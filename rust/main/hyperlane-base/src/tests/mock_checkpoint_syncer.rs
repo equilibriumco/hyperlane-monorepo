@@ -25,8 +25,12 @@ pub struct MockCheckpointSyncerResponses {
     pub write_latest_index: ResponseList<Result<()>>,
     /// responses for fetch_checkpoint
     pub fetch_checkpoint: ResponseList<Result<Option<SignedCheckpointWithMessageId>>>,
+    /// responses for fetch_checkpoint_blake2b
+    pub fetch_checkpoint_blake2b: ResponseList<Result<Option<hyperlane_core::SignedCheckpointWithMessageIdBlake2b>>>,
     /// responses for write_checkpoint
     pub write_checkpoint: ResponseList<Result<()>>,
+    /// responses for write_checkpoint_blake2b
+    pub write_checkpoint_blake2b: ResponseList<Result<()>>,
     /// responses for write_metadata
     pub write_metadata: ResponseList<Result<()>>,
     /// responses for write_announcement
@@ -85,6 +89,15 @@ impl CheckpointSyncer for MockCheckpointSyncer {
             .unwrap_or_else(|| panic!("No mock fetch_checkpoint response set"))
     }
 
+    async fn fetch_checkpoint_blake2b(&self, _: u32) -> Result<Option<hyperlane_core::SignedCheckpointWithMessageIdBlake2b>> {
+        self.responses
+            .fetch_checkpoint_blake2b
+            .lock()
+            .expect("Failed to acquire mutex")
+            .pop_front()
+            .unwrap_or_else(|| panic!("No mock fetch_checkpoint_blake2b response set"))
+    }
+
     async fn write_checkpoint(&self, _: &SignedCheckpointWithMessageId) -> Result<()> {
         self.responses
             .write_checkpoint
@@ -92,6 +105,15 @@ impl CheckpointSyncer for MockCheckpointSyncer {
             .expect("Failed to acquire mutex")
             .pop_front()
             .unwrap_or_else(|| panic!("No mock write_checkpoint response set"))
+    }
+
+    async fn write_checkpoint_blake2b(&self, _: &hyperlane_core::SignedCheckpointWithMessageIdBlake2b) -> Result<()> {
+        self.responses
+            .write_checkpoint_blake2b
+            .lock()
+            .expect("Failed to acquire mutex")
+            .pop_front()
+            .unwrap_or_else(|| panic!("No mock write_checkpoint_blake2b response set"))
     }
 
     async fn write_metadata(&self, _: &str) -> Result<()> {

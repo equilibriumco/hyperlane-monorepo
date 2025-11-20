@@ -319,6 +319,35 @@ impl ChainSigner for hyperlane_aleo::AleoSigner {
     }
 }
 
+// Cardano signer implementations
+#[async_trait]
+impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
+    async fn build(conf: &SignerConf) -> Result<Self, Report> {
+        match conf {
+            SignerConf::HexKey { key } => {
+                // TODO: Implement proper Cardano key derivation from hex
+                Ok(
+                    hyperlane_cardano::Keypair::from_string(&hex::encode(key.as_bytes()))
+                        .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?,
+                )
+            }
+            _ => bail!(format!("{conf:?} key is not supported by Cardano")),
+        }
+    }
+}
+
+impl ChainSigner for hyperlane_cardano::Keypair {
+    fn address_string(&self) -> String {
+        // TODO: Implement proper Cardano address derivation
+        "cardano_address_placeholder".to_string()
+    }
+
+    fn address_h256(&self) -> H256 {
+        // TODO: Implement proper Cardano address to H256 conversion
+        H256::zero()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ethers::{signers::LocalWallet, utils::hex};

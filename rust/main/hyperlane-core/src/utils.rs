@@ -1,3 +1,5 @@
+use blake2::digest::consts::U32;
+use blake2::Blake2b;
 use eyre::Result;
 use sha3::{digest::Update, Digest, Keccak256};
 use std::str::FromStr;
@@ -48,6 +50,19 @@ pub fn hex_or_base58_or_bech32_to_h256(string: &str) -> Result<H256> {
 pub fn domain_hash(address: H256, domain: impl Into<u32>) -> H256 {
     H256::from_slice(
         Keccak256::new()
+            .chain(domain.into().to_be_bytes())
+            .chain(address)
+            .chain("HYPERLANE")
+            .finalize()
+            .as_slice(),
+    )
+}
+
+/// Computes hash of domain concatenated with "HYPERLANE" using Blake2b-256
+pub fn domain_hash_blake2b(address: H256, domain: impl Into<u32>) -> H256 {
+    type Blake2b256 = Blake2b<U32>;
+    H256::from_slice(
+        Blake2b256::new()
             .chain(domain.into().to_be_bytes())
             .chain(address)
             .chain("HYPERLANE")

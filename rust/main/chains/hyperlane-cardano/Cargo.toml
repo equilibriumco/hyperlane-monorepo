@@ -1,0 +1,18 @@
+[package]
+name = "hyperlane-cardano"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hyperlane-core = { path = "../../hyperlane-core" }
+async-trait.workspace = true
+url = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+hex = "0.4.3"
+tracing = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+hyperlane-cardano-rpc-rust-client = "1.0.10"

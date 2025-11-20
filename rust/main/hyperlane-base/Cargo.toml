@@ -60,6 +60,7 @@ hyperlane-operation-verifier = { path = "../applications/hyperlane-operation-ver
 hyperlane-test = { path = "../hyperlane-test" }
 
 hyperlane-aleo = { path = "../chains/hyperlane-aleo", optional = true }
+hyperlane-cardano = { path = "../chains/hyperlane-cardano" }
 hyperlane-ethereum = { path = "../chains/hyperlane-ethereum" }
 hyperlane-fuel = { path = "../chains/hyperlane-fuel" }
 hyperlane-cosmos = { path = "../chains/hyperlane-cosmos" }

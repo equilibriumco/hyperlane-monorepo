@@ -14,6 +14,7 @@ async-trait.workspace = true
 async-rwlock.workspace = true
 auto_impl.workspace = true
 bigdecimal.workspace = true
+blake2 = "0.10.6"
 borsh.workspace = true
 bs58.workspace = true
 bech32.workspace = true
