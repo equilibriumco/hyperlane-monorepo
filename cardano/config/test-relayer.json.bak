@@ -1,0 +1,40 @@
+{
+  "chains": {
+    "fuji": {
+      "name": "fuji",
+      "domain": 43113,
+      "protocol": "ethereum",
+      "rpc_urls": ["https://api.avax-test.network/ext/bc/C/rpc"],
+      "addresses": {
+        "mailbox": "0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0",
+        "interchainGasPaymaster": "0x5821f3B6eE05F3dC62b43B74AB1C8F8E6904b1C8",
+        "validatorAnnounce": "0x5B4a16A6a52B6d8B2A7fd9D8B3A7b8f1a8B7f5C4"
+      },
+      "index": {
+        "from": 30000000
+      }
+    },
+    "cardanopreview": {
+      "name": "cardanopreview",
+      "domain": 2003,
+      "protocol": "cardano",
+      "connection": {
+        "type": "blockfrost",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "api_key": "${BLOCKFROST_API_KEY}",
+        "network": "preview"
+      },
+      "addresses": {
+        "mailbox": "fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
+        "ism": "72100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+        "registry": "7ce6ba32d10a3b9949965303585f2b3a1aa37ec41fd7460387c99c90"
+      },
+      "index": {
+        "from": 3790000
+      }
+    }
+  },
+  "originChainNames": ["fuji", "cardanopreview"],
+  "destinationChainNames": ["fuji", "cardanopreview"],
+  "relayChains": ["fuji", "cardanopreview"]
+}

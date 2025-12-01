@@ -1,0 +1,36 @@
+{
+  "txFeePerByte": 44,
+  "txFeeFixed": 155381,
+  "maxTxSize": 16384,
+  "protocolVersion": {
+    "major": 10,
+    "minor": 0
+  },
+  "maxBlockBodySize": 90112,
+  "maxBlockHeaderSize": 1100,
+  "stakeAddressDeposit": 2000000,
+  "stakePoolDeposit": 500000000,
+  "poolRetireMaxEpoch": 18,
+  "stakePoolTargetNum": 500,
+  "poolPledgeInfluence": 0.3,
+  "monetaryExpansion": 0.003,
+  "treasuryCut": 0.2,
+  "minPoolCost": 170000000,
+  "utxoCostPerByte": 4310,
+  "collateralPercentage": 150,
+  "maxCollateralInputs": 3,
+  "maxValueSize": 5000,
+  "costModels": {},
+  "executionUnitPrices": {
+    "priceMemory": 0.0577,
+    "priceSteps": 0.0000721
+  },
+  "maxTxExecutionUnits": {
+    "memory": 16500000,
+    "steps": 10000000000
+  },
+  "maxBlockExecutionUnits": {
+    "memory": 72000000,
+    "steps": 20000000000
+  }
+}

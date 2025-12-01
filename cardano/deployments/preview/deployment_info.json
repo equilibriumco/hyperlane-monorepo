@@ -1,0 +1,14 @@
+{
+    "network": "preview",
+    "tx_id": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576",
+    "ism": {
+        "hash": "72100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+        "address": "addr_test1wpepqztnkrtpz3ucmdss2822esun5sejdpk3lwll8tmwpjgj3qxka",
+        "utxo": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576#0"
+    },
+    "mailbox": {
+        "hash": "fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
+        "address": "addr_test1wr7npzktl7pq6rdntc49plvmeg3sf8k5emkjrau45z0tgec0mv2a0",
+        "utxo": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576#1"
+    }
+}
