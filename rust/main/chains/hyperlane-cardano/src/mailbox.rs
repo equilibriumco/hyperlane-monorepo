@@ -1,6 +1,8 @@
+use crate::blockfrost_provider::{BlockfrostProvider, Utxo};
 use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
-use crate::rpc::CardanoRpc;
+use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents};
+use crate::types::MailboxDatum;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use hyperlane_core::accumulator::incremental::IncrementalMerkle;
@@ -8,72 +10,314 @@ use hyperlane_core::accumulator::TREE_DEPTH;
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber, HyperlaneChain,
     HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox,
-    ReorgPeriod, TxCostEstimate, TxOutcome, H256, H512, U256,
+    ReorgPeriod, TxCostEstimate, TxOutcome, H256, U256,
 };
+use serde_json::Value;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::str::FromStr;
+use std::sync::Arc;
+use tracing::{debug, info};
 
 pub struct CardanoMailbox {
-    inbox: H256,
+    /// The mailbox minting policy hash - serves as both inbox and outbox address on Cardano
     pub outbox: H256,
     domain: HyperlaneDomain,
-    cardano_rpc: CardanoRpc,
+    provider: Arc<BlockfrostProvider>,
+    conf: ConnectionConf,
+    payer: Option<Keypair>,
+    tx_builder: HyperlaneTxBuilder,
 }
 
 impl CardanoMailbox {
     pub fn new(
         conf: &ConnectionConf,
         locator: ContractLocator,
-        _payer: Option<Keypair>,
+        payer: Option<Keypair>,
     ) -> ChainResult<Self> {
+        let provider = Arc::new(BlockfrostProvider::new(&conf.api_key, conf.network));
+        let tx_builder = HyperlaneTxBuilder::new(conf, provider.clone());
+
         Ok(CardanoMailbox {
             domain: locator.domain.clone(),
-            inbox: locator.address,
             outbox: locator.address,
-            cardano_rpc: CardanoRpc::new(&conf.url),
+            provider,
+            conf: conf.clone(),
+            payer,
+            tx_builder,
         })
+    }
+
+    /// Build the transaction components for processing a message
+    ///
+    /// This prepares all the UTXOs, redeemers, and datums needed for a Process transaction.
+    /// The caller can use these components with pallas-txbuilder to construct the full transaction.
+    pub async fn build_process_tx_components(
+        &self,
+        message: &HyperlaneMessage,
+        metadata: &[u8],
+    ) -> ChainResult<ProcessTxComponents> {
+        self.tx_builder
+            .build_process_tx(message, metadata)
+            .await
+            .map_err(ChainCommunicationError::from_other)
     }
 
     pub async fn finalized_block_number(&self) -> Result<u32, ChainCommunicationError> {
         let finalized_block_number = self
-            .cardano_rpc
-            .get_finalized_block_number()
+            .provider
+            .get_latest_block()
             .await
             .map_err(ChainCommunicationError::from_other)?;
-        Ok(finalized_block_number)
+        Ok(finalized_block_number as u32)
+    }
+
+    /// Find the mailbox UTXO by its state NFT or script address
+    ///
+    /// First tries to find by NFT (preferred method). If no NFT is found,
+    /// falls back to looking up UTXOs at the mailbox script address.
+    async fn find_mailbox_utxo(&self) -> ChainResult<Utxo> {
+        // First try to find by NFT (preferred method for production)
+        let mailbox_asset_name = ""; // Empty asset name for state NFT
+        let nft_result = self.provider
+            .find_utxo_by_nft(&self.conf.mailbox_policy_id, mailbox_asset_name)
+            .await;
+
+        match nft_result {
+            Ok(utxo) => {
+                info!("Found mailbox UTXO by NFT: {}#{}", utxo.tx_hash, utxo.output_index);
+                return Ok(utxo);
+            }
+            Err(e) => {
+                // Log that NFT lookup failed, will try script address lookup
+                info!(
+                    "NFT lookup failed ({}), falling back to script address lookup",
+                    e
+                );
+            }
+        }
+
+        // Fallback: Find UTXOs at the mailbox script address
+        // The mailbox_policy_id is actually the script hash
+        let script_address = self.provider
+            .script_hash_to_address(&self.conf.mailbox_policy_id)
+            .map_err(|e| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Failed to compute mailbox script address: {}",
+                    e
+                ))
+            })?;
+
+        info!("Looking up mailbox UTXOs at script address: {}", script_address);
+
+        let utxos = self.provider
+            .get_utxos_at_address(&script_address)
+            .await
+            .map_err(|e| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Failed to get UTXOs at mailbox address: {}",
+                    e
+                ))
+            })?;
+
+        // Find the first UTXO with an inline datum (the mailbox state UTXO)
+        // In production with proper NFTs, there should be exactly one
+        for utxo in utxos {
+            if utxo.inline_datum.is_some() {
+                info!(
+                    "Found mailbox UTXO by script address: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
+                return Ok(utxo);
+            }
+        }
+
+        Err(ChainCommunicationError::from_other_str(
+            "No mailbox UTXO found with inline datum at script address",
+        ))
+    }
+
+    /// Parse mailbox datum from UTXO
+    ///
+    /// Handles both JSON-formatted datum and raw CBOR hex from Blockfrost.
+    /// If inline_datum is CBOR hex, fetches JSON representation via data_hash.
+    async fn parse_mailbox_datum(&self, utxo: &Utxo) -> ChainResult<MailboxDatum> {
+        let inline_datum = utxo.inline_datum.as_ref().ok_or_else(|| {
+            ChainCommunicationError::from_other_str("Mailbox UTXO has no inline datum")
+        })?;
+
+        // First try parsing as JSON (may already be JSON from some API responses)
+        if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
+            return self.parse_mailbox_datum_json(&datum_json);
+        }
+
+        // If inline_datum is CBOR hex (starts with hex chars), fetch JSON via data_hash
+        let data_hash = utxo.data_hash.as_ref().ok_or_else(|| {
+            ChainCommunicationError::from_other_str(
+                "Mailbox UTXO has CBOR datum but no data_hash for JSON lookup",
+            )
+        })?;
+
+        debug!("Fetching datum JSON via data_hash: {}", data_hash);
+        let datum_json_str = self
+            .provider
+            .get_datum(data_hash)
+            .await
+            .map_err(|e| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Failed to fetch datum JSON: {}",
+                    e
+                ))
+            })?;
+
+        let datum_json: Value = serde_json::from_str(&datum_json_str).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Failed to parse fetched datum JSON: {}",
+                e
+            ))
+        })?;
+
+        // Blockfrost wraps the datum in a `json_value` field
+        let inner_json = datum_json
+            .get("json_value")
+            .unwrap_or(&datum_json);
+
+        self.parse_mailbox_datum_json(inner_json)
+    }
+
+    /// Parse mailbox datum from Blockfrost's JSON format
+    fn parse_mailbox_datum_json(&self, json: &Value) -> ChainResult<MailboxDatum> {
+        // Blockfrost returns datum as JSON with Plutus data structure
+        // Format: { "fields": [...], "constructor": N }
+        let fields = json
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid mailbox datum: missing fields")
+            })?;
+
+        if fields.len() < 6 {
+            return Err(ChainCommunicationError::from_other_str(
+                "Invalid mailbox datum: insufficient fields",
+            ));
+        }
+
+        // Parse local_domain (field 0)
+        let local_domain = fields
+            .get(0)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid local_domain in mailbox datum")
+            })? as u32;
+
+        // Parse default_ism (field 1) - 28-byte script hash
+        let default_ism_hex = fields
+            .get(1)
+            .and_then(|f| f.get("bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid default_ism in mailbox datum")
+            })?;
+        let default_ism_bytes = hex::decode(default_ism_hex).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Failed to decode default_ism: {}",
+                e
+            ))
+        })?;
+        let default_ism: [u8; 28] = default_ism_bytes.try_into().map_err(|_| {
+            ChainCommunicationError::from_other_str("Invalid default_ism length")
+        })?;
+
+        // Parse owner (field 2) - 28-byte verification key hash
+        let owner_hex = fields
+            .get(2)
+            .and_then(|f| f.get("bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid owner in mailbox datum")
+            })?;
+        let owner_bytes = hex::decode(owner_hex).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {}", e))
+        })?;
+        let owner: [u8; 28] = owner_bytes.try_into().map_err(|_| {
+            ChainCommunicationError::from_other_str("Invalid owner length")
+        })?;
+
+        // Parse outbound_nonce (field 3)
+        let outbound_nonce = fields
+            .get(3)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid outbound_nonce in mailbox datum")
+            })? as u32;
+
+        // Parse merkle_root (field 4) - 32-byte hash
+        let merkle_root_hex = fields
+            .get(4)
+            .and_then(|f| f.get("bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid merkle_root in mailbox datum")
+            })?;
+        let merkle_root_bytes = hex::decode(merkle_root_hex).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Failed to decode merkle_root: {}",
+                e
+            ))
+        })?;
+        let merkle_root: [u8; 32] = merkle_root_bytes.try_into().map_err(|_| {
+            ChainCommunicationError::from_other_str("Invalid merkle_root length")
+        })?;
+
+        // Parse merkle_count (field 5)
+        let merkle_count = fields
+            .get(5)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid merkle_count in mailbox datum")
+            })? as u32;
+
+        Ok(MailboxDatum {
+            local_domain,
+            default_ism,
+            owner,
+            outbound_nonce,
+            merkle_root,
+            merkle_count,
+        })
     }
 
     pub async fn tree_and_tip(
         &self,
         lag: Option<NonZeroU64>,
     ) -> ChainResult<(IncrementalMerkle, u32)> {
-        assert!(lag.is_none(), "Cardano always returns the finalized result");
-        let merkle_tree_response = self
-            .cardano_rpc
-            .get_latest_merkle_tree()
-            .await
-            .map_err(ChainCommunicationError::from_other)?;
-        let merkle_tree = merkle_tree_response.merkle_tree;
-        let branch: [H256; TREE_DEPTH] = merkle_tree
-            .branches
-            .iter()
-            .map(
-                |b| H256::from_str(b).unwrap(), /* TODO[cardano]: better error handling for RPC output */
-            )
-            .collect::<Vec<H256>>()
-            .try_into()
-            .unwrap();
-        let count = merkle_tree.count as usize;
-        Ok((
-            IncrementalMerkle::new(branch, count),
-            merkle_tree_response.block_number as u32,
-        ))
+        assert!(
+            lag.is_none(),
+            "Cardano always returns the finalized result"
+        );
+
+        // Find the mailbox UTXO and parse its datum
+        let utxo = self.find_mailbox_utxo().await?;
+        let datum = self.parse_mailbox_datum(&utxo).await?;
+
+        // Build an IncrementalMerkle tree from the datum
+        // Note: The datum only stores the root, not the full tree branches
+        // For a full implementation, we'd need to reconstruct branches from message history
+        // For now, create a tree with just the count
+        let branch = [H256::zero(); TREE_DEPTH];
+        let count = datum.merkle_count as usize;
+
+        let tip = self.finalized_block_number().await?;
+
+        Ok((IncrementalMerkle::new(branch, count), tip))
     }
 }
 
 impl HyperlaneContract for CardanoMailbox {
     fn address(&self) -> H256 {
+        // On Cardano, this represents the mailbox minting policy hash
         self.outbox
     }
 }
@@ -84,7 +328,7 @@ impl HyperlaneChain for CardanoMailbox {
     }
 
     fn provider(&self) -> Box<dyn HyperlaneProvider> {
-        Box::new(CardanoProvider::new(self.domain.clone()))
+        Box::new(CardanoProvider::new(&self.conf, self.domain.clone()))
     }
 }
 
@@ -98,26 +342,38 @@ impl Debug for CardanoMailbox {
 impl Mailbox for CardanoMailbox {
     async fn count(&self, _reorg_period: &ReorgPeriod) -> ChainResult<u32> {
         // For Cardano, we ignore reorg_period as it always returns finalized results
-        self.tree_and_tip(None).await.map(|(tree, _)| tree.count() as u32)
+        self.tree_and_tip(None)
+            .await
+            .map(|(tree, _)| tree.count() as u32)
     }
 
     async fn delivered(&self, id: H256) -> ChainResult<bool> {
-        let res = self
-            .cardano_rpc
-            .is_inbox_message_delivered(id)
+        // Check if a processed message marker NFT exists for this message ID
+        // The processed messages minting policy creates NFTs with message_id as asset name
+        let message_id_bytes: [u8; 32] = id.0;
+        let result = self
+            .provider
+            .is_message_delivered(&self.conf.mailbox_policy_id, &message_id_bytes)
             .await
             .map_err(ChainCommunicationError::from_other)?;
-        Ok(res.is_delivered)
+        Ok(result)
     }
 
     async fn default_ism(&self) -> ChainResult<H256> {
-        // ISM on Cardano is a minting policy, not an address
-        // TODO[cardano]: We could return the minting policy hash here?
-        Ok(H256::zero())
+        // Get the default ISM from the mailbox datum
+        let utxo = self.find_mailbox_utxo().await?;
+        let datum = self.parse_mailbox_datum(&utxo).await?;
+
+        // Convert 28-byte script hash to H256 with script prefix
+        let mut h = [0u8; 32];
+        h[0] = 0x02; // Script credential prefix
+        h[4..32].copy_from_slice(&datum.default_ism);
+        Ok(H256(h))
     }
 
     async fn recipient_ism(&self, _recipient: H256) -> ChainResult<H256> {
-        // All messages share the same ISM at the moment
+        // TODO: Query the registry to get recipient-specific ISM
+        // For now, return the default ISM
         self.default_ism().await
     }
 
@@ -127,43 +383,54 @@ impl Mailbox for CardanoMailbox {
         metadata: &[u8],
         _tx_gas_limit: Option<U256>,
     ) -> ChainResult<TxOutcome> {
-        let res = self
-            .cardano_rpc
-            .submit_inbox_message(message, metadata)
+        // Check if we have a payer keypair (required for signing)
+        let payer = self.payer.as_ref().ok_or_else(|| {
+            ChainCommunicationError::from_other_str(
+                "No payer keypair configured for Cardano mailbox. \
+                 Set a payer keypair to enable message processing.",
+            )
+        })?;
+
+        info!(
+            "Processing Hyperlane message nonce {} from origin {} to destination {}",
+            message.nonce, message.origin, message.destination
+        );
+
+        // Build, sign, and submit the process transaction
+        let outcome = self
+            .tx_builder
+            .build_and_submit_process_tx(message, metadata, payer)
             .await
             .map_err(ChainCommunicationError::from_other)?;
 
-        // Convert H256 to H512 for transaction_id
-        let mut txid_bytes = [0u8; 64];
-        let h256_bytes = H256::from_str(res.tx_id.as_str())
-            .unwrap_or(H256::zero());
-        txid_bytes[..32].copy_from_slice(h256_bytes.as_bytes());
+        info!(
+            "Message processed successfully. Transaction: {:?}",
+            outcome.transaction_id
+        );
 
-        Ok(TxOutcome {
-            transaction_id: H512::from(txid_bytes),
-            executed: true,
-            gas_used: U256::from(res.fee_lovelace),
-            // NOTE: There's no "dynamic" gas price on Cardano
-            gas_price: FixedPointNumber::try_from(U256::from(res.fee_lovelace))
-                .unwrap_or_else(|_| FixedPointNumber::zero()),
-        })
+        Ok(outcome)
     }
 
     async fn process_estimate_costs(
         &self,
-        message: &HyperlaneMessage,
-        metadata: &[u8],
+        _message: &HyperlaneMessage,
+        _metadata: &[u8],
     ) -> ChainResult<TxCostEstimate> {
-        let res = self
-            .cardano_rpc
-            .estimate_inbox_message_fee(message, metadata)
+        // Get protocol parameters to estimate fee
+        let _params = self
+            .provider
+            .get_protocol_parameters()
             .await
             .map_err(ChainCommunicationError::from_other)?;
-        let fee_lovelace = res.fee_lovelace as u32;
+
+        // Cardano transaction fees are deterministic based on tx size and script execution units
+        // A typical Hyperlane process transaction would be around 2-5 ADA
+        // For now, return a conservative estimate
+        let estimated_fee_lovelace = 5_000_000u64; // 5 ADA
+
         Ok(TxCostEstimate {
-            gas_limit: U256::from(fee_lovelace),
-            // NOTE: There's no "dynamic" gas price on Cardano
-            gas_price: FixedPointNumber::try_from(U256::from(fee_lovelace))
+            gas_limit: U256::from(estimated_fee_lovelace),
+            gas_price: FixedPointNumber::try_from(U256::from(1u64))
                 .unwrap_or_else(|_| FixedPointNumber::zero()),
             l2_gas_limit: None,
         })
@@ -171,13 +438,29 @@ impl Mailbox for CardanoMailbox {
 
     async fn process_calldata(
         &self,
-        _message: &HyperlaneMessage,
-        _metadata: &[u8],
+        message: &HyperlaneMessage,
+        metadata: &[u8],
     ) -> ChainResult<Vec<u8>> {
-        todo!("Cardano process_calldata not yet implemented")
+        // Encode the message and metadata for transaction construction
+        let mut calldata = Vec::new();
+
+        // Encode message fields
+        calldata.extend_from_slice(&[message.version]);
+        calldata.extend_from_slice(&message.nonce.to_be_bytes());
+        calldata.extend_from_slice(&message.origin.to_be_bytes());
+        calldata.extend_from_slice(message.sender.as_bytes());
+        calldata.extend_from_slice(&message.destination.to_be_bytes());
+        calldata.extend_from_slice(message.recipient.as_bytes());
+        calldata.extend_from_slice(&message.body);
+
+        // Append metadata
+        calldata.extend_from_slice(metadata);
+
+        Ok(calldata)
     }
 
-    fn delivered_calldata(&self, _message_id: H256) -> ChainResult<Option<Vec<u8>>> {
-        todo!("Cardano delivered_calldata not yet implemented")
+    fn delivered_calldata(&self, message_id: H256) -> ChainResult<Option<Vec<u8>>> {
+        // Return the message_id as calldata for delivery check
+        Ok(Some(message_id.as_bytes().to_vec()))
     }
 }

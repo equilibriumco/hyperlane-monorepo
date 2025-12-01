@@ -302,7 +302,10 @@ impl ChainConf {
                 h_aleo::application::AleoApplicationOperationVerifier::new(),
             )
                 as Box<dyn ApplicationOperationVerifier>),
-            ChainConnectionConf::Cardano(_) => todo!("Cardano application operation verifier"),
+            ChainConnectionConf::Cardano(_) => Ok(Box::new(
+                h_cardano::CardanoApplicationOperationVerifier::new(),
+            )
+                as Box<dyn ApplicationOperationVerifier>),
         };
 
         result.context(ctx)
@@ -359,7 +362,10 @@ impl ChainConf {
                 let provider = build_aleo_provider(self, conf, metrics, &locator, None)?;
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
-            ChainConnectionConf::Cardano(_) => todo!("Cardano provider"),
+            ChainConnectionConf::Cardano(conf) => {
+                let provider = h_cardano::CardanoProvider::new(conf, self.domain.clone());
+                Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
+            }
         }
         .context(ctx)
     }
@@ -515,7 +521,10 @@ impl ChainConf {
 
                 Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
             }
-            ChainConnectionConf::Cardano(_) => todo!("Cardano merkle tree hook"),
+            ChainConnectionConf::Cardano(conf) => {
+                let hook = h_cardano::CardanoMerkleTreeHook::new(conf, locator)?;
+                Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
+            }
         }
         .context(ctx)
     }
@@ -775,7 +784,7 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn InterchainGasPaymaster>)
             }
-            ChainConnectionConf::Cardano(_) => todo!("Cardano IGP"),
+            ChainConnectionConf::Cardano(_) => Err(eyre!("Cardano IGP not yet implemented")),
         }
         .context(ctx)
     }
@@ -950,7 +959,10 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
-            ChainConnectionConf::Cardano(_) => todo!("Cardano merkle tree hook indexer"),
+            ChainConnectionConf::Cardano(conf) => {
+                let indexer = h_cardano::CardanoMerkleTreeHookIndexer::new(conf, locator)?;
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
+            }
         }
         .context(ctx)
     }
@@ -1250,7 +1262,7 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn RoutingIsm>)
             }
-            ChainConnectionConf::Cardano(_) => todo!("Cardano does not support routing ISM"),
+            ChainConnectionConf::Cardano(_) => Err(eyre!("Cardano does not support routing ISM")),
         }
         .context(ctx)
     }

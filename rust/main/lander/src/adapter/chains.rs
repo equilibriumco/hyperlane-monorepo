@@ -1,5 +1,6 @@
 #[cfg(feature = "aleo")]
 pub use aleo::AleoTxPrecursor;
+pub use cardano::CardanoTxPrecursor;
 pub use ethereum::EthereumTxPrecursor;
 pub use factory::AdapterFactory;
 pub use radix::RadixTxPrecursor;
@@ -11,6 +12,7 @@ mod factory;
 // chains modules below
 #[cfg(feature = "aleo")]
 mod aleo;
+pub mod cardano;
 mod cosmos;
 pub mod ethereum;
 pub mod radix;

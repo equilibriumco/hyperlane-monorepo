@@ -1,0 +1,64 @@
+{
+  "chains": {
+    "fuji": {
+      "name": "fuji",
+      "displayName": "Avalanche Fuji",
+      "chainId": 43113,
+      "domainId": 43113,
+      "protocol": "ethereum",
+      "isTestnet": true,
+      "rpcUrls": [
+        {
+          "http": "https://api.avax-test.network/ext/bc/C/rpc"
+        }
+      ],
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 2,
+        "reorgPeriod": 1
+      },
+      "mailbox": "0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0",
+      "interchainGasPaymaster": "0x5821f3B6eE05F3dC62b43B74AB1C8F8E6904b1C8",
+      "validatorAnnounce": "0x5B4a16A6a52B6d8B2A7fd9D8B3A7b8f1a8B7f5C4",
+      "merkleTreeHook": "0x5821f3B6eE05F3dC62b43B74AB1C8F8E6904b1C8",
+      "testRecipient": "0x44a7e1d76fD8AfA244AdE7278336E3D5C658D398",
+      "index": {
+        "from": 30000000
+      }
+    },
+    "cardanopreview": {
+      "name": "cardanopreview",
+      "displayName": "Cardano Preview",
+      "chainId": 2003,
+      "domainId": 2003,
+      "protocol": "cardano",
+      "isTestnet": true,
+      "rpcUrls": [
+        {"http": "https://cardano-preview.blockfrost.io/api/v0"}
+      ],
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 20,
+        "reorgPeriod": 5
+      },
+      "connection": {
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "apiKey": "preview0RJzRJIZJ4UlJOAsN4gkui80hpNkGU4N",
+        "network": "preview",
+        "mailboxPolicyId": "fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
+        "registryPolicyId": "7ce6ba32d10a3b9949965303585f2b3a1aa37ec41fd7460387c99c90",
+        "ismPolicyId": "72100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+        "igpPolicyId": "0000000000000000000000000000000000000000000000000000000000",
+        "validatorAnnouncePolicyId": "0000000000000000000000000000000000000000000000000000000000"
+      },
+      "mailbox": "0x00000000fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
+      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "validatorAnnounce": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "merkleTreeHook": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "interchainSecurityModule": "0x0000000072100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+      "index": {
+        "from": 0
+      }
+    }
+  }
+}

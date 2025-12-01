@@ -1,13 +1,11 @@
 use std::fmt::{Debug, Display, Formatter};
 
-use blake2::digest::consts::U32;
-use blake2::Blake2b;
 use serde::{Deserialize, Serialize};
 use sha3::{digest::Update, Digest, Keccak256};
 
 use crate::{
     utils::{fmt_address_for_domain, fmt_domain},
-    Decode, Encode, HyperlaneProtocolError, KnownHyperlaneDomain, H256,
+    Decode, Encode, HyperlaneProtocolError, H256,
 };
 
 const HYPERLANE_MESSAGE_PREFIX_LEN: usize = 77;
@@ -163,26 +161,13 @@ impl Decode for HyperlaneMessage {
 }
 
 impl HyperlaneMessage {
-    /// Convert the message to a message id
+    /// Convert the message to a message id (keccak256 hash of encoded message)
     pub fn id(&self) -> H256 {
-        type Blake2b256 = Blake2b<U32>;
-        // TODO[cardano]: a better condition.
-        let destination_domain = KnownHyperlaneDomain::try_from(self.destination);
-        if destination_domain.is_ok()
-            && destination_domain.unwrap() == KnownHyperlaneDomain::CardanoTest1
-        {
-            return H256::from_slice(Blake2b256::new().chain(self.to_vec()).finalize().as_slice());
-        }
         H256::from_slice(Keccak256::new().chain(self.to_vec()).finalize().as_slice())
     }
 
+    /// Get message ID for merkle tree insertion (keccak256 hash of encoded message)
     pub fn id_for_merkle_tree(&self) -> H256 {
-        type Blake2b256 = Blake2b<U32>;
-        // TODO[cardano]: a better condition.
-        let origin_domain = KnownHyperlaneDomain::try_from(self.origin);
-        if origin_domain.is_ok() && origin_domain.unwrap() == KnownHyperlaneDomain::CardanoTest1 {
-            return H256::from_slice(Blake2b256::new().chain(self.to_vec()).finalize().as_slice());
-        }
         H256::from_slice(Keccak256::new().chain(self.to_vec()).finalize().as_slice())
     }
 }

@@ -382,7 +382,7 @@ impl HyperlaneDomainProtocol {
         use HyperlaneDomainProtocol::*;
         match self {
             Ethereum => format!("{:?}", H160::from(addr)),
-            Cardano => format!("{:?}", addr),
+            Cardano => format!("{addr:?}"),
             _ => format!("{addr:?}"),
         }
     }
@@ -441,7 +441,9 @@ impl KnownHyperlaneDomain {
             | StarknetSepolia => HyperlaneDomainType::Testnet,
             Test1 | Test2 | Test3 | Test4 | FuelTest1 | SealevelTest1 | SealevelTest2
             | CosmosTest99990 | CosmosTest99991 | CosmosTestNative1 | CosmosTestNative2
-            | StarknetTest23448593 | StarknetTest23448594 | CardanoTest1 => HyperlaneDomainType::LocalTestChain,
+            | StarknetTest23448593 | StarknetTest23448594 | CardanoTest1 => {
+                HyperlaneDomainType::LocalTestChain
+            }
             _ => HyperlaneDomainType::Mainnet,
         }
     }

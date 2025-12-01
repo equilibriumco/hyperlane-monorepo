@@ -14,6 +14,7 @@ use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
 
 use hyperlane_starknet as h_starknet;
+use hyperlane_cardano as h_cardano;
 
 use crate::settings::envs::*;
 use crate::settings::ChainConnectionConf;
@@ -818,7 +819,7 @@ pub fn build_connection_conf(
             build_aleo_connection_conf(rpcs, chain, err, operation_batch)
         }
         HyperlaneDomainProtocol::Cardano => {
-            todo!("Cardano connection configuration not yet implemented")
+            build_cardano_connection_conf(rpcs, chain, err)
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("Unsupported protocol chains are pre-filtered"),
@@ -836,4 +837,131 @@ pub fn is_protocol_supported(protocol: HyperlaneDomainProtocol) -> bool {
         // Aleo is feature-gated - only supported when the "aleo" feature is enabled
         Aleo => cfg!(feature = "aleo"),
     }
+}
+
+/// Build Cardano connection configuration
+pub fn build_cardano_connection_conf(
+    rpcs: &[Url],
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+) -> Option<ChainConnectionConf> {
+    let mut local_err = ConfigParsingError::default();
+
+    // Get the connection sub-object, or use the chain object itself
+    let conn = chain
+        .chain(&mut local_err)
+        .get_opt_key("connection")
+        .unwrap_or_else(|| chain.clone());
+
+    // URL - use first RPC if provided, otherwise get from connection config
+    let url = if !rpcs.is_empty() {
+        Some(rpcs[0].clone())
+    } else {
+        conn.chain(&mut local_err)
+            .get_key("url")
+            .parse_from_str("Invalid URL")
+            .end()
+    };
+
+    // API Key (required for Blockfrost)
+    let api_key = conn
+        .chain(&mut local_err)
+        .get_key("apiKey")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("api_key"),
+                eyre!("Missing api_key for Cardano chain"),
+            );
+            None
+        });
+
+    // Network (mainnet, preprod, preview)
+    let network_str = conn
+        .chain(&mut local_err)
+        .get_opt_key("network")
+        .parse_string()
+        .end()
+        .unwrap_or("mainnet");
+
+    let network = match network_str.to_lowercase().as_str() {
+        "mainnet" => h_cardano::CardanoNetwork::Mainnet,
+        "preprod" => h_cardano::CardanoNetwork::Preprod,
+        "preview" => h_cardano::CardanoNetwork::Preview,
+        _ => {
+            local_err.push(
+                (&chain.cwp).add("network"),
+                eyre!("Invalid network: {}. Expected 'mainnet', 'preprod', or 'preview'", network_str),
+            );
+            h_cardano::CardanoNetwork::Mainnet // Default, will error anyway
+        }
+    };
+
+    // Policy IDs
+    let mailbox_policy_id = conn
+        .chain(&mut local_err)
+        .get_key("mailboxPolicyId")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            // Fallback to chain-level mailbox address
+            chain
+                .chain(&mut local_err)
+                .get_opt_key("mailbox")
+                .parse_string()
+                .end()
+        })
+        .unwrap_or_default();
+
+    let registry_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("registryPolicyId")
+        .parse_string()
+        .end()
+        .unwrap_or_default();
+
+    let ism_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismPolicyId")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            chain
+                .chain(&mut local_err)
+                .get_opt_key("interchainSecurityModule")
+                .parse_string()
+                .end()
+        })
+        .unwrap_or_default();
+
+    let igp_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("igpPolicyId")
+        .parse_string()
+        .end()
+        .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
+
+    let validator_announce_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("validatorAnnouncePolicyId")
+        .parse_string()
+        .end()
+        .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
+
+    if !local_err.is_ok() || url.is_none() || api_key.is_none() {
+        err.merge(local_err);
+        return None;
+    }
+
+    Some(ChainConnectionConf::Cardano(h_cardano::ConnectionConf {
+        url: url.unwrap(),
+        api_key: api_key.unwrap().to_string(),
+        network,
+        mailbox_policy_id: mailbox_policy_id.to_string(),
+        registry_policy_id: registry_policy_id.to_string(),
+        ism_policy_id: ism_policy_id.to_string(),
+        igp_policy_id: igp_policy_id.to_string(),
+        validator_announce_policy_id: validator_announce_policy_id.to_string(),
+    }))
 }

@@ -12,7 +12,8 @@ use hyperlane_core::{identifiers::UniqueIdentifier, H256, H512};
 use crate::adapter::chains::AleoTxPrecursor;
 use crate::{
     adapter::chains::{
-        tron::TronTxPrecursor, EthereumTxPrecursor, RadixTxPrecursor, SealevelTxPrecursor,
+        CardanoTxPrecursor, EthereumTxPrecursor, RadixTxPrecursor, SealevelTxPrecursor,
+        tron::TronTxPrecursor,
     },
     payload::PayloadDetails,
     LanderError,
@@ -170,6 +171,7 @@ impl DropReason {
 pub enum VmSpecificTxData {
     #[cfg(feature = "aleo")]
     Aleo(Box<AleoTxPrecursor>),
+    Cardano(Box<CardanoTxPrecursor>),
     CosmWasm,
     Evm(Box<EthereumTxPrecursor>),
     Radix(Box<RadixTxPrecursor>),
