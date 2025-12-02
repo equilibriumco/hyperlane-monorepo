@@ -19,7 +19,7 @@
         "estimateBlockTime": 2
       },
       "index": {
-        "from": 48060000
+        "from": 48342277
       },
       "signer": {
         "type": "hexKey",
@@ -39,24 +39,27 @@
         "url": "https://cardano-preview.blockfrost.io/api/v0",
         "apiKey": "previewjtDS4mHuhJroFIX0BfOpVmMdnyTrWMfh",
         "network": "preview",
-        "mailboxPolicyId": "fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
-        "registryPolicyId": "7ce6ba32d10a3b9949965303585f2b3a1aa37ec41fd7460387c99c90",
-        "ismPolicyId": "72100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+        "mailboxPolicyId": "5af40133f0583b9ab72f5204084b0b2bedefde74ca65fd002635a7e2",
+        "mailboxScriptHash": "8098af52895659483ab3e842e675b4a54fb7a55594f6fa5770d2c839",
+        "processedMessagesScriptHash": "0a503f1a278eb112ce4602b43616ecf270a843b565acd34503e67814",
+        "mailboxReferenceScriptUtxo": "79559d040d90a17d6a60c71258eaf441af862c58ee7af14fb1ba2db168c8b785#0",
+        "registryPolicyId": "41e7ac7a6d1552cb848da41d25bec4c47a17efbc83d79d23b20e8839",
+        "ismPolicyId": "5e861d327a07954e38455add30ca04453f39385718ed7180037bf7d4",
         "igpPolicyId": "00000000000000000000000000000000000000000000000000000000",
         "validatorAnnouncePolicyId": "00000000000000000000000000000000000000000000000000000000"
       },
-      "mailbox": "0x00000000fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
-      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000001",
-      "validatorAnnounce": "0x0000000000000000000000000000000000000000000000000000000000000002",
-      "merkleTreeHook": "0x0000000000000000000000000000000000000000000000000000000000000003",
-      "interchainSecurityModule": "0x0000000072100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
+      "mailbox": "0x020000008098af52895659483ab3e842e675b4a54fb7a55594f6fa5770d2c839",
+      "interchainGasPaymaster": "0x0200000000000000000000000000000000000000000000000000000000000001",
+      "validatorAnnounce": "0x0200000000000000000000000000000000000000000000000000000000000002",
+      "merkleTreeHook": "0x0200000000000000000000000000000000000000000000000000000000000003",
+      "interchainSecurityModule": "0x0200000002993c46cdcf8eb56ada209e277acc288dc0263b6a502d17b8cbfa56",
       "blocks": {
         "confirmations": 1,
         "reorgPeriod": 5,
         "estimateBlockTime": 20
       },
       "index": {
-        "from": 3790000
+        "from": 3821995
       },
       "signer": {
         "type": "hexKey",
@@ -74,6 +77,7 @@
   ],
   "db": "/tmp/hyperlane-relayer-db",
   "allowLocalCheckpointSyncers": true,
+  "allowContractCallCaching": false,
   "metrics": {
     "port": 9090
   }

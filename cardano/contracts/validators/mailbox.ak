@@ -1,3 +1,4 @@
+use aiken/builtin
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash, keccak_256}
 use aiken/primitive/bytearray
@@ -260,11 +261,30 @@ fn is_message_processed(
 }
 
 /// Helper to check if datum matches a processed message
-/// Note: This expects the datum to be a valid ProcessedMessageDatum
-/// Only call this on UTXOs from the processed_messages_script address
+/// Uses safe parsing to handle cases where multiple datum types exist at the same address
+/// (e.g., when processed_messages_script == mailbox_script_hash)
 fn check_processed_datum(datum_data: Data, message_id: ByteArray) -> Bool {
-  expect processed: ProcessedMessageDatum = datum_data
-  processed.message_id == message_id
+  // ProcessedMessageDatum is encoded as Constr(0, [ByteArray])
+  // MailboxDatum is encoded as Constr(0, [Int, ByteArray, ByteArray, Int, ByteArray, Int])
+  // We can distinguish by checking field count before parsing
+  let constr_pair = builtin.un_constr_data(datum_data)
+  let tag = builtin.fst_pair(constr_pair)
+  let fields = builtin.snd_pair(constr_pair)
+
+  // ProcessedMessageDatum has tag 0 and exactly 1 field
+  if tag == 0 {
+    when fields is {
+      [single_field] -> {
+        // Has exactly one field - extract as ByteArray and compare
+        let msg_id_bytes = builtin.un_b_data(single_field)
+        msg_id_bytes == message_id
+      }
+      // More or fewer fields means this is not a ProcessedMessageDatum
+      _ -> False
+    }
+  } else {
+    False
+  }
 }
 
 /// Get the ISM for a recipient (custom or default)

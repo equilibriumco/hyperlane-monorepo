@@ -1,0 +1,9 @@
+{
+    "constructor": 1,
+    "fields": [
+        {"int": 43113},
+        {"list": [
+            {"bytes": "d8154f73d04cc7f7f0c332793692e6e6f6b2402e"}
+        ]}
+    ]
+}

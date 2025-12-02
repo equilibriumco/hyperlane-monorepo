@@ -113,7 +113,11 @@ pub type RecipientType {
 /// Registry entry for a recipient
 pub type RecipientRegistration {
   script_hash: ScriptHash,
+  /// NFT locator to find the state UTXO (contains datum)
   state_locator: UtxoLocator,
+  /// NFT locator to find the reference script UTXO
+  /// None = script is embedded in state UTXO's reference_script field
+  reference_script_locator: Option<UtxoLocator>,
   additional_inputs: List<AdditionalInput>,
   recipient_type: RecipientType,
   /// Override default ISM for this recipient
@@ -215,6 +219,8 @@ pub type RegistryRedeemer {
   Register { registration: RecipientRegistration }
   Unregister { script_hash: ScriptHash }
   UpdateRegistration { registration: RecipientRegistration }
+  /// Admin-only registration (bypasses script ownership check)
+  AdminRegister { registration: RecipientRegistration }
 }
 
 // ============================================================================

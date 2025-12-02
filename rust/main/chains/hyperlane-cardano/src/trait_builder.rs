@@ -12,8 +12,21 @@ pub struct ConnectionConf {
     pub api_key: String,
     /// Cardano network
     pub network: CardanoNetwork,
-    /// Mailbox policy ID (hex)
+    /// Mailbox policy ID (hex) - state NFT minting policy for NFT lookups
     pub mailbox_policy_id: String,
+    /// Mailbox script hash (hex) - actual validator script hash for address lookups
+    pub mailbox_script_hash: String,
+    /// Processed messages script hash (hex) - where processed message markers are stored.
+    /// This must match the `processed_messages_script` parameter applied to the mailbox.
+    /// Defaults to mailbox_script_hash if not specified.
+    pub processed_messages_script_hash: String,
+    /// Mailbox script CBOR (hex) - the actual script bytes for witness set
+    /// DEPRECATED: Use mailbox_reference_script_utxo instead
+    pub mailbox_script_cbor: Option<String>,
+    /// Mailbox reference script UTXO (format: "tx_hash#output_index")
+    /// When set, the transaction will use this as a reference input instead of including
+    /// the script in the witness set. This is the preferred method.
+    pub mailbox_reference_script_utxo: Option<String>,
     /// Registry policy ID (hex)
     pub registry_policy_id: String,
     /// ISM policy ID (hex)
@@ -30,6 +43,10 @@ pub struct RawConnectionConf {
     api_key: Option<String>,
     network: Option<String>,
     mailbox_policy_id: Option<String>,
+    mailbox_script_hash: Option<String>,
+    processed_messages_script_hash: Option<String>,
+    mailbox_script_cbor: Option<String>,
+    mailbox_reference_script_utxo: Option<String>,
     registry_policy_id: Option<String>,
     ism_policy_id: Option<String>,
     igp_policy_id: Option<String>,
@@ -110,6 +127,16 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("mailbox"))
             .into_config_result(|| cwp.join("mailbox_policy_id"))?;
 
+        let mailbox_script_hash = raw
+            .mailbox_script_hash
+            .ok_or(MissingPolicyId("mailbox_script_hash"))
+            .into_config_result(|| cwp.join("mailbox_script_hash"))?;
+
+        // Default to mailbox_script_hash if not specified (backwards compatibility)
+        let processed_messages_script_hash = raw
+            .processed_messages_script_hash
+            .unwrap_or_else(|| mailbox_script_hash.clone());
+
         let registry_policy_id = raw
             .registry_policy_id
             .ok_or(MissingPolicyId("registry"))
@@ -130,11 +157,20 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("validator_announce"))
             .into_config_result(|| cwp.join("validator_announce_policy_id"))?;
 
+        // Mailbox script CBOR is optional (deprecated - use reference scripts instead)
+        let mailbox_script_cbor = raw.mailbox_script_cbor;
+        // Mailbox reference script UTXO (preferred method)
+        let mailbox_reference_script_utxo = raw.mailbox_reference_script_utxo;
+
         Ok(Self {
             url,
             api_key,
             network,
             mailbox_policy_id,
+            mailbox_script_hash,
+            processed_messages_script_hash,
+            mailbox_script_cbor,
+            mailbox_reference_script_utxo,
             registry_policy_id,
             ism_policy_id,
             igp_policy_id,

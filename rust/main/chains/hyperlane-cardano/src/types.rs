@@ -221,6 +221,8 @@ pub enum RecipientType {
 pub struct RecipientRegistration {
     pub script_hash: ScriptHash,
     pub state_locator: UtxoLocator,
+    /// NFT locator for reference script UTXO (None = script embedded in state UTXO)
+    pub reference_script_locator: Option<UtxoLocator>,
     pub additional_inputs: Vec<AdditionalInput>,
     pub recipient_type: RecipientType,
     pub custom_ism: Option<ScriptHash>,
@@ -269,8 +271,14 @@ pub fn script_hash_to_hyperlane_address(hash: &ScriptHash) -> HyperlaneAddress {
 
 /// Convert a Hyperlane address to Cardano script hash
 pub fn hyperlane_address_to_script_hash(addr: &HyperlaneAddress) -> Option<ScriptHash> {
-    // Check if this is a script credential (prefix 0x02000000)
-    if addr[0] == 0x02 && addr[1] == 0x00 && addr[2] == 0x00 && addr[3] == 0x00 {
+    // Check if this is a script credential
+    // Accept both 0x02000000 (canonical script prefix) and 0x00000000 (legacy/compat)
+    let is_script_prefix = (addr[0] == 0x02 || addr[0] == 0x00)
+        && addr[1] == 0x00
+        && addr[2] == 0x00
+        && addr[3] == 0x00;
+
+    if is_script_prefix {
         let mut hash = [0u8; 28];
         hash.copy_from_slice(&addr[4..32]);
         Some(hash)

@@ -1,3 +1,4 @@
+use aiken/builtin.{verify_ecdsa_secp256k1_signature}
 use aiken/collection/list
 use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
@@ -15,6 +16,17 @@ use utils.{assoc_find, at, find_input, is_signed_by}
 /// This ISM is used as a reference input during message processing.
 /// The mailbox checks that this ISM is present, and the ISM's datum
 /// contains the validator set and threshold for each origin domain.
+///
+/// SIGNATURE VERIFICATION:
+/// - Uses ECDSA secp256k1 (same curve as Ethereum/EVM validators)
+/// - Applies EIP-191 "Ethereum Signed Message" prefix for compatibility
+/// - Accepts 65-byte signatures (r || s || v) or 64-byte (r || s)
+/// - Validator keys must be secp256k1 public keys (compressed 33 bytes or uncompressed 65 bytes)
+///
+/// NOTE: The validators list in the datum must contain secp256k1 PUBLIC KEYS,
+/// not Ethereum addresses. To derive the address from a signature, use ecrecover
+/// off-chain, then map addresses to public keys in your configuration.
+///
 /// Multisig ISM validator
 validator multisig_ism {
   spend(
@@ -67,8 +79,13 @@ fn count_valid_signatures(
   signatures: List<(Int, ByteArray)>,
   validators: List<ByteArray>,
 ) -> Int {
-  // Compute the signing hash (message digest that validators sign)
-  let message_hash = keccak_256(encode_message(message))
+  // Compute the signing hash (same as EVM validators)
+  // Step 1: Hash the encoded message
+  let message_encoded = encode_message(message)
+  let signing_hash = keccak_256(message_encoded)
+
+  // Step 2: Apply EIP-191 prefix: "\x19Ethereum Signed Message:\n32" + signing_hash
+  let message_hash = eip191_hash(signing_hash)
 
   // For each signature, verify it's valid and from a validator
   list.foldl(
@@ -91,23 +108,39 @@ fn count_valid_signatures(
   )
 }
 
-/// Verify a single signature
-/// Note: Cardano uses Ed25519, but EVM validators use secp256k1
-/// This is a placeholder - actual implementation needs proper crypto
+/// Apply EIP-191 "Ethereum Signed Message" prefix
+/// Format: "\x19Ethereum Signed Message:\n32" + hash
+fn eip191_hash(hash: ByteArray) -> ByteArray {
+  // EIP-191 prefix for 32-byte messages
+  let prefix = #"19457468657265756d205369676e6564204d6573736167653a0a3332"
+  // prefix = "\x19Ethereum Signed Message:\n32" in hex
+
+  keccak_256(bytearray.concat(prefix, hash))
+}
+
+/// Verify a single ECDSA secp256k1 signature
+/// Compatible with EVM validator signatures (65 bytes: r=32, s=32, v=1)
+/// Extracts r,s (first 64 bytes) and verifies against public key
 fn verify_signature(
   validator_key: ByteArray,
-  _message_hash: ByteArray,
+  message_hash: ByteArray,
   signature: ByteArray,
 ) -> Bool {
-  // For Ed25519 verification, we'd use builtin crypto
-  // For secp256k1 (EVM compatibility), we need to either:
-  // 1. Use Plutus builtins if available
-  // 2. Have Cardano-specific validators that sign with Ed25519
-  // 3. Use a hybrid approach
+  // EVM signatures are 65 bytes (r || s || v)
+  // Aiken's verify function expects 64 bytes (r || s)
+  let signature_length = bytearray.length(signature)
 
-  // Placeholder: signature must be 64 bytes (Ed25519 signature size)
-  // and validator key must be 32 bytes (Ed25519 public key size)
-  bytearray.length(signature) == 64 && bytearray.length(validator_key) == 32
+  if signature_length == 65 {
+    // Extract first 64 bytes (r || s), discarding v
+    let signature_64 = bytearray.take(signature, 64)
+    verify_ecdsa_secp256k1_signature(validator_key, message_hash, signature_64)
+  } else if signature_length == 64 {
+    // Already in correct format
+    verify_ecdsa_secp256k1_signature(validator_key, message_hash, signature)
+  } else {
+    // Invalid signature length
+    False
+  }
 }
 
 /// Validate setting validators for a domain

@@ -4,9 +4,9 @@ use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use cardano/assets.{lovelace_of}
 use types.{
   RecipientRegistration, RegistryDatum, RegistryRedeemer, ScriptHash,
-  Register, Unregister, UpdateRegistration,
+  Register, Unregister, UpdateRegistration, AdminRegister,
 }
-use utils.{find_input, has_script_input}
+use utils.{find_input, has_script_input, is_signed_by}
 
 /// Recipient Registry Validator
 /// Maintains a registry of Hyperlane-compatible recipients
@@ -36,6 +36,9 @@ validator registry {
 
       UpdateRegistration { registration } ->
         validate_update(registry_datum, registration, tx, own_ref)
+
+      AdminRegister { registration } ->
+        validate_admin_register(registry_datum, registration, tx, own_ref)
     }
   }
 
@@ -117,6 +120,33 @@ fn validate_update(
       },
     )
 
+  let new_datum = RegistryDatum { ..datum, registrations: new_registrations }
+
+  validate_registry_continuation(datum, new_datum, tx, own_ref)
+}
+
+/// Validate admin registration (owner can register any script)
+fn validate_admin_register(
+  datum: RegistryDatum,
+  registration: RecipientRegistration,
+  tx: Transaction,
+  own_ref: OutputReference,
+) -> Bool {
+  // Only owner can use admin registration
+  expect is_signed_by(tx, datum.owner)
+
+  // Verify registration is valid
+  expect validate_registration(registration)
+
+  // Verify script not already registered
+  expect
+    !list.any(
+      datum.registrations,
+      fn(r) { r.script_hash == registration.script_hash },
+    )
+
+  // Build new registrations list
+  let new_registrations = [registration, ..datum.registrations]
   let new_datum = RegistryDatum { ..datum, registrations: new_registrations }
 
   validate_registry_continuation(datum, new_datum, tx, own_ref)

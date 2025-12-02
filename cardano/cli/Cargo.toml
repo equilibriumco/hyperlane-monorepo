@@ -1,0 +1,58 @@
+[package]
+name = "hyperlane-cardano-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for deploying and managing Hyperlane contracts on Cardano"
+authors = ["Hyperlane Contributors"]
+license = "Apache-2.0"
+
+[[bin]]
+name = "hyperlane-cardano"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+clap_complete = "4.4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# HTTP client for Blockfrost
+reqwest = { version = "0.11", features = ["json"] }
+
+# Cardano primitives - using alpha for PlutusV3 support
+pallas-crypto = "1.0.0-alpha.3"
+pallas-addresses = "1.0.0-alpha.3"
+pallas-primitives = "1.0.0-alpha.3"
+pallas-codec = "1.0.0-alpha.3"
+pallas-traverse = "1.0.0-alpha.3"
+pallas-txbuilder = "1.0.0-alpha.3"
+
+# Crypto
+blake2 = "0.10"
+ed25519-dalek = "2.1"
+sha3 = "0.10"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+colored = "2"
+dialoguer = "0.11"
+indicatif = "0.17"
+dirs = "5"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

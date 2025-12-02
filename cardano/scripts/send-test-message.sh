@@ -11,9 +11,9 @@ FUJI_PRIVATE_KEY="0x8ab7a00c32d023e31b7763e7d44d4868d82ecd618fd77a322c61783a57b0
 # Cardano Preview domain
 CARDANO_DOMAIN=2003
 
-# Recipient on Cardano (our mailbox policy ID padded to 32 bytes)
+# Recipient on Cardano (mailbox script hash padded to 32 bytes)
 # Using the mailbox as recipient for testing
-CARDANO_RECIPIENT="0x00000000fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467"
+CARDANO_RECIPIENT="0x02000000f01158af16d6f625eae141c3d495d0f57913847ca87ebd6bfdc4a719"
 
 # Message body (hex encoded "Hello Cardano from Fuji!")
 MESSAGE_BODY=$(echo -n "Hello Cardano from Fuji!" | xxd -p | tr -d '\n')
@@ -37,7 +37,7 @@ log_info "Message: Hello Cardano from Fuji!"
 log_info ""
 
 # Check if cast is available
-if ! command -v cast &> /dev/null; then
+if ! command -v cast &>/dev/null; then
     log_error "cast (foundry) not found. Please install foundry: curl -L https://foundry.paradigm.xyz | bash"
     exit 1
 fi

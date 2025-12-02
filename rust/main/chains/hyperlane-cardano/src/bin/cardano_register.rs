@@ -50,6 +50,15 @@ struct Args {
     #[arg(long, action = clap::ArgAction::Append)]
     additional_input: Vec<String>,
 
+    /// Policy ID of the NFT that marks the reference script UTXO (optional)
+    /// If not provided, the script is assumed to be embedded in the state UTXO
+    #[arg(long)]
+    ref_script_policy: Option<String>,
+
+    /// Asset name of the reference script NFT (hex-encoded, can be empty for unit name)
+    #[arg(long)]
+    ref_script_asset: Option<String>,
+
     /// For TokenReceiver: vault policy ID
     #[arg(long)]
     vault_policy: Option<String>,
@@ -198,6 +207,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| parse_additional_input(s))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Build reference script locator if provided
+    let reference_script_locator = match (&args.ref_script_policy, &args.ref_script_asset) {
+        (Some(policy), asset) => Some(UtxoLocator {
+            policy_id: policy.clone(),
+            asset_name: asset.clone().unwrap_or_default(),
+        }),
+        _ => None,
+    };
+
     // Build registration
     let registration = RecipientRegistration {
         script_hash,
@@ -205,6 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             policy_id: args.state_policy.clone(),
             asset_name: args.state_asset.clone(),
         },
+        reference_script_locator,
         additional_inputs,
         recipient_type,
         custom_ism,
@@ -216,6 +235,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("State UTXO:");
     println!("  Policy ID: {}", registration.state_locator.policy_id);
     println!("  Asset Name: {}", registration.state_locator.asset_name);
+    if let Some(ref ref_locator) = registration.reference_script_locator {
+        println!("Reference Script UTXO:");
+        println!("  Policy ID: {}", ref_locator.policy_id);
+        println!("  Asset Name: {}", ref_locator.asset_name);
+    } else {
+        println!("Reference Script: Embedded in state UTXO");
+    }
     println!("Recipient Type: {:?}", registration.recipient_type);
     if let Some(ism) = &registration.custom_ism {
         println!("Custom ISM: {}", hex::encode(ism));

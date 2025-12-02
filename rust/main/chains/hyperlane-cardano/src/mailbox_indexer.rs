@@ -35,8 +35,9 @@ impl CardanoMailboxIndexer {
 
     /// Get the mailbox script address
     fn get_mailbox_address(&self) -> ChainResult<String> {
+        // Use the mailbox script hash from config for address derivation
         self.provider
-            .script_hash_to_address(&self.conf.mailbox_policy_id)
+            .script_hash_to_address(&self.conf.mailbox_script_hash)
             .map_err(hyperlane_core::ChainCommunicationError::from_other)
     }
 

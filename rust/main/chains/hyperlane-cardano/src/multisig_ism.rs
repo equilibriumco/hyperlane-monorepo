@@ -98,44 +98,288 @@ impl CardanoMultisigIsm {
     /// Parse ISM datum from UTXO
     ///
     /// Handles both JSON-formatted datum and raw CBOR hex from Blockfrost.
-    /// If inline_datum is CBOR hex, fetches JSON representation via data_hash.
     async fn parse_ism_datum(&self, utxo: &Utxo) -> ChainResult<MultisigIsmDatum> {
         let inline_datum = utxo.inline_datum.as_ref().ok_or_else(|| {
             ChainCommunicationError::from_other_str("ISM UTXO has no inline datum")
         })?;
 
-        // First try parsing as JSON (may already be JSON from some API responses)
+        // First try parsing as JSON object with expected structure
         if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
-            return self.parse_ism_datum_json(&datum_json);
+            // Only use JSON parsing if it's an object with "fields" key
+            if datum_json.get("fields").is_some() {
+                return self.parse_ism_datum_json(&datum_json);
+            }
         }
 
-        // If inline_datum is CBOR hex (starts with hex chars), fetch JSON via data_hash
-        let data_hash = utxo.data_hash.as_ref().ok_or_else(|| {
-            ChainCommunicationError::from_other_str(
-                "ISM UTXO has CBOR datum but no data_hash for JSON lookup",
-            )
-        })?;
+        // Blockfrost returns inline_datum as a raw CBOR hex string (quoted in JSON)
+        // Strip quotes if present and decode from CBOR
+        let hex_str = inline_datum.trim_matches('"');
 
-        tracing::debug!("Fetching ISM datum JSON via data_hash: {}", data_hash);
-        let datum_json_str = self
-            .provider
-            .get_datum(data_hash)
-            .await
-            .map_err(|e| {
-                ChainCommunicationError::from_other_str(&format!(
-                    "Failed to fetch ISM datum JSON: {}",
-                    e
-                ))
-            })?;
+        tracing::debug!("Parsing ISM datum from CBOR hex: {}...", &hex_str[..hex_str.len().min(40)]);
 
-        let datum_json: Value = serde_json::from_str(&datum_json_str).map_err(|e| {
+        self.parse_ism_datum_from_cbor(hex_str)
+    }
+
+    /// Parse ISM datum from raw CBOR hex string
+    fn parse_ism_datum_from_cbor(&self, hex_str: &str) -> ChainResult<MultisigIsmDatum> {
+        use pallas_primitives::conway::PlutusData;
+        use pallas_codec::minicbor;
+
+        let cbor_bytes = hex::decode(hex_str).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
-                "Failed to parse ISM datum JSON: {}",
+                "Failed to decode ISM datum hex: {}",
                 e
             ))
         })?;
 
-        self.parse_ism_datum_json(&datum_json)
+        let plutus_data: PlutusData = minicbor::decode(&cbor_bytes).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Failed to decode ISM datum CBOR: {}",
+                e
+            ))
+        })?;
+
+        // ISM datum structure: Constr 0 [validators_list, thresholds_list, owner]
+        let (tag, fields) = match &plutus_data {
+            PlutusData::Constr(c) => (c.tag, &c.fields),
+            _ => {
+                return Err(ChainCommunicationError::from_other_str(
+                    "ISM datum is not a Constr",
+                ))
+            }
+        };
+
+        if tag != 121 {
+            // Tag 121 = Constr 0
+            return Err(ChainCommunicationError::from_other_str(&format!(
+                "ISM datum has wrong constructor tag: {} (expected 121)",
+                tag
+            )));
+        }
+
+        let fields: Vec<_> = fields.iter().collect();
+        if fields.len() < 3 {
+            return Err(ChainCommunicationError::from_other_str(&format!(
+                "ISM datum has {} fields, expected 3",
+                fields.len()
+            )));
+        }
+
+        // Parse validators list (field 0): list of (domain, list of pubkeys)
+        let validators = self.parse_validators_from_plutus(&fields[0])?;
+
+        // Parse thresholds list (field 1): list of (domain, threshold)
+        let thresholds = self.parse_thresholds_from_plutus(&fields[1])?;
+
+        // Parse owner (field 2): 28-byte pubkey hash
+        let owner = self.parse_owner_from_plutus(&fields[2])?;
+
+        tracing::debug!(
+            "Parsed ISM datum: {} validator entries, {} threshold entries",
+            validators.len(),
+            thresholds.len()
+        );
+
+        Ok(MultisigIsmDatum {
+            validators,
+            thresholds,
+            owner,
+        })
+    }
+
+    fn parse_validators_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> ChainResult<Vec<(u32, Vec<[u8; 32]>)>> {
+        use pallas_primitives::conway::PlutusData;
+
+        let list = match data {
+            PlutusData::Array(arr) => arr.iter().collect::<Vec<_>>(),
+            _ => {
+                return Err(ChainCommunicationError::from_other_str(
+                    "Validators field is not a list",
+                ))
+            }
+        };
+
+        let mut validators = Vec::new();
+        for entry in list {
+            // Each entry is a Constr 0 (tuple): (domain, pubkeys_list)
+            let (tag, fields) = match entry {
+                PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+                _ => continue,
+            };
+            if tag != 121 || fields.len() < 2 {
+                continue;
+            }
+
+            // Parse domain (BigInt)
+            let domain = match &fields[0] {
+                PlutusData::BigInt(bi) => {
+                    match bi {
+                        pallas_primitives::conway::BigInt::Int(i) => {
+                            let val: i128 = (*i).into();
+                            val as u32
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            // Parse pubkeys list
+            let pubkeys_list = match &fields[1] {
+                PlutusData::Array(arr) => arr.iter().collect::<Vec<_>>(),
+                _ => continue,
+            };
+
+            let mut eth_addresses = Vec::new();
+            for pk in pubkeys_list {
+                if let PlutusData::BoundedBytes(bytes) = pk {
+                    let pk_bytes: &[u8] = bytes.as_ref();
+
+                    if pk_bytes.len() == 33 {
+                        // 33-byte compressed secp256k1 public key
+                        // Derive Ethereum address: keccak256(uncompressed_pubkey)[12..32]
+                        if let Some(eth_addr) = self.compressed_pubkey_to_eth_address(pk_bytes) {
+                            eth_addresses.push(eth_addr);
+                        }
+                    } else if pk_bytes.len() == 20 {
+                        // Already an Ethereum address (20 bytes), pad to 32 bytes
+                        let mut arr = [0u8; 32];
+                        arr[12..].copy_from_slice(pk_bytes);
+                        eth_addresses.push(arr);
+                    } else if pk_bytes.len() == 32 {
+                        // 32-byte value (possibly already padded address)
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(pk_bytes);
+                        eth_addresses.push(arr);
+                    }
+                }
+            }
+
+            validators.push((domain, eth_addresses));
+        }
+
+        Ok(validators)
+    }
+
+    /// Convert a 33-byte compressed secp256k1 public key to an Ethereum address (32 bytes, left-padded)
+    fn compressed_pubkey_to_eth_address(&self, compressed: &[u8]) -> Option<[u8; 32]> {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        use k256::PublicKey;
+        use sha3::{Digest, Keccak256};
+
+        // Parse the compressed public key
+        let pubkey = PublicKey::from_sec1_bytes(compressed).ok()?;
+
+        // Get the uncompressed form (65 bytes: 04 || x || y)
+        let uncompressed = pubkey.to_encoded_point(false);
+        let uncompressed_bytes = uncompressed.as_bytes();
+
+        if uncompressed_bytes.len() != 65 {
+            return None;
+        }
+
+        // Keccak256 hash of the 64-byte public key (skip the 04 prefix)
+        let hash = Keccak256::digest(&uncompressed_bytes[1..]);
+
+        // Ethereum address is the last 20 bytes, left-padded to 32 bytes for H256
+        let mut eth_addr = [0u8; 32];
+        eth_addr[12..].copy_from_slice(&hash[12..]);
+
+        tracing::debug!(
+            "Derived Ethereum address 0x{} from compressed pubkey 0x{}",
+            hex::encode(&eth_addr[12..]),
+            hex::encode(compressed)
+        );
+
+        Some(eth_addr)
+    }
+
+    fn parse_thresholds_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> ChainResult<Vec<(u32, u32)>> {
+        use pallas_primitives::conway::PlutusData;
+
+        let list = match data {
+            PlutusData::Array(arr) => arr.iter().collect::<Vec<_>>(),
+            _ => {
+                return Err(ChainCommunicationError::from_other_str(
+                    "Thresholds field is not a list",
+                ))
+            }
+        };
+
+        let mut thresholds = Vec::new();
+        for entry in list {
+            // Each entry is a Constr 0 (tuple): (domain, threshold)
+            let (tag, fields) = match entry {
+                PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+                _ => continue,
+            };
+            if tag != 121 || fields.len() < 2 {
+                continue;
+            }
+
+            // Parse domain
+            let domain = match &fields[0] {
+                PlutusData::BigInt(bi) => {
+                    match bi {
+                        pallas_primitives::conway::BigInt::Int(i) => {
+                            let val: i128 = (*i).into();
+                            val as u32
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            // Parse threshold
+            let threshold = match &fields[1] {
+                PlutusData::BigInt(bi) => {
+                    match bi {
+                        pallas_primitives::conway::BigInt::Int(i) => {
+                            let val: i128 = (*i).into();
+                            val as u32
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            thresholds.push((domain, threshold));
+        }
+
+        Ok(thresholds)
+    }
+
+    fn parse_owner_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> ChainResult<[u8; 28]> {
+        use pallas_primitives::conway::PlutusData;
+
+        match data {
+            PlutusData::BoundedBytes(bytes) => {
+                let owner_bytes: &[u8] = bytes.as_ref();
+                if owner_bytes.len() != 28 {
+                    return Err(ChainCommunicationError::from_other_str(&format!(
+                        "Owner has wrong length: {} (expected 28)",
+                        owner_bytes.len()
+                    )));
+                }
+                let mut owner = [0u8; 28];
+                owner.copy_from_slice(owner_bytes);
+                Ok(owner)
+            }
+            _ => Err(ChainCommunicationError::from_other_str(
+                "Owner field is not bytes",
+            )),
+        }
     }
 
     /// Parse ISM datum from Blockfrost's JSON format
@@ -179,20 +423,32 @@ impl CardanoMultisigIsm {
                     .and_then(|l| l.as_array())
                     .unwrap_or(&empty_pubkeys);
 
-                let mut pubkeys = Vec::new();
+                let mut eth_addresses = Vec::new();
                 for pk in pubkeys_list {
                     if let Some(pk_hex) = pk.get("bytes").and_then(|b| b.as_str()) {
                         if let Ok(pk_bytes) = hex::decode(pk_hex) {
-                            if pk_bytes.len() == 32 {
+                            if pk_bytes.len() == 33 {
+                                // 33-byte compressed secp256k1 public key
+                                // Derive Ethereum address: keccak256(uncompressed_pubkey)[12..32]
+                                if let Some(eth_addr) = self.compressed_pubkey_to_eth_address(&pk_bytes) {
+                                    eth_addresses.push(eth_addr);
+                                }
+                            } else if pk_bytes.len() == 20 {
+                                // Already an Ethereum address (20 bytes), pad to 32 bytes
+                                let mut arr = [0u8; 32];
+                                arr[12..].copy_from_slice(&pk_bytes);
+                                eth_addresses.push(arr);
+                            } else if pk_bytes.len() == 32 {
+                                // 32-byte value (possibly already padded address)
                                 let mut arr = [0u8; 32];
                                 arr.copy_from_slice(&pk_bytes);
-                                pubkeys.push(arr);
+                                eth_addresses.push(arr);
                             }
                         }
                     }
                 }
 
-                validators.push((domain, pubkeys));
+                validators.push((domain, eth_addresses));
             }
         }
 

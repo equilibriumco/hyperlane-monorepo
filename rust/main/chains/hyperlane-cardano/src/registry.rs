@@ -141,18 +141,400 @@ impl RecipientRegistry {
     }
 
     /// Parse the registry datum from a UTXO
+    ///
+    /// Handles both JSON-formatted datum and raw CBOR hex from Blockfrost.
     fn parse_registry_datum(&self, utxo: &Utxo) -> Result<RegistryDatum, RegistryError> {
         let inline_datum = utxo
             .inline_datum
             .as_ref()
             .ok_or_else(|| RegistryError::InvalidDatum("No inline datum".to_string()))?;
 
-        // Parse the CBOR datum
-        // The datum is in Blockfrost's JSON format, we need to parse it
-        let datum_json: Value = serde_json::from_str(inline_datum)
-            .map_err(|e| RegistryError::Deserialization(e.to_string()))?;
+        // First try parsing as JSON object with expected structure
+        if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
+            // Only use JSON parsing if it's an object with "fields" key
+            if datum_json.get("fields").is_some() {
+                return self.parse_registry_datum_json(&datum_json);
+            }
+        }
 
-        self.parse_registry_datum_json(&datum_json)
+        // Blockfrost returns inline_datum as a raw CBOR hex string (quoted in JSON)
+        // Strip quotes if present and decode from CBOR
+        let hex_str = inline_datum.trim_matches('"');
+        tracing::debug!(
+            "Parsing registry datum from CBOR hex: {}...",
+            &hex_str[..hex_str.len().min(40)]
+        );
+        self.parse_registry_datum_from_cbor(hex_str)
+    }
+
+    /// Parse registry datum from raw CBOR hex string
+    fn parse_registry_datum_from_cbor(&self, hex_str: &str) -> Result<RegistryDatum, RegistryError> {
+        use pallas_codec::minicbor;
+        use pallas_primitives::conway::PlutusData;
+
+        let cbor_bytes =
+            hex::decode(hex_str).map_err(|e| RegistryError::Deserialization(e.to_string()))?;
+
+        let plutus_data: PlutusData = minicbor::decode(&cbor_bytes)
+            .map_err(|e| RegistryError::Deserialization(format!("CBOR decode error: {}", e)))?;
+
+        // Registry datum structure: Constr 0 [registrations_list, owner]
+        let (tag, fields) = match &plutus_data {
+            PlutusData::Constr(c) => (c.tag, &c.fields),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Registry datum is not a Constr".to_string(),
+                ))
+            }
+        };
+
+        if tag != 121 {
+            // Tag 121 = Constr 0
+            return Err(RegistryError::InvalidDatum(format!(
+                "Registry datum has wrong constructor tag: {} (expected 121)",
+                tag
+            )));
+        }
+
+        let fields: Vec<_> = fields.iter().collect();
+        if fields.len() < 2 {
+            return Err(RegistryError::InvalidDatum(format!(
+                "Registry datum has {} fields, expected at least 2",
+                fields.len()
+            )));
+        }
+
+        // Parse registrations list (field 0)
+        let registrations = self.parse_registrations_from_plutus(&fields[0])?;
+
+        // Parse owner (field 1): 28-byte pubkey hash
+        let owner = self.parse_owner_from_plutus(&fields[1])?;
+
+        tracing::debug!(
+            "Parsed registry datum: {} registrations",
+            registrations.len()
+        );
+
+        Ok(RegistryDatum {
+            registrations,
+            owner,
+        })
+    }
+
+    /// Parse registrations list from PlutusData
+    fn parse_registrations_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<Vec<RecipientRegistration>, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        let list = match data {
+            PlutusData::Array(arr) => arr.iter().collect::<Vec<_>>(),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Registrations field is not a list".to_string(),
+                ))
+            }
+        };
+
+        let mut registrations = Vec::new();
+        for entry in list {
+            if let Ok(reg) = self.parse_registration_from_plutus(entry) {
+                registrations.push(reg);
+            }
+        }
+
+        Ok(registrations)
+    }
+
+    /// Parse a single registration from PlutusData
+    fn parse_registration_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<RecipientRegistration, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        let (tag, fields) = match data {
+            PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Registration is not a Constr".to_string(),
+                ))
+            }
+        };
+
+        if tag != 121 || fields.len() < 6 {
+            return Err(RegistryError::InvalidDatum(format!(
+                "Invalid registration structure: expected 6 fields, got {}",
+                fields.len()
+            )));
+        }
+
+        // Script hash (field 0)
+        let script_hash = match &fields[0] {
+            PlutusData::BoundedBytes(bytes) => {
+                let bytes: &[u8] = bytes.as_ref();
+                if bytes.len() != 28 {
+                    return Err(RegistryError::InvalidDatum("Invalid script_hash length".to_string()));
+                }
+                let mut hash = [0u8; 28];
+                hash.copy_from_slice(bytes);
+                hash
+            }
+            _ => return Err(RegistryError::InvalidDatum("Invalid script_hash".to_string())),
+        };
+
+        // State locator (field 1)
+        let state_locator = self.parse_utxo_locator_from_plutus(&fields[1])?;
+
+        // Reference script locator (field 2) - Option<UtxoLocator>
+        let reference_script_locator = self.parse_optional_locator_from_plutus(&fields[2])?;
+
+        // Additional inputs (field 3)
+        let additional_inputs = match &fields[3] {
+            PlutusData::Array(arr) => {
+                let mut inputs = Vec::new();
+                for input in arr.iter() {
+                    if let Ok(ai) = self.parse_additional_input_from_plutus(input) {
+                        inputs.push(ai);
+                    }
+                }
+                inputs
+            }
+            _ => Vec::new(),
+        };
+
+        // Recipient type (field 4) - Constr tag determines type
+        let recipient_type = self.parse_recipient_type_from_plutus(&fields[4])?;
+
+        // Custom ISM (field 5)
+        let custom_ism = match &fields[5] {
+            PlutusData::Constr(c) => {
+                // Some(ism_hash) = Constr 0 [bytes], None = Constr 1 []
+                if c.tag == 121 {
+                    // Constr 0 = Some
+                    if let Some(PlutusData::BoundedBytes(bytes)) = c.fields.first() {
+                        let bytes: &[u8] = bytes.as_ref();
+                        if bytes.len() == 28 {
+                            let mut hash = [0u8; 28];
+                            hash.copy_from_slice(bytes);
+                            Some(hash)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        Ok(RecipientRegistration {
+            script_hash,
+            state_locator,
+            reference_script_locator,
+            additional_inputs,
+            recipient_type,
+            custom_ism,
+        })
+    }
+
+    /// Parse UtxoLocator from PlutusData
+    fn parse_utxo_locator_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<UtxoLocator, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        let (tag, fields) = match data {
+            PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            _ => return Err(RegistryError::InvalidDatum("Invalid UtxoLocator".to_string())),
+        };
+
+        if tag != 121 || fields.len() < 2 {
+            return Err(RegistryError::InvalidDatum("Invalid UtxoLocator structure".to_string()));
+        }
+
+        let policy_id = match &fields[0] {
+            PlutusData::BoundedBytes(bytes) => {
+                let slice: &[u8] = bytes.as_ref();
+                hex::encode(slice)
+            }
+            _ => return Err(RegistryError::InvalidDatum("Invalid policy_id".to_string())),
+        };
+
+        let asset_name = match &fields[1] {
+            PlutusData::BoundedBytes(bytes) => {
+                let slice: &[u8] = bytes.as_ref();
+                hex::encode(slice)
+            }
+            _ => return Err(RegistryError::InvalidDatum("Invalid asset_name".to_string())),
+        };
+
+        Ok(UtxoLocator {
+            policy_id,
+            asset_name,
+        })
+    }
+
+    /// Parse AdditionalInput from PlutusData
+    fn parse_additional_input_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<AdditionalInput, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        let (tag, fields) = match data {
+            PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            _ => return Err(RegistryError::InvalidDatum("Invalid AdditionalInput".to_string())),
+        };
+
+        if tag != 121 || fields.len() < 3 {
+            return Err(RegistryError::InvalidDatum("Invalid AdditionalInput structure".to_string()));
+        }
+
+        // name (field 0) - bytes decoded as UTF-8 string
+        let name = match &fields[0] {
+            PlutusData::BoundedBytes(bytes) => {
+                let slice: &[u8] = bytes.as_ref();
+                String::from_utf8_lossy(slice).to_string()
+            }
+            _ => return Err(RegistryError::InvalidDatum("Invalid input name".to_string())),
+        };
+
+        let locator = self.parse_utxo_locator_from_plutus(&fields[1])?;
+
+        // must_be_spent is Constr 1 for True, Constr 0 for False
+        let must_be_spent = match &fields[2] {
+            PlutusData::Constr(c) => c.tag == 122, // Constr 1 = True
+            _ => false,
+        };
+
+        Ok(AdditionalInput {
+            name,
+            locator,
+            must_be_spent,
+        })
+    }
+
+    /// Parse RecipientType from PlutusData
+    fn parse_recipient_type_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<RecipientType, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        let (tag, fields) = match data {
+            PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            _ => return Ok(RecipientType::GenericHandler),
+        };
+
+        match tag {
+            121 => Ok(RecipientType::GenericHandler), // Constr 0
+            122 => {
+                // TokenReceiver - Constr 1 [vault_locator, minting_policy]
+                let vault_locator = if fields.len() > 0 {
+                    self.parse_optional_locator_from_plutus(&fields[0])?
+                } else {
+                    None
+                };
+                let minting_policy = if fields.len() > 1 {
+                    self.parse_optional_script_hash_from_plutus(&fields[1])?
+                } else {
+                    None
+                };
+                Ok(RecipientType::TokenReceiver {
+                    vault_locator,
+                    minting_policy,
+                })
+            }
+            123 => {
+                // ContractCaller - Constr 2 [target_locator]
+                if fields.is_empty() {
+                    return Err(RegistryError::InvalidDatum("ContractCaller missing target_locator".to_string()));
+                }
+                let target_locator = self.parse_utxo_locator_from_plutus(&fields[0])?;
+                Ok(RecipientType::ContractCaller { target_locator })
+            }
+            _ => Ok(RecipientType::GenericHandler),
+        }
+    }
+
+    /// Parse optional UtxoLocator from PlutusData (Option type)
+    fn parse_optional_locator_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<Option<UtxoLocator>, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        match data {
+            PlutusData::Constr(c) => {
+                if c.tag == 121 {
+                    // Some
+                    if let Some(inner) = c.fields.first() {
+                        Ok(Some(self.parse_utxo_locator_from_plutus(inner)?))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None) // None
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Parse optional ScriptHash from PlutusData (Option type)
+    fn parse_optional_script_hash_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<Option<ScriptHash>, RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        match data {
+            PlutusData::Constr(c) => {
+                if c.tag == 121 {
+                    // Some
+                    if let Some(PlutusData::BoundedBytes(bytes)) = c.fields.first() {
+                        let slice: &[u8] = bytes.as_ref();
+                        if slice.len() == 28 {
+                            let mut hash = [0u8; 28];
+                            hash.copy_from_slice(slice);
+                            return Ok(Some(hash));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Parse owner from PlutusData
+    fn parse_owner_from_plutus(
+        &self,
+        data: &pallas_primitives::conway::PlutusData,
+    ) -> Result<[u8; 28], RegistryError> {
+        use pallas_primitives::conway::PlutusData;
+
+        match data {
+            PlutusData::BoundedBytes(bytes) => {
+                let bytes: &[u8] = bytes.as_ref();
+                if bytes.len() != 28 {
+                    return Err(RegistryError::InvalidDatum(format!(
+                        "Owner has wrong length: {} (expected 28)",
+                        bytes.len()
+                    )));
+                }
+                let mut owner = [0u8; 28];
+                owner.copy_from_slice(bytes);
+                Ok(owner)
+            }
+            _ => Err(RegistryError::InvalidDatum("Owner field is not bytes".to_string())),
+        }
     }
 
     /// Parse registry datum from Blockfrost's JSON format
@@ -205,6 +587,14 @@ impl RecipientRegistry {
     }
 
     /// Parse a single registration from JSON
+    ///
+    /// Registration structure (6 fields):
+    /// - Field 0: script_hash (28-byte ByteArray)
+    /// - Field 1: state_locator (UtxoLocator)
+    /// - Field 2: reference_script_locator (Option<UtxoLocator>)
+    /// - Field 3: additional_inputs (List<AdditionalInput>)
+    /// - Field 4: recipient_type (RecipientType)
+    /// - Field 5: custom_ism (Option<ScriptHash>)
     fn parse_registration_json(
         &self,
         json: &Value,
@@ -216,13 +606,14 @@ impl RecipientRegistry {
                 RegistryError::InvalidDatum("Invalid registration structure".to_string())
             })?;
 
-        if fields.len() < 5 {
-            return Err(RegistryError::InvalidDatum(
-                "Invalid registration field count".to_string(),
-            ));
+        if fields.len() < 6 {
+            return Err(RegistryError::InvalidDatum(format!(
+                "Invalid registration field count: expected 6, got {}",
+                fields.len()
+            )));
         }
 
-        // Script hash
+        // Field 0: Script hash
         let script_hash_hex = fields
             .get(0)
             .and_then(|s| s.get("bytes"))
@@ -236,16 +627,23 @@ impl RecipientRegistry {
             .try_into()
             .map_err(|_| RegistryError::InvalidDatum("Invalid script_hash length".to_string()))?;
 
-        // State locator
+        // Field 1: State locator
         let state_locator =
             self.parse_utxo_locator_json(fields.get(1).ok_or_else(|| {
                 RegistryError::InvalidDatum("Missing state_locator".to_string())
             })?)?;
 
-        // Additional inputs
+        // Field 2: Reference script locator (Option<UtxoLocator>)
+        let reference_script_locator = self.parse_optional_locator_json(
+            fields
+                .get(2)
+                .ok_or_else(|| RegistryError::InvalidDatum("Missing reference_script_locator".to_string()))?,
+        )?;
+
+        // Field 3: Additional inputs
         let empty_inputs = vec![];
         let additional_inputs_json = fields
-            .get(2)
+            .get(3)
             .and_then(|a| a.get("list"))
             .and_then(|l| l.as_array())
             .unwrap_or(&empty_inputs);
@@ -256,22 +654,23 @@ impl RecipientRegistry {
             additional_inputs.push(input);
         }
 
-        // Recipient type
+        // Field 4: Recipient type
         let recipient_type =
-            self.parse_recipient_type_json(fields.get(3).ok_or_else(|| {
+            self.parse_recipient_type_json(fields.get(4).ok_or_else(|| {
                 RegistryError::InvalidDatum("Missing recipient_type".to_string())
             })?)?;
 
-        // Custom ISM (optional)
+        // Field 5: Custom ISM (optional)
         let custom_ism = self.parse_optional_script_hash_json(
             fields
-                .get(4)
+                .get(5)
                 .ok_or_else(|| RegistryError::InvalidDatum("Missing custom_ism".to_string()))?,
         )?;
 
         Ok(RecipientRegistration {
             script_hash,
             state_locator,
+            reference_script_locator,
             additional_inputs,
             recipient_type,
             custom_ism,

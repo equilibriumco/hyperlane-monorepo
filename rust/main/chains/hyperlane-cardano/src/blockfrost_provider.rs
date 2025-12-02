@@ -1,7 +1,10 @@
-use blockfrost::{BlockfrostAPI, BlockfrostError, Pagination};
+use blockfrost::{BlockfrostAPI, BlockfrostError, Order, Pagination};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
-use tracing::instrument;
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration};
+use tracing::{debug, instrument};
 
 #[derive(Error, Debug)]
 pub enum BlockfrostProviderError {
@@ -21,6 +24,8 @@ pub enum BlockfrostProviderError {
 pub struct BlockfrostProvider {
     api: BlockfrostAPI,
     network: CardanoNetwork,
+    /// Rate limiter: max 8 concurrent requests (staying under 10/sec limit)
+    rate_limiter: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for BlockfrostProvider {
@@ -97,7 +102,21 @@ impl BlockfrostProvider {
     /// Create a new Blockfrost provider
     pub fn new(api_key: &str, network: CardanoNetwork) -> Self {
         let api = BlockfrostAPI::new(api_key, Default::default());
-        Self { api, network }
+        Self {
+            api,
+            network,
+            // Allow max 5 concurrent requests to stay under 10/sec limit
+            rate_limiter: Arc::new(Semaphore::new(5)),
+        }
+    }
+
+    /// Rate-limited delay between API calls
+    /// Blockfrost free tier limit is 10 req/sec, so we use 150ms delay with 5 concurrent
+    async fn rate_limit(&self) {
+        let _permit = self.rate_limiter.acquire().await.unwrap();
+        // 150ms delay with 5 concurrent = max ~33 req/sec theoretical,
+        // but with serial pagination this gives us breathing room
+        sleep(Duration::from_millis(150)).await;
     }
 
     /// Get the current network
@@ -108,41 +127,78 @@ impl BlockfrostProvider {
     /// Get the latest block number
     #[instrument(skip(self))]
     pub async fn get_latest_block(&self) -> Result<u64, BlockfrostProviderError> {
+        self.rate_limit().await;
         let block = self.api.blocks_latest().await?;
         Ok(block.height.unwrap_or(0) as u64)
     }
 
-    /// Get UTXOs at an address
+    /// Get UTXOs at an address with manual pagination and rate limiting
+    /// Returns empty vector if the address has no UTXOs (404 from Blockfrost)
     #[instrument(skip(self))]
     pub async fn get_utxos_at_address(
         &self,
         address: &str,
     ) -> Result<Vec<Utxo>, BlockfrostProviderError> {
-        let pagination = Pagination::all();
-        let utxos = self.api.addresses_utxos(address, pagination).await?;
+        let mut all_utxos = Vec::new();
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
 
-        Ok(utxos
-            .into_iter()
-            .map(|u| Utxo {
-                tx_hash: u.tx_hash,
-                output_index: u.tx_index as u32,
-                address: address.to_string(),
-                value: u
-                    .amount
-                    .into_iter()
-                    .map(|a| UtxoValue {
-                        unit: a.unit,
-                        quantity: a.quantity,
-                    })
-                    .collect(),
-                inline_datum: u.inline_datum,
-                data_hash: u.data_hash,
-                reference_script_hash: u.reference_script_hash,
-            })
-            .collect())
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+
+            // Handle 404 (address has no UTXOs) as empty result rather than error
+            let utxos = match self.api.addresses_utxos(address, pagination).await {
+                Ok(utxos) => utxos,
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        tracing::debug!("Address {} has no UTXOs (404)", address);
+                        return Ok(all_utxos); // Return what we have so far (or empty)
+                    }
+                    // Handle 429 (rate limit) errors by returning what we have
+                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
+                        tracing::warn!("Rate limited while fetching UTXOs for {}, returning {} UTXOs collected so far", address, all_utxos.len());
+                        if all_utxos.is_empty() {
+                            return Err(e.into());
+                        }
+                        return Ok(all_utxos);
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let page_len = utxos.len();
+            for u in utxos {
+                all_utxos.push(Utxo {
+                    tx_hash: u.tx_hash,
+                    output_index: u.tx_index as u32,
+                    address: address.to_string(),
+                    value: u
+                        .amount
+                        .into_iter()
+                        .map(|a| UtxoValue {
+                            unit: a.unit,
+                            quantity: a.quantity,
+                        })
+                        .collect(),
+                    inline_datum: u.inline_datum,
+                    data_hash: u.data_hash,
+                    reference_script_hash: u.reference_script_hash,
+                });
+            }
+
+            // If we got less than PAGE_SIZE results, we've reached the last page
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_utxos)
     }
 
-    /// Get UTXOs containing a specific asset (NFT)
+    /// Get UTXOs containing a specific asset (NFT) with manual pagination
     /// Returns empty vector if the asset doesn't exist (404 from Blockfrost)
     #[instrument(skip(self))]
     pub async fn get_utxos_by_asset(
@@ -151,23 +207,42 @@ impl BlockfrostProvider {
         asset_name: &str,
     ) -> Result<Vec<Utxo>, BlockfrostProviderError> {
         let asset_id = format!("{}{}", policy_id, asset_name);
-        let pagination = Pagination::all();
+        let mut all_addresses = Vec::new();
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
 
-        // Handle 404 (asset not found) as an empty result rather than an error
-        let addresses = match self.api.assets_addresses(&asset_id, pagination).await {
-            Ok(addrs) => addrs,
-            Err(e) => {
-                // Check if this is a 404 error (asset doesn't exist)
-                let error_str = format!("{:?}", e);
-                if error_str.contains("404") || error_str.contains("Not Found") {
-                    return Ok(Vec::new());
+        // Manually paginate through asset addresses
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+
+            let addresses = match self.api.assets_addresses(&asset_id, pagination).await {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        return Ok(Vec::new());
+                    }
+                    // Handle 429 rate limit - return what we have if possible
+                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
+                        tracing::warn!("Rate limited while fetching asset addresses, continuing with {} addresses", all_addresses.len());
+                        break;
+                    }
+                    return Err(e.into());
                 }
-                return Err(e.into());
+            };
+
+            let page_len = addresses.len();
+            all_addresses.extend(addresses);
+
+            if page_len < PAGE_SIZE {
+                break;
             }
-        };
+            page += 1;
+        }
 
         let mut result = Vec::new();
-        for addr_info in addresses {
+        for addr_info in all_addresses {
             let utxos = self.get_utxos_at_address(&addr_info.address).await?;
             for utxo in utxos {
                 if utxo.has_asset(policy_id, asset_name) {
@@ -198,6 +273,7 @@ impl BlockfrostProvider {
     /// Get script datum by hash (returns JSON representation)
     #[instrument(skip(self))]
     pub async fn get_datum(&self, datum_hash: &str) -> Result<String, BlockfrostProviderError> {
+        self.rate_limit().await;
         let datum = self.api.scripts_datum_hash(datum_hash).await?;
         // The API returns serde_json::Value directly
         serde_json::to_string(&datum)
@@ -210,6 +286,7 @@ impl BlockfrostProvider {
         &self,
         script_hash: &str,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
+        self.rate_limit().await;
         let script = self.api.scripts_by_id(script_hash).await?;
         serde_json::to_value(&script)
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
@@ -221,6 +298,7 @@ impl BlockfrostProvider {
         &self,
         tx_cbor: &[u8],
     ) -> Result<String, BlockfrostProviderError> {
+        self.rate_limit().await;
         let tx_hash = self.api.transactions_submit(tx_cbor.to_vec()).await?;
         Ok(tx_hash)
     }
@@ -230,24 +308,48 @@ impl BlockfrostProvider {
     pub async fn get_protocol_parameters(
         &self,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
+        self.rate_limit().await;
         let params = self.api.epochs_latest_parameters().await?;
         serde_json::to_value(&params)
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
     }
 
-    /// Check if a message has been processed (by checking for processed message marker)
+    /// Check if a message has been processed (by checking for processed message marker UTXO)
+    ///
+    /// Processed message markers are UTXOs at the processed_messages_script address
+    /// with an inline datum containing the message_id.
+    ///
+    /// TODO: Migrate to NFT-based tracking for O(1) lookups instead of O(n) scanning.
     #[instrument(skip(self))]
     pub async fn is_message_delivered(
         &self,
-        processed_messages_policy: &str,
+        processed_messages_script_hash: &str,
         message_id: &[u8; 32],
     ) -> Result<bool, BlockfrostProviderError> {
-        // The processed message marker NFT has the message_id as the asset name
-        let asset_name = hex::encode(message_id);
-        let utxos = self
-            .get_utxos_by_asset(processed_messages_policy, &asset_name)
-            .await?;
-        Ok(!utxos.is_empty())
+        // Get the script address from the hash
+        let address = script_hash_to_address(processed_messages_script_hash, self.network)?;
+
+        // Get all UTXOs at the processed messages script address
+        let utxos = self.get_utxos_at_address(&address).await?;
+
+        // Check each UTXO's inline datum for the message_id
+        // ProcessedMessageDatum is encoded as: d87981 58 20 <32-byte message_id>
+        // (Constr 0, 1 field, bytestring of 32 bytes)
+        let message_id_hex = hex::encode(message_id);
+
+        for utxo in utxos {
+            if let Some(ref datum_hex) = utxo.inline_datum {
+                // The datum should end with the 32-byte message_id
+                // Format: d8798158200000...0000 (prefix + 32 bytes = 68 hex chars total)
+                if datum_hex.len() >= 64 && datum_hex.ends_with(&message_id_hex) {
+                    debug!("Found processed message marker for message_id: {}", message_id_hex);
+                    return Ok(true);
+                }
+            }
+        }
+
+        debug!("No processed message marker found for message_id: {}", message_id_hex);
+        Ok(false)
     }
 
     /// Get all script UTXOs (useful for finding mailbox, registry, ISM states)
@@ -261,14 +363,10 @@ impl BlockfrostProvider {
         self.get_utxos_at_address(&address).await
     }
 
-    /// Get transactions at an address within a block range
+    /// Get transactions at an address within a block range with manual pagination
     ///
-    /// When a block range is specified, this uses an optimized approach:
-    /// 1. Fetch all historical transactions for the address (1 API call)
-    /// 2. Filter them by the block range in-memory
-    ///
-    /// This is more efficient than the old approach which fetched all transactions
-    /// every time, or a naive block-by-block approach which would make too many calls.
+    /// Uses manual pagination with rate limiting between each page to avoid 429 errors.
+    /// Filters by block range in-memory after fetching.
     #[instrument(skip(self))]
     pub async fn get_address_transactions(
         &self,
@@ -276,32 +374,61 @@ impl BlockfrostProvider {
         from_block: Option<u64>,
         to_block: Option<u64>,
     ) -> Result<Vec<AddressTransaction>, BlockfrostProviderError> {
-        // Fetch all transactions for this address once
-        let pagination = Pagination::all();
-        let txs = self.api.addresses_transactions(address, pagination).await?;
-
         let mut result = Vec::new();
-        for tx in txs {
-            let block_height = tx.block_height as u64;
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
 
-            // Filter by block range if specified
-            if let Some(from) = from_block {
-                if block_height < from {
-                    continue;
+        // Manually paginate with rate limiting between each page
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+
+            let txs = match self.api.addresses_transactions(address, pagination).await {
+                Ok(txs) => txs,
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        return Ok(result);
+                    }
+                    // Handle 429 rate limit - return what we have if possible
+                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
+                        tracing::warn!("Rate limited while fetching transactions, continuing with {} txs", result.len());
+                        break;
+                    }
+                    return Err(e.into());
                 }
-            }
-            if let Some(to) = to_block {
-                if block_height > to {
-                    continue;
+            };
+
+            let page_len = txs.len();
+
+            // Convert and filter each transaction immediately
+            for tx in txs {
+                let block_height = tx.block_height as u64;
+
+                // Filter by block range if specified
+                if let Some(from) = from_block {
+                    if block_height < from {
+                        continue;
+                    }
                 }
+                if let Some(to) = to_block {
+                    if block_height > to {
+                        continue;
+                    }
+                }
+
+                result.push(AddressTransaction {
+                    tx_hash: tx.tx_hash,
+                    block_height,
+                    block_time: tx.block_time as u64,
+                    tx_index: tx.tx_index as u32,
+                });
             }
 
-            result.push(AddressTransaction {
-                tx_hash: tx.tx_hash,
-                block_height,
-                block_time: tx.block_time as u64,
-                tx_index: tx.tx_index as u32,
-            });
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            page += 1;
         }
 
         Ok(result)
@@ -313,6 +440,7 @@ impl BlockfrostProvider {
         &self,
         tx_hash: &str,
     ) -> Result<TransactionUtxos, BlockfrostProviderError> {
+        self.rate_limit().await;
         let utxos = self.api.transactions_utxos(tx_hash).await?;
 
         let inputs = utxos
@@ -370,6 +498,7 @@ impl BlockfrostProvider {
         &self,
         tx_hash: &str,
     ) -> Result<Vec<TransactionRedeemer>, BlockfrostProviderError> {
+        self.rate_limit().await;
         let redeemers = self.api.transactions_redeemers(tx_hash).await?;
 
         Ok(redeemers
@@ -393,6 +522,7 @@ impl BlockfrostProvider {
         &self,
         height: u64,
     ) -> Result<BlockInfo, BlockfrostProviderError> {
+        self.rate_limit().await;
         let block = self.api.blocks_by_id(&height.to_string()).await?;
         Ok(BlockInfo {
             hash: block.hash,
@@ -403,15 +533,46 @@ impl BlockfrostProvider {
         })
     }
 
-    /// Get transactions in a block
+    /// Get transactions in a block with manual pagination
     #[instrument(skip(self))]
     pub async fn get_block_transactions(
         &self,
         block_hash: &str,
     ) -> Result<Vec<String>, BlockfrostProviderError> {
-        let pagination = Pagination::all();
-        let txs = self.api.blocks_txs(block_hash, pagination).await?;
-        Ok(txs)
+        let mut all_txs = Vec::new();
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
+
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+
+            let txs = match self.api.blocks_txs(block_hash, pagination).await {
+                Ok(txs) => txs,
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        return Ok(all_txs);
+                    }
+                    // Handle 429 rate limit - return what we have
+                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
+                        tracing::warn!("Rate limited while fetching block txs, returning {} txs", all_txs.len());
+                        break;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let page_len = txs.len();
+            all_txs.extend(txs);
+
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_txs)
     }
 
     /// Get redeemer data by hash (the actual datum content)
@@ -420,6 +581,7 @@ impl BlockfrostProvider {
         &self,
         datum_hash: &str,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
+        self.rate_limit().await;
         let datum = self.api.scripts_datum_hash(datum_hash).await?;
         Ok(datum)
     }

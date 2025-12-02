@@ -1,14 +1,32 @@
 {
-    "network": "preview",
-    "tx_id": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576",
-    "ism": {
-        "hash": "72100973b0d6114798db61051d4acc393a4332686d1fbbff3af6e0c9",
-        "address": "addr_test1wpepqztnkrtpz3ucmdss2822esun5sejdpk3lwll8tmwpjgj3qxka",
-        "utxo": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576#0"
-    },
-    "mailbox": {
-        "hash": "fd308acbff820d0db35e2a50fd9bca23049ed4ceed21f795a09eb467",
-        "address": "addr_test1wr7npzktl7pq6rdntc49plvmeg3sf8k5emkjrau45z0tgec0mv2a0",
-        "utxo": "028f7a4aaf9d47d43d1720049f08646340b328b4c95680b08c88b54b07313576#1"
-    }
+  "network": "preview",
+  "mailbox": {
+    "hash": "8098af52895659483ab3e842e675b4a54fb7a55594f6fa5770d2c839",
+    "address": "addr_test1wzqf3t6j39t9jjp6k05y9en4kjj5lda92k20d7jhwrfvswgyx0se0",
+    "state_nft_policy": "5af40133f0583b9ab72f5204084b0b2bedefde74ca65fd002635a7e2"
+  },
+  "ism": {
+    "hash": "02993c46cdcf8eb56ada209e277acc288dc0263b6a502d17b8cbfa56",
+    "address": "addr_test1wqpfj0zxeh8cadt2mgsfufm6es5gmspx8d49qtghhr9l54seymp6f"
+  },
+  "registry": {
+    "hash": "eb0ec4a2f9097c9cecdbb21091e1d5291b1f25af383ea1e73116f278",
+    "address": "addr_test1wr4sa39zlyyhe88vmweppy0p6553k8e94uurag08xyt0y7qagxpdg"
+  },
+  "igp": {
+    "hash": "41f6064ba9989daf8efaec0793360423552d2dcb2f16991254a2902d",
+    "address": "addr_test1wpqlvpjt4xvfmtuwltkq0yekqs342tfdevh3dxgj2j3fqtg5pzvu0"
+  },
+  "validator_announce": {
+    "hash": "8bb3b159b889dd08c2a8ad8a183852f8ec2c2e80b4a59207cee975b2",
+    "address": "addr_test1wz9m8v2ehzya6zxz4zkc5xpc2tuwctpwsz62tys8em5htvs3lqmxf"
+  },
+  "warp_route": {
+    "hash": "e4ca8279338ac8786987f6be49298619b19c2deed6988bf16e310dd1",
+    "address": "addr_test1wrjv4qnexw9vs7rfslmtujffscvmr8pdamtf3zl3dccsm5ga0ztgu"
+  },
+  "vault": {
+    "hash": "a3a296f04fc7387fef4c1740fa755f1b7ca42c57e42bf8c02532dae5",
+    "address": "addr_test1wz3699hsflrnsll0fst5p7n4tudhefpv2ljzh7xqy5ed4egpdvw7c"
+  }
 }

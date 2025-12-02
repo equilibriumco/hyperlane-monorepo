@@ -914,6 +914,22 @@ pub fn build_cardano_connection_conf(
         })
         .unwrap_or_default();
 
+    let mailbox_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxScriptHash")
+        .parse_string()
+        .end()
+        .unwrap_or_default();
+
+    // Optional: Processed messages script hash (defaults to mailbox_script_hash if not specified)
+    let processed_messages_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("processedMessagesScriptHash")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| mailbox_script_hash.to_string());
+
     let registry_policy_id = conn
         .chain(&mut local_err)
         .get_opt_key("registryPolicyId")
@@ -949,6 +965,22 @@ pub fn build_cardano_connection_conf(
         .end()
         .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
 
+    // Optional: Script CBOR hex for witness set (deprecated - use reference scripts)
+    let mailbox_script_cbor = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxScriptCbor")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    // Optional: Reference script UTXO (format: "tx_hash#output_index") - preferred method
+    let mailbox_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
     if !local_err.is_ok() || url.is_none() || api_key.is_none() {
         err.merge(local_err);
         return None;
@@ -959,6 +991,10 @@ pub fn build_cardano_connection_conf(
         api_key: api_key.unwrap().to_string(),
         network,
         mailbox_policy_id: mailbox_policy_id.to_string(),
+        mailbox_script_hash: mailbox_script_hash.to_string(),
+        processed_messages_script_hash,
+        mailbox_script_cbor,
+        mailbox_reference_script_utxo,
         registry_policy_id: registry_policy_id.to_string(),
         ism_policy_id: ism_policy_id.to_string(),
         igp_policy_id: igp_policy_id.to_string(),

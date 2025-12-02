@@ -341,7 +341,7 @@ impl FromRawConf<RawRelayerSettings> for RelayerSettings {
 
         let allow_contract_call_caching = p
             .chain(&mut err)
-            .get_opt_key("allowLocalCheckpointSyncers")
+            .get_opt_key("allowContractCallCaching")
             .parse_bool()
             .unwrap_or(true);
 

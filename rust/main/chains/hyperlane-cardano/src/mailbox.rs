@@ -96,10 +96,9 @@ impl CardanoMailbox {
             }
         }
 
-        // Fallback: Find UTXOs at the mailbox script address
-        // The mailbox_policy_id is actually the script hash
+        // Fallback: Find UTXOs at the mailbox script address using the actual script hash
         let script_address = self.provider
-            .script_hash_to_address(&self.conf.mailbox_policy_id)
+            .script_hash_to_address(&self.conf.mailbox_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
                     "Failed to compute mailbox script address: {}",
@@ -348,12 +347,12 @@ impl Mailbox for CardanoMailbox {
     }
 
     async fn delivered(&self, id: H256) -> ChainResult<bool> {
-        // Check if a processed message marker NFT exists for this message ID
-        // The processed messages minting policy creates NFTs with message_id as asset name
+        // Check if a processed message marker UTXO exists for this message ID
+        // Markers are UTXOs at processed_messages_script address with inline datum containing message_id
         let message_id_bytes: [u8; 32] = id.0;
         let result = self
             .provider
-            .is_message_delivered(&self.conf.mailbox_policy_id, &message_id_bytes)
+            .is_message_delivered(&self.conf.processed_messages_script_hash, &message_id_bytes)
             .await
             .map_err(ChainCommunicationError::from_other)?;
         Ok(result)
@@ -441,22 +440,29 @@ impl Mailbox for CardanoMailbox {
         message: &HyperlaneMessage,
         metadata: &[u8],
     ) -> ChainResult<Vec<u8>> {
-        // Encode the message and metadata for transaction construction
-        let mut calldata = Vec::new();
+        // Encode the message in Hyperlane wire format
+        let mut message_bytes = Vec::new();
+        message_bytes.extend_from_slice(&[message.version]);
+        message_bytes.extend_from_slice(&message.nonce.to_be_bytes());
+        message_bytes.extend_from_slice(&message.origin.to_be_bytes());
+        message_bytes.extend_from_slice(message.sender.as_bytes());
+        message_bytes.extend_from_slice(&message.destination.to_be_bytes());
+        message_bytes.extend_from_slice(message.recipient.as_bytes());
+        message_bytes.extend_from_slice(&message.body);
 
-        // Encode message fields
-        calldata.extend_from_slice(&[message.version]);
-        calldata.extend_from_slice(&message.nonce.to_be_bytes());
-        calldata.extend_from_slice(&message.origin.to_be_bytes());
-        calldata.extend_from_slice(message.sender.as_bytes());
-        calldata.extend_from_slice(&message.destination.to_be_bytes());
-        calldata.extend_from_slice(message.recipient.as_bytes());
-        calldata.extend_from_slice(&message.body);
+        // Create CardanoTxCalldata structure expected by the lander adapter
+        // This must be JSON-serialized for serde_json::from_slice in the adapter
+        let calldata = serde_json::json!({
+            "message": message_bytes,
+            "metadata": metadata.to_vec(),
+        });
 
-        // Append metadata
-        calldata.extend_from_slice(metadata);
-
-        Ok(calldata)
+        serde_json::to_vec(&calldata).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Failed to serialize CardanoTxCalldata: {}",
+                e
+            ))
+        })
     }
 
     fn delivered_calldata(&self, message_id: H256) -> ChainResult<Option<Vec<u8>>> {
