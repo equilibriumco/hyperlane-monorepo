@@ -196,27 +196,30 @@ pub fn build_ism_datum(
     builder.start_constr(0);
 
     // Validators list: List<(Domain, List<Address>)>
+    // NOTE: In Plutus/Aiken, tuples are encoded as plain CBOR arrays, NOT as Constr 0
     builder.start_list();
     for (domain, addrs) in validators {
+        // Tuple is a plain array [domain, addrs], NOT Constr 0
         builder
-            .start_constr(0)
+            .start_list()
             .uint(*domain as u64)
             .start_list();
         for addr in addrs {
             builder.bytes_hex(addr)?;
         }
-        builder.end_list().end_constr();
+        builder.end_list().end_list();
     }
     builder.end_list();
 
     // Thresholds list: List<(Domain, Int)>
     builder.start_list();
     for (domain, threshold) in thresholds {
+        // Tuple is a plain array [domain, threshold], NOT Constr 0
         builder
-            .start_constr(0)
+            .start_list()
             .uint(*domain as u64)
             .uint(*threshold as u64)
-            .end_constr();
+            .end_list();
     }
     builder.end_list();
 
@@ -455,6 +458,20 @@ pub fn build_registry_remove_redeemer(script_hash: &str) -> Result<Vec<u8>> {
     // Remove is constructor 1
     builder.start_constr(1);
     builder.bytes_hex(script_hash)?;
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a Mailbox SetDefaultIsm redeemer
+/// Redeemer: SetDefaultIsm { new_ism: ScriptHash }
+/// SetDefaultIsm is constructor index 2 in MailboxRedeemer
+pub fn build_mailbox_set_default_ism_redeemer(new_ism_hash: &str) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // SetDefaultIsm is constructor 2
+    builder.start_constr(2);
+    builder.bytes_hex(new_ism_hash)?;
     builder.end_constr();
 
     Ok(builder.build())

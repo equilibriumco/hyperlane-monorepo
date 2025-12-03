@@ -3,7 +3,9 @@
     "fields": [
         {"int": 43113},
         {"list": [
-            {"bytes": "d8154f73d04cc7f7f0c332793692e6e6f6b2402e"}
+            {"bytes": "03225f0eceb966fca4afec433f93cb38d3b0cbb44b066a4a83618fc23d2ccd5c17"},
+            {"bytes": "02365bf6056abceb9c2ca8f1812e72393de74adaeabe73c908bc6d5be0c8943bdb"},
+            {"bytes": "031c4541675efb2cfed64bd677e408ffa3e48906329458dd95a042e21df529da08"}
         ]}
     ]
 }

@@ -298,19 +298,20 @@ fn get_recipient_ism(
   default_ism
 }
 
-/// Verify that the ISM is present and metadata is provided
+/// Verify that the ISM is being spent (which triggers its Verify redeemer)
+/// This ensures actual signature verification happens on-chain
 fn verify_ism_present(
   ism_hash: ScriptHash,
   tx: Transaction,
   metadata: ByteArray,
 ) -> Bool {
-  // ISM must be in reference inputs
-  // The ISM validator will verify the signatures in metadata
-  let ism_present =
+  // ISM must be SPENT (not just referenced) to trigger its validator
+  // The ISM validator's Verify redeemer will verify the signatures
+  let ism_spent =
     list.any(
-      tx.reference_inputs,
-      fn(ref_input) {
-        when ref_input.output.address.payment_credential is {
+      tx.inputs,
+      fn(input) {
+        when input.output.address.payment_credential is {
           Script(hash) -> hash == ism_hash
           _ -> False
         }
@@ -318,7 +319,7 @@ fn verify_ism_present(
     )
 
   // Metadata must not be empty (contains signatures)
-  ism_present && bytearray.length(metadata) > 0
+  ism_spent && bytearray.length(metadata) > 0
 }
 
 /// Verify that the recipient script is being called

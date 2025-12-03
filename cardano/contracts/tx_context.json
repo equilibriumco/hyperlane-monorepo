@@ -1,0 +1,165 @@
+{
+  "inputs": [
+    {
+      "utxo": "07dc84273172747314a933481c84b472e95cd92914b74080ffa0ae0d110da93b#0",
+      "datum": {
+        "inline": {
+          "cbor": "d879861907d35820b8c35b1d5aae3d409cf0656c7e0885db4dee30bc53d9c2764bbc772ad258201212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89005820000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "redeemer": {
+        "cbor": "d8799f8218031910f119a8015820000000000000000000000000000000001f26bff1bd4bbfa1c3fa8daaebc4007b28bf47493a54d34d36e2f697479636865636b696e672e2e2e5840000000000000000000009febb83da7630d882bb7d84dd6ea1a0477db6c7a10ef25da7225ec39d739c9f4f30fb0f3c1000010c31257bc1d13d2fbb96c63025556b501bfc7a1e852f81575a289d14af445cb5c988b957bc932b11e91377d24f1b29ea700ef21cb8c465b50748d54c3115844a6a691b684307340e2aa53721b245845be380a7c467021e3f55a5a367f06de11d21f774c6e249cd8fa11be79df7fd32b859fd1b22b2c63ab18eb87a854778b775ff17e89770b58203e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51ff"
+      },
+      "value": {
+        "lovelace": 5000000,
+        "assets": [
+          {
+            "policy_id": "2b137f2e935c291b39f7c0bcba937bdcc6303c911f9a32f69a9e198f",
+            "asset_name": "",
+            "quantity": 1
+          }
+        ]
+      }
+    },
+    {
+      "utxo": "91d4b5658014086207e6c21bc8d4035e4ba881de3fb896d09857c0c2b4a36a4f#1",
+      "value": {
+        "lovelace": 9459500000
+      }
+    },
+    {
+      "utxo": "f0b52c30eb683206bd3243295f3c0011ab07f4f972f25fe6f412d7fa7bdc1865#0",
+      "datum": {
+        "inline": {
+          "cbor": "d8799f9f9f80809f82009f80fffff"
+        }
+      },
+      "redeemer": {
+        "cbor": "d8799f19a8015820000000000000000000000000000000001f26bff1bd4bbfa1c3fa8daaebc4007b636865636b696e672e2e2e"
+      },
+      "value": {
+        "lovelace": 5000000,
+        "assets": [
+          {
+            "policy_id": "7f85b185136edf9eb13aedcb5f96eecb9324d12e191b8a9c55aaa39d",
+            "asset_name": "",
+            "quantity": 1
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "address": "750af08d2c429d087f9a9ee7a3b6bf8db11a86e6a4711a101ee1f4e6",
+      "datum": {
+        "inline": {
+          "cbor": "d879861907d35820b8c35b1d5aae3d409cf0656c7e0885db4dee30bc53d9c2764bbc772ad258201212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89005820000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "value": {
+        "lovelace": 5000000,
+        "assets": [
+          {
+            "policy_id": "2b137f2e935c291b39f7c0bcba937bdcc6303c911f9a32f69a9e198f",
+            "asset_name": "",
+            "quantity": 1
+          }
+        ]
+      }
+    },
+    {
+      "address": "824a4a99b8129e548a60e1480b396c5d4c3a9a5279a6a5e236f217fa",
+      "datum": {
+        "inline": {
+          "cbor": "d8799f9f809f82019f5812636865636b696e672e2e2e00ff"
+        }
+      },
+      "value": {
+        "lovelace": 5000000,
+        "assets": [
+          {
+            "policy_id": "7f85b185136edf9eb13aedcb5f96eecb9324d12e191b8a9c55aaa39d",
+            "asset_name": "",
+            "quantity": 1
+          }
+        ]
+      }
+    },
+    {
+      "address": "b8c2c75aae3d409cf0656c7e0885db4dee30bc53d9c2764bbc772ad2",
+      "datum": {
+        "inline": {
+          "cbor": "d8799f9f8219a8019f5820d8154f73d04cc5fb1f7f0c3322793693e6e6b5f6b2402e895820895ae30bc83fc8493b9c37781b0b813d2365995957c32599582043e915573d9f1383cbf482049e4a012290759e7f58207095c11126fa1d61b7f11451a5c83ec19bbed2209ff8828219a8010258201212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89ffff"
+        }
+      },
+      "value": {
+        "lovelace": 5000000,
+        "assets": [
+          {
+            "policy_id": "5ba145b14785c1fc85d2b139e8d9b1f491671662089e08961bd6bbb0",
+            "asset_name": "",
+            "quantity": 1
+          }
+        ]
+      }
+    },
+    {
+      "address": "0a503f1a278eb112ce4602b43616ecf270a843b565acd34503e67814",
+      "datum": {
+        "inline": {
+          "cbor": "d87958203e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51"
+        }
+      },
+      "value": {
+        "lovelace": 2000000,
+        "assets": [
+          {
+            "policy_id": "1c709693f0f41a49a6b813654a643f8f006aa27fdde21fa7b546677b",
+            "asset_name": "7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51",
+            "quantity": 1
+          }
+        ]
+      }
+    },
+    {
+      "address": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "value": {
+        "lovelace": 9454500000
+      }
+    }
+  ],
+  "reference_inputs": [
+    {
+      "utxo": "91d4b5658014086207e6c21bc8d4035e4ba881de3fb896d09857c0c2b4a36a4f#0",
+      "reference_script": "750af08d2c429d087f9a9ee7a3b6bf8db11a86e6a4711a101ee1f4e6",
+      "value": {
+        "lovelace": 25000000
+      }
+    },
+    {
+      "utxo": "f0b52c30eb683206bd3243295f3c0011ab07f4f972f25fe6f412d7fa7bdc1865#1",
+      "reference_script": "824a4a99b8129e548a60e1480b396c5d4c3a9a5279a6a5e236f217fa",
+      "value": {
+        "lovelace": 20000000,
+        "assets": [
+          {
+            "policy_id": "7f85b185136edf9eb13aedcb5f96eecb9324d12e191b8a9c55aaa39d",
+            "asset_name": "726566",
+            "quantity": 1
+          }
+        ]
+      }
+    }
+  ],
+  "mints": [
+    {
+      "policy_id": "1c709693f0f41a49a6b813654a643f8f006aa27fdde21fa7b546677b",
+      "asset_name": "7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51",
+      "quantity": 1,
+      "redeemer": {
+        "cbor": "d8799f80ff"
+      }
+    }
+  ]
+}

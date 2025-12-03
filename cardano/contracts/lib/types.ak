@@ -194,11 +194,82 @@ pub type MultisigIsmDatum {
   owner: VerificationKeyHash,
 }
 
+/// Checkpoint data that validators sign
+/// Hyperlane validators sign checkpoints with this structure:
+/// 1. domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
+/// 2. digest = keccak256(domain_hash || merkle_root || merkle_index || message_id)
+/// 3. signed = EIP-191(digest)
+pub type Checkpoint {
+  /// Origin domain (same as message origin)
+  origin: Domain,
+  /// Merkle root of the message tree (32 bytes)
+  merkle_root: ByteArray,
+  /// Origin merkle tree hook address (32 bytes, typically the origin mailbox)
+  /// This is used in the domain hash for validator signing
+  origin_merkle_tree_hook: ByteArray,
+  /// Merkle tree index (nonce of the message in the tree)
+  merkle_index: Int,
+  /// Message ID (32 bytes) - keccak256 hash of the message
+  message_id: ByteArray,
+}
+
+/// Encode checkpoint domain hash
+/// Format: origin (4 bytes big-endian) || merkle_tree_hook (32 bytes) || "HYPERLANE" (9 bytes)
+pub fn encode_domain_hash(origin: Int, merkle_tree_hook: ByteArray) -> ByteArray {
+  let origin_bytes = int_to_bytes(origin, 4)
+  // "HYPERLANE" = 0x48595045524c414e45 (9 bytes)
+  let hyperlane_suffix = #"48595045524c414e45"
+
+  origin_bytes
+    |> bytearray.concat(merkle_tree_hook)
+    |> bytearray.concat(hyperlane_suffix)
+}
+
+/// Encode checkpoint for hashing (after domain hash is computed)
+/// Format: domain_hash (32 bytes) || merkle_root (32 bytes) || merkle_index (4 bytes big-endian) || message_id (32 bytes)
+pub fn encode_checkpoint(checkpoint: Checkpoint, domain_hash: ByteArray) -> ByteArray {
+  let index_bytes = int_to_bytes(checkpoint.merkle_index, 4)
+
+  domain_hash
+    |> bytearray.concat(checkpoint.merkle_root)
+    |> bytearray.concat(index_bytes)
+    |> bytearray.concat(checkpoint.message_id)
+}
+
+/// Validator signature with recovered public key in both formats
+/// The relayer recovers the public key off-chain and passes both formats for on-chain verification
+pub type ValidatorSignature {
+  /// Compressed public key (33 bytes: 0x02/0x03 prefix + x-coordinate)
+  /// Used for verifyEcdsaSecp256k1Signature per CIP-49
+  compressed_pubkey: ByteArray,
+  /// Uncompressed public key (64 bytes: x || y, no 0x04 prefix)
+  /// Used to compute Ethereum address on-chain: keccak256(pubkey)[12:32]
+  uncompressed_pubkey: ByteArray,
+  /// The 64-byte signature (r || s)
+  signature: ByteArray,
+}
+
 /// Multisig ISM redeemer
 pub type MultisigIsmRedeemer {
-  /// Verification (called as reference input, no state change)
-  Verify { message: Message, signatures: List<(Int, ByteArray)> }
+  /// Verification: verify validators signed the checkpoint
+  /// The checkpoint commits to a merkle root containing the message
+  ///
+  /// Security model:
+  /// 1. Relayer recovers public key from signature off-chain (using v/recovery ID)
+  /// 2. ISM verifies the signature on-chain using verify_ecdsa_secp256k1_signature
+  /// 3. ISM computes Ethereum address from the verified public key
+  /// 4. ISM checks the address is in the trusted validators list
+  ///
+  /// This provides cryptographic binding: an attacker cannot forge a signature
+  /// without the validator's private key.
+  Verify {
+    /// The checkpoint that validators signed
+    checkpoint: Checkpoint,
+    /// Validator signatures with recovered public keys
+    validator_signatures: List<ValidatorSignature>,
+  }
   /// Admin: set validators for a domain
+  /// validators should be Ethereum addresses (20 bytes each)
   SetValidators { domain: Domain, validators: List<ByteArray> }
   /// Admin: set threshold for a domain
   SetThreshold { domain: Domain, threshold: Int }

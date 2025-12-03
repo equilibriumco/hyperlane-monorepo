@@ -233,9 +233,65 @@ impl AdaptsChain for CardanoAdapter {
         }
     }
 
-    async fn tx_ready_for_resubmission(&self, _tx: &Transaction) -> bool {
-        // Cardano transactions can be resubmitted if not yet on-chain
-        true
+    async fn tx_ready_for_resubmission(&self, tx: &Transaction) -> bool {
+        // Cardano uses a UTXO model - once a transaction is submitted,
+        // it cannot be "replaced" like in Ethereum. The UTXOs are consumed.
+        //
+        // If the transaction has already been submitted (has a tx_hash),
+        // we should NOT try to rebuild and resubmit - we should just wait
+        // for it to be confirmed or check if it failed.
+        //
+        // Only allow resubmission if:
+        // 1. The transaction has never been submitted (no tx_hash)
+        // 2. OR the transaction hash is not found on-chain (tx was dropped from mempool)
+
+        let precursor = tx.precursor();
+
+        // If no tx_hash, this is a fresh transaction that needs to be submitted
+        if precursor.tx_hash.is_none() {
+            return true;
+        }
+
+        // If we have a tx_hash, check if it's on-chain
+        let tx_hash = precursor.tx_hash.unwrap();
+        match self.get_tx_hash_status(tx_hash).await {
+            Ok(TransactionStatus::Finalized) => {
+                // Transaction is already on-chain, no need to resubmit
+                tracing::info!(?tx_hash, "Transaction already confirmed on-chain, skipping resubmission");
+                false
+            }
+            Err(LanderError::TxHashNotFound(_)) => {
+                // Transaction not on-chain - might have been dropped from mempool
+                // However, we still shouldn't rebuild because the message might have been
+                // delivered by the original transaction that's still propagating.
+                // Wait a reasonable time before considering resubmission.
+                if let Some(last_attempt) = tx.last_submission_attempt {
+                    let elapsed = chrono::Utc::now() - last_attempt;
+                    // Wait at least 2 minutes (6 Cardano slots) before considering resubmission
+                    let min_wait = chrono::Duration::seconds(120);
+                    if elapsed < min_wait {
+                        tracing::debug!(
+                            ?tx_hash,
+                            elapsed_secs = elapsed.num_seconds(),
+                            "Transaction not yet confirmed, waiting before resubmission"
+                        );
+                        return false;
+                    }
+                }
+                // Enough time has passed, allow resubmission
+                tracing::info!(?tx_hash, "Transaction not found on-chain after timeout, allowing resubmission");
+                true
+            }
+            Err(e) => {
+                // Network error - don't resubmit, just wait
+                tracing::warn!(?e, "Error checking transaction status, skipping resubmission");
+                false
+            }
+            _ => {
+                // Any other status means transaction is being processed
+                false
+            }
+        }
     }
 
     async fn reverted_payloads(
@@ -252,11 +308,20 @@ impl AdaptsChain for CardanoAdapter {
 
         // Check if message was delivered
         let message_id = message.id();
-        let delivered = self
-            .provider
-            .is_message_delivered(&self.connection_conf.mailbox_policy_id, &message_id.0)
-            .await
-            .unwrap_or(false);
+
+        // Prefer NFT lookup (O(1)) if processedMessagesNftPolicyId is configured
+        let delivered = if let Some(ref nft_policy_id) = self.connection_conf.processed_messages_nft_policy_id {
+            self.provider
+                .is_message_delivered_by_nft(nft_policy_id, &message_id.0)
+                .await
+                .unwrap_or(false)
+        } else {
+            // Fallback: Scan UTXOs at processed_messages_script address (O(n))
+            self.provider
+                .is_message_delivered(&self.connection_conf.processed_messages_script_hash, &message_id.0)
+                .await
+                .unwrap_or(false)
+        };
 
         if delivered {
             Ok(Vec::new())

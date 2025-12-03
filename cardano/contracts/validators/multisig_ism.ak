@@ -5,10 +5,10 @@ use aiken/primitive/bytearray
 use cardano/assets.{lovelace_of}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use types.{
-  Domain, Message, MultisigIsmDatum, MultisigIsmRedeemer, encode_message,
-  Verify, SetValidators, SetThreshold,
+  Checkpoint, Domain, MultisigIsmDatum, MultisigIsmRedeemer, ValidatorSignature,
+  encode_checkpoint, encode_domain_hash, Verify, SetValidators, SetThreshold,
 }
-use utils.{assoc_find, at, find_input, is_signed_by}
+use utils.{assoc_find, find_input, is_signed_by}
 
 /// Multisig ISM (Interchain Security Module) Validator
 /// Verifies message authenticity using N-of-M validator signatures
@@ -17,15 +17,19 @@ use utils.{assoc_find, at, find_input, is_signed_by}
 /// The mailbox checks that this ISM is present, and the ISM's datum
 /// contains the validator set and threshold for each origin domain.
 ///
-/// SIGNATURE VERIFICATION:
-/// - Uses ECDSA secp256k1 (same curve as Ethereum/EVM validators)
-/// - Applies EIP-191 "Ethereum Signed Message" prefix for compatibility
-/// - Accepts 65-byte signatures (r || s || v) or 64-byte (r || s)
-/// - Validator keys must be secp256k1 public keys (compressed 33 bytes or uncompressed 65 bytes)
+/// SIGNATURE VERIFICATION APPROACH:
+/// 1. Relayer recovers public keys from signatures off-chain using ecrecover
+/// 2. Relayer passes both compressed (33 bytes) and uncompressed (64 bytes) pubkeys
+/// 3. ISM verifies the two formats match (same x-coordinate)
+/// 4. ISM verifies signature using compressed pubkey (per CIP-49)
+/// 5. ISM computes Ethereum address from uncompressed pubkey: keccak256(pubkey)[12:32]
+/// 6. ISM checks each computed address is in the trusted validators list
 ///
-/// NOTE: The validators list in the datum must contain secp256k1 PUBLIC KEYS,
-/// not Ethereum addresses. To derive the address from a signature, use ecrecover
-/// off-chain, then map addresses to public keys in your configuration.
+/// Security:
+/// - On-chain signature verification provides cryptographic proof
+/// - The public key formats are verified to match, preventing substitution
+/// - An attacker cannot forge a signature without the validator's private key
+/// - The Ethereum address derivation (keccak256) is collision-resistant
 ///
 /// Multisig ISM validator
 validator multisig_ism {
@@ -38,8 +42,8 @@ validator multisig_ism {
     expect Some(ism_datum) = datum
 
     when redeemer is {
-      Verify { message, signatures } ->
-        verify_message(ism_datum, message, signatures)
+      Verify { checkpoint, validator_signatures } ->
+        verify_checkpoint(ism_datum, checkpoint, validator_signatures)
 
       SetValidators { domain, validators } ->
         validate_set_validators(ism_datum, domain, validators, tx, own_ref)
@@ -54,92 +58,113 @@ validator multisig_ism {
   }
 }
 
-/// Verify a message has sufficient valid signatures
-fn verify_message(
+/// Verify a checkpoint has sufficient valid validator signatures
+fn verify_checkpoint(
   datum: MultisigIsmDatum,
-  message: Message,
-  signatures: List<(Int, ByteArray)>,
+  checkpoint: Checkpoint,
+  validator_signatures: List<ValidatorSignature>,
 ) -> Bool {
-  // Get validators for the origin domain
-  expect Some(validators) = assoc_find(datum.validators, message.origin)
+  // Get trusted validator addresses for the origin domain
+  expect Some(validator_addresses) = assoc_find(datum.validators, checkpoint.origin)
 
   // Get threshold for the origin domain
-  expect Some(threshold) = assoc_find(datum.thresholds, message.origin)
+  expect Some(threshold) = assoc_find(datum.thresholds, checkpoint.origin)
 
-  // Count valid signatures
-  let valid_count = count_valid_signatures(message, signatures, validators)
+  // Compute the message hash that validators signed
+  let message_hash = compute_checkpoint_hash(checkpoint)
+
+  // Count valid signatures from trusted validators
+  let valid_count = count_valid_signatures(
+    validator_signatures,
+    validator_addresses,
+    message_hash,
+  )
 
   // Must have at least threshold valid signatures
   valid_count >= threshold
 }
 
-/// Count the number of valid signatures
+/// Compute the hash that validators sign for a checkpoint
+/// This matches the Hyperlane signing format:
+/// 1. domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
+/// 2. checkpoint_digest = keccak256(domain_hash || merkle_root || merkle_index || message_id)
+/// 3. eth_signed_message = keccak256("\x19Ethereum Signed Message:\n32" || checkpoint_digest)
+fn compute_checkpoint_hash(checkpoint: Checkpoint) -> ByteArray {
+  // Step 1: domain_hash
+  let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
+  let domain_hash = keccak_256(domain_hash_encoded)
+
+  // Step 2: checkpoint_digest
+  let checkpoint_encoded = encode_checkpoint(checkpoint, domain_hash)
+  let checkpoint_digest = keccak_256(checkpoint_encoded)
+
+  // Step 3: EIP-191 hash (this is what validators actually sign)
+  let eip191_prefix = #"19457468657265756d205369676e6564204d6573736167653a0a3332"
+  let prefixed = bytearray.concat(eip191_prefix, checkpoint_digest)
+  keccak_256(prefixed)
+}
+
+/// Count how many signatures are valid and from trusted validators
 fn count_valid_signatures(
-  message: Message,
-  signatures: List<(Int, ByteArray)>,
-  validators: List<ByteArray>,
+  validator_signatures: List<ValidatorSignature>,
+  validator_addresses: List<ByteArray>,
+  message_hash: ByteArray,
 ) -> Int {
-  // Compute the signing hash (same as EVM validators)
-  // Step 1: Hash the encoded message
-  let message_encoded = encode_message(message)
-  let signing_hash = keccak_256(message_encoded)
-
-  // Step 2: Apply EIP-191 prefix: "\x19Ethereum Signed Message:\n32" + signing_hash
-  let message_hash = eip191_hash(signing_hash)
-
-  // For each signature, verify it's valid and from a validator
   list.foldl(
-    signatures,
+    validator_signatures,
     0,
-    fn(sig_entry, acc) {
-      let (validator_index, signature) = sig_entry
+    fn(val_sig, acc) {
+      let ValidatorSignature { compressed_pubkey, uncompressed_pubkey, signature } = val_sig
 
-      // Get the validator's public key
-      when at(validators, validator_index) is {
-        Some(validator_key) ->
-          if verify_signature(validator_key, message_hash, signature) {
-            acc + 1
-          } else {
-            acc
-          }
-        None -> acc
+      // Step 1: Verify the compressed and uncompressed keys match
+      // The x-coordinate should be the same: compressed[1:33] == uncompressed[0:32]
+      let compressed_x = bytearray.drop(compressed_pubkey, 1)
+      let uncompressed_x = bytearray.take(uncompressed_pubkey, 32)
+      expect compressed_x == uncompressed_x
+
+      // Step 2: Verify the signature using compressed pubkey (per CIP-49)
+      let sig_valid = verify_ecdsa_secp256k1_signature(
+        compressed_pubkey,
+        message_hash,
+        signature,
+      )
+
+      if sig_valid {
+        // Step 3: Compute Ethereum address from uncompressed public key
+        let address = pubkey_to_eth_address(uncompressed_pubkey)
+
+        // Step 4: Check if this address is in the trusted validators list
+        if list.has(validator_addresses, address) {
+          acc + 1
+        } else {
+          // Signature valid but address not trusted
+          acc
+        }
+      } else {
+        // Signature verification failed
+        acc
       }
     },
   )
 }
 
-/// Apply EIP-191 "Ethereum Signed Message" prefix
-/// Format: "\x19Ethereum Signed Message:\n32" + hash
-fn eip191_hash(hash: ByteArray) -> ByteArray {
-  // EIP-191 prefix for 32-byte messages
-  let prefix = #"19457468657265756d205369676e6564204d6573736167653a0a3332"
-  // prefix = "\x19Ethereum Signed Message:\n32" in hex
+/// Convert an uncompressed secp256k1 public key (64 bytes) to Ethereum address (20 bytes)
+/// address = keccak256(pubkey)[12:32] (last 20 bytes)
+fn pubkey_to_eth_address(pubkey: ByteArray) -> ByteArray {
+  let pubkey_len = bytearray.length(pubkey)
 
-  keccak_256(bytearray.concat(prefix, hash))
-}
-
-/// Verify a single ECDSA secp256k1 signature
-/// Compatible with EVM validator signatures (65 bytes: r=32, s=32, v=1)
-/// Extracts r,s (first 64 bytes) and verifies against public key
-fn verify_signature(
-  validator_key: ByteArray,
-  message_hash: ByteArray,
-  signature: ByteArray,
-) -> Bool {
-  // EVM signatures are 65 bytes (r || s || v)
-  // Aiken's verify function expects 64 bytes (r || s)
-  let signature_length = bytearray.length(signature)
-
-  if signature_length == 65 {
-    // Extract first 64 bytes (r || s), discarding v
-    let signature_64 = bytearray.take(signature, 64)
-    verify_ecdsa_secp256k1_signature(validator_key, message_hash, signature_64)
-  } else if signature_length == 64 {
-    // Already in correct format
-    verify_ecdsa_secp256k1_signature(validator_key, message_hash, signature)
+  if pubkey_len == 64 {
+    // Uncompressed key without prefix (64 bytes: X || Y)
+    let hash = keccak_256(pubkey)
+    bytearray.drop(hash, 12)
+  } else if pubkey_len == 65 {
+    // Uncompressed key with 0x04 prefix (65 bytes: 04 || X || Y)
+    let pubkey_no_prefix = bytearray.drop(pubkey, 1)
+    let hash = keccak_256(pubkey_no_prefix)
+    bytearray.drop(hash, 12)
   } else {
-    // Invalid signature length
-    False
+    // Invalid key length - return empty (won't match any trusted address)
+    #""
   }
 }
 

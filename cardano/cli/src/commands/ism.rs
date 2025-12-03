@@ -24,8 +24,8 @@ enum IsmCommands {
         #[arg(long)]
         domain: u32,
 
-        /// Validator public keys (33-byte compressed secp256k1, comma-separated hex)
-        /// Example: 03225f0eceb966fca4afec433f93cb38d3b0cbb44b066a4a83618fc23d2ccd5c17,...
+        /// Validator Ethereum addresses (20-byte hex, comma-separated)
+        /// Example: ab8cc5ae0dcce3d0dff1925a70cda0250f06ba21,...
         #[arg(long, value_delimiter = ',')]
         validators: Vec<String>,
 
@@ -44,6 +44,10 @@ enum IsmCommands {
         /// Dry run
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip evaluation and use hardcoded execution units (useful when Blockfrost evaluation fails)
+        #[arg(long)]
+        skip_eval: bool,
     },
 
     /// Set threshold for a domain
@@ -128,7 +132,8 @@ pub async fn execute(ctx: &CliContext, args: IsmArgs) -> Result<()> {
             ism_policy,
             signing_key,
             dry_run,
-        } => set_validators(ctx, domain, validators, threshold, ism_policy, signing_key, dry_run).await,
+            skip_eval,
+        } => set_validators(ctx, domain, validators, threshold, ism_policy, signing_key, dry_run, skip_eval).await,
         IsmCommands::SetThreshold {
             domain,
             threshold,
@@ -160,31 +165,25 @@ async fn set_validators(
     ism_policy: Option<String>,
     signing_key: Option<String>,
     dry_run: bool,
+    skip_eval: bool,
 ) -> Result<()> {
     println!("{}", "Setting ISM validators...".cyan());
     println!("  Domain: {}", domain);
     println!("  Validators: {}", validators.len());
 
-    // Validate and normalize validator public keys (33-byte compressed secp256k1)
+    // Validate and normalize validator Ethereum addresses (20 bytes)
     let normalized: Vec<Vec<u8>> = validators
         .iter()
         .map(|v| {
             let v = v.strip_prefix("0x").unwrap_or(v);
             let bytes = hex::decode(v)?;
-            if bytes.len() != 33 {
+            if bytes.len() != 20 {
                 Err(anyhow!(
-                    "Validator public key must be 33 bytes (66 hex chars), got {}: {}",
+                    "Validator address must be 20 bytes (40 hex chars), got {}: {}",
                     bytes.len(),
                     v
                 ))
             } else {
-                // Validate it starts with 02 or 03 (compressed point prefix)
-                if bytes[0] != 0x02 && bytes[0] != 0x03 {
-                    return Err(anyhow!(
-                        "Invalid compressed public key prefix (expected 02 or 03): {}",
-                        v
-                    ));
-                }
                 Ok(bytes)
             }
         })
@@ -313,12 +312,21 @@ async fn set_validators(
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
         .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
 
-    // Find fee UTXO (different from collateral if possible)
+    // Find fee UTXO (pure ADA, no tokens, different from collateral if possible)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 10_000_000 &&
+            u.assets.is_empty() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+        })
+        .or_else(|| {
+            // If no pure ADA UTXO with 10M, try with at least 5M
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000 &&
+                u.assets.is_empty() &&
+                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            })
         })
         .unwrap_or(collateral_utxo);
 
@@ -384,7 +392,7 @@ async fn set_validators(
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
         )
         // ISM script
         .script(ScriptKind::PlutusV3, ism_script_bytes)
@@ -409,19 +417,24 @@ async fn set_validators(
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
 
     // Evaluate the transaction first to check for script errors and get execution units
-    println!("{}", "Evaluating transaction...".cyan());
-    match client.evaluate_tx(&tx.tx_bytes.0).await {
-        Ok(eval_result) => {
-            println!("  Evaluation successful");
-            if let Some(results) = eval_result.evaluation_result {
-                for (key, units) in results {
-                    println!("    {}: mem={}, steps={}", key, units.memory, units.steps);
+    if skip_eval {
+        println!("{}", "Skipping evaluation (using hardcoded execution units)...".yellow());
+    } else {
+        println!("{}", "Evaluating transaction...".cyan());
+        match client.evaluate_tx(&tx.tx_bytes.0).await {
+            Ok(eval_result) => {
+                println!("  Evaluation successful");
+                if let Some(results) = eval_result.evaluation_result {
+                    for (key, units) in results {
+                        println!("    {}: mem={}, steps={}", key, units.memory, units.steps);
+                    }
                 }
             }
-        }
-        Err(e) => {
-            println!("  {}", format!("Evaluation failed: {:?}", e).red());
-            return Err(anyhow!("Transaction evaluation failed: {:?}", e));
+            Err(e) => {
+                println!("  {}", format!("Evaluation failed: {:?}", e).red());
+                println!("  {}", "Tip: Use --skip-eval to bypass evaluation and use hardcoded execution units".yellow());
+                return Err(anyhow!("Transaction evaluation failed: {:?}", e));
+            }
         }
     }
 
@@ -617,7 +630,7 @@ async fn add_validator(
     println!("  New validators: {:?}", new_validators);
 
     // Call set_validators with updated list
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run).await
+    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, false).await
 }
 
 async fn remove_validator(
@@ -659,7 +672,7 @@ async fn remove_validator(
 
     println!("  New validators: {:?}", new_validators);
 
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run).await
+    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, false).await
 }
 
 // Helper functions
@@ -909,11 +922,11 @@ fn build_ism_datum(
     //   List<(Domain, Int)>,              // thresholds
     //   ByteArray                         // owner
     // ]
-    // NOTE: In Aiken, 2-tuples are encoded as Constr 0 (tag 121)
+    // NOTE: In Plutus/Aiken, 2-tuples are encoded as plain CBOR arrays [a, b], NOT as Constr 0
     // CRITICAL: Order must be preserved for Plutus datum comparison!
     // Using Indef encoding to match Aiken's native encoding style
 
-    // Build validators list - each (domain, keys) tuple is Constr 0 [domain, keys_list]
+    // Build validators list - each (domain, keys) tuple is a plain array [domain, keys_list]
     let validators_list: Vec<PlutusData> = validators
         .iter()
         .map(|(domain, keys)| {
@@ -922,32 +935,23 @@ fn build_ism_datum(
                 .map(|k| PlutusData::BoundedBytes(BoundedBytes::from(k.clone())))
                 .collect();
 
-            // Tuple (Domain, List<ByteArray>) is encoded as Constr 0 [domain, keys]
-            // Use Indef encoding for fields to match Aiken
-            PlutusData::Constr(Constr {
-                tag: 121, // Constr 0
-                any_constructor: None,
-                fields: MaybeIndefArray::Indef(vec![
-                    PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
-                    PlutusData::Array(MaybeIndefArray::Indef(keys_data)),
-                ]),
-            })
+            // Tuple (Domain, List<ByteArray>) is a plain array [domain, keys], NOT Constr 0
+            PlutusData::Array(MaybeIndefArray::Indef(vec![
+                PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
+                PlutusData::Array(MaybeIndefArray::Indef(keys_data)),
+            ]))
         })
         .collect();
 
-    // Build thresholds list - each (domain, threshold) tuple is Constr 0 [domain, threshold]
+    // Build thresholds list - each (domain, threshold) tuple is a plain array [domain, threshold]
     let thresholds_list: Vec<PlutusData> = thresholds
         .iter()
         .map(|(domain, threshold)| {
-            // Tuple (Domain, Int) is encoded as Constr 0 [domain, threshold]
-            PlutusData::Constr(Constr {
-                tag: 121, // Constr 0
-                any_constructor: None,
-                fields: MaybeIndefArray::Indef(vec![
-                    PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
-                    PlutusData::BigInt(BigInt::Int((*threshold as i64).into())),
-                ]),
-            })
+            // Tuple (Domain, Int) is a plain array [domain, threshold], NOT Constr 0
+            PlutusData::Array(MaybeIndefArray::Indef(vec![
+                PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
+                PlutusData::BigInt(BigInt::Int((*threshold as i64).into())),
+            ]))
         })
         .collect();
 

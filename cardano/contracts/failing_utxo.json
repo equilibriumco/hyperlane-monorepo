@@ -1,0 +1,18 @@
+{
+  "utxo": "dc09f18bdd93b5a0252f54a658f8fb7239c4f54bd29925de0c834e02e8a20656#0",
+  "datum": {
+    "inline": {
+      "cbor": "d8799f9f8219a8019f5820d8154f73d04cc5fb1f7f0c3322793693e6e6b5f6b2402e895820895ae30bc83fc8493b9c37781b0b813d2365995957c32599582043e915573d9f1383cbf482049e4a012290759e7f58207095c11126fa1d61b7f11451a5c83ec19bbed2209ff8828219a8010258201212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89ffff"
+    }
+  },
+  "value": {
+    "lovelace": 5000000,
+    "assets": [
+      {
+        "policy_id": "5ba145b14785c1fc85d2b139e8d9b1f491671662089e08961bd6bbb0",
+        "asset_name": "",
+        "quantity": 1
+      }
+    ]
+  }
+}

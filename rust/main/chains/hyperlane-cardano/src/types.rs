@@ -149,9 +149,10 @@ pub struct MultisigIsmDatum {
     pub owner: [u8; 28],                          // VerificationKeyHash
 }
 
-/// Ed25519 signature wrapper for serde compatibility
+/// ECDSA secp256k1 signature wrapper (65 bytes: r || s || v)
+/// Hyperlane validators use Ethereum-style ECDSA signatures
 #[derive(Debug, Clone)]
-pub struct Signature(pub [u8; 64]);
+pub struct Signature(pub [u8; 65]);
 
 impl Serialize for Signature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -169,25 +170,92 @@ impl<'de> Deserialize<'de> for Signature {
     {
         let s = String::deserialize(deserializer)?;
         let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        if bytes.len() != 64 {
-            return Err(serde::de::Error::custom("Signature must be 64 bytes"));
+        if bytes.len() != 65 {
+            return Err(serde::de::Error::custom("Signature must be 65 bytes"));
         }
-        let mut arr = [0u8; 64];
+        let mut arr = [0u8; 65];
         arr.copy_from_slice(&bytes);
         Ok(Signature(arr))
     }
 }
 
-/// Multisig ISM redeemer (matches Aiken MultisigIsmRedeemer)
+/// Checkpoint data that validators sign (matches Aiken Checkpoint)
+/// Hyperlane validators sign checkpoints with this structure:
+/// 1. domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
+/// 2. digest = keccak256(domain_hash || merkle_root || merkle_index || message_id)
+/// 3. signed = EIP-191(digest)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Origin domain (same as message origin)
+    pub origin: Domain,
+    /// Merkle root of the message tree (32 bytes)
+    pub merkle_root: [u8; 32],
+    /// Origin merkle tree hook address (32 bytes, typically the origin mailbox)
+    /// This is used in the domain hash for validator signing
+    pub origin_merkle_tree_hook: [u8; 32],
+    /// Merkle tree index (nonce of the message in the tree)
+    pub merkle_index: u32,
+    /// Message ID (32 bytes) - keccak256 hash of the message
+    pub message_id: [u8; 32],
+}
+
+/// Validator signature with recovered public key in both formats
+/// The relayer recovers the public key off-chain and passes both formats for on-chain verification
+#[derive(Debug, Clone)]
+pub struct ValidatorSignature {
+    /// Compressed public key (33 bytes: 0x02/0x03 prefix + x-coordinate)
+    /// Used for verifyEcdsaSecp256k1Signature per CIP-49
+    pub compressed_pubkey: [u8; 33],
+    /// Uncompressed public key (64 bytes: x || y, no 0x04 prefix)
+    /// Used to compute Ethereum address on-chain: keccak256(pubkey)[12:32]
+    pub uncompressed_pubkey: [u8; 64],
+    /// The 64-byte signature (r || s)
+    pub signature: [u8; 64],
+}
+
+/// Ethereum address (20 bytes)
+#[derive(Debug, Clone)]
+pub struct EthAddress(pub [u8; 20]);
+
+impl serde::Serialize for EthAddress {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EthAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 20 {
+            return Err(serde::de::Error::custom("expected 20 bytes"));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(EthAddress(arr))
+    }
+}
+
+/// Multisig ISM redeemer (matches Aiken MultisigIsmRedeemer)
+///
+/// Security model:
+/// 1. Relayer recovers public keys from signatures off-chain (using v/recovery ID)
+/// 2. ISM verifies each signature on-chain using verify_ecdsa_secp256k1_signature
+/// 3. ISM computes Ethereum address from the verified public key
+/// 4. ISM checks the address is in the trusted validators list
+///
+/// This provides cryptographic binding: an attacker cannot forge a signature
+/// without the validator's private key.
+#[derive(Debug, Clone)]
 pub enum MultisigIsmRedeemer {
     Verify {
-        message: Message,
-        signatures: Vec<(u32, Signature)>, // (validator_index, signature)
+        checkpoint: Checkpoint,
+        /// Validator signatures with recovered public keys
+        validator_signatures: Vec<ValidatorSignature>,
     },
     SetValidators {
         domain: Domain,
-        validators: Vec<[u8; 32]>,
+        /// Ethereum addresses (20 bytes each) of trusted validators
+        validators: Vec<EthAddress>,
     },
     SetThreshold {
         domain: Domain,

@@ -20,6 +20,13 @@ pub struct ConnectionConf {
     /// This must match the `processed_messages_script` parameter applied to the mailbox.
     /// Defaults to mailbox_script_hash if not specified.
     pub processed_messages_script_hash: String,
+    /// Processed messages NFT policy ID (hex) - minting policy for processed message NFTs.
+    /// When set, enables efficient O(1) lookups for message delivery status.
+    /// If not set, falls back to UTXO scanning at processed_messages_script address.
+    pub processed_messages_nft_policy_id: Option<String>,
+    /// Processed messages NFT script CBOR (hex) - the minting policy script bytes.
+    /// Required if processed_messages_nft_policy_id is set.
+    pub processed_messages_nft_script_cbor: Option<String>,
     /// Mailbox script CBOR (hex) - the actual script bytes for witness set
     /// DEPRECATED: Use mailbox_reference_script_utxo instead
     pub mailbox_script_cbor: Option<String>,
@@ -31,6 +38,12 @@ pub struct ConnectionConf {
     pub registry_policy_id: String,
     /// ISM policy ID (hex)
     pub ism_policy_id: String,
+    /// ISM script CBOR (hex) - for inline witness set
+    /// DEPRECATED: Use ism_reference_script_utxo instead
+    pub ism_script_cbor: Option<String>,
+    /// ISM reference script UTXO (format: "tx_hash#output_index")
+    /// When set, the transaction will use this as a reference input for ISM verification
+    pub ism_reference_script_utxo: Option<String>,
     /// IGP (Interchain Gas Paymaster) policy ID (hex)
     pub igp_policy_id: String,
     /// Validator Announce policy ID (hex)
@@ -38,6 +51,7 @@ pub struct ConnectionConf {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawConnectionConf {
     url: Option<String>,
     api_key: Option<String>,
@@ -45,10 +59,14 @@ pub struct RawConnectionConf {
     mailbox_policy_id: Option<String>,
     mailbox_script_hash: Option<String>,
     processed_messages_script_hash: Option<String>,
+    processed_messages_nft_policy_id: Option<String>,
+    processed_messages_nft_script_cbor: Option<String>,
     mailbox_script_cbor: Option<String>,
     mailbox_reference_script_utxo: Option<String>,
     registry_policy_id: Option<String>,
     ism_policy_id: Option<String>,
+    ism_script_cbor: Option<String>,
+    ism_reference_script_utxo: Option<String>,
     igp_policy_id: Option<String>,
     validator_announce_policy_id: Option<String>,
 }
@@ -162,6 +180,14 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         // Mailbox reference script UTXO (preferred method)
         let mailbox_reference_script_utxo = raw.mailbox_reference_script_utxo;
 
+        // Processed messages NFT policy (optional - enables O(1) lookups)
+        let processed_messages_nft_policy_id = raw.processed_messages_nft_policy_id;
+        let processed_messages_nft_script_cbor = raw.processed_messages_nft_script_cbor;
+
+        // ISM script options (prefer reference script, fall back to inline)
+        let ism_script_cbor = raw.ism_script_cbor;
+        let ism_reference_script_utxo = raw.ism_reference_script_utxo;
+
         Ok(Self {
             url,
             api_key,
@@ -169,10 +195,14 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             mailbox_policy_id,
             mailbox_script_hash,
             processed_messages_script_hash,
+            processed_messages_nft_policy_id,
+            processed_messages_nft_script_cbor,
             mailbox_script_cbor,
             mailbox_reference_script_utxo,
             registry_policy_id,
             ism_policy_id,
+            ism_script_cbor,
+            ism_reference_script_utxo,
             igp_policy_id,
             validator_announce_policy_id,
         })

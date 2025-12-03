@@ -352,6 +352,32 @@ impl BlockfrostProvider {
         Ok(false)
     }
 
+    /// Check if a message has been processed using NFT lookup (O(1))
+    ///
+    /// This is the preferred method when processedMessagesNftPolicyId is configured.
+    /// It performs a direct asset lookup by policy_id + asset_name, which is O(1)
+    /// regardless of how many messages have been processed.
+    #[instrument(skip(self))]
+    pub async fn is_message_delivered_by_nft(
+        &self,
+        nft_policy_id: &str,
+        message_id: &[u8; 32],
+    ) -> Result<bool, BlockfrostProviderError> {
+        // The NFT asset name is the 32-byte message_id
+        let asset_name = hex::encode(message_id);
+
+        // Use get_utxos_by_asset for efficient O(1) lookup
+        let utxos = self.get_utxos_by_asset(nft_policy_id, &asset_name).await?;
+
+        if !utxos.is_empty() {
+            debug!("Found processed message NFT for message_id: {}", asset_name);
+            return Ok(true);
+        }
+
+        debug!("No processed message NFT found for message_id: {}", asset_name);
+        Ok(false)
+    }
+
     /// Get all script UTXOs (useful for finding mailbox, registry, ISM states)
     #[instrument(skip(self))]
     pub async fn get_script_utxos(

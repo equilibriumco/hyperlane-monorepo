@@ -204,12 +204,15 @@ impl CardanoMultisigIsm {
 
         let mut validators = Vec::new();
         for entry in list {
-            // Each entry is a Constr 0 (tuple): (domain, pubkeys_list)
-            let (tag, fields) = match entry {
-                PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            // Each entry is a tuple (domain, pubkeys_list)
+            // In Aiken/Plutus, tuples are encoded as plain arrays [a, b], NOT as Constr 0
+            // But we also support Constr 0 for backwards compatibility
+            let fields: Vec<&PlutusData> = match entry {
+                PlutusData::Array(arr) => arr.iter().collect(),
+                PlutusData::Constr(c) if c.tag == 121 => c.fields.iter().collect(),
                 _ => continue,
             };
-            if tag != 121 || fields.len() < 2 {
+            if fields.len() < 2 {
                 continue;
             }
 
@@ -314,12 +317,15 @@ impl CardanoMultisigIsm {
 
         let mut thresholds = Vec::new();
         for entry in list {
-            // Each entry is a Constr 0 (tuple): (domain, threshold)
-            let (tag, fields) = match entry {
-                PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
+            // Each entry is a tuple (domain, threshold)
+            // In Aiken/Plutus, tuples are encoded as plain arrays [a, b], NOT as Constr 0
+            // But we also support Constr 0 for backwards compatibility
+            let fields: Vec<&PlutusData> = match entry {
+                PlutusData::Array(arr) => arr.iter().collect(),
+                PlutusData::Constr(c) if c.tag == 121 => c.fields.iter().collect(),
                 _ => continue,
             };
-            if tag != 121 || fields.len() < 2 {
+            if fields.len() < 2 {
                 continue;
             }
 
