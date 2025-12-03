@@ -80,6 +80,39 @@ impl ForwardBackwardIterator {
         }
     }
 
+    /// Refresh the high nonce iterator to check for newly indexed messages.
+    /// This is called when both iterators are stuck on Unindexed, to pick up
+    /// messages that were indexed after the iterator was initialized.
+    ///
+    /// This handles the case where:
+    /// - The relayer starts with an empty database
+    /// - The iterator initializes at nonce 0
+    /// - Messages are indexed at a higher nonce (e.g., 4337)
+    /// - The iterator needs to jump to the newly indexed range
+    fn refresh_high_nonce(&mut self) {
+        let db = &self.high_nonce_iter.db;
+        if let Ok(Some(highest_nonce)) = db.retrieve_highest_seen_message_nonce() {
+            let current_nonce = self.high_nonce_iter.nonce.unwrap_or(0);
+            // Only update if database has messages at a higher nonce than our current position
+            // This handles the case where we started at 0 but messages start at a higher nonce
+            if highest_nonce >= current_nonce {
+                // Check if there's actually a message at the current nonce
+                // If not, we need to find where the messages actually start
+                if db.retrieve_message_by_nonce(current_nonce).ok().flatten().is_none() {
+                    // No message at current nonce, jump to highest known nonce
+                    // The iterator will then work backwards and forwards from there
+                    debug!(
+                        current_nonce,
+                        highest_nonce,
+                        domain = self._domain,
+                        "Jumping high nonce iterator to newly indexed messages"
+                    );
+                    self.high_nonce_iter.nonce = Some(highest_nonce);
+                }
+            }
+        }
+    }
+
     async fn try_get_next_message(
         &mut self,
         metrics: &MessageDbLoaderMetrics,
@@ -109,8 +142,12 @@ impl ForwardBackwardIterator {
                     return Ok(Some(low_nonce_message));
                 }
 
-                // If both iterators give us unindexed messages, there are no messages at the moment
-                (MessageStatus::Unindexed, MessageStatus::Unindexed) => return Ok(None),
+                // If both iterators give us unindexed messages, check if new messages
+                // have been indexed since we last checked
+                (MessageStatus::Unindexed, MessageStatus::Unindexed) => {
+                    self.refresh_high_nonce();
+                    return Ok(None);
+                }
             }
             // This loop may iterate through millions of processed messages, blocking the runtime.
             // So, to avoid starving other futures in this task, yield to the runtime
