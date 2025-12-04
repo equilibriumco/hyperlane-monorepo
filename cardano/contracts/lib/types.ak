@@ -100,14 +100,20 @@ pub type AdditionalInput {
 /// Recipient type determines how relayer constructs outputs
 pub type RecipientType {
   /// State in, state out, no other effects
-  GenericHandler
+  Generic
   /// Mints/releases tokens to address specified in message body
   TokenReceiver {
     vault_locator: Option<UtxoLocator>,
     minting_policy: Option<ScriptHash>,
   }
-  /// Calls another contract (advanced)
-  ContractCaller { target_locator: UtxoLocator }
+  /// Defers message processing to a separate step
+  /// The relayer creates a message UTXO with an NFT proving legitimacy
+  /// Messages are processed separately (manually, via dApp, automated service, etc.)
+  Deferred {
+    /// Minting policy for message NFTs (proves message is legitimate)
+    /// The policy only allows minting when mailbox is in inputs
+    message_policy: ScriptHash,
+  }
 }
 
 /// Registry entry for a recipient
@@ -145,6 +151,45 @@ pub type HyperlaneRecipientRedeemer<contract_redeemer> {
   HandleMessage { origin: Domain, sender: HyperlaneAddress, body: ByteArray }
   /// Contract-specific actions
   ContractAction { action: contract_redeemer }
+}
+
+// ============================================================================
+// Deferred Recipient Types (for complex recipients with deferred processing)
+// ============================================================================
+
+/// Stored message datum for Deferred recipient pattern
+/// This is stored in the message UTXO created by the relayer
+/// The message is later processed and the message NFT burned
+pub type StoredMessageDatum {
+  /// Source chain domain
+  origin: Domain,
+  /// Sender address on origin chain (32 bytes)
+  sender: HyperlaneAddress,
+  /// Message payload
+  body: ByteArray,
+  /// Message ID (32 bytes) - used as NFT asset name
+  message_id: ByteArray,
+  /// Nonce from the original message (for ordering)
+  nonce: Int,
+}
+
+/// Redeemer for message NFT minting policy
+pub type MessageNftRedeemer {
+  /// Mint a message NFT when storing a message
+  /// Asset name = message_id (32 bytes)
+  MintMessage
+  /// Burn a message NFT when processing a stored message
+  BurnMessage
+}
+
+/// Contract-specific redeemer for Deferred recipients
+pub type DeferredAction {
+  /// Process a stored message
+  /// Consumes the message UTXO, burns the NFT, creates custom outputs
+  ProcessStoredMessage {
+    /// The message ID being processed (must match NFT asset name)
+    message_id: ByteArray,
+  }
 }
 
 // ============================================================================

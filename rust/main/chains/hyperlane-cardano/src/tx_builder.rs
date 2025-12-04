@@ -231,12 +231,38 @@ impl HyperlaneTxBuilder {
             };
         let recipient_redeemer_cbor = encode_recipient_redeemer(&recipient_redeemer)?;
 
-        // 7. Build recipient continuation datum (with updated state)
-        // The recipient contract expects: messages_received + 1, last_message: Some(body), nonce + 1
-        let recipient_continuation_datum_cbor = build_recipient_continuation_datum(
-            &recipient_utxo,
-            &msg.body,
-        )?;
+        // 7. Build recipient continuation datum based on recipient type
+        // For Deferred, we also need to build the stored message datum and NFT mint redeemer
+        let (recipient_continuation_datum_cbor, stored_message_datum_cbor, message_nft_redeemer_cbor) =
+            match &registration.recipient_type {
+                crate::types::RecipientType::Deferred { .. } => {
+                    info!("Processing Deferred recipient - will store message for later processing");
+
+                    // Build Deferred recipient continuation datum (increments messages_stored counter)
+                    let continuation_datum = build_deferred_continuation_datum(&recipient_utxo)?;
+
+                    // Build StoredMessageDatum for the message UTXO
+                    let stored_msg_datum = crate::types::StoredMessageDatum {
+                        origin: msg.origin,
+                        sender: msg.sender,
+                        body: msg.body.clone(),
+                        message_id,
+                        nonce: msg.nonce,
+                    };
+                    let stored_msg_datum_cbor = encode_stored_message_datum(&stored_msg_datum)?;
+
+                    // Build message NFT mint redeemer
+                    let nft_redeemer = crate::types::MessageNftRedeemer::MintMessage;
+                    let nft_redeemer_cbor = encode_message_nft_redeemer(&nft_redeemer)?;
+
+                    (continuation_datum, Some(stored_msg_datum_cbor), Some(nft_redeemer_cbor))
+                }
+                _ => {
+                    // Generic, TokenReceiver - use existing logic
+                    let continuation_datum = build_recipient_continuation_datum(&recipient_utxo, &msg.body)?;
+                    (continuation_datum, None, None)
+                }
+            };
 
         // 8. Encode processed message marker datum
         let processed_datum = ProcessedMessageDatum { message_id };
@@ -310,6 +336,9 @@ impl HyperlaneTxBuilder {
             metadata: metadata.to_vec(),
             message: msg_for_ism,
             ism_redeemer_cbor,
+            recipient_type: registration.recipient_type.clone(),
+            stored_message_datum_cbor,
+            message_nft_redeemer_cbor,
         })
     }
 
@@ -490,6 +519,55 @@ impl HyperlaneTxBuilder {
         )?;
         tx = tx.output(recipient_output);
 
+        // 2b. Deferred-specific: Create message UTXO and mint message NFT
+        // This is the UTXO that stores the message on-chain for later processing by a bot
+        if let crate::types::RecipientType::Deferred { message_policy } = &components.recipient_type {
+            info!("Creating Deferred message UTXO with message NFT");
+
+            // Get message NFT policy bytes
+            let message_nft_policy_bytes: Hash<28> = Hash::new(*message_policy);
+
+            // Asset name is the 32-byte message_id
+            let asset_name: Vec<u8> = components.message_id.to_vec();
+
+            // Mint the message NFT (proves message is legitimate)
+            tx = tx.mint_asset(message_nft_policy_bytes, asset_name.clone(), 1)
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to mint message NFT: {:?}", e)))?;
+
+            // Create message UTXO at recipient address with StoredMessageDatum and the NFT
+            let recipient_address = parse_address(&components.recipient_utxo.address)?;
+            let stored_datum_cbor = components.stored_message_datum_cbor.as_ref()
+                .ok_or_else(|| TxBuilderError::MissingInput("Deferred missing stored_message_datum_cbor".to_string()))?;
+
+            let mut message_utxo_output = Output::new(recipient_address, MIN_UTXO_LOVELACE)
+                .set_inline_datum(stored_datum_cbor.clone());
+
+            // Add the message NFT to this output
+            message_utxo_output = message_utxo_output
+                .add_asset(message_nft_policy_bytes, asset_name.clone(), 1)
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {:?}", e)))?;
+
+            tx = tx.output(message_utxo_output);
+
+            // Add mint redeemer for message NFT (MintMessage = Constr 0 [])
+            let mint_redeemer_cbor = components.message_nft_redeemer_cbor.as_ref()
+                .ok_or_else(|| TxBuilderError::MissingInput("Deferred missing message_nft_redeemer_cbor".to_string()))?;
+            let ex_units_mint = ExUnits {
+                mem: DEFAULT_MEM_UNITS,
+                steps: DEFAULT_STEP_UNITS,
+            };
+            tx = tx.add_mint_redeemer(message_nft_policy_bytes, mint_redeemer_cbor.clone(), Some(ex_units_mint));
+
+            // Note: The message NFT minting policy script needs to be added as a reference script
+            // This should be configured in ConnectionConf with message_nft_reference_script_utxo
+            // For now, we assume it's provided as a reference input along with the recipient script
+            debug!(
+                "Added message UTXO for Deferred: message_id={}, policy={}",
+                hex::encode(&components.message_id),
+                hex::encode(message_policy)
+            );
+        }
+
         // 3. ISM continuation output (same address, same datum, same value)
         // The ISM is spent for verification but must continue with unchanged state
         let ism_output = create_ism_continuation_output(&components.ism_utxo)?;
@@ -553,11 +631,17 @@ impl HyperlaneTxBuilder {
         debug!("Added processed message marker output for message_id: {}", hex::encode(&components.message_id));
 
         // 5. Change output back to payer
-        // The payer's input funds: fee + processed marker output
+        // The payer's input funds: fee + processed marker output + (optional) message UTXO
         // (mailbox and recipient continuation outputs return the same value they consume)
         let fee = ESTIMATED_FEE_LOVELACE;
-        let processed_marker_cost = MIN_UTXO_LOVELACE; // Only the processed marker is "new" value
-        let change_amount = total_input.saturating_sub(fee + processed_marker_cost);
+        let processed_marker_cost = MIN_UTXO_LOVELACE;
+        // For Deferred, we also create a message UTXO which needs MIN_UTXO_LOVELACE
+        let message_utxo_cost = if matches!(&components.recipient_type, crate::types::RecipientType::Deferred { .. }) {
+            MIN_UTXO_LOVELACE
+        } else {
+            0
+        };
+        let change_amount = total_input.saturating_sub(fee + processed_marker_cost + message_utxo_cost);
 
         if change_amount >= MIN_UTXO_LOVELACE {
             let change_output = Output::new(
@@ -997,6 +1081,14 @@ pub struct ProcessTxComponents {
     pub message: crate::types::Message,
     /// ISM Verify redeemer CBOR (pre-encoded)
     pub ism_redeemer_cbor: Vec<u8>,
+    /// Recipient type for this message
+    pub recipient_type: crate::types::RecipientType,
+    /// Deferred-specific: Encoded stored message datum (CBOR)
+    /// Only set when recipient_type is Deferred
+    pub stored_message_datum_cbor: Option<Vec<u8>>,
+    /// Deferred-specific: Encoded message NFT mint redeemer (CBOR)
+    /// Only set when recipient_type is Deferred
+    pub message_nft_redeemer_cbor: Option<Vec<u8>>,
 }
 
 // ============================================================================
@@ -1622,6 +1714,183 @@ pub fn encode_processed_message_datum(
     });
 
     encode_plutus_data(&plutus_data)
+}
+
+// ============================================================================
+// Deferred Recipient Encoding Functions
+// ============================================================================
+
+/// Encode a StoredMessageDatum as Plutus Data CBOR
+/// Structure: Constr 0 [origin: Int, sender: ByteArray, body: ByteArray, message_id: ByteArray, nonce: Int]
+pub fn encode_stored_message_datum(
+    datum: &crate::types::StoredMessageDatum,
+) -> Result<Vec<u8>, TxBuilderError> {
+    let plutus_data = PlutusData::Constr(Constr {
+        tag: 121, // Constructor 0
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            PlutusData::BigInt(BigInt::Int((datum.origin as i64).into())),
+            PlutusData::BoundedBytes(datum.sender.to_vec().into()),
+            PlutusData::BoundedBytes(datum.body.clone().into()),
+            PlutusData::BoundedBytes(datum.message_id.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((datum.nonce as i64).into())),
+        ]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
+/// Encode a MessageNftRedeemer as Plutus Data CBOR
+/// MintMessage = Constr 0 [], BurnMessage = Constr 1 []
+pub fn encode_message_nft_redeemer(
+    redeemer: &crate::types::MessageNftRedeemer,
+) -> Result<Vec<u8>, TxBuilderError> {
+    let tag = match redeemer {
+        crate::types::MessageNftRedeemer::MintMessage => 121, // Constructor 0
+        crate::types::MessageNftRedeemer::BurnMessage => 122, // Constructor 1
+    };
+
+    let plutus_data = PlutusData::Constr(Constr {
+        tag,
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
+/// Build Deferred continuation datum with updated counters
+/// Structure: HyperlaneRecipientDatum { ism: Option, last_processed_nonce: Option, inner: DeferredInner }
+/// DeferredInner: { messages_stored: Int, messages_processed: Int }
+fn build_deferred_continuation_datum(
+    recipient_utxo: &Utxo,
+) -> Result<Vec<u8>, TxBuilderError> {
+    // Parse the existing datum to extract current state
+    let (ism_opt, old_nonce, messages_stored, messages_processed) =
+        if let Some(datum_str) = &recipient_utxo.inline_datum {
+            parse_deferred_datum(datum_str)?
+        } else {
+            (None, None, 0, 0)
+        };
+
+    // Increment messages_stored (messages_processed stays the same - that's for bot processing)
+    let new_messages_stored = messages_stored + 1;
+    let new_nonce = match old_nonce {
+        Some(n) => Some(n + 1),
+        None => Some(1),
+    };
+
+    let plutus_data = build_deferred_datum_plutus(
+        ism_opt.as_deref(),
+        new_nonce,
+        new_messages_stored,
+        messages_processed,
+    );
+
+    encode_plutus_data(&plutus_data)
+}
+
+/// Build Deferred datum as PlutusData
+fn build_deferred_datum_plutus(
+    ism: Option<&[u8]>,
+    nonce: Option<i64>,
+    messages_stored: i64,
+    messages_processed: i64,
+) -> PlutusData {
+    // HyperlaneRecipientDatum { ism, last_processed_nonce, inner }
+    let ism_field = match ism {
+        Some(hash) => PlutusData::Constr(Constr {
+            tag: 121, // Some = constructor 0
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![
+                PlutusData::BoundedBytes(hash.to_vec().into())
+            ]),
+        }),
+        None => PlutusData::Constr(Constr {
+            tag: 122, // None = constructor 1
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![]),
+        }),
+    };
+
+    let nonce_field = match nonce {
+        Some(n) => PlutusData::Constr(Constr {
+            tag: 121, // Some = constructor 0
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![
+                PlutusData::BigInt(BigInt::Int(n.into()))
+            ]),
+        }),
+        None => PlutusData::Constr(Constr {
+            tag: 122, // None = constructor 1
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![]),
+        }),
+    };
+
+    // DeferredInner { messages_stored, messages_processed }
+    let inner_field = PlutusData::Constr(Constr {
+        tag: 121, // DeferredInner = constructor 0
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            PlutusData::BigInt(BigInt::Int(messages_stored.into())),
+            PlutusData::BigInt(BigInt::Int(messages_processed.into())),
+        ]),
+    });
+
+    // HyperlaneRecipientDatum = constructor 0
+    PlutusData::Constr(Constr {
+        tag: 121,
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            ism_field,
+            nonce_field,
+            inner_field,
+        ]),
+    })
+}
+
+/// Parse a Deferred datum to extract the current state
+/// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_stored: i64, messages_processed: i64)
+fn parse_deferred_datum(datum_str: &str) -> Result<(Option<Vec<u8>>, Option<i64>, i64, i64), TxBuilderError> {
+    let datum_cbor = json_datum_to_cbor(datum_str)?;
+
+    use pallas_codec::minicbor;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {}", e)))?;
+
+    // Structure: Constr 0 [ism_opt, nonce_opt, inner]
+    // inner: Constr 0 [messages_stored, messages_processed]
+    if let PlutusData::Constr(constr) = decoded {
+        let fields: Vec<_> = constr.fields.clone().to_vec();
+        if fields.len() >= 3 {
+            let ism = extract_option_bytes(&fields[0]);
+            let nonce = extract_option_int(&fields[1]);
+
+            // Extract inner.messages_stored and inner.messages_processed
+            let (messages_stored, messages_processed) = if let PlutusData::Constr(inner) = &fields[2] {
+                let inner_fields: Vec<_> = inner.fields.clone().to_vec();
+                let stored = if inner_fields.len() > 0 {
+                    extract_int(&inner_fields[0]).unwrap_or(0)
+                } else {
+                    0
+                };
+                let processed = if inner_fields.len() > 1 {
+                    extract_int(&inner_fields[1]).unwrap_or(0)
+                } else {
+                    0
+                };
+                (stored, processed)
+            } else {
+                (0, 0)
+            };
+
+            return Ok((ism, nonce, messages_stored, messages_processed));
+        }
+    }
+
+    // Default values if parsing fails
+    Ok((None, None, 0, 0))
 }
 
 /// Encode a Message as Plutus Data

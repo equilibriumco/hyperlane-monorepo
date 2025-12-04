@@ -10,7 +10,7 @@
 //!   --script-hash       The recipient script hash (28 bytes, hex)
 //!   --state-policy      Policy ID of the NFT that marks the recipient state UTXO
 //!   --state-asset       Asset name of the state NFT (hex)
-//!   --recipient-type    Type of recipient: generic, token-receiver, contract-caller
+//!   --recipient-type    Type of recipient: generic, token-receiver, deferred
 //!   --custom-ism        Optional custom ISM script hash
 //!   --additional-input  Additional inputs in format "name:policy:asset:spend" (can repeat)
 
@@ -71,13 +71,9 @@ struct Args {
     #[arg(long)]
     minting_policy: Option<String>,
 
-    /// For ContractCaller: target policy ID
+    /// For Deferred: message NFT policy ID
     #[arg(long)]
-    target_policy: Option<String>,
-
-    /// For ContractCaller: target asset name
-    #[arg(long)]
-    target_asset: Option<String>,
+    message_policy: Option<String>,
 
     /// Cardano network (mainnet, preprod, preview)
     #[arg(long, default_value = "preprod")]
@@ -92,7 +88,7 @@ struct Args {
 enum RecipientTypeArg {
     Generic,
     TokenReceiver,
-    ContractCaller,
+    Deferred,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -142,7 +138,7 @@ fn parse_additional_input(s: &str) -> Result<AdditionalInput, String> {
 
 fn build_recipient_type(args: &Args) -> Result<RecipientType, String> {
     match args.recipient_type {
-        RecipientTypeArg::Generic => Ok(RecipientType::GenericHandler),
+        RecipientTypeArg::Generic => Ok(RecipientType::Generic),
         RecipientTypeArg::TokenReceiver => {
             let vault_locator = match (&args.vault_policy, &args.vault_asset) {
                 (Some(policy), Some(asset)) => Some(UtxoLocator {
@@ -163,19 +159,13 @@ fn build_recipient_type(args: &Args) -> Result<RecipientType, String> {
                 minting_policy,
             })
         }
-        RecipientTypeArg::ContractCaller => {
-            let target_policy = args.target_policy
+        RecipientTypeArg::Deferred => {
+            let message_policy_hex = args.message_policy
                 .as_ref()
-                .ok_or("--target-policy is required for ContractCaller")?;
-            let target_asset = args.target_asset
-                .as_ref()
-                .ok_or("--target-asset is required for ContractCaller")?;
+                .ok_or("--message-policy is required for Deferred")?;
 
-            Ok(RecipientType::ContractCaller {
-                target_locator: UtxoLocator {
-                    policy_id: target_policy.clone(),
-                    asset_name: target_asset.clone(),
-                },
+            Ok(RecipientType::Deferred {
+                message_policy: parse_script_hash(message_policy_hex)?,
             })
         }
     }

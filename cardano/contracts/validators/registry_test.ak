@@ -2,7 +2,7 @@ use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/primitive/bytearray
 use types.{
-  RecipientRegistration, GenericHandler, RegistryDatum, UtxoLocator,
+  RecipientRegistration, Generic, RegistryDatum, UtxoLocator,
 }
 
 // ============================================================================
@@ -48,7 +48,7 @@ fn make_registration(script_seed: Int, owner_seed: Int) -> RecipientRegistration
     state_locator: make_utxo_locator(script_seed),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 }
@@ -222,7 +222,7 @@ test multiple_owners_multiple_registrations() {
     state_locator: make_utxo_locator(1),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 
@@ -232,7 +232,7 @@ test multiple_owners_multiple_registrations() {
     state_locator: make_utxo_locator(2),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 
@@ -378,7 +378,7 @@ test transfer_ownership_updates_owner() {
     state_locator: make_utxo_locator(1),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 
@@ -399,7 +399,7 @@ test transfer_ownership_preserves_other_fields() {
     state_locator: make_utxo_locator(1),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 
@@ -452,7 +452,7 @@ test admin_different_from_all_owners() {
     state_locator: make_utxo_locator(1),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 
@@ -462,7 +462,7 @@ test admin_different_from_all_owners() {
     state_locator: make_utxo_locator(2),
     reference_script_locator: None,
     additional_inputs: [],
-    recipient_type: GenericHandler,
+    recipient_type: Generic,
     custom_ism: None,
   }
 

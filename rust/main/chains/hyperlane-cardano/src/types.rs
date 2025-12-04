@@ -274,13 +274,15 @@ pub struct AdditionalInput {
 /// Recipient type (matches Aiken RecipientType)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecipientType {
-    GenericHandler,
+    Generic,
     TokenReceiver {
         vault_locator: Option<UtxoLocator>,
         minting_policy: Option<ScriptHash>,
     },
-    ContractCaller {
-        target_locator: UtxoLocator,
+    /// Defer message processing to a separate bot
+    Deferred {
+        /// Minting policy for message NFTs (proves message is legitimate)
+        message_policy: ScriptHash,
     },
 }
 
@@ -322,6 +324,55 @@ pub enum HyperlaneRecipientRedeemer<T> {
     ContractAction {
         action: T,
     },
+}
+
+// ============================================================================
+// Deferred Recipient Types (for complex recipients with deferred processing)
+// ============================================================================
+
+/// Stored message datum for Deferred recipient pattern (matches Aiken StoredMessageDatum)
+/// This is stored in the message UTXO created by the relayer
+/// A bot later processes this UTXO and burns the message NFT
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMessageDatum {
+    /// Source chain domain
+    pub origin: Domain,
+    /// Sender address on origin chain (32 bytes)
+    pub sender: HyperlaneAddress,
+    /// Message payload
+    pub body: Vec<u8>,
+    /// Message ID (32 bytes) - used as NFT asset name
+    pub message_id: [u8; 32],
+    /// Nonce from the original message (for ordering)
+    pub nonce: u32,
+}
+
+/// Redeemer for message NFT minting policy (matches Aiken MessageNftRedeemer)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageNftRedeemer {
+    /// Mint a message NFT when storing a message
+    MintMessage,
+    /// Burn a message NFT when processing a stored message
+    BurnMessage,
+}
+
+/// Contract-specific redeemer for Deferred recipients (matches Aiken DeferredAction)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DeferredAction {
+    /// Process a stored message (called by bot)
+    ProcessStoredMessage {
+        /// The message ID being processed (must match NFT asset name)
+        message_id: [u8; 32],
+    },
+}
+
+/// Inner state for deferred recipient (matches Aiken DeferredInner)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferredInner {
+    /// Count of messages received (for tracking)
+    pub messages_stored: u64,
+    /// Count of messages processed by bot
+    pub messages_processed: u64,
 }
 
 /// Convert a Cardano script hash to Hyperlane address

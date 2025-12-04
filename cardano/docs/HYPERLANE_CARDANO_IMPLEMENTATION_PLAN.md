@@ -185,17 +185,18 @@ type AdditionalInput {
 // Recipient type determines how relayer constructs outputs
 type RecipientType {
   // State in, state out, no other effects
-  GenericHandler
-  
+  Generic
+
   // Mints/releases tokens to address specified in message body
   TokenReceiver {
     vault_locator: Option<UtxoLocator>,   // For collateral-backed
     minting_policy: Option<ScriptHash>,    // For synthetic
   }
-  
-  // Calls another contract (advanced)
-  ContractCaller {
-    target_locator: UtxoLocator,
+
+  // For complex recipients where relayer cannot build outputs
+  // Messages are stored on-chain for later processing
+  Deferred {
+    message_policy: ScriptHash,           // NFT policy proving message legitimacy
   }
 }
 
@@ -1032,7 +1033,7 @@ impl CardanoAdapter {
         utxos: &DiscoveredUtxos,
     ) -> Result<()> {
         match &registration.recipient_type {
-            RecipientType::GenericHandler => {
+            RecipientType::Generic => {
                 // Just continuation of recipient state
                 let new_datum = self.compute_new_recipient_datum(
                     &utxos.recipient_state,
@@ -1085,8 +1086,9 @@ impl CardanoAdapter {
                 );
             }
             
-            RecipientType::ContractCaller { target_locator } => {
-                // More complex - needs to call another contract
+            RecipientType::Deferred { message_policy } => {
+                // Store message on-chain with NFT for later processing
+                // Mint message NFT, create stored message UTXO
                 todo!()
             }
         }

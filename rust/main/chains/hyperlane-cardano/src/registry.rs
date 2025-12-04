@@ -429,11 +429,11 @@ impl RecipientRegistry {
 
         let (tag, fields) = match data {
             PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
-            _ => return Ok(RecipientType::GenericHandler),
+            _ => return Ok(RecipientType::Generic),
         };
 
         match tag {
-            121 => Ok(RecipientType::GenericHandler), // Constr 0
+            121 => Ok(RecipientType::Generic), // Constr 0
             122 => {
                 // TokenReceiver - Constr 1 [vault_locator, minting_policy]
                 let vault_locator = if fields.len() > 0 {
@@ -452,14 +452,25 @@ impl RecipientRegistry {
                 })
             }
             123 => {
-                // ContractCaller - Constr 2 [target_locator]
+                // Deferred - Constr 2 [message_policy]
                 if fields.is_empty() {
-                    return Err(RegistryError::InvalidDatum("ContractCaller missing target_locator".to_string()));
+                    return Err(RegistryError::InvalidDatum("Deferred missing message_policy".to_string()));
                 }
-                let target_locator = self.parse_utxo_locator_from_plutus(&fields[0])?;
-                Ok(RecipientType::ContractCaller { target_locator })
+                let message_policy = match &fields[0] {
+                    PlutusData::BoundedBytes(bytes) => {
+                        let bytes: &[u8] = bytes.as_ref();
+                        if bytes.len() != 28 {
+                            return Err(RegistryError::InvalidDatum("Invalid message_policy length".to_string()));
+                        }
+                        let mut hash = [0u8; 28];
+                        hash.copy_from_slice(bytes);
+                        hash
+                    }
+                    _ => return Err(RegistryError::InvalidDatum("Invalid message_policy".to_string())),
+                };
+                Ok(RecipientType::Deferred { message_policy })
             }
-            _ => Ok(RecipientType::GenericHandler),
+            _ => Ok(RecipientType::Generic),
         }
     }
 
@@ -745,7 +756,7 @@ impl RecipientRegistry {
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid recipient type".to_string()))?;
 
         match constructor {
-            0 => Ok(RecipientType::GenericHandler),
+            0 => Ok(RecipientType::Generic),
             1 => {
                 let fields = json
                     .get("fields")
@@ -776,15 +787,31 @@ impl RecipientRegistry {
                     .get("fields")
                     .and_then(|f| f.as_array())
                     .ok_or_else(|| {
-                        RegistryError::InvalidDatum("Invalid ContractCaller fields".to_string())
+                        RegistryError::InvalidDatum("Invalid Deferred fields".to_string())
                     })?;
 
-                let target_locator =
-                    self.parse_utxo_locator_json(fields.get(0).ok_or_else(|| {
-                        RegistryError::InvalidDatum("Missing target locator".to_string())
-                    })?)?;
+                let message_policy_bytes = fields
+                    .get(0)
+                    .and_then(|v| v.get("bytes"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        RegistryError::InvalidDatum("Missing message_policy".to_string())
+                    })?;
 
-                Ok(RecipientType::ContractCaller { target_locator })
+                let message_policy_vec = hex::decode(message_policy_bytes).map_err(|e| {
+                    RegistryError::InvalidDatum(format!("Invalid message_policy hex: {}", e))
+                })?;
+
+                if message_policy_vec.len() != 28 {
+                    return Err(RegistryError::InvalidDatum(
+                        "message_policy must be 28 bytes".to_string(),
+                    ));
+                }
+
+                let mut message_policy = [0u8; 28];
+                message_policy.copy_from_slice(&message_policy_vec);
+
+                Ok(RecipientType::Deferred { message_policy })
             }
             _ => Err(RegistryError::InvalidDatum(format!(
                 "Unknown recipient type constructor: {}",

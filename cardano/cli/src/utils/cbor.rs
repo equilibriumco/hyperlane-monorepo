@@ -313,7 +313,7 @@ pub fn build_registry_datum(
         // additional_inputs (empty list for now)
         builder.start_list().end_list();
 
-        // recipient_type (GenericHandler = 0)
+        // recipient_type (Generic = 0)
         builder.start_constr(0).end_constr();
 
         // custom_ism (None)
@@ -396,7 +396,7 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
     // additional_inputs (empty list)
     builder.start_list().end_list();
 
-    // recipient_type (GenericHandler = 0)
+    // recipient_type (Generic = 0)
     builder.start_constr(0).end_constr();
 
     // custom_ism (None = constructor 1)
@@ -451,7 +451,7 @@ pub fn build_registry_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8
     // additional_inputs (empty list)
     builder.start_list().end_list();
 
-    // recipient_type (GenericHandler = 0)
+    // recipient_type (Generic = 0)
     builder.start_constr(0).end_constr();
 
     // custom_ism (None = constructor 1)

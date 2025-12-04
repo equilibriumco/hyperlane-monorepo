@@ -460,7 +460,7 @@ type RecipientRegistration {
   state_locator: UtxoLocator,           // NFT to find state UTXO
   reference_script_locator: Option<UtxoLocator>,  // NFT to find script UTXO
   additional_inputs: List<AdditionalInput>,
-  recipient_type: RecipientType,        // GenericHandler | TokenReceiver | ContractCaller
+  recipient_type: RecipientType,        // Generic | TokenReceiver | Deferred
   custom_ism: Option<ScriptHash>,
 }
 ```

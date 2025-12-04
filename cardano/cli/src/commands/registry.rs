@@ -128,7 +128,8 @@ enum RegistryCommands {
 enum RecipientTypeArg {
     Generic,
     TokenReceiver,
-    ContractCaller,
+    /// Defer message processing (processed separately)
+    Deferred,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -217,9 +218,9 @@ async fn register(
     }
 
     let type_str = match recipient_type {
-        RecipientTypeArg::Generic => "GenericHandler",
+        RecipientTypeArg::Generic => "Generic",
         RecipientTypeArg::TokenReceiver => "TokenReceiver",
-        RecipientTypeArg::ContractCaller => "ContractCaller",
+        RecipientTypeArg::Deferred => "Deferred",
     };
     println!("  Type: {}", type_str);
 
@@ -504,9 +505,9 @@ async fn generate_json(
     let owner = validate_script_hash(owner)?; // Same validation - 28 bytes hex
 
     let type_str = match recipient_type {
-        RecipientTypeArg::Generic => "GenericHandler",
+        RecipientTypeArg::Generic => "Generic",
         RecipientTypeArg::TokenReceiver => "TokenReceiver",
-        RecipientTypeArg::ContractCaller => "ContractCaller",
+        RecipientTypeArg::Deferred => "Deferred",
     };
 
     let registration = RecipientInfo {
@@ -664,9 +665,9 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
     // Recipient type (field 5)
     let recipient_type = match &fields[5] {
         PlutusData::Constr(c) => match c.tag {
-            121 => "GenericHandler",
+            121 => "Generic",
             122 => "TokenReceiver",
-            123 => "ContractCaller",
+            123 => "Deferred",
             _ => "Unknown",
         },
         _ => "Unknown",
@@ -815,9 +816,9 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .and_then(|t| t.get("constructor"))
             .and_then(|c| c.as_u64())
             .map(|c| match c {
-                0 => "GenericHandler",
+                0 => "Generic",
                 1 => "TokenReceiver",
-                2 => "ContractCaller",
+                2 => "Deferred",
                 _ => "Unknown",
             })
             .unwrap_or("Unknown")

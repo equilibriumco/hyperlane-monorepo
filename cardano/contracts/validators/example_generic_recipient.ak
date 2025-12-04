@@ -7,14 +7,17 @@ use types.{
 }
 use utils.{find_input}
 
-/// Generic Recipient Example
+/// Example: Generic Recipient
 /// A minimal Hyperlane recipient that stores received messages
 ///
-/// This demonstrates the standard pattern for Hyperlane-compatible recipients:
+/// This is an EXAMPLE contract demonstrating the standard pattern for
+/// Hyperlane-compatible recipients using the Generic type:
 /// 1. Use HyperlaneRecipientDatum wrapper for state
 /// 2. Use HyperlaneRecipientRedeemer for actions
 /// 3. Verify mailbox is the caller for HandleMessage (via NFT check)
 /// 4. Maintain state continuation
+///
+/// See also: example_deferred_recipient.ak for deferred message processing
 ///
 /// ## Security Model
 ///
@@ -64,11 +67,11 @@ pub type GenericRecipientInner {
   last_message: Option<ByteArray>,
 }
 
-/// Generic recipient validator
+/// Example Generic Recipient validator
 ///
 /// IMPORTANT: Parameterized by `mailbox_policy_id` (the NFT policy), NOT script hash!
 /// This ensures we verify the REAL mailbox, not a fake UTXO at the same address.
-validator generic_recipient(mailbox_policy_id: PolicyId) {
+validator example_generic_recipient(mailbox_policy_id: PolicyId) {
   spend(
     datum: Option<HyperlaneRecipientDatum<GenericRecipientInner>>,
     redeemer: HyperlaneRecipientRedeemer<Void>,

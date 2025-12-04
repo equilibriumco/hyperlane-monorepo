@@ -492,7 +492,7 @@ async function deployRecipient(
       asset_name: fromText("ref"),
     },
     additional_inputs: [],
-    recipient_type: { GenericHandler: {} },
+    recipient_type: { Generic: {} },
     custom_ism: null,
   };
   
