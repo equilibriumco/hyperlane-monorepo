@@ -87,15 +87,144 @@ impl Asset {
     }
 }
 
+/// Parameter applied to a script
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedParameter {
+    /// Human-readable name of the parameter
+    pub name: String,
+    /// Type of the parameter (e.g., "ScriptHash", "OutputReference")
+    pub param_type: String,
+    /// The value that was applied (hex encoded for bytes)
+    pub value: String,
+    /// Human-readable description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// State NFT information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateNftInfo {
+    /// Policy ID of the state NFT minting policy
+    pub policy_id: String,
+    /// Asset name (hex encoded, e.g., "4d61696c626f78205374617465" for "Mailbox State")
+    pub asset_name_hex: String,
+    /// Human-readable asset name
+    pub asset_name: String,
+    /// The UTXO that was consumed to create this unique policy
+    pub seed_utxo: String,
+}
+
+/// Reference script UTXO information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceScriptUtxo {
+    /// Transaction hash containing the reference script
+    pub tx_hash: String,
+    /// Output index
+    pub output_index: u32,
+    /// Lovelace locked in the UTXO
+    pub lovelace: u64,
+}
+
 /// Script information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScriptInfo {
+    /// Script hash before any parameters are applied (from plutus.json)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_before_parametrization: Option<String>,
+    /// Final script hash (after parameter application, if any)
     pub hash: String,
+    /// Script address (derived from final hash)
     pub address: String,
+    /// Parameters that were applied to derive the final hash
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub applied_parameters: Vec<AppliedParameter>,
+    /// State NFT information (set after initialization)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_nft: Option<StateNftInfo>,
+    /// Current state UTXO (the UTXO holding the state NFT and datum)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_utxo: Option<String>,
+    /// Reference script UTXO (for using as reference in transactions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_script_utxo: Option<ReferenceScriptUtxo>,
+    /// Initialization transaction hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_tx_hash: Option<String>,
+    /// Whether the contract has been initialized
+    #[serde(default)]
+    pub initialized: bool,
+
+    // Legacy fields for backwards compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub utxo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_nft_policy: Option<String>,
+}
+
+impl ScriptInfo {
+    /// Create a new ScriptInfo for a non-parameterized script
+    pub fn new(hash: String, address: String) -> Self {
+        Self {
+            hash_before_parametrization: None,
+            hash,
+            address,
+            applied_parameters: Vec::new(),
+            state_nft: None,
+            state_utxo: None,
+            reference_script_utxo: None,
+            init_tx_hash: None,
+            initialized: false,
+            utxo: None,
+            state_nft_policy: None,
+        }
+    }
+
+    /// Create a new ScriptInfo for a parameterized script
+    pub fn new_parameterized(
+        hash_before: String,
+        hash_after: String,
+        address: String,
+        parameters: Vec<AppliedParameter>,
+    ) -> Self {
+        Self {
+            hash_before_parametrization: Some(hash_before),
+            hash: hash_after,
+            address,
+            applied_parameters: parameters,
+            state_nft: None,
+            state_utxo: None,
+            reference_script_utxo: None,
+            init_tx_hash: None,
+            initialized: false,
+            utxo: None,
+            state_nft_policy: None,
+        }
+    }
+
+    /// Check if this script requires parameter application
+    pub fn is_parameterized(&self) -> bool {
+        self.hash_before_parametrization.is_some()
+    }
+
+    /// Set initialization info
+    pub fn set_initialized(
+        &mut self,
+        tx_hash: String,
+        state_utxo: String,
+        state_nft: StateNftInfo,
+    ) {
+        self.init_tx_hash = Some(tx_hash);
+        self.state_utxo = Some(state_utxo.clone());
+        self.state_nft = Some(state_nft.clone());
+        self.initialized = true;
+        // Legacy fields
+        self.utxo = Some(state_utxo);
+        self.state_nft_policy = Some(state_nft.policy_id);
+    }
 }
 
 /// Deployment information

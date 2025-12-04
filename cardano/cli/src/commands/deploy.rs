@@ -175,11 +175,29 @@ async fn extract(
     }
 
     // Update deployment_info.json with new addresses
-    let to_script_info = |v: &ExtractedValidator| ScriptInfo {
-        hash: v.hash.clone(),
-        address: v.address.clone(),
-        utxo: None,
-        state_nft_policy: None,
+    // Note: For parameterized scripts, hash_before_parametrization contains the pre-param hash
+    // The `hash` field will be updated later when parameters are applied during init
+    let to_script_info = |v: &ExtractedValidator| {
+        if v.requires_parameters {
+            // Parameterized script - record hash before parameters as placeholder
+            // The final hash will be set during initialization
+            ScriptInfo {
+                hash_before_parametrization: Some(v.hash.clone()),
+                hash: v.hash.clone(), // Placeholder, will be updated during init
+                address: v.address.clone(), // Placeholder, will be updated during init
+                applied_parameters: Vec::new(), // Will be filled during init
+                state_nft: None,
+                state_utxo: None,
+                reference_script_utxo: None,
+                init_tx_hash: None,
+                initialized: false,
+                utxo: None,
+                state_nft_policy: None,
+            }
+        } else {
+            // Non-parameterized script
+            ScriptInfo::new(v.hash.clone(), v.address.clone())
+        }
     };
 
     let deployment_info = DeploymentInfo {
@@ -271,43 +289,37 @@ async fn generate_config(ctx: &CliContext, output: Option<String>) -> Result<()>
 
     let mut info = DeploymentInfo::new(ctx.network.as_str());
 
-    info.mailbox = Some(ScriptInfo {
-        hash: validators.mailbox.hash.clone(),
-        address: validators.mailbox.address.clone(),
-        utxo: None,
-        state_nft_policy: None,
-    });
+    // Helper to create ScriptInfo for validators
+    let to_script_info = |v: &ExtractedValidator| {
+        if v.requires_parameters {
+            ScriptInfo {
+                hash_before_parametrization: Some(v.hash.clone()),
+                hash: v.hash.clone(),
+                address: v.address.clone(),
+                applied_parameters: Vec::new(),
+                state_nft: None,
+                state_utxo: None,
+                reference_script_utxo: None,
+                init_tx_hash: None,
+                initialized: false,
+                utxo: None,
+                state_nft_policy: None,
+            }
+        } else {
+            ScriptInfo::new(v.hash.clone(), v.address.clone())
+        }
+    };
 
-    info.ism = Some(ScriptInfo {
-        hash: validators.ism.hash.clone(),
-        address: validators.ism.address.clone(),
-        utxo: None,
-        state_nft_policy: None,
-    });
-
-    info.registry = Some(ScriptInfo {
-        hash: validators.registry.hash.clone(),
-        address: validators.registry.address.clone(),
-        utxo: None,
-        state_nft_policy: None,
-    });
+    info.mailbox = Some(to_script_info(&validators.mailbox));
+    info.ism = Some(to_script_info(&validators.ism));
+    info.registry = Some(to_script_info(&validators.registry));
 
     if let Some(igp) = &validators.igp {
-        info.igp = Some(ScriptInfo {
-            hash: igp.hash.clone(),
-            address: igp.address.clone(),
-            utxo: None,
-            state_nft_policy: None,
-        });
+        info.igp = Some(to_script_info(igp));
     }
 
     if let Some(va) = &validators.validator_announce {
-        info.validator_announce = Some(ScriptInfo {
-            hash: va.hash.clone(),
-            address: va.address.clone(),
-            utxo: None,
-            state_nft_policy: None,
-        });
+        info.validator_announce = Some(to_script_info(va));
     }
 
     // Save to file

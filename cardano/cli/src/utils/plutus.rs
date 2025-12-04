@@ -80,6 +80,12 @@ pub struct ExtractedValidator {
     pub cbor_hex: String,
     pub hash: String,
     pub address: String,
+    /// Whether this validator requires parameter application
+    #[serde(default)]
+    pub requires_parameters: bool,
+    /// Parameter names from the blueprint
+    #[serde(default)]
+    pub parameter_names: Vec<String>,
 }
 
 impl ExtractedValidator {
@@ -96,6 +102,10 @@ impl ExtractedValidator {
             .unwrap_or(&def.title)
             .to_string();
 
+        // Track parameter information
+        let requires_parameters = !def.parameters.is_empty();
+        let parameter_names = def.parameters.iter().map(|p| p.title.clone()).collect();
+
         Ok(Self {
             name,
             title: def.title.clone(),
@@ -104,6 +114,8 @@ impl ExtractedValidator {
             cbor_hex: def.compiled_code.clone(),
             hash: hash_hex,
             address,
+            requires_parameters,
+            parameter_names,
         })
     }
 
@@ -354,6 +366,23 @@ pub fn script_hash_to_address(hash_hex: &str, network: pallas_addresses::Network
     hash_array.copy_from_slice(&hash_bytes);
 
     Ok(script_address_bech32(&hash_array, network))
+}
+
+/// Encode a script hash (28 bytes) as CBOR for validator parameters
+pub fn encode_script_hash_param(script_hash_hex: &str) -> Result<Vec<u8>> {
+    let hash_bytes = hex::decode(script_hash_hex)
+        .with_context(|| "Invalid script hash hex")?;
+
+    if hash_bytes.len() != 28 {
+        return Err(anyhow!("Script hash must be 28 bytes, got {}", hash_bytes.len()));
+    }
+
+    // CBOR encoding for ByteArray (28 bytes):
+    // 581c = 28-byte bytestring prefix
+    let mut cbor = vec![0x58, 0x1c];
+    cbor.extend_from_slice(&hash_bytes);
+
+    Ok(cbor)
 }
 
 /// Encode an output reference as CBOR for state_nft parameter

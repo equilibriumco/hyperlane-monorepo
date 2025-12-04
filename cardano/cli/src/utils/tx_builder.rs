@@ -25,6 +25,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
     /// Build an initialization transaction that mints a state NFT and creates
     /// an initial UTXO at a script address with inline datum
+    ///
+    /// # Arguments
+    /// * `asset_name` - Optional asset name for the NFT (e.g., "Mailbox State"). If None, uses empty name.
     pub async fn build_init_tx(
         &self,
         payer: &Keypair,
@@ -34,6 +37,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         script_address: &str,
         datum_cbor: &[u8],
         output_lovelace: u64,
+        asset_name: Option<&str>,
     ) -> Result<BuiltTransaction> {
         // Get current slot for validity
         let current_slot = self.client.get_latest_slot().await?;
@@ -44,6 +48,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Calculate policy ID from script (PlutusV3 uses tag 0x03)
         let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Convert asset name to bytes (empty vec if None)
+        let asset_name_bytes: Vec<u8> = asset_name.map(|n| n.as_bytes().to_vec()).unwrap_or_default();
 
         // Parse tx hashes
         let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
@@ -67,7 +74,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             output_lovelace,
         )
         .set_inline_datum(datum_cbor.to_vec())
-        .add_asset(Hash::new(policy_id), vec![], 1)
+        .add_asset(Hash::new(policy_id), asset_name_bytes.clone(), 1)
         .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
 
         // Build change output
@@ -85,7 +92,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .input(input)
             .collateral_input(collateral)
             .output(script_output)
-            .mint_asset(Hash::new(policy_id), vec![], 1)
+            .mint_asset(Hash::new(policy_id), asset_name_bytes, 1)
             .map_err(|e| anyhow!("Failed to add mint: {:?}", e))?
             .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
             .add_mint_redeemer(

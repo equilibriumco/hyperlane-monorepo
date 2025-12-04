@@ -7,8 +7,9 @@ use colored::Colorize;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{build_generic_recipient_datum, build_ism_datum, build_mailbox_datum};
 use crate::utils::context::CliContext;
-use crate::utils::plutus::{apply_validator_param, encode_output_reference};
+use crate::utils::plutus::{apply_validator_param, encode_output_reference, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
+use crate::utils::types::{AppliedParameter, StateNftInfo};
 
 #[derive(Args)]
 pub struct InitArgs {
@@ -27,6 +28,12 @@ enum InitCommands {
         /// ISM script hash (28 bytes hex)
         #[arg(long)]
         ism_hash: String,
+
+        /// Processed messages script hash (28 bytes hex)
+        /// This is the address where processed message markers are stored.
+        /// Defaults to the registry script hash if not provided.
+        #[arg(long)]
+        processed_messages_hash: Option<String>,
 
         /// UTXO to use for minting state NFT (tx_hash#index)
         #[arg(long)]
@@ -154,9 +161,10 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         InitCommands::Mailbox {
             domain,
             ism_hash,
+            processed_messages_hash,
             utxo,
             dry_run,
-        } => init_mailbox(ctx, domain, &ism_hash, utxo, dry_run).await,
+        } => init_mailbox(ctx, domain, &ism_hash, processed_messages_hash, utxo, dry_run).await,
         InitCommands::Ism {
             domains,
             validators,
@@ -194,6 +202,7 @@ async fn init_mailbox(
     ctx: &CliContext,
     domain: u32,
     ism_hash: &str,
+    processed_messages_hash: Option<String>,
     utxo: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -206,6 +215,30 @@ async fn init_mailbox(
     let owner_pkh = keypair.verification_key_hash_hex();
 
     println!("  Owner: {}", owner_pkh);
+
+    // Get deployment info for default processed_messages_hash
+    let deployment = ctx.load_deployment_info()
+        .with_context(|| "Run 'deploy extract' first")?;
+
+    // Determine processed_messages_hash - default to registry hash
+    let pm_hash = match processed_messages_hash {
+        Some(h) => {
+            let h = h.strip_prefix("0x").unwrap_or(&h).to_lowercase();
+            if h.len() != 56 {
+                return Err(anyhow!("processed-messages-hash must be 28 bytes (56 hex chars)"));
+            }
+            h
+        }
+        None => {
+            // Default to registry hash
+            deployment
+                .registry
+                .as_ref()
+                .map(|r| r.hash.clone())
+                .ok_or_else(|| anyhow!("Registry hash not found. Use --processed-messages-hash or run 'deploy extract' first"))?
+        }
+    };
+    println!("  Processed Messages Script: {}", pm_hash);
 
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let address = keypair.address_bech32(ctx.pallas_network());
@@ -255,17 +288,16 @@ async fn init_mailbox(
 
     // Apply parameter to state_nft minting policy using aiken CLI
     println!("\n{}", "Applying state_nft parameter...".cyan());
-    let applied = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
-    println!("  State NFT Policy ID: {}", applied.policy_id.green());
+    let applied_nft = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
+    println!("  State NFT Policy ID: {}", applied_nft.policy_id.green());
 
-    // Get mailbox script address
-    let deployment = ctx.load_deployment_info()
-        .with_context(|| "Run 'deploy extract' first")?;
-    let mailbox_addr = deployment
-        .mailbox
-        .as_ref()
-        .map(|m| m.address.clone())
-        .ok_or_else(|| anyhow!("Mailbox address not found in deployment info"))?;
+    // Apply processed_messages_script parameter to mailbox validator
+    println!("{}", "Applying mailbox parameter...".cyan());
+    let pm_param_cbor = encode_script_hash_param(&pm_hash)?;
+    let pm_param_hex = hex::encode(&pm_param_cbor);
+    let applied_mailbox = apply_validator_param(&ctx.contracts_dir, "mailbox", "mailbox", &pm_param_hex)?;
+    let mailbox_addr = script_hash_to_address(&applied_mailbox.policy_id, ctx.pallas_network())?;
+    println!("  Mailbox Script Hash: {}", applied_mailbox.policy_id.green());
     println!("  Mailbox Address: {}", mailbox_addr);
 
     // Build mailbox datum
@@ -277,15 +309,21 @@ async fn init_mailbox(
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTransaction would:");
         println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        println!("  - Mint state NFT with policy {}", applied.policy_id);
+        println!("  - Mint state NFT with policy {}", applied_nft.policy_id);
         println!("  - Create output at {} with {} ADA + NFT + datum", mailbox_addr, 5);
+        println!("\n{}", "Mailbox will be parameterized with:".green());
+        println!("  - processed_messages_script: {}", pm_hash);
+        println!("  - Resulting mailbox hash: {}", applied_mailbox.policy_id);
         return Ok(());
     }
 
     // Build and submit transaction
     println!("\n{}", "Building transaction...".cyan());
-    let mint_script_cbor = hex::decode(&applied.compiled_code)
+    let mint_script_cbor = hex::decode(&applied_nft.compiled_code)
         .with_context(|| "Invalid script CBOR")?;
+
+    // State NFT asset name for mailbox
+    let mailbox_asset_name = "Mailbox State";
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let built_tx = tx_builder
@@ -297,6 +335,7 @@ async fn init_mailbox(
             &mailbox_addr,
             &datum_cbor,
             5_000_000, // 5 ADA output
+            Some(mailbox_asset_name),
         )
         .await?;
 
@@ -314,13 +353,51 @@ async fn init_mailbox(
     println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: https://preview.cardanoscan.io/transaction/{}", tx_hash);
 
-    // Update deployment info
+    // State UTXO reference (first output is the state UTXO)
+    let state_utxo_ref = format!("{}#0", tx_hash);
+
+    // Update deployment info with complete initialization details
     let mut deployment = deployment;
     if let Some(ref mut mailbox) = deployment.mailbox {
-        mailbox.state_nft_policy = Some(applied.policy_id.clone());
+        // Record the parameter that was applied
+        mailbox.applied_parameters = vec![
+            AppliedParameter {
+                name: "processed_messages_script".to_string(),
+                param_type: "ScriptHash".to_string(),
+                value: pm_hash.clone(),
+                description: Some("Script hash where processed message markers are stored".to_string()),
+            }
+        ];
+
+        // Update hash and address to post-parameterization values
+        mailbox.hash = applied_mailbox.policy_id.clone();
+        mailbox.address = mailbox_addr.clone();
+
+        // Record state NFT info
+        mailbox.state_nft = Some(StateNftInfo {
+            policy_id: applied_nft.policy_id.clone(),
+            asset_name_hex: hex::encode(mailbox_asset_name.as_bytes()),
+            asset_name: mailbox_asset_name.to_string(),
+            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+        });
+
+        // Record initialization details
+        mailbox.init_tx_hash = Some(tx_hash.clone());
+        mailbox.state_utxo = Some(state_utxo_ref.clone());
+        mailbox.initialized = true;
+
+        // Legacy fields
+        mailbox.utxo = Some(state_utxo_ref);
+        mailbox.state_nft_policy = Some(applied_nft.policy_id.clone());
     }
     ctx.save_deployment_info(&deployment)?;
     println!("\n{}", "✓ Deployment info updated".green());
+    println!("  Mailbox hash updated to: {}", applied_mailbox.policy_id);
+
+    // Also save the applied mailbox script for reference
+    let mailbox_script_path = ctx.network_deployments_dir().join("mailbox_applied.plutus");
+    applied_mailbox.save_plutus_file(&mailbox_script_path, "Applied mailbox validator")?;
+    println!("  Mailbox script saved to: {:?}", mailbox_script_path);
 
     Ok(())
 }
@@ -442,6 +519,9 @@ async fn init_ism(
     let mint_script_cbor = hex::decode(&applied.compiled_code)
         .with_context(|| "Invalid script CBOR")?;
 
+    // State NFT asset name for ISM
+    let ism_asset_name = "ISM State";
+
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let built_tx = tx_builder
         .build_init_tx(
@@ -452,6 +532,7 @@ async fn init_ism(
             &ism_addr,
             &datum_cbor,
             5_000_000, // 5 ADA output
+            Some(ism_asset_name),
         )
         .await?;
 
@@ -469,9 +550,29 @@ async fn init_ism(
     println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
-    // Update deployment info
+    // State UTXO reference (first output is the state UTXO)
+    let state_utxo_ref = format!("{}#0", tx_hash);
+
+    // Update deployment info with complete initialization details
     let mut deployment = deployment;
     if let Some(ref mut ism) = deployment.ism {
+        // ISM is not parameterized, so no applied_parameters
+
+        // Record state NFT info
+        ism.state_nft = Some(StateNftInfo {
+            policy_id: applied.policy_id.clone(),
+            asset_name_hex: hex::encode(ism_asset_name.as_bytes()),
+            asset_name: ism_asset_name.to_string(),
+            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+        });
+
+        // Record initialization details
+        ism.init_tx_hash = Some(tx_hash.clone());
+        ism.state_utxo = Some(state_utxo_ref.clone());
+        ism.initialized = true;
+
+        // Legacy fields
+        ism.utxo = Some(state_utxo_ref);
         ism.state_nft_policy = Some(applied.policy_id.clone());
     }
     ctx.save_deployment_info(&deployment)?;
@@ -568,6 +669,9 @@ async fn init_registry(ctx: &CliContext, utxo: Option<String>, dry_run: bool) ->
     let mint_script_cbor = hex::decode(&applied.compiled_code)
         .with_context(|| "Invalid script CBOR")?;
 
+    // State NFT asset name for Registry
+    let registry_asset_name = "Registry State";
+
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let built_tx = tx_builder
         .build_init_tx(
@@ -578,6 +682,7 @@ async fn init_registry(ctx: &CliContext, utxo: Option<String>, dry_run: bool) ->
             &registry_addr,
             &datum_cbor,
             5_000_000, // 5 ADA output
+            Some(registry_asset_name),
         )
         .await?;
 
@@ -595,9 +700,29 @@ async fn init_registry(ctx: &CliContext, utxo: Option<String>, dry_run: bool) ->
     println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
-    // Update deployment info
+    // State UTXO reference (first output is the state UTXO)
+    let state_utxo_ref = format!("{}#0", tx_hash);
+
+    // Update deployment info with complete initialization details
     let mut deployment = deployment;
     if let Some(ref mut registry) = deployment.registry {
+        // Registry is not parameterized, so no applied_parameters
+
+        // Record state NFT info
+        registry.state_nft = Some(StateNftInfo {
+            policy_id: applied.policy_id.clone(),
+            asset_name_hex: hex::encode(registry_asset_name.as_bytes()),
+            asset_name: registry_asset_name.to_string(),
+            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+        });
+
+        // Record initialization details
+        registry.init_tx_hash = Some(tx_hash.clone());
+        registry.state_utxo = Some(state_utxo_ref.clone());
+        registry.initialized = true;
+
+        // Legacy fields
+        registry.utxo = Some(state_utxo_ref);
         registry.state_nft_policy = Some(applied.policy_id.clone());
     }
     ctx.save_deployment_info(&deployment)?;
@@ -729,11 +854,12 @@ async fn init_recipient(
 
             println!("\n{}", "Applying generic_recipient parameter...".cyan());
             let mailbox_hash_cbor = encode_script_hash_param(&mailbox_hash)?;
+            let mailbox_hash_cbor_hex = hex::encode(&mailbox_hash_cbor);
             let recipient_applied = apply_validator_param(
                 &ctx.contracts_dir,
                 "generic_recipient",
                 "generic_recipient",
-                &mailbox_hash_cbor,
+                &mailbox_hash_cbor_hex,
             )?;
             println!("  Recipient Script Hash: {}", recipient_applied.policy_id.green());
 
@@ -843,23 +969,6 @@ async fn init_recipient(
     Ok(())
 }
 
-/// Encode a script hash (28 bytes) as a CBOR parameter for aiken blueprint apply
-fn encode_script_hash_param(hash_hex: &str) -> Result<String> {
-    // Script hash is 28 bytes, encoded as a CBOR bytestring
-    let hash_bytes = hex::decode(hash_hex)
-        .map_err(|e| anyhow!("Invalid script hash hex: {}", e))?;
-
-    if hash_bytes.len() != 28 {
-        return Err(anyhow!("Script hash must be 28 bytes, got {}", hash_bytes.len()));
-    }
-
-    // CBOR encode as bytestring: 0x58 1c <28 bytes>
-    let mut cbor = vec![0x58, 0x1c]; // bytestring with 1-byte length = 28
-    cbor.extend_from_slice(&hash_bytes);
-
-    Ok(hex::encode(cbor))
-}
-
 async fn init_all(
     ctx: &CliContext,
     domain: u32,
@@ -884,7 +993,8 @@ async fn init_all(
     init_ism(ctx, origin_domains, None, None, None, dry_run).await?;
 
     println!("\n{}", "2. Initializing Mailbox...".cyan());
-    init_mailbox(ctx, domain, &ism_hash, None, dry_run).await?;
+    // processed_messages_hash defaults to registry, utxo is None
+    init_mailbox(ctx, domain, &ism_hash, None, None, dry_run).await?;
 
     println!("\n{}", "3. Initializing Registry...".cyan());
     init_registry(ctx, None, dry_run).await?;

@@ -564,6 +564,25 @@ impl BlockfrostClient {
         self.get(&format!("/txs/{}", tx_hash)).await
     }
 
+    /// Get transactions for an address (paginated, returns tx hashes in order)
+    pub async fn get_address_transactions(&self, address: &str, count: u32) -> Result<Vec<AddressTx>> {
+        let endpoint = format!("/addresses/{}/transactions?count={}&order=desc", address, count);
+        match self.get(&endpoint).await {
+            Ok(txs) => Ok(txs),
+            Err(e) => {
+                if e.to_string().contains("404") {
+                    return Ok(vec![]);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Get transaction UTXOs (inputs and outputs)
+    pub async fn get_tx_utxos(&self, tx_hash: &str) -> Result<TxUtxos> {
+        self.get(&format!("/txs/{}/utxos", tx_hash)).await
+    }
+
     /// Wait for transaction confirmation
     pub async fn wait_for_tx(&self, tx_hash: &str, timeout_secs: u64) -> Result<TxInfo> {
         let start = std::time::Instant::now();
@@ -638,4 +657,42 @@ pub struct EvaluationResult {
 pub struct ExecutionUnits {
     pub memory: u64,
     pub steps: u64,
+}
+
+/// Address transaction info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressTx {
+    pub tx_hash: String,
+    pub tx_index: u32,
+    pub block_height: u64,
+    pub block_time: u64,
+}
+
+/// Transaction UTXOs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxUtxos {
+    pub hash: String,
+    pub inputs: Vec<TxUtxoEntry>,
+    pub outputs: Vec<TxUtxoEntry>,
+}
+
+/// Transaction UTXO entry (input or output)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxUtxoEntry {
+    pub address: String,
+    pub amount: Vec<TxUtxoAmount>,
+    #[serde(default)]
+    pub output_index: u32,
+    pub data_hash: Option<String>,
+    pub inline_datum: Option<serde_json::Value>,
+    pub reference_script_hash: Option<String>,
+    pub collateral: Option<bool>,
+    pub reference: Option<bool>,
+}
+
+/// Transaction UTXO amount
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxUtxoAmount {
+    pub unit: String,
+    pub quantity: String,
 }
