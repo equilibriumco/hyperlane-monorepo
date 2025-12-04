@@ -102,6 +102,10 @@ enum RegistryCommands {
         #[arg(long)]
         script_hash: String,
 
+        /// Owner verification key hash (28 bytes hex)
+        #[arg(long)]
+        owner: String,
+
         /// State NFT policy ID
         #[arg(long)]
         state_policy: String,
@@ -175,11 +179,12 @@ pub async fn execute(ctx: &CliContext, args: RegistryArgs) -> Result<()> {
         } => remove(ctx, &script_hash, registry_policy, dry_run).await,
         RegistryCommands::GenerateJson {
             script_hash,
+            owner,
             state_policy,
             state_asset,
             recipient_type,
             output,
-        } => generate_json(&script_hash, &state_policy, &state_asset, recipient_type, output).await,
+        } => generate_json(&script_hash, &owner, &state_policy, &state_asset, recipient_type, output).await,
     }
 }
 
@@ -222,8 +227,15 @@ async fn register(
         println!("  Custom ISM: {}", ism);
     }
 
+    // Get signing key early to determine owner
+    let signing_key_path = ctx.signing_key_path()
+        .ok_or_else(|| anyhow!("Signing key required for registration. Use --signing-key"))?;
+    let payer = Keypair::from_file(signing_key_path)?;
+    let owner_pkh = hex::encode(payer.verification_key_hash());
+
     let registration = RecipientInfo {
         script_hash: script_hash.clone(),
+        owner: owner_pkh.clone(),
         state_policy_id: state_policy.to_string(),
         state_asset_name: state_asset.to_string(),
         recipient_type: type_str.to_string(),
@@ -242,11 +254,8 @@ async fn register(
 
     // Get required context
     let api_key = ctx.require_api_key()?;
-    let signing_key_path = ctx.signing_key_path()
-        .ok_or_else(|| anyhow!("Signing key required for registration. Use --signing-key"))?;
 
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-    let payer = Keypair::from_file(signing_key_path)?;
     let network = if ctx.network() == "mainnet" { Network::Mainnet } else { Network::Testnet };
     let tx_builder = HyperlaneTxBuilder::new(&client, network);
 
@@ -274,11 +283,12 @@ async fn register(
         return Err(anyhow!("Recipient {} is already registered", script_hash));
     }
 
-    // Convert to RegistrationData
+    // Convert to RegistrationData (includes owner field now)
     let existing: Vec<RegistrationData> = existing_registrations
         .iter()
         .map(|r| RegistrationData {
             script_hash: r.script_hash.clone(),
+            owner: r.owner.clone(),
             state_policy_id: r.state_policy_id.clone(),
             state_asset_name: r.state_asset_name.clone(),
             ref_script_policy_id: r.ref_script_policy_id.clone(),
@@ -288,6 +298,7 @@ async fn register(
 
     let new_registration = RegistrationData {
         script_hash: script_hash.clone(),
+        owner: owner_pkh.clone(),
         state_policy_id: state_policy.to_string(),
         state_asset_name: state_asset.to_string(),
         ref_script_policy_id: ref_script_policy,
@@ -333,10 +344,7 @@ async fn register(
         .ok_or_else(|| anyhow!("Registry script missing cborHex field"))?;
     let registry_script_cbor = hex::decode(registry_script_hex)?;
 
-    // Get owner PKH from payer
-    let owner_pkh = hex::encode(payer.verification_key_hash());
-
-    // Build transaction
+    // Build transaction (owner_pkh already defined earlier)
     println!("\n{}", "Building transaction...".cyan());
     let tx = tx_builder
         .build_registry_register_tx(
@@ -391,17 +399,28 @@ async fn list(
         match format {
             OutputFormat::Table => {
                 println!("\n{}", "Registered Recipients:".green());
-                println!("{}", "-".repeat(80));
+                println!("{}", "-".repeat(120));
                 println!(
-                    "{:<64} {:<10}",
-                    "Script Hash", "Type"
+                    "{:<58} {:<58} {:<10}",
+                    "Script Hash", "Owner", "Type"
                 );
-                println!("{}", "-".repeat(80));
+                println!("{}", "-".repeat(120));
 
                 for reg in &registrations {
+                    // Truncate hashes for display
+                    let script_display = if reg.script_hash.len() > 56 {
+                        format!("{}...", &reg.script_hash[..53])
+                    } else {
+                        reg.script_hash.clone()
+                    };
+                    let owner_display = if reg.owner.len() > 56 {
+                        format!("{}...", &reg.owner[..53])
+                    } else {
+                        reg.owner.clone()
+                    };
                     println!(
-                        "{:<64} {:<10}",
-                        reg.script_hash, reg.recipient_type
+                        "{:<58} {:<58} {:<10}",
+                        script_display, owner_display, reg.recipient_type
                     );
                 }
 
@@ -475,12 +494,14 @@ async fn remove(
 
 async fn generate_json(
     script_hash: &str,
+    owner: &str,
     state_policy: &str,
     state_asset: &str,
     recipient_type: RecipientTypeArg,
     output: Option<String>,
 ) -> Result<()> {
     let script_hash = validate_script_hash(script_hash)?;
+    let owner = validate_script_hash(owner)?; // Same validation - 28 bytes hex
 
     let type_str = match recipient_type {
         RecipientTypeArg::Generic => "GenericHandler",
@@ -490,6 +511,7 @@ async fn generate_json(
 
     let registration = RecipientInfo {
         script_hash,
+        owner,
         state_policy_id: state_policy.to_string(),
         state_asset_name: state_asset.to_string(),
         recipient_type: type_str.to_string(),
@@ -599,8 +621,10 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         _ => return Err(anyhow!("Registration is not a Constr")),
     };
 
-    if tag != 121 || fields.len() < 6 {
-        return Err(anyhow!("Invalid registration structure, expected 6 fields, got {}", fields.len()));
+    // RecipientRegistration has 7 fields now:
+    // script_hash, owner, state_locator, reference_script_locator, additional_inputs, recipient_type, custom_ism
+    if tag != 121 || fields.len() < 7 {
+        return Err(anyhow!("Invalid registration structure, expected 7 fields, got {}", fields.len()));
     }
 
     // Script hash (field 0)
@@ -609,11 +633,17 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         _ => return Err(anyhow!("Invalid script_hash")),
     };
 
-    // State locator (field 1)
-    let (state_policy, state_asset) = parse_utxo_locator_from_plutus(&fields[1])?;
+    // Owner (field 1) - VerificationKeyHash
+    let owner = match &fields[1] {
+        PlutusData::BoundedBytes(bytes) => hex::encode(bytes.as_ref() as &[u8]),
+        _ => return Err(anyhow!("Invalid owner")),
+    };
 
-    // Reference script locator (field 2) - Option<UtxoLocator>
-    let (ref_script_policy, ref_script_asset) = match &fields[2] {
+    // State locator (field 2)
+    let (state_policy, state_asset) = parse_utxo_locator_from_plutus(&fields[2])?;
+
+    // Reference script locator (field 3) - Option<UtxoLocator>
+    let (ref_script_policy, ref_script_asset) = match &fields[3] {
         PlutusData::Constr(c) => {
             if c.tag == 121 {
                 // Some(locator)
@@ -631,8 +661,8 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         _ => (None, None),
     };
 
-    // Recipient type (field 4, was field 3)
-    let recipient_type = match &fields[4] {
+    // Recipient type (field 5)
+    let recipient_type = match &fields[5] {
         PlutusData::Constr(c) => match c.tag {
             121 => "GenericHandler",
             122 => "TokenReceiver",
@@ -642,8 +672,8 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         _ => "Unknown",
     }.to_string();
 
-    // Custom ISM (field 5, was field 4)
-    let custom_ism = match &fields[5] {
+    // Custom ISM (field 6)
+    let custom_ism = match &fields[6] {
         PlutusData::Constr(c) => {
             if c.tag == 121 {
                 if let Some(PlutusData::BoundedBytes(bytes)) = c.fields.first() {
@@ -660,6 +690,7 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
 
     Ok(RecipientInfo {
         script_hash,
+        owner,
         state_policy_id: state_policy,
         state_asset_name: state_asset,
         recipient_type,
@@ -709,6 +740,7 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .and_then(|f| f.as_array())
             .ok_or_else(|| anyhow!("Invalid registration entry"))?;
 
+        // Field 0: script_hash
         let script_hash = entry_fields
             .get(0)
             .and_then(|h| h.get("bytes"))
@@ -716,9 +748,17 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .ok_or_else(|| anyhow!("Invalid script hash"))?
             .to_string();
 
-        // Parse state locator (field 1)
-        let state_fields = entry_fields
+        // Field 1: owner (VerificationKeyHash)
+        let owner = entry_fields
             .get(1)
+            .and_then(|h| h.get("bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| anyhow!("Invalid owner"))?
+            .to_string();
+
+        // Field 2: state_locator
+        let state_fields = entry_fields
+            .get(2)
             .and_then(|s| s.get("fields"))
             .and_then(|f| f.as_array())
             .ok_or_else(|| anyhow!("Invalid state locator"))?;
@@ -737,9 +777,9 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .unwrap_or("")
             .to_string();
 
-        // Parse reference script locator (field 2) - Option<UtxoLocator>
+        // Field 3: reference_script_locator - Option<UtxoLocator>
         let (ref_script_policy, ref_script_asset) = entry_fields
-            .get(2)
+            .get(3)
             .and_then(|opt| {
                 if opt.get("constructor") == Some(&serde_json::json!(0)) {
                     // Some(locator)
@@ -769,9 +809,9 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             })
             .unwrap_or((None, None));
 
-        // Parse recipient type (field 4, was field 3)
+        // Field 5: recipient_type
         let recipient_type = entry_fields
-            .get(4)
+            .get(5)
             .and_then(|t| t.get("constructor"))
             .and_then(|c| c.as_u64())
             .map(|c| match c {
@@ -783,9 +823,9 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .unwrap_or("Unknown")
             .to_string();
 
-        // Parse custom ISM (field 5, was field 4)
+        // Field 6: custom_ism
         let custom_ism = entry_fields
-            .get(5)
+            .get(6)
             .and_then(|i| {
                 if i.get("constructor") == Some(&serde_json::json!(0)) {
                     // Some(ism)
@@ -802,6 +842,7 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
 
         registrations.push(RecipientInfo {
             script_hash,
+            owner,
             state_policy_id: state_policy,
             state_asset_name: state_asset,
             recipient_type,

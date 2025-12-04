@@ -267,9 +267,10 @@ pub fn build_ism_set_threshold_redeemer(domain: u32, threshold: u32) -> Vec<u8> 
 }
 
 /// Build a Registry datum
+/// Note: admin_pkh is the registry admin, while each registration has its own owner
 pub fn build_registry_datum(
     registrations: &[RegistrationData],
-    owner_pkh: &str,
+    admin_pkh: &str,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -282,6 +283,9 @@ pub fn build_registry_datum(
 
         // script_hash
         builder.bytes_hex(&reg.script_hash)?;
+
+        // owner (VerificationKeyHash - the registration owner)
+        builder.bytes_hex(&reg.owner)?;
 
         // state_locator (policy_id, asset_name)
         builder.start_constr(0);
@@ -319,8 +323,8 @@ pub fn build_registry_datum(
     }
     builder.end_list();
 
-    // Owner
-    builder.bytes_hex(owner_pkh)?;
+    // Admin (registry admin, not registration owner)
+    builder.bytes_hex(admin_pkh)?;
 
     builder.end_constr();
 
@@ -331,6 +335,8 @@ pub fn build_registry_datum(
 #[derive(Clone)]
 pub struct RegistrationData {
     pub script_hash: String,
+    /// Owner who can modify/remove this registration (verification key hash, 28 bytes hex)
+    pub owner: String,
     pub state_policy_id: String,
     pub state_asset_name: String,
     /// Reference script locator (optional)
@@ -346,19 +352,23 @@ pub fn build_mint_redeemer() -> Vec<u8> {
     builder.build()
 }
 
-/// Build a Registry AdminRegister redeemer (owner-only, bypasses script ownership check)
+/// Build a Registry AdminRegister redeemer (admin-only, bypasses script ownership check)
 /// Redeemer: AdminRegister { registration: RecipientRegistration }
+/// AdminRegister is constructor 4 in RegistryRedeemer
 pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    // AdminRegister is constructor 3
-    builder.start_constr(3);
+    // AdminRegister is constructor 4 (Register=0, UpdateRegistration=1, Unregister=2, TransferRegistrationOwnership=3, AdminRegister=4)
+    builder.start_constr(4);
 
     // RecipientRegistration structure
     builder.start_constr(0);
 
     // script_hash
     builder.bytes_hex(&reg.script_hash)?;
+
+    // owner (VerificationKeyHash)
+    builder.bytes_hex(&reg.owner)?;
 
     // state_locator (policy_id, asset_name)
     builder.start_constr(0);
@@ -412,6 +422,9 @@ pub fn build_registry_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8
     // script_hash
     builder.bytes_hex(&reg.script_hash)?;
 
+    // owner (VerificationKeyHash)
+    builder.bytes_hex(&reg.owner)?;
+
     // state_locator (policy_id, asset_name)
     builder.start_constr(0);
     builder.bytes_hex(&reg.state_policy_id)?;
@@ -450,13 +463,14 @@ pub fn build_registry_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8
     Ok(builder.build())
 }
 
-/// Build a Registry Remove redeemer
-/// Redeemer: Remove { script_hash: ScriptHash }
-pub fn build_registry_remove_redeemer(script_hash: &str) -> Result<Vec<u8>> {
+/// Build a Registry Unregister redeemer
+/// Redeemer: Unregister { script_hash: ScriptHash }
+/// Unregister is constructor 2 (Register=0, UpdateRegistration=1, Unregister=2, TransferRegistrationOwnership=3, AdminRegister=4)
+pub fn build_registry_unregister_redeemer(script_hash: &str) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    // Remove is constructor 1
-    builder.start_constr(1);
+    // Unregister is constructor 2
+    builder.start_constr(2);
     builder.bytes_hex(script_hash)?;
     builder.end_constr();
 

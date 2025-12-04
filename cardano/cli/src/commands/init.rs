@@ -895,7 +895,10 @@ async fn init_recipient(
         println!("    --state-policy {} \\", nft_policy_id);
         println!("    --state-asset \"\" \\");
         println!("    --ref-script-policy {} \\", nft_policy_id);
-        println!("    --ref-script-asset {}", ref_asset_name);
+        println!("    --ref-script-asset {} \\", ref_asset_name);
+        println!("    --signing-key <path-to-owner-key>");
+        println!("\nNote: The signing key's public key hash becomes the registration owner.");
+        println!("Only the owner can update or remove this registration.");
         return Ok(());
     }
 
@@ -963,7 +966,11 @@ async fn init_recipient(
     println!("    --state-policy {} \\", nft_policy_id);
     println!("    --state-asset \"\" \\");
     println!("    --ref-script-policy {} \\", nft_policy_id);
-    println!("    --ref-script-asset {}", ref_asset_name);
+    println!("    --ref-script-asset {} \\", ref_asset_name);
+    println!("    --signing-key <path-to-owner-key>");
+    println!();
+    println!("{}", "Note: The signing key's public key hash becomes the registration owner.".cyan());
+    println!("{}", "Only the owner can update or remove this registration.".cyan());
     println!();
 
     Ok(())

@@ -126,3 +126,16 @@ pub fn assoc_find(items: List<(k, v)>, key: k) -> Option<v> {
       }
   }
 }
+
+/// Check if a specific NFT is present in any transaction input
+/// This is used for proving ownership/control of a UTXO
+pub fn has_nft_in_inputs(
+  tx: Transaction,
+  policy_id: ByteArray,
+  asset_name: ByteArray,
+) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) { quantity_of(input.output.value, policy_id, asset_name) > 0 },
+  )
+}

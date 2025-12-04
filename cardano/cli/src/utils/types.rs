@@ -289,8 +289,11 @@ pub struct MailboxDatum {
 
 /// Registry recipient info
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecipientInfo {
     pub script_hash: String,
+    /// Owner who can modify/remove this registration (verification key hash)
+    pub owner: String,
     pub state_policy_id: String,
     pub state_asset_name: String,
     pub recipient_type: String,

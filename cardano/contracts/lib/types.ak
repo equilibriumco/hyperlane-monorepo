@@ -112,7 +112,11 @@ pub type RecipientType {
 
 /// Registry entry for a recipient
 pub type RecipientRegistration {
+  /// Script hash of the recipient validator
   script_hash: ScriptHash,
+  /// Owner who can modify/remove this registration
+  /// This is the KEY security field - only this key can update the registration
+  owner: VerificationKeyHash,
   /// NFT locator to find the state UTXO (contains datum)
   state_locator: UtxoLocator,
   /// NFT locator to find the reference script UTXO
@@ -282,15 +286,40 @@ pub type MultisigIsmRedeemer {
 /// Registry datum
 pub type RegistryDatum {
   registrations: List<RecipientRegistration>,
-  owner: VerificationKeyHash,
+  /// Registry admin (can pause, upgrade, etc.)
+  admin: VerificationKeyHash,
 }
 
-/// Registry redeemer
+/// Registry redeemer actions
 pub type RegistryRedeemer {
+  /// Initial registration of a new recipient
+  /// Requires: owner signature AND state NFT in inputs
   Register { registration: RecipientRegistration }
+
+  /// Update an existing registration (owner only)
+  /// Requires: current owner's signature
+  UpdateRegistration {
+    script_hash: ScriptHash,
+    new_state_locator: Option<UtxoLocator>,
+    new_reference_script_locator: Option<Option<UtxoLocator>>,
+    new_additional_inputs: Option<List<AdditionalInput>>,
+    new_recipient_type: Option<RecipientType>,
+    new_custom_ism: Option<Option<ScriptHash>>,
+  }
+
+  /// Remove a registration (owner only)
+  /// Requires: current owner's signature
   Unregister { script_hash: ScriptHash }
-  UpdateRegistration { registration: RecipientRegistration }
-  /// Admin-only registration (bypasses script ownership check)
+
+  /// Transfer registration ownership (both parties must sign)
+  /// Requires: current owner AND new owner signatures
+  TransferRegistrationOwnership {
+    script_hash: ScriptHash,
+    new_owner: VerificationKeyHash,
+  }
+
+  /// Admin-only registration (bypasses ownership check)
+  /// Requires: registry admin signature
   AdminRegister { registration: RecipientRegistration }
 }
 
