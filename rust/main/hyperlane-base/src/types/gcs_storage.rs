@@ -227,15 +227,6 @@ impl CheckpointSyncer for GcsStorageClient {
         }
     }
 
-    /// Attempt to fetch the signed blake2b (checkpoint, messageId) tuple at this index
-    #[instrument(skip(self))]
-    async fn fetch_checkpoint_blake2b(
-        &self,
-        _index: u32,
-    ) -> Result<Option<hyperlane_core::SignedCheckpointWithMessageIdBlake2b>> {
-        todo!("Blake2b checkpoints not supported for GCS storage")
-    }
-
     /// Write the signed (checkpoint, messageId) tuple to this syncer
     #[instrument(skip(self, signed_checkpoint))]
     async fn write_checkpoint(
@@ -246,15 +237,6 @@ impl CheckpointSyncer for GcsStorageClient {
         let object_name = self.object_path(&object_key);
         let data = serde_json::to_vec(signed_checkpoint)?;
         self.upload_and_log(&object_name, data).await
-    }
-
-    /// Write the signed blake2b (checkpoint, messageId) tuple to this syncer
-    #[instrument(skip(self, _signed_checkpoint))]
-    async fn write_checkpoint_blake2b(
-        &self,
-        _signed_checkpoint: &hyperlane_core::SignedCheckpointWithMessageIdBlake2b,
-    ) -> Result<()> {
-        todo!("Blake2b checkpoints not supported for GCS storage")
     }
 
     /// Write the agent metadata to this syncer

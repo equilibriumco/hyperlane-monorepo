@@ -6021,7 +6021,6 @@ dependencies = [
  "auto_impl 1.2.0",
  "bech32 0.11.0",
  "bigdecimal",
- "blake2",
  "borsh 1.6.0",
  "bs58 0.5.1",
  "bytes",

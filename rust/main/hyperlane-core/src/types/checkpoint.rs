@@ -1,12 +1,10 @@
 use std::fmt::Debug;
 
-use blake2::digest::consts::U32;
-use blake2::Blake2b;
 use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 use sha3::{digest::Update, Digest, Keccak256};
 
-use crate::{utils::{domain_hash, domain_hash_blake2b}, Signable, Signature, SignedType, H256};
+use crate::{utils::domain_hash, Signable, Signature, SignedType, H256};
 
 /// An Hyperlane checkpoint
 #[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
@@ -52,37 +50,8 @@ impl Signable for CheckpointWithMessageId {
     }
 }
 
-/// A Hyperlane (checkpoint, messageId) tuple with Blake2b for Cardano
-#[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug, Deref)]
-pub struct CheckpointWithMessageIdBlake2b {
-    /// existing Hyperlane checkpoint struct
-    #[deref]
-    pub checkpoint: CheckpointWithMessageId,
-}
-
-impl Signable for CheckpointWithMessageIdBlake2b {
-    /// The equivalence of `CheckpointWithMessageId` but with Blake2b over Keccak256 for Cardano
-    fn signing_hash(&self) -> H256 {
-        type Blake2b256 = Blake2b<U32>;
-        H256::from_slice(
-            Blake2b256::new()
-                .chain(domain_hash_blake2b(
-                    self.merkle_tree_hook_address,
-                    self.mailbox_domain,
-                ))
-                .chain(self.root)
-                .chain(self.index.to_be_bytes())
-                .chain(self.message_id)
-                .finalize()
-                .as_slice(),
-        )
-    }
-}
-
 /// Signed (checkpoint, messageId) tuple
 pub type SignedCheckpointWithMessageId = SignedType<CheckpointWithMessageId>;
-/// Signed checkpoint with Blake2b for Cardano
-pub type SignedCheckpointWithMessageIdBlake2b = SignedType<CheckpointWithMessageIdBlake2b>;
 
 /// A checkpoint and multiple signatures
 #[derive(Clone, Debug, PartialEq)]
