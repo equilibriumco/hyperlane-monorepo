@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use commands::{deferred, deploy, init, ism, mailbox, query, registry, tx, utxo, warp};
+use commands::{config, deferred, deploy, init, ism, mailbox, query, registry, tx, utxo, warp};
 
 /// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
 #[derive(Parser)]
@@ -78,6 +78,9 @@ enum Commands {
     /// Deferred message processing (example for example_deferred_recipient)
     Deferred(deferred::DeferredArgs),
 
+    /// Manage configuration files (relayer config)
+    Config(config::ConfigArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -137,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Utxo(args) => utxo::execute(&ctx, args).await,
         Commands::Tx(args) => tx::execute(&ctx, args).await,
         Commands::Deferred(args) => deferred::execute(&ctx, args).await,
+        Commands::Config(args) => config::execute(&ctx, args).await,
         Commands::Completions { shell } => {
             use clap::CommandFactory;
             use clap_complete::generate;

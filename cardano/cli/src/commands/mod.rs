@@ -1,5 +1,6 @@
 //! CLI commands module
 
+pub mod config;
 pub mod deferred;
 pub mod deploy;
 pub mod init;
