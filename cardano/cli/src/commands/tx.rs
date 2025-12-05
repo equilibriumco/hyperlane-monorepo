@@ -45,12 +45,6 @@ enum TxCommands {
         timeout: u64,
     },
 
-    /// Evaluate a transaction (get execution units)
-    Evaluate {
-        /// Path to transaction file
-        tx_file: String,
-    },
-
     /// Sign a transaction
     Sign {
         /// Path to raw transaction file
@@ -92,7 +86,6 @@ pub async fn execute(ctx: &CliContext, args: TxArgs) -> Result<()> {
         } => submit(ctx, &tx_file, wait, timeout).await,
         TxCommands::Status { tx_hash } => status(ctx, &tx_hash).await,
         TxCommands::Wait { tx_hash, timeout } => wait_for_tx(ctx, &tx_hash, timeout).await,
-        TxCommands::Evaluate { tx_file } => evaluate(ctx, &tx_file).await,
         TxCommands::Sign { tx_file, output } => sign(ctx, &tx_file, output).await,
         TxCommands::Decode { input } => decode(&input).await,
         TxCommands::BuildPayment { to, amount, output } => {
@@ -194,30 +187,6 @@ async fn wait_for_tx(ctx: &CliContext, tx_hash: &str, timeout: u64) -> Result<()
     println!("  Block: {}", info.block);
     println!("  Slot: {}", info.slot);
     println!("  Fee: {} lovelace", info.fees);
-
-    Ok(())
-}
-
-async fn evaluate(ctx: &CliContext, tx_file: &str) -> Result<()> {
-    println!("{}", format!("Evaluating transaction from {}...", tx_file).cyan());
-
-    let content = std::fs::read_to_string(tx_file)?;
-    let json: serde_json::Value = serde_json::from_str(&content)?;
-
-    let cbor_hex = json
-        .get("cborHex")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Missing 'cborHex' field"))?;
-
-    let cbor = hex::decode(cbor_hex)?;
-
-    let api_key = ctx.require_api_key()?;
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-
-    let result = client.evaluate_tx(&cbor).await?;
-
-    println!("\n{}", "Evaluation Result:".green());
-    println!("{}", serde_json::to_string_pretty(&result)?);
 
     Ok(())
 }

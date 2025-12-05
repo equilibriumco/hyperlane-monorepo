@@ -145,21 +145,55 @@ impl BlockfrostClient {
     }
 
     /// Find UTXO by asset (policy ID + asset name)
+    /// Find a UTXO containing an asset with the given policy ID and asset name.
+    /// The asset_name should be hex-encoded (e.g., "4d61696c626f78205374617465" for "Mailbox State").
+    /// If asset_name is empty, it will search for any asset under the policy and match UTXOs
+    /// containing any asset from that policy.
     pub async fn find_utxo_by_asset(&self, policy_id: &str, asset_name: &str) -> Result<Option<Utxo>> {
-        let unit = if asset_name.is_empty() {
-            policy_id.to_string()
-        } else {
-            format!("{}{}", policy_id, asset_name)
-        };
-
         #[derive(Deserialize)]
         struct AssetAddress {
             address: String,
+            #[allow(dead_code)]
             quantity: String,
         }
 
-        let endpoint = format!("/assets/{}/addresses", unit);
-        let addresses: Vec<AssetAddress> = match self.get(&endpoint).await {
+        // If asset_name is provided, query directly for that specific asset
+        if !asset_name.is_empty() {
+            let unit = format!("{}{}", policy_id, asset_name);
+            let endpoint = format!("/assets/{}/addresses", unit);
+            let addresses: Vec<AssetAddress> = match self.get(&endpoint).await {
+                Ok(a) => a,
+                Err(e) => {
+                    if e.to_string().contains("404") {
+                        return Ok(None);
+                    }
+                    return Err(e);
+                }
+            };
+
+            // Find the address holding the asset
+            for addr in addresses {
+                let utxos = self.get_utxos(&addr.address).await?;
+                for utxo in utxos {
+                    if utxo.assets.iter().any(|a| a.policy_id == policy_id && a.asset_name == asset_name) {
+                        return Ok(Some(utxo));
+                    }
+                }
+            }
+            return Ok(None);
+        }
+
+        // If asset_name is empty, query for assets under this policy
+        // Blockfrost API: /assets/policy/{policy_id}
+        #[derive(Deserialize)]
+        struct PolicyAsset {
+            asset: String,
+            #[allow(dead_code)]
+            quantity: String,
+        }
+
+        let endpoint = format!("/assets/policy/{}", policy_id);
+        let assets: Vec<PolicyAsset> = match self.get(&endpoint).await {
             Ok(a) => a,
             Err(e) => {
                 if e.to_string().contains("404") {
@@ -169,12 +203,28 @@ impl BlockfrostClient {
             }
         };
 
-        // Find the address holding the asset
-        for addr in addresses {
-            let utxos = self.get_utxos(&addr.address).await?;
-            for utxo in utxos {
-                if utxo.assets.iter().any(|a| a.policy_id == policy_id && a.asset_name == asset_name) {
-                    return Ok(Some(utxo));
+        // For each asset under this policy, try to find a UTXO
+        for policy_asset in assets {
+            // The asset field is the full unit (policy_id + asset_name_hex)
+            let asset_name_from_unit = policy_asset.asset.strip_prefix(policy_id).unwrap_or("");
+
+            let endpoint = format!("/assets/{}/addresses", policy_asset.asset);
+            let addresses: Vec<AssetAddress> = match self.get(&endpoint).await {
+                Ok(a) => a,
+                Err(e) => {
+                    if e.to_string().contains("404") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            for addr in addresses {
+                let utxos = self.get_utxos(&addr.address).await?;
+                for utxo in utxos {
+                    if utxo.assets.iter().any(|a| a.policy_id == policy_id && a.asset_name == asset_name_from_unit) {
+                        return Ok(Some(utxo));
+                    }
                 }
             }
         }
@@ -605,31 +655,6 @@ impl BlockfrostClient {
         }
     }
 
-    /// Evaluate transaction (get execution units)
-    pub async fn evaluate_tx(&self, tx_cbor: &[u8]) -> Result<EvaluationResult> {
-        #[derive(Deserialize)]
-        struct EvalResponse {
-            result: Option<EvaluationResult>,
-            error: Option<serde_json::Value>,
-        }
-
-        let response: EvalResponse = self
-            .client
-            .post(&format!("{}/utils/txs/evaluate", self.base_url))
-            .header("project_id", &self.api_key)
-            .header("Content-Type", "application/cbor")
-            .body(tx_cbor.to_vec())
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        if let Some(error) = response.error {
-            return Err(anyhow!("Transaction evaluation failed: {:?}", error));
-        }
-
-        response.result.ok_or_else(|| anyhow!("No evaluation result"))
-    }
 }
 
 /// Transaction information
@@ -645,19 +670,6 @@ pub struct TxInfo {
     pub size: u32,
 }
 
-/// Transaction evaluation result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluationResult {
-    #[serde(rename = "EvaluationResult")]
-    pub evaluation_result: Option<std::collections::HashMap<String, ExecutionUnits>>,
-}
-
-/// Execution units for a script
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionUnits {
-    pub memory: u64,
-    pub steps: u64,
-}
 
 /// Address transaction info
 #[derive(Debug, Clone, Serialize, Deserialize)]

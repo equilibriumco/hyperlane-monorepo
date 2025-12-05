@@ -50,6 +50,10 @@ enum RegistryCommands {
         #[arg(long)]
         custom_ism: Option<String>,
 
+        /// Message NFT minting policy (required for deferred recipients)
+        #[arg(long)]
+        message_policy: Option<String>,
+
         /// Registry policy ID
         #[arg(long)]
         registry_policy: Option<String>,
@@ -148,6 +152,7 @@ pub async fn execute(ctx: &CliContext, args: RegistryArgs) -> Result<()> {
             ref_script_asset,
             recipient_type,
             custom_ism,
+            message_policy,
             registry_policy,
             dry_run,
         } => {
@@ -160,6 +165,7 @@ pub async fn execute(ctx: &CliContext, args: RegistryArgs) -> Result<()> {
                 ref_script_asset,
                 recipient_type,
                 custom_ism,
+                message_policy,
                 registry_policy,
                 dry_run,
             )
@@ -198,6 +204,7 @@ async fn register(
     ref_script_asset: Option<String>,
     recipient_type: RecipientTypeArg,
     custom_ism: Option<String>,
+    message_policy: Option<String>,
     registry_policy: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -224,6 +231,16 @@ async fn register(
     };
     println!("  Type: {}", type_str);
 
+    // Validate deferred recipients have message_policy
+    if matches!(recipient_type, RecipientTypeArg::Deferred) {
+        if message_policy.is_none() {
+            return Err(anyhow!(
+                "Deferred recipients require --message-policy (the stored_message_nft minting policy)"
+            ));
+        }
+        println!("  Message Policy: {}", message_policy.as_ref().unwrap());
+    }
+
     if let Some(ism) = &custom_ism {
         println!("  Custom ISM: {}", ism);
     }
@@ -243,6 +260,7 @@ async fn register(
         custom_ism: custom_ism.clone(),
         ref_script_policy_id: ref_script_policy.clone(),
         ref_script_asset_name: ref_script_asset.clone(),
+        deferred_message_policy: message_policy.clone(),
     };
 
     println!("\n{}", "Registration Data:".green());
@@ -294,6 +312,9 @@ async fn register(
             state_asset_name: r.state_asset_name.clone(),
             ref_script_policy_id: r.ref_script_policy_id.clone(),
             ref_script_asset_name: r.ref_script_asset_name.clone(),
+            recipient_type: r.recipient_type.clone(),
+            custom_ism: r.custom_ism.clone(),
+            deferred_message_policy: r.deferred_message_policy.clone(),
         })
         .collect();
 
@@ -304,6 +325,9 @@ async fn register(
         state_asset_name: state_asset.to_string(),
         ref_script_policy_id: ref_script_policy,
         ref_script_asset_name: ref_script_asset,
+        recipient_type: type_str.to_string(),
+        custom_ism: custom_ism.clone(),
+        deferred_message_policy: message_policy.clone(),
     };
 
     // Get payer UTXOs
@@ -474,7 +498,7 @@ async fn show(
 async fn remove(
     ctx: &CliContext,
     script_hash: &str,
-    _registry_policy: Option<String>,
+    registry_policy: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
     println!("{}", "Removing recipient registration...".cyan());
@@ -482,13 +506,131 @@ async fn remove(
     let script_hash = validate_script_hash(script_hash)?;
     println!("  Script Hash: {}", script_hash);
 
+    let policy_id = get_registry_policy(ctx, registry_policy)?;
+    let api_key = ctx.require_api_key()?;
+    let payer = ctx.load_signing_key()?;
+    let network = ctx.pallas_network();
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Look up registry UTXO
+    println!("\n{}", "Looking up registry UTXO...".cyan());
+    let registry_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Registry UTXO not found"))?;
+
+    println!("  Found: {}#{}", registry_utxo.tx_hash, registry_utxo.output_index);
+
+    // Parse existing registrations
+    let existing_registrations = if let Some(datum) = &registry_utxo.inline_datum {
+        parse_registrations_from_datum(datum)?
+    } else {
+        return Err(anyhow!("Registry UTXO has no inline datum"));
+    };
+
+    // Find the registration to remove and verify ownership
+    let payer_pkh = hex::encode(payer.verification_key_hash());
+    let reg_to_remove = existing_registrations
+        .iter()
+        .find(|r| r.script_hash == script_hash)
+        .ok_or_else(|| anyhow!("Recipient {} not found in registry", script_hash))?;
+
+    if reg_to_remove.owner != payer_pkh {
+        return Err(anyhow!(
+            "Only the owner can remove this registration. Owner: {}, Your key: {}",
+            reg_to_remove.owner,
+            payer_pkh
+        ));
+    }
+
+    println!("  Registration found, owner verified");
+    println!("  Existing registrations: {}", existing_registrations.len());
+
+    // Filter out the registration to remove
+    let remaining: Vec<RegistrationData> = existing_registrations
+        .iter()
+        .filter(|r| r.script_hash != script_hash)
+        .map(|r| RegistrationData {
+            script_hash: r.script_hash.clone(),
+            owner: r.owner.clone(),
+            state_policy_id: r.state_policy_id.clone(),
+            state_asset_name: r.state_asset_name.clone(),
+            ref_script_policy_id: r.ref_script_policy_id.clone(),
+            ref_script_asset_name: r.ref_script_asset_name.clone(),
+            recipient_type: r.recipient_type.clone(),
+            custom_ism: r.custom_ism.clone(),
+            deferred_message_policy: r.deferred_message_policy.clone(),
+        })
+        .collect();
+
+    println!("  Remaining after removal: {}", remaining.len());
+
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         return Ok(());
     }
 
-    println!("\n{}", "Manual Steps Required:".yellow().bold());
-    println!("Build a transaction that spends the registry UTXO with 'Remove' redeemer");
+    // Get payer UTXOs
+    println!("\n{}", "Finding payer UTXOs...".cyan());
+    let payer_address = payer.address_bech32(network);
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+
+    let input_utxo = payer_utxos.iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
+        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees"))?;
+
+    let collateral_utxo = payer_utxos.iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.tx_hash != input_utxo.tx_hash)
+        .ok_or_else(|| anyhow!("Need a separate collateral UTXO"))?;
+
+    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
+    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+
+    // Load registry script from deployment directory
+    println!("\n{}", "Loading registry script...".cyan());
+    let registry_script_path = ctx.network_deployments_dir().join("registry.plutus");
+    if !registry_script_path.exists() {
+        return Err(anyhow!(
+            "Registry script not found at {:?}. Make sure to deploy first.",
+            registry_script_path
+        ));
+    }
+    let registry_script_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&registry_script_path)?
+    )?;
+    let registry_script_hex = registry_script_json
+        .get("cborHex")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Registry script missing cborHex field"))?;
+    let registry_script_cbor = hex::decode(registry_script_hex)?;
+
+    // Build transaction
+    println!("\n{}", "Building transaction...".cyan());
+    let tx_builder = HyperlaneTxBuilder::new(&client, network);
+    let tx = tx_builder
+        .build_registry_unregister_tx(
+            &payer,
+            input_utxo,
+            collateral_utxo,
+            &registry_utxo,
+            &registry_script_cbor,
+            &remaining,
+            &script_hash,
+            &payer_pkh,
+        )
+        .await?;
+
+    // Sign transaction
+    println!("{}", "Signing transaction...".cyan());
+    let signed_tx = tx_builder.sign_tx(tx, &payer)?;
+
+    // Submit transaction
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client.submit_tx(&signed_tx).await?;
+
+    println!("\n{} Transaction submitted!", "✓".green());
+    println!("  TX Hash: {}", tx_hash);
+    println!("\n{}", "Recipient removed successfully!".green().bold());
 
     Ok(())
 }
@@ -519,6 +661,7 @@ async fn generate_json(
         custom_ism: None,
         ref_script_policy_id: None,
         ref_script_asset_name: None,
+        deferred_message_policy: None,
     };
 
     let json = serde_json::to_string_pretty(&registration)?;
@@ -662,16 +805,24 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         _ => (None, None),
     };
 
-    // Recipient type (field 5)
-    let recipient_type = match &fields[5] {
+    // Recipient type (field 5) and extract deferred_message_policy for Deferred
+    let (recipient_type, deferred_message_policy) = match &fields[5] {
         PlutusData::Constr(c) => match c.tag {
-            121 => "Generic",
-            122 => "TokenReceiver",
-            123 => "Deferred",
-            _ => "Unknown",
+            121 => ("Generic".to_string(), None),
+            122 => ("TokenReceiver".to_string(), None),
+            123 => {
+                // Deferred { message_policy: ScriptHash }
+                let msg_policy = c.fields.first()
+                    .and_then(|f| match f {
+                        PlutusData::BoundedBytes(bytes) => Some(hex::encode(bytes.as_ref() as &[u8])),
+                        _ => None,
+                    });
+                ("Deferred".to_string(), msg_policy)
+            }
+            _ => ("Unknown".to_string(), None),
         },
-        _ => "Unknown",
-    }.to_string();
+        _ => ("Unknown".to_string(), None),
+    };
 
     // Custom ISM (field 6)
     let custom_ism = match &fields[6] {
@@ -698,6 +849,7 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         custom_ism,
         ref_script_policy_id: ref_script_policy,
         ref_script_asset_name: ref_script_asset,
+        deferred_message_policy,
     })
 }
 
@@ -810,19 +962,28 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             })
             .unwrap_or((None, None));
 
-        // Field 5: recipient_type
-        let recipient_type = entry_fields
+        // Field 5: recipient_type and deferred_message_policy
+        let (recipient_type, deferred_message_policy) = entry_fields
             .get(5)
-            .and_then(|t| t.get("constructor"))
-            .and_then(|c| c.as_u64())
-            .map(|c| match c {
-                0 => "Generic",
-                1 => "TokenReceiver",
-                2 => "Deferred",
-                _ => "Unknown",
+            .map(|t| {
+                let constr = t.get("constructor").and_then(|c| c.as_u64()).unwrap_or(0);
+                match constr {
+                    0 => ("Generic".to_string(), None),
+                    1 => ("TokenReceiver".to_string(), None),
+                    2 => {
+                        // Deferred { message_policy: ScriptHash }
+                        let msg_policy = t.get("fields")
+                            .and_then(|f| f.as_array())
+                            .and_then(|a| a.get(0))
+                            .and_then(|h| h.get("bytes"))
+                            .and_then(|b| b.as_str())
+                            .map(|s| s.to_string());
+                        ("Deferred".to_string(), msg_policy)
+                    }
+                    _ => ("Unknown".to_string(), None),
+                }
             })
-            .unwrap_or("Unknown")
-            .to_string();
+            .unwrap_or(("Unknown".to_string(), None));
 
         // Field 6: custom_ism
         let custom_ism = entry_fields
@@ -850,6 +1011,7 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             custom_ism,
             ref_script_policy_id: ref_script_policy,
             ref_script_asset_name: ref_script_asset,
+            deferred_message_policy,
         });
     }
 

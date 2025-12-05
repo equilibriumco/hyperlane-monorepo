@@ -8,7 +8,7 @@ use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{ExtractedValidator, HyperlaneValidators, PlutusBlueprint};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
-use crate::utils::types::{DeploymentInfo, ScriptInfo};
+use crate::utils::types::{DeploymentInfo, ReferenceScriptUtxo, ScriptInfo};
 
 #[derive(Args)]
 pub struct DeployArgs {
@@ -46,8 +46,8 @@ enum DeployCommands {
         #[arg(long)]
         script: String,
 
-        /// Output lovelace amount (minimum required for the UTXO, default 25 ADA for large scripts)
-        #[arg(long, default_value = "25000000")]
+        /// Output lovelace amount (minimum required for the UTXO, default 15 ADA)
+        #[arg(long, default_value = "15000000")]
         lovelace: u64,
 
         /// Dry run - show what would be done without submitting
@@ -57,8 +57,8 @@ enum DeployCommands {
 
     /// Deploy all core reference scripts (mailbox, ism, registry)
     ReferenceScriptsAll {
-        /// Output lovelace per script (default 25 ADA each)
-        #[arg(long, default_value = "25000000")]
+        /// Output lovelace per script (default 15 ADA each)
+        #[arg(long, default_value = "15000000")]
         lovelace: u64,
 
         /// Dry run
@@ -348,6 +348,18 @@ async fn deploy_reference_script(
     lovelace: u64,
     dry_run: bool,
 ) -> Result<()> {
+    deploy_reference_script_internal(ctx, script_name, lovelace, dry_run, &[]).await?;
+    Ok(())
+}
+
+/// Internal reference script deployment that tracks spent UTXOs
+async fn deploy_reference_script_internal(
+    ctx: &CliContext,
+    script_name: &str,
+    lovelace: u64,
+    dry_run: bool,
+    exclude_utxos: &[String],
+) -> Result<Option<String>> {
     println!("{}", format!("Deploying reference script: {}", script_name).cyan());
 
     let api_key = ctx.require_api_key()?;
@@ -363,9 +375,16 @@ async fn deploy_reference_script(
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let payer_address = keypair.address_bech32(ctx.pallas_network());
 
-    // Get UTXOs for fee payment
-    let utxos = client.get_utxos(&payer_address).await?;
-    println!("  Found {} UTXOs at wallet", utxos.len());
+    // Get UTXOs for fee payment and filter out already-spent ones
+    let all_utxos = client.get_utxos(&payer_address).await?;
+    let utxos: Vec<_> = all_utxos
+        .into_iter()
+        .filter(|u| {
+            let utxo_ref = format!("{}#{}", u.tx_hash, u.output_index);
+            !exclude_utxos.contains(&utxo_ref)
+        })
+        .collect();
+    println!("  Found {} UTXOs at wallet (excluding {} spent)", utxos.len(), exclude_utxos.len());
 
     // Find suitable UTXOs
     let input_utxo = utxos
@@ -383,7 +402,7 @@ async fn deploy_reference_script(
         println!("  - Script hash: {}", script_hash);
         println!("\nAfter deployment, update the relayer config to use this reference script:");
         println!("  Reference Script UTXO: <tx_hash>#0");
-        return Ok(());
+        return Ok(None);
     }
 
     // Build the reference script transaction
@@ -439,10 +458,65 @@ async fn deploy_reference_script(
     println!("\n{}", "✓ Reference script info saved".green());
     println!("  File: {:?}", ref_scripts_file);
 
-    println!("\n{}", "Update your relayer config to use this reference script:".yellow());
-    println!("  Reference UTXO: {}#0", tx_hash);
+    // Also update deployment_info.json with the reference script UTXO
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        let ref_utxo = ReferenceScriptUtxo {
+            tx_hash: tx_hash.clone(),
+            output_index: 0,
+            lovelace,
+        };
 
-    Ok(())
+        // Match script name to the appropriate field in deployment info
+        match script_name {
+            "mailbox" => {
+                if let Some(ref mut mailbox) = deployment.mailbox {
+                    mailbox.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "multisig_ism" | "ism" => {
+                if let Some(ref mut ism) = deployment.ism {
+                    ism.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "registry" => {
+                if let Some(ref mut registry) = deployment.registry {
+                    registry.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "igp" => {
+                if let Some(ref mut igp) = deployment.igp {
+                    igp.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "validator_announce" => {
+                if let Some(ref mut va) = deployment.validator_announce {
+                    va.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "warp_route" => {
+                if let Some(ref mut wr) = deployment.warp_route {
+                    wr.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "vault" => {
+                if let Some(ref mut vault) = deployment.vault {
+                    vault.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            _ => {
+                // Unknown script, skip updating deployment_info.json
+            }
+        }
+
+        ctx.save_deployment_info(&deployment)?;
+        println!("{}", "✓ Deployment info updated".green());
+    }
+
+    println!("\n{}", "Reference UTXO for relayer config:".yellow());
+    println!("  {}#0", tx_hash);
+
+    // Return the spent UTXO reference
+    Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))
 }
 
 /// Deploy all core reference scripts (mailbox, ism, registry)
@@ -455,9 +529,15 @@ async fn deploy_all_reference_scripts(
 
     let scripts = ["mailbox", "multisig_ism", "registry"];
 
+    // Track spent UTXOs to avoid reusing them
+    let mut spent_utxos: Vec<String> = Vec::new();
+
     for script in &scripts {
         println!("\n{}", format!("=== {} ===", script).cyan().bold());
-        deploy_reference_script(ctx, script, lovelace, dry_run).await?;
+        let spent = deploy_reference_script_internal(ctx, script, lovelace, dry_run, &spent_utxos).await?;
+        if let Some(utxo) = spent {
+            spent_utxos.push(utxo);
+        }
 
         if !dry_run {
             // Wait a bit between transactions to avoid conflicts
@@ -488,6 +568,31 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
         return Ok((cbor, hash, title));
     }
 
+    // For parameterized scripts, check if we have an applied version from initialization
+    let applied_script_path = match script_name {
+        "mailbox" => Some(ctx.network_deployments_dir().join("mailbox_applied.plutus")),
+        _ => None,
+    };
+
+    if let Some(applied_path) = applied_script_path {
+        if applied_path.exists() {
+            println!("  Using applied script: {:?}", applied_path);
+            let content = std::fs::read_to_string(&applied_path)?;
+            let json: serde_json::Value = serde_json::from_str(&content)?;
+            let cbor_hex = json["cborHex"]
+                .as_str()
+                .ok_or_else(|| anyhow!("No cborHex in applied plutus file"))?;
+            let cbor = hex::decode(cbor_hex)?;
+            let hash = hex::encode(crate::utils::crypto::script_hash(&cbor));
+            return Ok((cbor, hash, script_name.to_string()));
+        } else {
+            return Err(anyhow!(
+                "Validator '{}' is parameterized but no applied script found at {:?}. Run 'init {}' first.",
+                script_name, applied_path, script_name
+            ));
+        }
+    }
+
     // Load from blueprint
     let blueprint = PlutusBlueprint::from_file(&ctx.plutus_json_path())?;
 
@@ -510,8 +615,8 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
 
     if !validator.parameters.is_empty() {
         return Err(anyhow!(
-            "Validator '{}' is parameterized. Apply parameters first using 'aiken blueprint apply'",
-            title
+            "Validator '{}' is parameterized. Run 'init {}' first to apply parameters.",
+            title, script_name
         ));
     }
 

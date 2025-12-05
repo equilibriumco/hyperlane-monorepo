@@ -110,19 +110,9 @@ impl Keypair {
         self.signing_key.sign(message).to_bytes()
     }
 
-    /// Get the raw signing key bytes (for transaction signing)
-    pub fn signing_key_bytes(&self) -> &[u8; 32] {
-        self.signing_key.as_bytes()
-    }
-
     /// Get the pallas public key (for transaction signing)
     pub fn pallas_public_key(&self) -> &PallasPublicKey {
         &self.pallas_public
-    }
-
-    /// Get the payment credential hash (28 bytes, for required signers)
-    pub fn payment_credential_hash(&self) -> &[u8; 28] {
-        &self.payment_cred_hash
     }
 
     /// Get the public key hash as Vec<u8> (alias for convenience)
@@ -138,29 +128,6 @@ pub fn blake2b_224(data: &[u8]) -> [u8; 28] {
     hasher.update(data);
     let result = hasher.finalize();
     let mut hash = [0u8; 28];
-    hash.copy_from_slice(&result);
-    hash
-}
-
-/// Compute Blake2b-256 hash (32 bytes)
-pub fn blake2b_256(data: &[u8]) -> [u8; 32] {
-    use blake2::digest::consts::U32;
-    type Blake2b256 = Blake2b<U32>;
-    let mut hasher = Blake2b256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&result);
-    hash
-}
-
-/// Compute Keccak256 hash (for Hyperlane message IDs)
-pub fn keccak256(data: &[u8]) -> [u8; 32] {
-    use sha3::Keccak256;
-    let mut hasher = Keccak256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut hash = [0u8; 32];
     hash.copy_from_slice(&result);
     hash
 }
@@ -200,19 +167,5 @@ mod tests {
         let data = b"hello";
         let hash = blake2b_224(data);
         assert_eq!(hash.len(), 28);
-    }
-
-    #[test]
-    fn test_blake2b_256() {
-        let data = b"hello";
-        let hash = blake2b_256(data);
-        assert_eq!(hash.len(), 32);
-    }
-
-    #[test]
-    fn test_keccak256() {
-        let data = b"hello";
-        let hash = keccak256(data);
-        assert_eq!(hash.len(), 32);
     }
 }

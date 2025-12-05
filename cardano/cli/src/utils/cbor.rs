@@ -56,18 +56,6 @@ impl CborBuilder {
         self
     }
 
-    /// Start an indefinite-length map
-    pub fn start_map(&mut self) -> &mut Self {
-        self.bytes.push(0xbf);
-        self
-    }
-
-    /// End a map
-    pub fn end_map(&mut self) -> &mut Self {
-        self.bytes.push(0xff);
-        self
-    }
-
     /// Add an unsigned integer
     pub fn uint(&mut self, n: u64) -> &mut Self {
         self.encode_uint(0, n);
@@ -84,32 +72,12 @@ impl CborBuilder {
         self
     }
 
-    /// Add a byte string
-    pub fn bytes(&mut self, data: &[u8]) -> &mut Self {
-        self.encode_uint(2, data.len() as u64);
-        self.bytes.extend_from_slice(data);
-        self
-    }
-
     /// Add a byte string from hex
     pub fn bytes_hex(&mut self, hex: &str) -> Result<&mut Self> {
         let data = hex::decode(hex).map_err(|e| anyhow!("Invalid hex: {}", e))?;
         self.encode_uint(2, data.len() as u64);
         self.bytes.extend_from_slice(&data);
         Ok(self)
-    }
-
-    /// Add a text string
-    pub fn text(&mut self, s: &str) -> &mut Self {
-        self.encode_uint(3, s.len() as u64);
-        self.bytes.extend_from_slice(s.as_bytes());
-        self
-    }
-
-    /// Add raw CBOR bytes
-    pub fn raw(&mut self, data: &[u8]) -> &mut Self {
-        self.bytes.extend_from_slice(data);
-        self
     }
 
     /// Encode a major type with argument
@@ -141,11 +109,6 @@ impl CborBuilder {
     /// Build and return the CBOR bytes
     pub fn build(self) -> Vec<u8> {
         self.bytes
-    }
-
-    /// Build and return as hex string
-    pub fn build_hex(self) -> String {
-        hex::encode(self.build())
     }
 }
 
@@ -231,41 +194,6 @@ pub fn build_ism_datum(
     Ok(builder.build())
 }
 
-/// Build an ISM SetValidators redeemer
-pub fn build_ism_set_validators_redeemer(
-    domain: u32,
-    validators: &[String], // 20-byte validator addresses as hex
-) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // SetValidators { domain: Domain, validators: List<ByteArray> }
-    builder
-        .start_constr(1) // SetValidators is constructor 1
-        .uint(domain as u64)
-        .start_list();
-
-    for validator in validators {
-        builder.bytes_hex(validator)?;
-    }
-
-    builder.end_list().end_constr();
-
-    Ok(builder.build())
-}
-
-/// Build an ISM SetThreshold redeemer
-pub fn build_ism_set_threshold_redeemer(domain: u32, threshold: u32) -> Vec<u8> {
-    let mut builder = CborBuilder::new();
-
-    builder
-        .start_constr(2) // SetThreshold is constructor 2
-        .uint(domain as u64)
-        .uint(threshold as u64)
-        .end_constr();
-
-    builder.build()
-}
-
 /// Build a Registry datum
 /// Note: admin_pkh is the registry admin, while each registration has its own owner
 pub fn build_registry_datum(
@@ -313,11 +241,50 @@ pub fn build_registry_datum(
         // additional_inputs (empty list for now)
         builder.start_list().end_list();
 
-        // recipient_type (Generic = 0)
-        builder.start_constr(0).end_constr();
+        // recipient_type encoding:
+        // - Generic = Constr 0 [] (empty)
+        // - TokenReceiver = Constr 1 [vault_locator: Option, minting_policy: Option]
+        // - Deferred = Constr 2 [message_policy: ScriptHash]
+        match reg.recipient_type.to_lowercase().as_str() {
+            "generic" => {
+                builder.start_constr(0).end_constr();
+            }
+            "tokenreceiver" | "token-receiver" | "token_receiver" => {
+                // TokenReceiver { vault_locator: Option<UtxoLocator>, minting_policy: Option<ScriptHash> }
+                // For now, encode both as None
+                builder.start_constr(1);
+                builder.start_constr(1).end_constr(); // vault_locator: None
+                builder.start_constr(1).end_constr(); // minting_policy: None
+                builder.end_constr();
+            }
+            "deferred" => {
+                // Deferred { message_policy: ScriptHash }
+                builder.start_constr(2);
+                if let Some(msg_policy) = &reg.deferred_message_policy {
+                    builder.bytes_hex(msg_policy)?;
+                } else {
+                    return Err(anyhow!("Deferred recipient requires message_policy (deferred_message_policy field)"));
+                }
+                builder.end_constr();
+            }
+            _ => {
+                builder.start_constr(0).end_constr(); // Default to Generic
+            }
+        }
 
-        // custom_ism (None)
-        builder.start_constr(1).end_constr();
+        // custom_ism: Option<ScriptHash>
+        match &reg.custom_ism {
+            Some(ism_hash) => {
+                // Some = constructor 0
+                builder.start_constr(0);
+                builder.bytes_hex(ism_hash)?;
+                builder.end_constr();
+            }
+            None => {
+                // None = constructor 1
+                builder.start_constr(1).end_constr();
+            }
+        }
 
         builder.end_constr();
     }
@@ -343,6 +310,13 @@ pub struct RegistrationData {
     /// If Some, contains (policy_id, asset_name) for the reference script NFT
     pub ref_script_policy_id: Option<String>,
     pub ref_script_asset_name: Option<String>,
+    /// Recipient type: "Generic" (0), "TokenReceiver" (1), or "Deferred" (2)
+    pub recipient_type: String,
+    /// Custom ISM script hash (optional)
+    pub custom_ism: Option<String>,
+    /// For Deferred recipients: the message NFT minting policy
+    /// Required when recipient_type is "Deferred"
+    pub deferred_message_policy: Option<String>,
 }
 
 /// Build a mint redeemer (empty constructor 0)
@@ -396,69 +370,48 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
     // additional_inputs (empty list)
     builder.start_list().end_list();
 
-    // recipient_type (Generic = 0)
-    builder.start_constr(0).end_constr();
-
-    // custom_ism (None = constructor 1)
-    builder.start_constr(1).end_constr();
-
-    builder.end_constr(); // End RecipientRegistration
-    builder.end_constr(); // End AdminRegister
-
-    Ok(builder.build())
-}
-
-/// Build a Registry Register redeemer
-/// Redeemer: Register { registration: RecipientRegistration }
-pub fn build_registry_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // Register is constructor 0
-    builder.start_constr(0);
-
-    // RecipientRegistration structure
-    builder.start_constr(0);
-
-    // script_hash
-    builder.bytes_hex(&reg.script_hash)?;
-
-    // owner (VerificationKeyHash)
-    builder.bytes_hex(&reg.owner)?;
-
-    // state_locator (policy_id, asset_name)
-    builder.start_constr(0);
-    builder.bytes_hex(&reg.state_policy_id)?;
-    builder.bytes_hex(&reg.state_asset_name)?;
-    builder.end_constr();
-
-    // reference_script_locator: Option<UtxoLocator>
-    match (&reg.ref_script_policy_id, &reg.ref_script_asset_name) {
-        (Some(policy), Some(asset)) => {
-            // Some(locator) = Constr 0 [locator]
-            builder.start_constr(0);
-            builder.start_constr(0);
-            builder.bytes_hex(policy)?;
-            builder.bytes_hex(asset)?;
+    // recipient_type encoding:
+    // - Generic = Constr 0 [] (empty)
+    // - TokenReceiver = Constr 1 [vault_locator: Option, minting_policy: Option]
+    // - Deferred = Constr 2 [message_policy: ScriptHash]
+    match reg.recipient_type.to_lowercase().as_str() {
+        "generic" => {
+            builder.start_constr(0).end_constr();
+        }
+        "tokenreceiver" | "token-receiver" | "token_receiver" => {
+            builder.start_constr(1);
+            builder.start_constr(1).end_constr(); // vault_locator: None
+            builder.start_constr(1).end_constr(); // minting_policy: None
             builder.end_constr();
+        }
+        "deferred" => {
+            builder.start_constr(2);
+            if let Some(msg_policy) = &reg.deferred_message_policy {
+                builder.bytes_hex(msg_policy)?;
+            } else {
+                return Err(anyhow!("Deferred recipient requires message_policy (deferred_message_policy field)"));
+            }
             builder.end_constr();
         }
         _ => {
-            // None = Constr 1 []
+            builder.start_constr(0).end_constr();
+        }
+    }
+
+    // custom_ism: Option<ScriptHash>
+    match &reg.custom_ism {
+        Some(ism_hash) => {
+            builder.start_constr(0);
+            builder.bytes_hex(ism_hash)?;
+            builder.end_constr();
+        }
+        None => {
             builder.start_constr(1).end_constr();
         }
     }
 
-    // additional_inputs (empty list)
-    builder.start_list().end_list();
-
-    // recipient_type (Generic = 0)
-    builder.start_constr(0).end_constr();
-
-    // custom_ism (None = constructor 1)
-    builder.start_constr(1).end_constr();
-
     builder.end_constr(); // End RecipientRegistration
-    builder.end_constr(); // End Register
+    builder.end_constr(); // End AdminRegister
 
     Ok(builder.build())
 }
@@ -531,6 +484,47 @@ pub fn build_generic_recipient_datum(
     Ok(builder.build())
 }
 
+/// Build a DeferredRecipient datum for initialization
+/// Structure: HyperlaneRecipientDatum<DeferredInner>
+/// HyperlaneRecipientDatum { ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: DeferredInner }
+/// DeferredInner { messages_stored: Int, messages_processed: Int }
+pub fn build_deferred_recipient_datum(
+    custom_ism: Option<&str>,
+    messages_stored: u64,
+    messages_processed: u64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr(0);
+
+    // ism: Option<ScriptHash>
+    match custom_ism {
+        Some(ism_hash) => {
+            // Some = constructor 0 with value
+            builder.start_constr(0);
+            builder.bytes_hex(ism_hash)?;
+            builder.end_constr();
+        }
+        None => {
+            // None = constructor 1 with no fields
+            builder.start_constr(1).end_constr();
+        }
+    }
+
+    // last_processed_nonce: Option<Int> - start with None
+    builder.start_constr(1).end_constr();
+
+    // inner: DeferredInner = constructor 0 [messages_stored, messages_processed]
+    builder.start_constr(0);
+    builder.uint(messages_stored);
+    builder.uint(messages_processed);
+    builder.end_constr();
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,13 +546,6 @@ mod tests {
         let mut builder = CborBuilder::new();
         builder.uint(1000);
         assert_eq!(builder.build(), vec![0x19, 0x03, 0xe8]);
-    }
-
-    #[test]
-    fn test_cbor_bytes() {
-        let mut builder = CborBuilder::new();
-        builder.bytes(&[1, 2, 3]);
-        assert_eq!(builder.build(), vec![0x43, 0x01, 0x02, 0x03]);
     }
 
     #[test]

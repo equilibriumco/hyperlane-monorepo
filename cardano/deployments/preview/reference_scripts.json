@@ -40,5 +40,26 @@
     "tx_hash": "f333bb296d2255972233387f71185e59dff9ed7cfdc20a9a7f133935def3a662",
     "output_index": 0,
     "lovelace": 25000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "b034d68bdbc8b9e9a3c6352f1450105ed2a43b74d47c8369b7176fe9",
+    "tx_hash": "66f62b6fbd0cdbea504f548938807d7d59272af17376c69517b0f485abf9eb52",
+    "output_index": 0,
+    "lovelace": 15000000
+  },
+  {
+    "script_name": "multisig_ism",
+    "script_hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
+    "tx_hash": "8326e24f24a604adc8f277cad4bea6a13fc9aa009870f61d9a9c55544fd7419b",
+    "output_index": 0,
+    "lovelace": 15000000
+  },
+  {
+    "script_name": "registry",
+    "script_hash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
+    "tx_hash": "271f976b50b5e12a477df0b9da4010c3a241d15204747280c5ff823e66d2becb",
+    "output_index": 0,
+    "lovelace": 15000000
   }
 ]

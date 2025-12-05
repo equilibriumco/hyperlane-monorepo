@@ -34,6 +34,7 @@ pub struct ValidatorDef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ParameterDef {
     pub title: String,
+    #[allow(dead_code)]
     pub schema: serde_json::Value,
 }
 
@@ -153,7 +154,6 @@ pub struct HyperlaneValidators {
     pub warp_route: Option<ExtractedValidator>,
     pub vault: Option<ExtractedValidator>,
     pub state_nft: Option<ExtractedValidator>,
-    pub synthetic_token: Option<ExtractedValidator>,
 }
 
 impl HyperlaneValidators {
@@ -183,7 +183,6 @@ impl HyperlaneValidators {
             warp_route: find_opt("warp_route", "spend"),
             vault: find_opt("vault", "spend"),
             state_nft: find_opt("state_nft", "mint"),
-            synthetic_token: find_opt("synthetic_token", "mint"),
         })
     }
 }
@@ -266,7 +265,9 @@ pub fn apply_validator_param_with_purpose(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("aiken blueprint apply failed: {}", stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = if stderr.is_empty() { stdout } else { stderr };
+        return Err(anyhow!("aiken blueprint apply failed: {}", combined));
     }
 
     // Read the applied blueprint
@@ -317,8 +318,118 @@ pub fn apply_validator_param_with_purpose(
     let _ = std::fs::remove_file(&temp_file);
 
     Ok(AppliedValidator {
-        module: module.to_string(),
-        validator: validator.to_string(),
+        compiled_code,
+        policy_id,
+    })
+}
+
+/// Apply multiple parameters to a validator sequentially
+/// Each parameter is applied in order, using the output of the previous apply as input
+pub fn apply_validator_params(
+    contracts_dir: &Path,
+    module: &str,
+    validator: &str,
+    params_cbor_hex: &[&str],
+) -> Result<AppliedValidator> {
+    use std::process::Command;
+
+    if params_cbor_hex.is_empty() {
+        return Err(anyhow!("At least one parameter is required"));
+    }
+
+    let aiken_path = find_aiken()
+        .ok_or_else(|| anyhow!("aiken not found. Please install aiken: https://aiken-lang.org/installation-instructions"))?;
+
+    let mut current_blueprint: Option<String> = None;
+    let temp_base = format!("{}_{}_multi", module, validator);
+
+    for (i, param) in params_cbor_hex.iter().enumerate() {
+        let out_filename = format!("{}_{}.json", temp_base, i);
+        let _out_file = contracts_dir.join(&out_filename);
+
+        let mut args = vec![
+            "blueprint".to_string(),
+            "apply".to_string(),
+            param.to_string(),
+            "--module".to_string(),
+            module.to_string(),
+            "--validator".to_string(),
+            validator.to_string(),
+            "--out".to_string(),
+            out_filename.clone(),
+        ];
+
+        // Use previous output as input for subsequent applies
+        if let Some(ref in_file) = current_blueprint {
+            args.push("--in".to_string());
+            args.push(in_file.clone());
+        }
+
+        let output = Command::new(&aiken_path)
+            .current_dir(contracts_dir)
+            .args(&args)
+            .output()
+            .with_context(|| format!("Failed to run aiken blueprint apply ({})", aiken_path.display()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let combined = if stderr.is_empty() { stdout } else { stderr };
+            // Clean up temp files
+            for j in 0..=i {
+                let _ = std::fs::remove_file(contracts_dir.join(format!("{}_{}.json", temp_base, j)));
+            }
+            return Err(anyhow!("aiken blueprint apply failed (param {}): {}", i + 1, combined));
+        }
+
+        // Clean up previous temp file
+        if let Some(ref prev) = current_blueprint {
+            let _ = std::fs::remove_file(contracts_dir.join(prev));
+        }
+
+        current_blueprint = Some(out_filename);
+    }
+
+    // Read the final applied blueprint
+    let final_file = contracts_dir.join(current_blueprint.as_ref().unwrap());
+    let content = std::fs::read_to_string(&final_file)
+        .with_context(|| format!("Failed to read applied blueprint: {:?}", final_file))?;
+
+    let blueprint: serde_json::Value = serde_json::from_str(&content)?;
+
+    // Find the applied validator
+    let validators = blueprint["validators"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No validators in applied blueprint"))?;
+
+    let title_pattern = format!("{}.{}", module, validator);
+
+    let validator_def = validators
+        .iter()
+        .find(|v| v["title"].as_str() == Some(&title_pattern))
+        .or_else(|| {
+            for p in ["mint", "spend"] {
+                let pattern = format!("{}.{}.{}", module, validator, p);
+                if let Some(v) = validators.iter().find(|v| v["title"].as_str() == Some(&pattern)) {
+                    return Some(v);
+                }
+            }
+            None
+        })
+        .ok_or_else(|| anyhow!("Applied validator not found: {}", title_pattern))?;
+
+    let compiled_code = validator_def["compiledCode"]
+        .as_str()
+        .ok_or_else(|| anyhow!("No compiledCode in applied validator"))?
+        .to_string();
+
+    let script_hash = super::crypto::script_hash_from_hex(&compiled_code)?;
+    let policy_id = hex::encode(script_hash);
+
+    // Clean up final temp file
+    let _ = std::fs::remove_file(&final_file);
+
+    Ok(AppliedValidator {
         compiled_code,
         policy_id,
     })
@@ -327,8 +438,6 @@ pub fn apply_validator_param_with_purpose(
 /// Result of applying parameters to a validator
 #[derive(Debug, Clone)]
 pub struct AppliedValidator {
-    pub module: String,
-    pub validator: String,
     pub compiled_code: String,
     pub policy_id: String,
 }

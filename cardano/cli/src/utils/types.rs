@@ -28,14 +28,6 @@ pub struct UtxoRef {
 }
 
 impl UtxoRef {
-    pub fn new(tx_hash: String, output_index: u32) -> Self {
-        Self { tx_hash, output_index }
-    }
-
-    pub fn to_string(&self) -> String {
-        format!("{}#{}", self.tx_hash, self.output_index)
-    }
-
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.split('#').collect();
         if parts.len() == 2 {
@@ -63,11 +55,6 @@ pub struct Utxo {
     pub reference_script: Option<String>,
 }
 
-impl Utxo {
-    pub fn utxo_ref(&self) -> UtxoRef {
-        UtxoRef::new(self.tx_hash.clone(), self.output_index)
-    }
-}
 
 /// Native asset
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,15 +64,6 @@ pub struct Asset {
     pub quantity: u64,
 }
 
-impl Asset {
-    pub fn unit(&self) -> String {
-        if self.asset_name.is_empty() {
-            self.policy_id.clone()
-        } else {
-            format!("{}{}", self.policy_id, self.asset_name)
-        }
-    }
-}
 
 /// Parameter applied to a script
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,49 +160,6 @@ impl ScriptInfo {
             state_nft_policy: None,
         }
     }
-
-    /// Create a new ScriptInfo for a parameterized script
-    pub fn new_parameterized(
-        hash_before: String,
-        hash_after: String,
-        address: String,
-        parameters: Vec<AppliedParameter>,
-    ) -> Self {
-        Self {
-            hash_before_parametrization: Some(hash_before),
-            hash: hash_after,
-            address,
-            applied_parameters: parameters,
-            state_nft: None,
-            state_utxo: None,
-            reference_script_utxo: None,
-            init_tx_hash: None,
-            initialized: false,
-            utxo: None,
-            state_nft_policy: None,
-        }
-    }
-
-    /// Check if this script requires parameter application
-    pub fn is_parameterized(&self) -> bool {
-        self.hash_before_parametrization.is_some()
-    }
-
-    /// Set initialization info
-    pub fn set_initialized(
-        &mut self,
-        tx_hash: String,
-        state_utxo: String,
-        state_nft: StateNftInfo,
-    ) {
-        self.init_tx_hash = Some(tx_hash);
-        self.state_utxo = Some(state_utxo.clone());
-        self.state_nft = Some(state_nft.clone());
-        self.initialized = true;
-        // Legacy fields
-        self.utxo = Some(state_utxo);
-        self.state_nft_policy = Some(state_nft.policy_id);
-    }
 }
 
 /// Deployment information
@@ -265,28 +200,6 @@ impl DeploymentInfo {
     }
 }
 
-/// Multisig ISM datum structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultisigIsmDatum {
-    /// Validators per domain: (domain_id, list of 20-byte validator addresses)
-    pub validators: Vec<(u32, Vec<String>)>,
-    /// Threshold per domain: (domain_id, threshold)
-    pub thresholds: Vec<(u32, u32)>,
-    /// Owner public key hash (28 bytes hex)
-    pub owner: String,
-}
-
-/// Mailbox datum structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MailboxDatum {
-    pub local_domain: u32,
-    pub default_ism: String, // script hash hex
-    pub owner: String,       // pkh hex
-    pub outbound_nonce: u32,
-    pub merkle_root: String, // 32 bytes hex
-    pub merkle_count: u32,
-}
-
 /// Registry recipient info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -305,6 +218,9 @@ pub struct RecipientInfo {
     /// Reference script NFT asset name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_script_asset_name: Option<String>,
+    /// For Deferred recipients: the message NFT minting policy
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferred_message_policy: Option<String>,
 }
 
 /// Protocol parameters (subset we need)
@@ -334,25 +250,3 @@ impl Default for ProtocolParams {
     }
 }
 
-/// Transaction submission result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxSubmitResult {
-    pub tx_hash: String,
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Relayer configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayerConfig {
-    pub network: String,
-    pub blockfrost_url: String,
-    pub mailbox_policy_id: String,
-    pub ism_policy_id: String,
-    pub registry_policy_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub igp_policy_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validator_announce_policy_id: Option<String>,
-}

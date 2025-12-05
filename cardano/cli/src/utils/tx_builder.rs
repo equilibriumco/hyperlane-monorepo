@@ -176,7 +176,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let cost_model = self.client.get_plutusv3_cost_model().await?;
 
         // Calculate script hash
-        let script_hash = super::crypto::script_hash(registry_script_cbor);
+        let _script_hash = super::crypto::script_hash(registry_script_cbor);
 
         // Build updated registrations list
         // IMPORTANT: The contract prepends the new registration, not appends!
@@ -264,6 +264,104 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
+        let tx = staging.build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a registry unregister transaction
+    /// Spends the registry UTXO and creates a new one with the registration removed
+    pub async fn build_registry_unregister_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        registry_utxo: &Utxo,
+        registry_script_cbor: &[u8],
+        remaining_registrations: &[RegistrationData],
+        script_hash_to_remove: &str,
+        owner_pkh: &str,
+    ) -> Result<BuiltTransaction> {
+        use crate::utils::cbor::{build_registry_datum, build_registry_unregister_redeemer};
+
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Build new datum with remaining registrations (the one being removed is already filtered out)
+        let new_datum = build_registry_datum(remaining_registrations, owner_pkh)?;
+
+        // Build unregister redeemer
+        let redeemer = build_registry_unregister_redeemer(script_hash_to_remove)?;
+
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let registry_tx_hash: [u8; 32] = hex::decode(&registry_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid registry tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        let registry_address = &registry_utxo.address;
+        let registry_addr = pallas_addresses::Address::from_bech32(registry_address)
+            .map_err(|e| anyhow!("Invalid registry address: {}", e))?;
+
+        let fee_input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+        let registry_input = Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64);
+
+        // Get state NFT from registry UTXO
+        let state_nft = registry_utxo.assets.iter()
+            .find(|a| a.quantity == 1)
+            .ok_or_else(|| anyhow!("Registry UTXO has no state NFT"))?;
+
+        let nft_policy: [u8; 28] = hex::decode(&state_nft.policy_id)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid NFT policy ID"))?;
+
+        let nft_asset_name = hex::decode(&state_nft.asset_name).unwrap_or_default();
+
+        // Build registry output with updated datum and same NFT
+        let registry_output = Output::new(registry_addr.clone(), registry_utxo.lovelace)
+            .set_inline_datum(new_datum)
+            .add_asset(Hash::new(nft_policy), nft_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
+
+        let fee_estimate = 1_000_000u64;
+        let change = input_utxo.lovelace.saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            .input(fee_input)
+            .input(registry_input)
+            .collateral_input(collateral)
+            .output(registry_output)
+            .script(ScriptKind::PlutusV3, registry_script_cbor.to_vec())
+            .add_spend_redeemer(
+                Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64),
+                redeemer,
+                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        if change > 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
         let tx = staging.build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
@@ -578,54 +676,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Build the transaction
         let tx = staging
             .build_conway_raw()
-            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
-
-        Ok(tx)
-    }
-
-    /// Build a simple UTXO split transaction
-    pub async fn build_split_tx(
-        &self,
-        payer: &Keypair,
-        input_utxo: &Utxo,
-        count: u32,
-        amount_per_output: u64,
-    ) -> Result<BuiltTransaction> {
-        let payer_address = payer.address_bech32(self.network);
-        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
-            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
-
-        let current_slot = self.client.get_latest_slot().await?;
-        let validity_end = current_slot + 7200;
-
-        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid tx hash"))?;
-
-        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-
-        let mut staging = StagingTransaction::new()
-            .input(input)
-            .invalid_from_slot(validity_end);
-
-        // Add split outputs
-        for _ in 0..count {
-            staging = staging.output(Output::new(payer_addr.clone(), amount_per_output));
-        }
-
-        // Calculate change
-        let fee_estimate = 200_000u64;
-        let total_outputs = amount_per_output * count as u64;
-        let change = input_utxo.lovelace.saturating_sub(total_outputs).saturating_sub(fee_estimate);
-
-        if change > 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
-        }
-
-        staging = staging.fee(fee_estimate);
-        staging = staging.network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
-
-        let tx = staging.build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)

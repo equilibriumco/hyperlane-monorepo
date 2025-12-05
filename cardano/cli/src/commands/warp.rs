@@ -166,7 +166,7 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
 }
 
 async fn deploy(
-    ctx: &CliContext,
+    _ctx: &CliContext,
     token_type: TokenType,
     token_policy: Option<String>,
     token_asset: Option<String>,

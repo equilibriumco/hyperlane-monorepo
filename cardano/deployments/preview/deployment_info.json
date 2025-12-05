@@ -1,31 +1,79 @@
 {
   "network": "preview",
   "mailbox": {
-    "hash": "96832bee2f5dfaa73ab8f579c55c22dec5b2ae98935651b651bd98ae",
-    "address": "addr_test1wztgx2lw9awl4fe6hr6hn32uyt0vtv4wnzf4v5dk2x7e3ts42y6zg"
+    "hashBeforeParametrization": "96832bee2f5dfaa73ab8f579c55c22dec5b2ae98935651b651bd98ae",
+    "hash": "b034d68bdbc8b9e9a3c6352f1450105ed2a43b74d47c8369b7176fe9",
+    "address": "addr_test1wzcrf45tm0ytn6drcc6j79zszp0d9fpmwn28eqmfkutkl6gfx7wpe",
+    "appliedParameters": [
+      {
+        "name": "processed_messages_script",
+        "paramType": "ScriptHash",
+        "value": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
+        "description": "Script hash where processed message markers are stored"
+      }
+    ],
+    "stateNft": {
+      "policyId": "95be8f7a927f4df5b46aae43621c3d4d00f829b858d7b96f9ed9347a",
+      "assetNameHex": "4d61696c626f78205374617465",
+      "assetName": "Mailbox State",
+      "seedUtxo": "07dc84273172747314a933481c84b472e95cd92914b74080ffa0ae0d110da93b#1"
+    },
+    "stateUtxo": "c81d197fad613157e34962ebef1ac233e15a83ee0c91b7ab302c5cd4e75930bf#0",
+    "initTxHash": "c81d197fad613157e34962ebef1ac233e15a83ee0c91b7ab302c5cd4e75930bf",
+    "initialized": true,
+    "utxo": "c81d197fad613157e34962ebef1ac233e15a83ee0c91b7ab302c5cd4e75930bf#0",
+    "stateNftPolicy": "95be8f7a927f4df5b46aae43621c3d4d00f829b858d7b96f9ed9347a"
   },
   "ism": {
     "hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
-    "address": "addr_test1wr2ftw69psy3nfr2e72plg73g02pxtynmw9w6727s8gkkcgtk4t3x"
+    "address": "addr_test1wr2ftw69psy3nfr2e72plg73g02pxtynmw9w6727s8gkkcgtk4t3x",
+    "stateNft": {
+      "policyId": "5959acb26c04b70b6806323ae6766a0a3937f72475c58c1e1f008b1c",
+      "assetNameHex": "49534d205374617465",
+      "assetName": "ISM State",
+      "seedUtxo": "dc09f18bdd93b5a0252f54a658f8fb7239c4f54bd29925de0c834e02e8a20656#1"
+    },
+    "stateUtxo": "1b2d4af65713b55b217e895713630f7fe1af52efe6c2bf64c5afb4272ee8f735#0",
+    "initTxHash": "1b2d4af65713b55b217e895713630f7fe1af52efe6c2bf64c5afb4272ee8f735",
+    "initialized": true,
+    "utxo": "1b2d4af65713b55b217e895713630f7fe1af52efe6c2bf64c5afb4272ee8f735#0",
+    "stateNftPolicy": "5959acb26c04b70b6806323ae6766a0a3937f72475c58c1e1f008b1c"
   },
   "registry": {
-    "hash": "eb0ec4a2f9097c9cecdbb21091e1d5291b1f25af383ea1e73116f278",
-    "address": "addr_test1wr4sa39zlyyhe88vmweppy0p6553k8e94uurag08xyt0y7qagxpdg"
+    "hash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
+    "address": "addr_test1wp72505hut0xfafcdty9sl05as8jgwvw5pdu583v2nm8jkcjpntdz",
+    "stateNft": {
+      "policyId": "3a41a318c670b4de12b12c81174ac31a47f42e86edce6f54812cd8aa",
+      "assetNameHex": "5265676973747279205374617465",
+      "assetName": "Registry State",
+      "seedUtxo": "92aad50d06842a6e06ffa820b16647265c742d5e0a1a57e54609a202c8fa6201#0"
+    },
+    "stateUtxo": "4693132c0b4adb7952f9a66b19a32a279895339ac89a50716b2a55ef72f94f94#0",
+    "initTxHash": "4693132c0b4adb7952f9a66b19a32a279895339ac89a50716b2a55ef72f94f94",
+    "initialized": true,
+    "utxo": "4693132c0b4adb7952f9a66b19a32a279895339ac89a50716b2a55ef72f94f94#0",
+    "stateNftPolicy": "3a41a318c670b4de12b12c81174ac31a47f42e86edce6f54812cd8aa"
   },
   "igp": {
     "hash": "41f6064ba9989daf8efaec0793360423552d2dcb2f16991254a2902d",
-    "address": "addr_test1wpqlvpjt4xvfmtuwltkq0yekqs342tfdevh3dxgj2j3fqtg5pzvu0"
+    "address": "addr_test1wpqlvpjt4xvfmtuwltkq0yekqs342tfdevh3dxgj2j3fqtg5pzvu0",
+    "initialized": false
   },
   "validator_announce": {
+    "hashBeforeParametrization": "8bb3b159b889dd08c2a8ad8a183852f8ec2c2e80b4a59207cee975b2",
     "hash": "8bb3b159b889dd08c2a8ad8a183852f8ec2c2e80b4a59207cee975b2",
-    "address": "addr_test1wz9m8v2ehzya6zxz4zkc5xpc2tuwctpwsz62tys8em5htvs3lqmxf"
+    "address": "addr_test1wz9m8v2ehzya6zxz4zkc5xpc2tuwctpwsz62tys8em5htvs3lqmxf",
+    "initialized": false
   },
   "warp_route": {
+    "hashBeforeParametrization": "e4ca8279338ac8786987f6be49298619b19c2deed6988bf16e310dd1",
     "hash": "e4ca8279338ac8786987f6be49298619b19c2deed6988bf16e310dd1",
-    "address": "addr_test1wrjv4qnexw9vs7rfslmtujffscvmr8pdamtf3zl3dccsm5ga0ztgu"
+    "address": "addr_test1wrjv4qnexw9vs7rfslmtujffscvmr8pdamtf3zl3dccsm5ga0ztgu",
+    "initialized": false
   },
   "vault": {
     "hash": "a3a296f04fc7387fef4c1740fa755f1b7ca42c57e42bf8c02532dae5",
-    "address": "addr_test1wz3699hsflrnsll0fst5p7n4tudhefpv2ljzh7xqy5ed4egpdvw7c"
+    "address": "addr_test1wz3699hsflrnsll0fst5p7n4tudhefpv2ljzh7xqy5ed4egpdvw7c",
+    "initialized": false
   }
 }

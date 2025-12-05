@@ -8,8 +8,8 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 2. [Contract Overview & Dependencies](#contract-overview--dependencies)
 3. [Phase 1: Build Contracts](#phase-1-build-contracts)
 4. [Phase 2: Extract Validators](#phase-2-extract-validators)
-5. [Phase 3: Deploy Reference Scripts](#phase-3-deploy-reference-scripts)
-6. [Phase 4: Initialize Core Contracts](#phase-4-initialize-core-contracts)
+5. [Phase 3: Initialize Core Contracts](#phase-3-initialize-core-contracts)
+6. [Phase 4: Deploy Reference Scripts](#phase-4-deploy-reference-scripts)
 7. [Phase 5: Configure Contracts](#phase-5-configure-contracts)
 8. [Phase 6: Deploy Recipients](#phase-6-deploy-recipients)
 9. [Verification & Troubleshooting](#verification--troubleshooting)
@@ -50,9 +50,9 @@ Your signing key must control a wallet with sufficient ADA:
 
 | Operation | Minimum ADA Required |
 |-----------|---------------------|
-| Reference script deployment | ~30 ADA per script |
+| Reference script deployment | ~15 ADA per script |
 | Contract initialization | ~10 ADA per contract |
-| Total recommended | ~200 ADA |
+| Total recommended | ~100 ADA |
 
 ---
 
@@ -74,7 +74,7 @@ Your signing key must control a wallet with sufficient ADA:
 
 | Contract | Purpose | Parameters | Dependencies |
 |----------|---------|------------|--------------|
-| **generic_recipient** | Example message handler | mailbox_policy_id | mailbox |
+| **example_generic_recipient** | Example message handler | mailbox_policy_id | mailbox |
 | **warp_route** | Token bridge | mailbox_policy_id | mailbox, vault |
 | **vault** | Token custody | None | warp_route |
 
@@ -107,14 +107,14 @@ Your signing key must control a wallet with sufficient ADA:
 The contracts must be deployed in this order due to dependencies:
 
 1. **Extract all validators** from plutus.json
-2. **Deploy reference scripts** (mailbox, ISM, registry) - no dependencies
-3. **Initialize Mailbox** - creates state NFT, produces mailbox_policy_id
-4. **Initialize ISM** - creates state NFT, produces ism_policy_id
-5. **Initialize Registry** - creates state NFT
-6. **Configure Mailbox** - set default ISM using ism_policy_id
-7. **Configure ISM** - set validators and thresholds for each origin domain
-8. **Deploy Recipients** - parameterized with mailbox_policy_id
-9. **Register Recipients** - add to registry
+2. **Initialize Core Contracts** - applies parameters, creates state NFTs, produces parameterized scripts
+3. **Deploy Reference Scripts** - deploy the parameterized scripts as on-chain reference scripts
+4. **Configure Mailbox** - set default ISM using ism_policy_id
+5. **Configure ISM** - set validators and thresholds for each origin domain
+6. **Deploy Recipients** - parameterized with mailbox_policy_id
+7. **Register Recipients** - add to registry
+
+> **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM, registry) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
 
 ---
 
@@ -145,7 +145,7 @@ Expected output:
 "multisig_ism.multisig_ism.spend"
 "registry.registry.spend"
 "state_nft.state_nft.mint"
-"generic_recipient.generic_recipient.spend"
+"example_generic_recipient.example_generic_recipient.spend"
 "processed_message_nft.processed_message_nft.mint"
 "warp_route.warp_route.spend"
 "vault.vault.spend"
@@ -196,59 +196,11 @@ ls deployments/$NETWORK/
 
 ---
 
-## Phase 3: Deploy Reference Scripts
+## Phase 3: Initialize Core Contracts
 
-Reference scripts are deployed on-chain to reduce transaction costs. Each script is stored in a UTXO that can be referenced by future transactions.
+Initialization applies parameters to the contracts, creates state NFTs, and sets up initial datums. This step is required before deploying reference scripts because the core contracts are parameterized.
 
-### 3.1 Deploy All Core Reference Scripts
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  deploy reference-scripts-all
-```
-
-This deploys:
-- Mailbox validator (25 ADA minimum UTXO)
-- Multisig ISM validator (25 ADA minimum UTXO)
-- Registry validator (25 ADA minimum UTXO)
-
-### 3.2 Deploy Individual Reference Script (Alternative)
-
-```bash
-# Deploy a specific script
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  deploy reference-script \
-  --script deployments/$NETWORK/mailbox.plutus \
-  --lovelace 25000000
-```
-
-### 3.3 Record Reference Script UTXOs
-
-After deployment, note the UTXO references for each script:
-
-```bash
-# The CLI outputs something like:
-# Reference script deployed: abc123...#0
-
-# Save these for later use
-echo "MAILBOX_REF_UTXO=abc123...#0" >> deployments/$NETWORK/.env
-echo "ISM_REF_UTXO=def456...#0" >> deployments/$NETWORK/.env
-echo "REGISTRY_REF_UTXO=ghi789...#0" >> deployments/$NETWORK/.env
-```
-
----
-
-## Phase 4: Initialize Core Contracts
-
-Initialization creates state NFTs and initial datums for each contract.
-
-### 4.1 Initialize All Core Contracts (Recommended)
+### 3.1 Initialize All Core Contracts (Recommended)
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -264,7 +216,7 @@ Parameters:
 - `--domain`: Local Cardano domain ID (2003 for preview, 2002 for preprod)
 - `--origin-domains`: Comma-separated list of origin chain domain IDs to configure
 
-### 4.2 Initialize Individually (Alternative)
+### 3.2 Initialize Individually (Alternative)
 
 #### Initialize Mailbox
 
@@ -329,13 +281,77 @@ Registry initialized!
   UTXO: ghi789...#0
 ```
 
-### 4.3 Verify Initialization
+### 3.3 Verify Initialization
 
 ```bash
 # Check status
 ./cli/target/release/hyperlane-cardano \
   --network $NETWORK \
   init status
+```
+
+---
+
+## Phase 4: Deploy Reference Scripts
+
+Reference scripts are deployed on-chain to reduce transaction costs. Each script is stored in a UTXO that can be referenced by future transactions.
+
+> **Note**: This step must be done AFTER initialization because the contracts are parameterized. The `init` commands apply the required parameters and save the parameterized scripts to the deployments directory.
+
+### 4.1 Deploy All Core Reference Scripts
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  deploy reference-scripts-all
+```
+
+This deploys:
+- Mailbox validator (15 ADA minimum UTXO)
+- Multisig ISM validator (15 ADA minimum UTXO)
+- Registry validator (15 ADA minimum UTXO)
+
+### 4.2 Deploy Individual Reference Script (Alternative)
+
+```bash
+# Deploy a specific script by name (uses applied script automatically)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  deploy reference-script \
+  --script mailbox
+
+# Or deploy from a specific .plutus file
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  deploy reference-script \
+  --script deployments/$NETWORK/mailbox_applied.plutus \
+  --lovelace 15000000
+```
+
+### 4.3 Verify Reference Script Deployment
+
+The CLI automatically saves the reference script UTXOs to `deployment_info.json`. You can verify the deployment:
+
+```bash
+# Check deployment_info.json for reference_script_utxo fields
+cat deployments/$NETWORK/deployment_info.json | jq '.mailbox.reference_script_utxo'
+cat deployments/$NETWORK/deployment_info.json | jq '.ism.reference_script_utxo'
+cat deployments/$NETWORK/deployment_info.json | jq '.registry.reference_script_utxo'
+```
+
+When configuring the relayer, use these UTXO references in your agent configuration:
+
+```yaml
+chains:
+  cardano:
+    mailboxReferenceScriptUtxo: "<tx_hash>#0"
+    ismReferenceScriptUtxo: "<tx_hash>#0"
 ```
 
 ---
@@ -370,7 +386,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --network $NETWORK \
   ism set-validators \
   --domain 43113 \
-  --validators "ab8cc5ae0dcce3d0dff1925a70cda0250f06ba21,cd9ef2b3a4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+  --validators "d8154f73d04cc7f7f0c332793692e6e6f6b2402e,895ae30bc83ff1493b9cf7781b0b813d23659857,43e915573d9f1383cbf482049e4a012290759e7f"
 ```
 
 ### 5.3 Set ISM Threshold
@@ -382,7 +398,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --network $NETWORK \
   ism set-threshold \
   --domain 43113 \
-  --threshold 1
+  --threshold 2
 ```
 
 ### 5.4 Verify Configuration
@@ -403,24 +419,33 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ## Phase 6: Deploy Recipients
 
-Recipients are contracts that receive Hyperlane messages. They must be parameterized with the mailbox policy ID.
+Recipients are contracts that receive Hyperlane messages. They must be parameterized with the mailbox policy ID. The CLI supports deploying both the built-in example recipient and custom recipient contracts.
 
-### 6.1 Deploy Generic Recipient
+### 6.1 Deploy Built-in Example Recipient
+
+The CLI includes a generic recipient for testing. Deploy it with:
 
 ```bash
-# Get mailbox policy ID
-MAILBOX_POLICY=$(cat deployments/$NETWORK/mailbox_state_nft.policy)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init recipient
+```
 
+The CLI automatically reads the mailbox NFT policy ID from `deployment_info.json`. If you need to specify it manually:
+
+```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
   --signing-key $CARDANO_SIGNING_KEY \
   --network $NETWORK \
   init recipient \
-  --mailbox-hash $MAILBOX_POLICY
+  --mailbox-hash <mailbox_nft_policy_id>
 ```
 
 This:
-1. Applies the mailbox policy ID parameter to the recipient script
+1. Applies the mailbox NFT policy ID parameter to the `example_generic_recipient` script
 2. Creates a state NFT for the recipient
 3. Creates two UTXOs:
    - State UTXO at recipient address with datum
@@ -435,9 +460,87 @@ Recipient deployed!
   Reference Script UTXO: xyz123...#1
 ```
 
-### 6.2 Register Recipient
+### 6.2 Deploy Custom Recipient
 
-After deployment, register the recipient in the registry:
+To deploy your own recipient contract, use the `--custom-contracts`, `--custom-module`, and `--custom-validator` options:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init recipient \
+  --custom-contracts ./path/to/your/contracts \
+  --custom-module my_recipient \
+  --custom-validator my_recipient
+```
+
+Requirements for custom recipients:
+- Your contract must be an Aiken project with a compiled `plutus.json` blueprint
+- The validator must accept `mailbox_policy_id: PolicyId` as its first parameter
+- The CLI will automatically apply the mailbox policy ID parameter using `aiken blueprint apply`
+
+Example custom recipient structure:
+```aiken
+validator my_recipient(mailbox_policy_id: PolicyId) {
+  spend(datum, redeemer, own_ref, tx) {
+    // Verify mailbox is calling by checking for mailbox NFT in inputs
+    expect mailbox_is_caller(tx, mailbox_policy_id)
+    // Your custom logic here
+    True
+  }
+}
+```
+
+### 6.3 Deploy Deferred Recipient (Optional)
+
+The deferred recipient pattern allows messages to be stored first and processed later. This is useful for:
+- Rate limiting or batching message processing
+- Allowing users to trigger message processing at their convenience
+- Separating message reception from execution
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init recipient --deferred
+```
+
+This command:
+1. Applies the mailbox NFT policy ID to `stored_message_nft` (minting policy for message storage)
+2. Applies both `mailbox_policy_id` and `message_nft_policy` to `example_deferred_recipient`
+3. Creates the two-UTXO pattern with the deferred recipient datum
+
+Output includes:
+```
+Stored Message NFT Policy: abc123...
+Recipient Script Hash: def456...
+Message NFT Policy: abc123...
+
+To register this recipient with the Hyperlane registry, run:
+  hyperlane-cardano registry register \
+    --script-hash def456... \
+    --recipient-type deferred \
+    --message-policy abc123... \
+    --state-policy xyz789... \
+    --state-asset "" \
+    --ref-script-policy xyz789... \
+    --ref-script-asset 726566 \
+    --signing-key <path-to-owner-key>
+```
+
+> **Important**: The `--message-policy` is required when registering deferred recipients. This is the `stored_message_nft` policy ID shown during deployment.
+
+After deployment, you can:
+- List pending deferred messages: `hyperlane-cardano deferred list --recipient <address>`
+- Process a deferred message: `hyperlane-cardano deferred process --recipient <address> --message-utxo <utxo>`
+
+### 6.4 Register Recipient
+
+After deploying a recipient (built-in or custom), register it in the registry:
+
+**For generic recipients:**
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -449,8 +552,25 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --state-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
   --state-asset "" \
   --ref-script-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --ref-script-asset "01" \
+  --ref-script-asset 726566 \
   --recipient-type generic
+```
+
+**For deferred recipients (requires `--message-policy`):**
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  registry register \
+  --script-hash d00c07baf0e1aa1d5b2362ad6d4acbd443367167517781e4d12ff6f4 \
+  --state-policy 90440110a4ff0daf3d8ba1fbe3178d6f5af03b8b09ebc144f6a10f52 \
+  --state-asset "" \
+  --ref-script-policy 90440110a4ff0daf3d8ba1fbe3178d6f5af03b8b09ebc144f6a10f52 \
+  --ref-script-asset 726566 \
+  --recipient-type deferred \
+  --message-policy 0a289423f18f05d5d0bc46176c3c09a4a626a81078f0ba5c59bbb47c
 ```
 
 Parameters:
@@ -459,9 +579,10 @@ Parameters:
 - `--state-asset`: Asset name within policy (empty for unit token)
 - `--ref-script-policy`: Reference script NFT policy (optional)
 - `--ref-script-asset`: Reference script NFT asset name (optional)
-- `--recipient-type`: One of `generic`, `token-receiver`, `contract-caller`
+- `--recipient-type`: One of `generic`, `token-receiver`, `deferred`
+- `--message-policy`: Message NFT minting policy (**required for deferred recipients**)
 
-### 6.3 Verify Registration
+### 6.5 Verify Registration
 
 ```bash
 ./cli/target/release/hyperlane-cardano \
@@ -570,22 +691,22 @@ cd contracts && aiken build && cd ..
 echo "Step 2: Extracting validators..."
 $CLI --network $NETWORK deploy extract --output $DEPLOY_DIR
 
-# Step 3: Deploy reference scripts
-echo "Step 3: Deploying reference scripts..."
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  deploy reference-scripts-all
-
-echo "Waiting for confirmation..."
-sleep 30
-
-# Step 4: Initialize core contracts
-echo "Step 4: Initializing core contracts..."
+# Step 3: Initialize core contracts (applies parameters)
+echo "Step 3: Initializing core contracts..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   init all \
   --domain $LOCAL_DOMAIN \
   --origin-domains "$ORIGIN_DOMAINS"
+
+echo "Waiting for confirmation..."
+sleep 30
+
+# Step 4: Deploy reference scripts (must be after init to use parameterized scripts)
+echo "Step 4: Deploying reference scripts..."
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  deploy reference-scripts-all
 
 echo "Waiting for confirmation..."
 sleep 30

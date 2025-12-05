@@ -145,15 +145,6 @@ impl CliContext {
         }
     }
 
-    /// Get the CardanoScan URL for an address
-    pub fn explorer_addr_url(&self, address: &str) -> String {
-        match self.network {
-            CardanoNetwork::Mainnet => format!("https://cardanoscan.io/address/{}", address),
-            CardanoNetwork::Preprod => format!("https://preprod.cardanoscan.io/address/{}", address),
-            CardanoNetwork::Preview => format!("https://preview.cardanoscan.io/address/{}", address),
-        }
-    }
-
     /// Get network as string
     pub fn network(&self) -> &str {
         self.network.as_str()
@@ -162,15 +153,5 @@ impl CliContext {
     /// Get signing key path
     pub fn signing_key_path(&self) -> Option<&Path> {
         self.signing_key_path.as_deref()
-    }
-
-    /// Resolve a relative path against the deployments directory
-    pub fn resolve_path(&self, path: &str) -> PathBuf {
-        let p = Path::new(path);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.network_deployments_dir().join(path)
-        }
     }
 }

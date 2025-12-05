@@ -38,10 +38,6 @@ enum MailboxCommands {
         /// Dry run
         #[arg(long)]
         dry_run: bool,
-
-        /// Skip evaluation and use hardcoded execution units
-        #[arg(long)]
-        skip_eval: bool,
     },
 
     /// Show current mailbox configuration
@@ -60,8 +56,7 @@ pub async fn execute(ctx: &CliContext, args: MailboxArgs) -> Result<()> {
             reference_script,
             signing_key,
             dry_run,
-            skip_eval,
-        } => set_default_ism(ctx, &ism_hash, mailbox_policy, reference_script, signing_key, dry_run, skip_eval).await,
+        } => set_default_ism(ctx, &ism_hash, mailbox_policy, reference_script, signing_key, dry_run).await,
         MailboxCommands::Show { mailbox_policy } => show_config(ctx, mailbox_policy).await,
     }
 }
@@ -73,7 +68,6 @@ async fn set_default_ism(
     reference_script: Option<String>,
     signing_key: Option<String>,
     dry_run: bool,
-    skip_eval: bool,
 ) -> Result<()> {
     println!("{}", "Setting Mailbox default ISM...".cyan());
 
@@ -107,8 +101,17 @@ async fn set_default_ism(
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
+    // Get asset name from deployment info (hex-encoded)
+    let asset_name_hex = ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.mailbox)
+        .and_then(|m| m.state_nft)
+        .map(|nft| nft.asset_name_hex)
+        .unwrap_or_else(|| hex::encode("Mailbox State"));
+
     let mailbox_utxo = client
-        .find_utxo_by_asset(&policy_id, "")
+        .find_utxo_by_asset(&policy_id, &asset_name_hex)
         .await?
         .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
 
@@ -332,28 +335,6 @@ async fn set_default_ism(
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
-
-    // Evaluate the transaction
-    if skip_eval {
-        println!("{}", "Skipping evaluation (using hardcoded execution units)...".yellow());
-    } else {
-        println!("{}", "Evaluating transaction...".cyan());
-        match client.evaluate_tx(&tx.tx_bytes.0).await {
-            Ok(eval_result) => {
-                println!("  Evaluation successful");
-                if let Some(results) = eval_result.evaluation_result {
-                    for (key, units) in results {
-                        println!("    {}: mem={}, steps={}", key, units.memory, units.steps);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("  {}", format!("Evaluation failed: {:?}", e).red());
-                println!("  {}", "Tip: Use --skip-eval to bypass evaluation and use hardcoded execution units".yellow());
-                return Err(anyhow!("Transaction evaluation failed: {:?}", e));
-            }
-        }
-    }
 
     // Sign the transaction
     println!("{}", "Signing transaction...".cyan());
