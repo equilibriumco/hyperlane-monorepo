@@ -642,6 +642,13 @@ async fn set_threshold(
     let fee_estimate = 2_000_000u64;
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
+    // Check for reference script UTXO in deployment info
+    let ref_script_utxo = ctx.load_deployment_info()
+        .ok()
+        .and_then(|d| d.ism)
+        .and_then(|ism| ism.reference_script_utxo)
+        .map(|r| (r.tx_hash, r.output_index));
+
     // Build staging transaction
     let mut staging = StagingTransaction::new()
         // ISM script input
@@ -658,8 +665,6 @@ async fn set_threshold(
             redeemer_cbor.clone(),
             Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
         )
-        // ISM script
-        .script(ScriptKind::PlutusV3, ism_script_bytes)
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
         // Required signer (owner)
@@ -668,6 +673,17 @@ async fn set_threshold(
         .fee(fee_estimate)
         .invalid_from_slot(validity_end)
         .network_id(0); // Testnet
+
+    // Add reference script OR embedded script
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        println!("  Using reference script: {}#{}", ref_tx_hash, ref_output_idx);
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx as u64));
+    } else {
+        println!("  Using embedded script (no reference script found)");
+        staging = staging.script(ScriptKind::PlutusV3, ism_script_bytes);
+    }
 
     // Add change output if significant
     if change > 1_500_000 {

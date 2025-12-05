@@ -1,6 +1,7 @@
-//! CBOR encoding utilities for Cardano datums and redeemers
+//! CBOR encoding/decoding utilities for Cardano datums and redeemers
 
 use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
 
 /// CBOR builder for Plutus data
 pub struct CborBuilder {
@@ -525,6 +526,278 @@ pub fn build_deferred_recipient_datum(
     Ok(builder.build())
 }
 
+// =============================================================================
+// CBOR Decoder for Plutus Data
+// =============================================================================
+
+/// Decode CBOR hex to Cardano JSON datum format
+/// This handles the Plutus data encoding used by Blockfrost
+pub fn decode_plutus_datum(cbor_hex: &str) -> Result<Value> {
+    let bytes = hex::decode(cbor_hex).map_err(|e| anyhow!("Invalid hex: {}", e))?;
+    let mut decoder = CborDecoder::new(&bytes);
+    decoder.decode_value()
+}
+
+struct CborDecoder<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> CborDecoder<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn peek(&self) -> Result<u8> {
+        self.bytes
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| anyhow!("Unexpected end of CBOR data"))
+    }
+
+    fn read_byte(&mut self) -> Result<u8> {
+        let b = self.peek()?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.pos + n > self.bytes.len() {
+            return Err(anyhow!("Unexpected end of CBOR data"));
+        }
+        let slice = &self.bytes[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(slice)
+    }
+
+    fn read_uint(&mut self, additional: u8) -> Result<u64> {
+        match additional {
+            0..=23 => Ok(additional as u64),
+            24 => Ok(self.read_byte()? as u64),
+            25 => {
+                let bytes = self.read_bytes(2)?;
+                Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as u64)
+            }
+            26 => {
+                let bytes = self.read_bytes(4)?;
+                Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64)
+            }
+            27 => {
+                let bytes = self.read_bytes(8)?;
+                Ok(u64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]))
+            }
+            _ => Err(anyhow!("Invalid CBOR additional info: {}", additional)),
+        }
+    }
+
+    fn decode_value(&mut self) -> Result<Value> {
+        let initial = self.read_byte()?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+
+        match major {
+            0 => {
+                // Unsigned integer
+                let n = self.read_uint(additional)?;
+                Ok(json!({"int": n}))
+            }
+            1 => {
+                // Negative integer
+                let n = self.read_uint(additional)?;
+                let value = -1i64 - (n as i64);
+                Ok(json!({"int": value}))
+            }
+            2 => {
+                // Byte string
+                let len = self.read_uint(additional)? as usize;
+                let bytes = self.read_bytes(len)?;
+                Ok(json!({"bytes": hex::encode(bytes)}))
+            }
+            3 => {
+                // Text string
+                let len = self.read_uint(additional)? as usize;
+                let bytes = self.read_bytes(len)?;
+                let text = String::from_utf8_lossy(bytes);
+                Ok(json!({"string": text}))
+            }
+            4 => {
+                // Array
+                if additional == 31 {
+                    // Indefinite-length array
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?; // consume break
+                            break;
+                        }
+                        items.push(self.decode_value()?);
+                    }
+                    Ok(json!({"list": items}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        items.push(self.decode_value()?);
+                    }
+                    Ok(json!({"list": items}))
+                }
+            }
+            5 => {
+                // Map
+                if additional == 31 {
+                    // Indefinite-length map
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?;
+                            break;
+                        }
+                        let key = self.decode_value()?;
+                        let value = self.decode_value()?;
+                        items.push(json!({"k": key, "v": value}));
+                    }
+                    Ok(json!({"map": items}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        let key = self.decode_value()?;
+                        let value = self.decode_value()?;
+                        items.push(json!({"k": key, "v": value}));
+                    }
+                    Ok(json!({"map": items}))
+                }
+            }
+            6 => {
+                // Tag - this is where Plutus constructors are encoded
+                let tag = self.read_uint(additional)?;
+                self.decode_tagged(tag)
+            }
+            7 => {
+                // Simple values
+                match additional {
+                    20 => Ok(json!(false)),
+                    21 => Ok(json!(true)),
+                    22 => Ok(json!(null)),
+                    _ => Err(anyhow!("Unsupported simple value: {}", additional)),
+                }
+            }
+            _ => Err(anyhow!("Invalid CBOR major type: {}", major)),
+        }
+    }
+
+    fn decode_tagged(&mut self, tag: u64) -> Result<Value> {
+        match tag {
+            // Plutus constructor tags 121-127 map to constructors 0-6
+            121..=127 => {
+                let constructor = tag - 121;
+                let fields = self.decode_constructor_fields()?;
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            // Plutus constructor tags 1280-1400 map to constructors 7-127
+            1280..=1400 => {
+                let constructor = tag - 1280 + 7;
+                let fields = self.decode_constructor_fields()?;
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            // General constructor (tag 102)
+            102 => {
+                // Format: [constructor_index, fields...]
+                let initial = self.read_byte()?;
+                let major = initial >> 5;
+                let additional = initial & 0x1f;
+
+                if major != 4 {
+                    return Err(anyhow!("Expected array for tag 102 constructor"));
+                }
+
+                let items = if additional == 31 {
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?;
+                            break;
+                        }
+                        items.push(self.decode_value()?);
+                    }
+                    items
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        items.push(self.decode_value()?);
+                    }
+                    items
+                };
+
+                if items.is_empty() {
+                    return Err(anyhow!("Tag 102 constructor requires at least index"));
+                }
+
+                let constructor = items[0]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Invalid constructor index"))?;
+
+                let fields: Vec<Value> = items.into_iter().skip(1).collect();
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            _ => {
+                // Unknown tag, decode the content
+                let content = self.decode_value()?;
+                Ok(json!({"tag": tag, "content": content}))
+            }
+        }
+    }
+
+    fn decode_constructor_fields(&mut self) -> Result<Vec<Value>> {
+        let initial = self.read_byte()?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+
+        if major != 4 {
+            return Err(anyhow!(
+                "Expected array for constructor fields, got major {}",
+                major
+            ));
+        }
+
+        if additional == 31 {
+            // Indefinite-length array
+            let mut items = Vec::new();
+            loop {
+                if self.peek()? == 0xff {
+                    self.read_byte()?;
+                    break;
+                }
+                items.push(self.decode_value()?);
+            }
+            Ok(items)
+        } else {
+            let len = self.read_uint(additional)? as usize;
+            let mut items = Vec::new();
+            for _ in 0..len {
+                items.push(self.decode_value()?);
+            }
+            Ok(items)
+        }
+    }
+}
+
+/// Try to normalize a datum value from Blockfrost
+/// If it's a hex string, decode it as CBOR; otherwise return as-is
+pub fn normalize_datum(datum: &Value) -> Result<Value> {
+    if let Some(hex_str) = datum.as_str() {
+        // It's a hex-encoded CBOR string
+        decode_plutus_datum(hex_str)
+    } else {
+        // It's already a JSON object
+        Ok(datum.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +835,13 @@ mod tests {
         let redeemer = build_mint_redeemer();
         // Constructor 0 with empty fields
         assert_eq!(redeemer, vec![0xd8, 0x79, 0x9f, 0xff]);
+    }
+
+    #[test]
+    fn test_decode_plutus_datum() {
+        // Constructor 0 with int 42: d8 79 9f 18 2a ff
+        let datum = decode_plutus_datum("d8799f182aff").unwrap();
+        assert_eq!(datum["constructor"], 0);
+        assert_eq!(datum["fields"][0]["int"], 42);
     }
 }

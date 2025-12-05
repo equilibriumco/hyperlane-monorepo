@@ -290,6 +290,8 @@ pub enum RecipientType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipientRegistration {
     pub script_hash: ScriptHash,
+    /// Owner verification key hash (who can update/remove this registration)
+    pub owner: [u8; 28],
     pub state_locator: UtxoLocator,
     /// NFT locator for reference script UTXO (None = script embedded in state UTXO)
     pub reference_script_locator: Option<UtxoLocator>,

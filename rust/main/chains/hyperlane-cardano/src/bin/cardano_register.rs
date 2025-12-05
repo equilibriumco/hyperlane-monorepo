@@ -29,6 +29,11 @@ struct Args {
     #[arg(long)]
     script_hash: String,
 
+    /// Owner verification key hash (28 bytes, hex-encoded)
+    /// This is who can update/remove the registration
+    #[arg(long)]
+    owner: String,
+
     /// Policy ID of the NFT that marks the recipient state UTXO
     #[arg(long)]
     state_policy: String,
@@ -182,6 +187,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse script hash
     let script_hash = parse_script_hash(&args.script_hash)?;
 
+    // Parse owner
+    let owner = parse_script_hash(&args.owner)?;
+
     // Build recipient type
     let recipient_type = build_recipient_type(&args)?;
 
@@ -209,6 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build registration
     let registration = RecipientRegistration {
         script_hash,
+        owner,
         state_locator: UtxoLocator {
             policy_id: args.state_policy.clone(),
             asset_name: args.state_asset.clone(),

@@ -655,6 +655,52 @@ impl BlockfrostClient {
         }
     }
 
+    /// Wait for a specific UTXO to appear at an address
+    ///
+    /// This is more reliable than wait_for_tx because the transaction can be
+    /// indexed before the address UTXOs are updated in Blockfrost.
+    pub async fn wait_for_utxo(
+        &self,
+        address: &str,
+        tx_hash: &str,
+        output_index: u32,
+        timeout_secs: u64,
+    ) -> Result<Utxo> {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let utxo_ref = format!("{}#{}", tx_hash, output_index);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for UTXO {} at address {}",
+                    utxo_ref,
+                    address
+                ));
+            }
+
+            match self.get_utxos(address).await {
+                Ok(utxos) => {
+                    if let Some(utxo) = utxos
+                        .into_iter()
+                        .find(|u| u.tx_hash == tx_hash && u.output_index == output_index)
+                    {
+                        return Ok(utxo);
+                    }
+                    // UTXO not found yet, wait and retry
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    // Address might have no UTXOs yet (404), retry
+                    if !e.to_string().contains("404") {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
 }
 
 /// Transaction information

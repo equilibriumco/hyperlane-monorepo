@@ -37,7 +37,8 @@ impl CardanoMultisigIsm {
     async fn find_ism_utxo(&self) -> ChainResult<Utxo> {
         use tracing::info;
 
-        let ism_asset_name = ""; // Empty asset name for state NFT
+        // Asset name is configured from deployment info (e.g., "49534d205374617465" for "ISM State")
+        let ism_asset_name = &self.conf.ism_asset_name_hex;
         let nft_result = self.provider
             .find_utxo_by_nft(&self.conf.ism_policy_id, ism_asset_name)
             .await;
@@ -57,9 +58,8 @@ impl CardanoMultisigIsm {
         }
 
         // Fallback: Find UTXOs at the ISM script address
-        // The ism_policy_id is actually the script hash
         let script_address = self.provider
-            .script_hash_to_address(&self.conf.ism_policy_id)
+            .script_hash_to_address(&self.conf.ism_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
                     "Failed to compute ISM script address: {}",

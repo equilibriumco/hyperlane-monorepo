@@ -14,6 +14,8 @@ pub struct ConnectionConf {
     pub network: CardanoNetwork,
     /// Mailbox policy ID (hex) - state NFT minting policy for NFT lookups
     pub mailbox_policy_id: String,
+    /// Mailbox asset name hex - the asset name for the state NFT (e.g., "4d61696c626f78205374617465" for "Mailbox State")
+    pub mailbox_asset_name_hex: String,
     /// Mailbox script hash (hex) - actual validator script hash for address lookups
     pub mailbox_script_hash: String,
     /// Processed messages script hash (hex) - where processed message markers are stored.
@@ -36,8 +38,14 @@ pub struct ConnectionConf {
     pub mailbox_reference_script_utxo: Option<String>,
     /// Registry policy ID (hex)
     pub registry_policy_id: String,
-    /// ISM policy ID (hex)
+    /// Registry asset name hex - the asset name for the state NFT (e.g., "5265676973747279205374617465" for "Registry State")
+    pub registry_asset_name_hex: String,
+    /// ISM policy ID (hex) - state NFT minting policy for NFT lookups
     pub ism_policy_id: String,
+    /// ISM asset name hex - the asset name for the state NFT (e.g., "49534d205374617465" for "ISM State")
+    pub ism_asset_name_hex: String,
+    /// ISM script hash (hex) - actual validator script hash for address lookups
+    pub ism_script_hash: String,
     /// ISM script CBOR (hex) - for inline witness set
     /// DEPRECATED: Use ism_reference_script_utxo instead
     pub ism_script_cbor: Option<String>,
@@ -57,6 +65,7 @@ pub struct RawConnectionConf {
     api_key: Option<String>,
     network: Option<String>,
     mailbox_policy_id: Option<String>,
+    mailbox_asset_name_hex: Option<String>,
     mailbox_script_hash: Option<String>,
     processed_messages_script_hash: Option<String>,
     processed_messages_nft_policy_id: Option<String>,
@@ -64,7 +73,10 @@ pub struct RawConnectionConf {
     mailbox_script_cbor: Option<String>,
     mailbox_reference_script_utxo: Option<String>,
     registry_policy_id: Option<String>,
+    registry_asset_name_hex: Option<String>,
     ism_policy_id: Option<String>,
+    ism_asset_name_hex: Option<String>,
+    ism_script_hash: Option<String>,
     ism_script_cbor: Option<String>,
     ism_reference_script_utxo: Option<String>,
     igp_policy_id: Option<String>,
@@ -145,6 +157,9 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("mailbox"))
             .into_config_result(|| cwp.join("mailbox_policy_id"))?;
 
+        // Asset name hex defaults to empty string for backwards compatibility
+        let mailbox_asset_name_hex = raw.mailbox_asset_name_hex.unwrap_or_default();
+
         let mailbox_script_hash = raw
             .mailbox_script_hash
             .ok_or(MissingPolicyId("mailbox_script_hash"))
@@ -160,10 +175,21 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("registry"))
             .into_config_result(|| cwp.join("registry_policy_id"))?;
 
+        // Registry asset name hex defaults to empty string for backwards compatibility
+        let registry_asset_name_hex = raw.registry_asset_name_hex.unwrap_or_default();
+
         let ism_policy_id = raw
             .ism_policy_id
             .ok_or(MissingPolicyId("ism"))
             .into_config_result(|| cwp.join("ism_policy_id"))?;
+
+        // ISM asset name hex defaults to empty string for backwards compatibility
+        let ism_asset_name_hex = raw.ism_asset_name_hex.unwrap_or_default();
+
+        let ism_script_hash = raw
+            .ism_script_hash
+            .ok_or(MissingPolicyId("ism_script_hash"))
+            .into_config_result(|| cwp.join("ism_script_hash"))?;
 
         let igp_policy_id = raw
             .igp_policy_id
@@ -193,6 +219,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             api_key,
             network,
             mailbox_policy_id,
+            mailbox_asset_name_hex,
             mailbox_script_hash,
             processed_messages_script_hash,
             processed_messages_nft_policy_id,
@@ -200,7 +227,10 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             mailbox_script_cbor,
             mailbox_reference_script_utxo,
             registry_policy_id,
+            registry_asset_name_hex,
             ism_policy_id,
+            ism_asset_name_hex,
+            ism_script_hash,
             ism_script_cbor,
             ism_reference_script_utxo,
             igp_policy_id,

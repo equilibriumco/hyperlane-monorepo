@@ -928,7 +928,8 @@ async fn init_recipient(
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
 
     // Get applied scripts - either from files or by running aiken
-    let (nft_policy_id, nft_compiled_code, recipient_hash, recipient_compiled_code, msg_nft_policy) =
+    // For deferred recipients, we also get the stored_message_nft compiled code for reference script deployment
+    let (nft_policy_id, nft_compiled_code, recipient_hash, recipient_compiled_code, msg_nft_policy, msg_nft_compiled_code) =
         if let (Some(nft_file), Some(recipient_file)) = (&nft_script, &recipient_script) {
             // Load pre-applied scripts from files
             println!("\n{}", "Loading pre-applied scripts...".cyan());
@@ -954,7 +955,7 @@ async fn init_recipient(
             println!("  Recipient Script Hash: {}", recipient_hash_hex.green());
 
             // Pre-applied scripts don't have msg_nft_policy tracking
-            (nft_policy_hex, nft_cbor.to_string(), recipient_hash_hex, recipient_cbor.to_string(), None)
+            (nft_policy_hex, nft_cbor.to_string(), recipient_hash_hex, recipient_cbor.to_string(), None, None)
         } else {
             // Apply parameters using aiken
             let output_ref_cbor = encode_output_reference(&input_utxo.tx_hash, input_utxo.output_index)?;
@@ -970,8 +971,8 @@ async fn init_recipient(
             let mailbox_policy_cbor = encode_script_hash_param(&mailbox_policy_id)?;
             let mailbox_policy_cbor_hex = hex::encode(&mailbox_policy_cbor);
 
-            // Returns (recipient_applied, msg_nft_policy)
-            let (recipient_applied, msg_nft_policy) = if use_custom {
+            // Returns (recipient_applied, msg_nft_policy, msg_nft_compiled_code)
+            let (recipient_applied, msg_nft_policy, msg_nft_compiled_code) = if use_custom {
                 println!("\n{}", format!("Applying {}.{} parameter from custom contracts...", module_name, validator_name).cyan());
                 let custom_path = std::path::Path::new(&custom_contracts_path);
                 let applied = apply_validator_param(
@@ -980,7 +981,7 @@ async fn init_recipient(
                     &validator_name,
                     &mailbox_policy_cbor_hex,
                 )?;
-                (applied, None)
+                (applied, None, None)
             } else if deferred {
                 // Deferred recipient requires two steps:
                 // 1. Apply stored_message_nft with mailbox_policy_id to get message NFT policy
@@ -1008,7 +1009,8 @@ async fn init_recipient(
                     "example_deferred_recipient",
                     &[&mailbox_policy_cbor_hex, &msg_nft_cbor_hex],
                 )?;
-                (applied, Some(stored_msg_nft.policy_id))
+                // Return the stored_message_nft compiled code for reference script deployment
+                (applied, Some(stored_msg_nft.policy_id), Some(stored_msg_nft.compiled_code))
             } else {
                 println!("\n{}", "Applying example_generic_recipient parameter...".cyan());
                 let applied = apply_validator_param(
@@ -1017,11 +1019,11 @@ async fn init_recipient(
                     "example_generic_recipient",
                     &mailbox_policy_cbor_hex,
                 )?;
-                (applied, None)
+                (applied, None, None)
             };
             println!("  Recipient Script Hash: {}", recipient_applied.policy_id.green());
 
-            (nft_applied.policy_id, nft_applied.compiled_code, recipient_applied.policy_id, recipient_applied.compiled_code, msg_nft_policy)
+            (nft_applied.policy_id, nft_applied.compiled_code, recipient_applied.policy_id, recipient_applied.compiled_code, msg_nft_policy, msg_nft_compiled_code)
         };
 
     // Compute recipient address
@@ -1046,11 +1048,21 @@ async fn init_recipient(
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTransaction would:");
         println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        println!("  - Mint TWO NFTs with policy {}:", nft_policy_id);
-        println!("    - State NFT (empty asset name) -> script address");
-        println!("    - Ref NFT (asset name 'ref') -> deployer address");
-        println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
-        println!("  - Create ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
+        if msg_nft_compiled_code.is_some() {
+            println!("  - Mint THREE NFTs with policy {}:", nft_policy_id);
+            println!("    - State NFT (empty asset name) -> script address");
+            println!("    - Ref NFT (asset name 'ref') -> deployer address");
+            println!("    - Msg Ref NFT (asset name 'msg_ref') -> deployer address");
+            println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
+            println!("  - Create recipient ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
+            println!("  - Create message NFT ref script UTXO at {} with 20 ADA + msg_ref NFT + stored_message_nft script", address);
+        } else {
+            println!("  - Mint TWO NFTs with policy {}:", nft_policy_id);
+            println!("    - State NFT (empty asset name) -> script address");
+            println!("    - Ref NFT (asset name 'ref') -> deployer address");
+            println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
+            println!("  - Create ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
+        }
         println!("\nTo register this recipient, run:");
         println!("  hyperlane-cardano registry register \\");
         println!("    --script-hash {} \\", recipient_hash);
@@ -1075,27 +1087,52 @@ async fn init_recipient(
         return Ok(());
     }
 
-    // Build and submit transaction using the two-UTXO pattern
-    println!("\n{}", "Building two-UTXO transaction...".cyan());
+    // Build and submit transaction
     let mint_script_cbor = hex::decode(&nft_compiled_code)
         .with_context(|| "Invalid NFT script CBOR")?;
     let recipient_script_cbor = hex::decode(&recipient_compiled_code)
         .with_context(|| "Invalid recipient script CBOR")?;
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
-    let built_tx = tx_builder
-        .build_init_recipient_two_utxo_tx(
-            &keypair,
-            &input_utxo,
-            &collateral_utxo,
-            &mint_script_cbor,
-            &recipient_script_cbor,
-            &recipient_addr,
-            &datum_cbor,
-            output_lovelace,
-            ref_script_lovelace,
-        )
-        .await?;
+
+    // Use three-UTXO pattern for deferred recipients (includes stored_message_nft reference script)
+    // Use two-UTXO pattern for generic/token recipients
+    let built_tx = if let Some(ref msg_nft_code) = msg_nft_compiled_code {
+        println!("\n{}", "Building three-UTXO transaction (deferred recipient)...".cyan());
+        let msg_nft_script_cbor = hex::decode(msg_nft_code)
+            .with_context(|| "Invalid message NFT script CBOR")?;
+        let msg_ref_lovelace = 20_000_000u64; // 20 ADA for stored_message_nft reference script
+        tx_builder
+            .build_init_recipient_three_utxo_tx(
+                &keypair,
+                &input_utxo,
+                &collateral_utxo,
+                &mint_script_cbor,
+                &recipient_script_cbor,
+                &msg_nft_script_cbor,
+                &recipient_addr,
+                &datum_cbor,
+                output_lovelace,
+                ref_script_lovelace,
+                msg_ref_lovelace,
+            )
+            .await?
+    } else {
+        println!("\n{}", "Building two-UTXO transaction...".cyan());
+        tx_builder
+            .build_init_recipient_two_utxo_tx(
+                &keypair,
+                &input_utxo,
+                &collateral_utxo,
+                &mint_script_cbor,
+                &recipient_script_cbor,
+                &recipient_addr,
+                &datum_cbor,
+                output_lovelace,
+                ref_script_lovelace,
+            )
+            .await?
+    };
 
     println!("  TX Hash: {}", hex::encode(&built_tx.tx_hash.0));
 
@@ -1112,8 +1149,9 @@ async fn init_recipient(
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     // Output deployment info
+    let pattern_name = if msg_nft_compiled_code.is_some() { "Three-UTXO" } else { "Two-UTXO" };
     println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
-    println!("{}", "Recipient Deployment Summary (Two-UTXO Pattern)".green().bold());
+    println!("{}", format!("Recipient Deployment Summary ({} Pattern)", pattern_name).green().bold());
     println!("{}", "═══════════════════════════════════════════════════════════════".green());
     println!();
     println!("{}", "Script Info:".cyan());
@@ -1128,10 +1166,19 @@ async fn init_recipient(
     println!("  NFT Asset Name: (empty)");
     println!("  Location: {}", recipient_addr);
     println!();
-    println!("{}", "Reference Script UTXO (output #1):".cyan());
+    println!("{}", "Recipient Reference Script UTXO (output #1):".cyan());
     println!("  NFT Policy: {}", nft_policy_id.green());
     println!("  NFT Asset Name: {} (\"ref\")", ref_asset_name);
     println!("  Location: {}", address);
+    if msg_nft_compiled_code.is_some() {
+        println!();
+        let msg_ref_asset_name = "6d73675f726566"; // "msg_ref" in hex
+        println!("{}", "Message NFT Reference Script UTXO (output #2):".cyan());
+        println!("  NFT Policy: {}", nft_policy_id.green());
+        println!("  NFT Asset Name: {} (\"msg_ref\")", msg_ref_asset_name);
+        println!("  Location: {}", address);
+        println!("  Contains: stored_message_nft minting policy script");
+    }
     println!();
     println!("{}", "═══════════════════════════════════════════════════════════════".green());
     println!("{}", "To register this recipient with the Hyperlane registry, run:".yellow());

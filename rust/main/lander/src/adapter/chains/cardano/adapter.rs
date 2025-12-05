@@ -42,8 +42,6 @@ pub struct CardanoAdapter {
     pub signer: Keypair,
     /// Estimated block time for the chain
     pub estimated_block_time: Duration,
-    /// Domain for this chain
-    pub domain: hyperlane_core::HyperlaneDomain,
 }
 
 impl CardanoAdapter {
@@ -71,7 +69,6 @@ impl CardanoAdapter {
             tx_builder,
             signer,
             estimated_block_time: conf.estimated_block_time,
-            domain: conf.domain.clone(),
         })
     }
 }

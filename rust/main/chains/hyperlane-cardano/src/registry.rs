@@ -66,9 +66,12 @@ impl RecipientRegistry {
         let mut by_script_hash = HashMap::new();
         for reg in &datum.registrations {
             let hash_hex = hex::encode(&reg.script_hash);
+            info!("Registry: parsed registration script_hash={}, recipient_type={:?}",
+                  hash_hex, reg.recipient_type);
             by_script_hash.insert(hash_hex, reg.clone());
         }
 
+        let num_registrations = by_script_hash.len();
         let cache = RegistryCache {
             datum,
             utxo,
@@ -76,7 +79,7 @@ impl RecipientRegistry {
         };
 
         *self.cache.write().await = Some(cache);
-        info!("Registry cache refreshed");
+        info!("Registry cache refreshed with {} registrations", num_registrations);
         Ok(())
     }
 
@@ -248,6 +251,15 @@ impl RecipientRegistry {
     }
 
     /// Parse a single registration from PlutusData
+    ///
+    /// Registration structure has 7 fields:
+    /// - Field 0: script_hash (28-byte ByteArray)
+    /// - Field 1: owner (28-byte VerificationKeyHash)
+    /// - Field 2: state_locator (UtxoLocator)
+    /// - Field 3: reference_script_locator (Option<UtxoLocator>)
+    /// - Field 4: additional_inputs (List<AdditionalInput>)
+    /// - Field 5: recipient_type (RecipientType)
+    /// - Field 6: custom_ism (Option<ScriptHash>)
     fn parse_registration_from_plutus(
         &self,
         data: &pallas_primitives::conway::PlutusData,
@@ -263,9 +275,9 @@ impl RecipientRegistry {
             }
         };
 
-        if tag != 121 || fields.len() < 6 {
+        if tag != 121 || fields.len() < 7 {
             return Err(RegistryError::InvalidDatum(format!(
-                "Invalid registration structure: expected 6 fields, got {}",
+                "Invalid registration structure: expected 7 fields, got {}",
                 fields.len()
             )));
         }
@@ -284,14 +296,28 @@ impl RecipientRegistry {
             _ => return Err(RegistryError::InvalidDatum("Invalid script_hash".to_string())),
         };
 
-        // State locator (field 1)
-        let state_locator = self.parse_utxo_locator_from_plutus(&fields[1])?;
+        // Owner (field 1) - VerificationKeyHash
+        let owner = match &fields[1] {
+            PlutusData::BoundedBytes(bytes) => {
+                let bytes: &[u8] = bytes.as_ref();
+                if bytes.len() != 28 {
+                    return Err(RegistryError::InvalidDatum("Invalid owner length".to_string()));
+                }
+                let mut hash = [0u8; 28];
+                hash.copy_from_slice(bytes);
+                hash
+            }
+            _ => return Err(RegistryError::InvalidDatum("Invalid owner".to_string())),
+        };
 
-        // Reference script locator (field 2) - Option<UtxoLocator>
-        let reference_script_locator = self.parse_optional_locator_from_plutus(&fields[2])?;
+        // State locator (field 2)
+        let state_locator = self.parse_utxo_locator_from_plutus(&fields[2])?;
 
-        // Additional inputs (field 3)
-        let additional_inputs = match &fields[3] {
+        // Reference script locator (field 3) - Option<UtxoLocator>
+        let reference_script_locator = self.parse_optional_locator_from_plutus(&fields[3])?;
+
+        // Additional inputs (field 4)
+        let additional_inputs = match &fields[4] {
             PlutusData::Array(arr) => {
                 let mut inputs = Vec::new();
                 for input in arr.iter() {
@@ -304,11 +330,11 @@ impl RecipientRegistry {
             _ => Vec::new(),
         };
 
-        // Recipient type (field 4) - Constr tag determines type
-        let recipient_type = self.parse_recipient_type_from_plutus(&fields[4])?;
+        // Recipient type (field 5) - Constr tag determines type
+        let recipient_type = self.parse_recipient_type_from_plutus(&fields[5])?;
 
-        // Custom ISM (field 5)
-        let custom_ism = match &fields[5] {
+        // Custom ISM (field 6)
+        let custom_ism = match &fields[6] {
             PlutusData::Constr(c) => {
                 // Some(ism_hash) = Constr 0 [bytes], None = Constr 1 []
                 if c.tag == 121 {
@@ -334,6 +360,7 @@ impl RecipientRegistry {
 
         Ok(RecipientRegistration {
             script_hash,
+            owner,
             state_locator,
             reference_script_locator,
             additional_inputs,
@@ -599,13 +626,14 @@ impl RecipientRegistry {
 
     /// Parse a single registration from JSON
     ///
-    /// Registration structure (6 fields):
+    /// Registration structure (7 fields):
     /// - Field 0: script_hash (28-byte ByteArray)
-    /// - Field 1: state_locator (UtxoLocator)
-    /// - Field 2: reference_script_locator (Option<UtxoLocator>)
-    /// - Field 3: additional_inputs (List<AdditionalInput>)
-    /// - Field 4: recipient_type (RecipientType)
-    /// - Field 5: custom_ism (Option<ScriptHash>)
+    /// - Field 1: owner (28-byte VerificationKeyHash)
+    /// - Field 2: state_locator (UtxoLocator)
+    /// - Field 3: reference_script_locator (Option<UtxoLocator>)
+    /// - Field 4: additional_inputs (List<AdditionalInput>)
+    /// - Field 5: recipient_type (RecipientType)
+    /// - Field 6: custom_ism (Option<ScriptHash>)
     fn parse_registration_json(
         &self,
         json: &Value,
@@ -617,9 +645,9 @@ impl RecipientRegistry {
                 RegistryError::InvalidDatum("Invalid registration structure".to_string())
             })?;
 
-        if fields.len() < 6 {
+        if fields.len() < 7 {
             return Err(RegistryError::InvalidDatum(format!(
-                "Invalid registration field count: expected 6, got {}",
+                "Invalid registration field count: expected 7, got {}",
                 fields.len()
             )));
         }
@@ -638,23 +666,37 @@ impl RecipientRegistry {
             .try_into()
             .map_err(|_| RegistryError::InvalidDatum("Invalid script_hash length".to_string()))?;
 
-        // Field 1: State locator
+        // Field 1: Owner (VerificationKeyHash)
+        let owner_hex = fields
+            .get(1)
+            .and_then(|o| o.get("bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| RegistryError::InvalidDatum("Invalid owner".to_string()))?;
+
+        let owner_bytes = hex::decode(owner_hex)
+            .map_err(|e| RegistryError::Deserialization(e.to_string()))?;
+
+        let owner: [u8; 28] = owner_bytes
+            .try_into()
+            .map_err(|_| RegistryError::InvalidDatum("Invalid owner length".to_string()))?;
+
+        // Field 2: State locator
         let state_locator =
-            self.parse_utxo_locator_json(fields.get(1).ok_or_else(|| {
+            self.parse_utxo_locator_json(fields.get(2).ok_or_else(|| {
                 RegistryError::InvalidDatum("Missing state_locator".to_string())
             })?)?;
 
-        // Field 2: Reference script locator (Option<UtxoLocator>)
+        // Field 3: Reference script locator (Option<UtxoLocator>)
         let reference_script_locator = self.parse_optional_locator_json(
             fields
-                .get(2)
+                .get(3)
                 .ok_or_else(|| RegistryError::InvalidDatum("Missing reference_script_locator".to_string()))?,
         )?;
 
-        // Field 3: Additional inputs
+        // Field 4: Additional inputs
         let empty_inputs = vec![];
         let additional_inputs_json = fields
-            .get(3)
+            .get(4)
             .and_then(|a| a.get("list"))
             .and_then(|l| l.as_array())
             .unwrap_or(&empty_inputs);
@@ -665,21 +707,22 @@ impl RecipientRegistry {
             additional_inputs.push(input);
         }
 
-        // Field 4: Recipient type
+        // Field 5: Recipient type
         let recipient_type =
-            self.parse_recipient_type_json(fields.get(4).ok_or_else(|| {
+            self.parse_recipient_type_json(fields.get(5).ok_or_else(|| {
                 RegistryError::InvalidDatum("Missing recipient_type".to_string())
             })?)?;
 
-        // Field 5: Custom ISM (optional)
+        // Field 6: Custom ISM (optional)
         let custom_ism = self.parse_optional_script_hash_json(
             fields
-                .get(5)
+                .get(6)
                 .ok_or_else(|| RegistryError::InvalidDatum("Missing custom_ism".to_string()))?,
         )?;
 
         Ok(RecipientRegistration {
             script_hash,
+            owner,
             state_locator,
             reference_script_locator,
             additional_inputs,

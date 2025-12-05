@@ -46,9 +46,9 @@ enum DeployCommands {
         #[arg(long)]
         script: String,
 
-        /// Output lovelace amount (minimum required for the UTXO, default 15 ADA)
-        #[arg(long, default_value = "15000000")]
-        lovelace: u64,
+        /// Output lovelace amount (if not specified, calculates minimum based on script size + 10% buffer)
+        #[arg(long)]
+        lovelace: Option<u64>,
 
         /// Dry run - show what would be done without submitting
         #[arg(long)]
@@ -57,9 +57,9 @@ enum DeployCommands {
 
     /// Deploy all core reference scripts (mailbox, ism, registry)
     ReferenceScriptsAll {
-        /// Output lovelace per script (default 15 ADA each)
-        #[arg(long, default_value = "15000000")]
-        lovelace: u64,
+        /// Output lovelace per script (if not specified, calculates minimum for each script)
+        #[arg(long)]
+        lovelace: Option<u64>,
 
         /// Dry run
         #[arg(long)]
@@ -79,6 +79,19 @@ pub async fn execute(ctx: &CliContext, args: DeployArgs) -> Result<()> {
             deploy_all_reference_scripts(ctx, lovelace, dry_run).await
         }
     }
+}
+
+/// Calculate minimum lovelace for a reference script UTXO
+/// Formula: (160 + addressSize + scriptSize) * coinsPerUTxOByte
+/// We add a 10% buffer for safety
+fn calculate_min_lovelace_for_ref_script(script_size: usize, coins_per_utxo_byte: u64) -> u64 {
+    // Overhead: 160 (base) + 57 (typical script address) + 10 (value) + 30 (other)
+    const OVERHEAD: u64 = 160 + 57 + 10 + 30;
+    let base = (OVERHEAD + script_size as u64) * coins_per_utxo_byte;
+    // Add 10% buffer and round up to nearest ADA
+    let with_buffer = (base * 110) / 100;
+    // Round up to nearest 1 ADA (1_000_000 lovelace)
+    ((with_buffer + 999_999) / 1_000_000) * 1_000_000
 }
 
 async fn extract(
@@ -102,7 +115,12 @@ async fn extract(
 
     // Determine output directory
     let output_dir = match output {
-        Some(p) => std::path::PathBuf::from(p),
+        Some(p) => {
+            let path = std::path::PathBuf::from(p);
+            std::fs::create_dir_all(&path)
+                .with_context(|| format!("Failed to create output directory: {:?}", path))?;
+            path
+        }
         None => ctx.ensure_deployments_dir()?,
     };
 
@@ -345,7 +363,7 @@ async fn generate_config(ctx: &CliContext, output: Option<String>) -> Result<()>
 async fn deploy_reference_script(
     ctx: &CliContext,
     script_name: &str,
-    lovelace: u64,
+    lovelace: Option<u64>,
     dry_run: bool,
 ) -> Result<()> {
     deploy_reference_script_internal(ctx, script_name, lovelace, dry_run, &[]).await?;
@@ -353,13 +371,14 @@ async fn deploy_reference_script(
 }
 
 /// Internal reference script deployment that tracks spent UTXOs
+/// Returns (spent_utxo_ref, submitted_tx_hash) if successful
 async fn deploy_reference_script_internal(
     ctx: &CliContext,
     script_name: &str,
-    lovelace: u64,
+    lovelace_override: Option<u64>,
     dry_run: bool,
     exclude_utxos: &[String],
-) -> Result<Option<String>> {
+) -> Result<Option<(String, String)>> {
     println!("{}", format!("Deploying reference script: {}", script_name).cyan());
 
     let api_key = ctx.require_api_key()?;
@@ -368,11 +387,27 @@ async fn deploy_reference_script_internal(
     // Load script CBOR
     let (script_cbor, script_hash, script_title) = load_script(ctx, script_name)?;
 
+    // Calculate or use provided lovelace amount
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+    let lovelace = match lovelace_override {
+        Some(l) => l,
+        None => {
+            // Calculate minimum based on script size and protocol params
+            let params = client.get_protocol_params().await?;
+            let min_lovelace = calculate_min_lovelace_for_ref_script(script_cbor.len(), params.coins_per_utxo_byte);
+            println!("  Calculated min: {} ADA (script size: {} bytes, {} lovelace/byte)",
+                (min_lovelace as f64) / 1_000_000.0,
+                script_cbor.len(),
+                params.coins_per_utxo_byte
+            );
+            min_lovelace
+        }
+    };
+
     println!("  Script Hash: {}", script_hash.green());
     println!("  Script Size: {} bytes", script_cbor.len());
     println!("  Output:      {} ADA", lovelace / 1_000_000);
 
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let payer_address = keypair.address_bech32(ctx.pallas_network());
 
     // Get UTXOs for fee payment and filter out already-spent ones
@@ -515,14 +550,14 @@ async fn deploy_reference_script_internal(
     println!("\n{}", "Reference UTXO for relayer config:".yellow());
     println!("  {}#0", tx_hash);
 
-    // Return the spent UTXO reference
-    Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))
+    // Return the spent UTXO reference and the new tx_hash
+    Ok(Some((format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index), tx_hash)))
 }
 
 /// Deploy all core reference scripts (mailbox, ism, registry)
 async fn deploy_all_reference_scripts(
     ctx: &CliContext,
-    lovelace: u64,
+    lovelace: Option<u64>,
     dry_run: bool,
 ) -> Result<()> {
     println!("{}", "Deploying all core reference scripts...".cyan());
@@ -532,17 +567,36 @@ async fn deploy_all_reference_scripts(
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
 
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Get wallet address for UTXO polling
+    let keypair = ctx.load_signing_key()?;
+    let wallet_address = keypair.address_bech32(ctx.pallas_network());
+
     for script in &scripts {
         println!("\n{}", format!("=== {} ===", script).cyan().bold());
-        let spent = deploy_reference_script_internal(ctx, script, lovelace, dry_run, &spent_utxos).await?;
-        if let Some(utxo) = spent {
-            spent_utxos.push(utxo);
-        }
+        // Pass lovelace override - if None, each script calculates its own minimum
+        let result = deploy_reference_script_internal(ctx, script, lovelace, dry_run, &spent_utxos).await?;
 
-        if !dry_run {
-            // Wait a bit between transactions to avoid conflicts
-            println!("Waiting for transaction to propagate...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        if let Some((spent_utxo, tx_hash)) = result {
+            spent_utxos.push(spent_utxo);
+
+            // Wait for the change UTXO to appear at the wallet address
+            // This is more reliable than wait_for_tx because Blockfrost can index
+            // the transaction before the address UTXOs are updated
+            println!("Waiting for change UTXO to be indexed (timeout: 120s)...");
+            // Change output is at index #1 (reference script output is at #0)
+            match client.wait_for_utxo(&wallet_address, &tx_hash, 1, 120).await {
+                Ok(utxo) => println!(
+                    "{}",
+                    format!("✓ Change UTXO available: {}#{} ({} ADA)", tx_hash, 1, utxo.lovelace / 1_000_000).green()
+                ),
+                Err(e) => {
+                    println!("{}", format!("Warning: {}", e).yellow());
+                    println!("Continuing anyway, but next deployment may fail if UTXO not yet available");
+                }
+            }
         }
     }
 

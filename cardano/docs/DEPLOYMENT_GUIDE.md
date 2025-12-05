@@ -339,10 +339,10 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 The CLI automatically saves the reference script UTXOs to `deployment_info.json`. You can verify the deployment:
 
 ```bash
-# Check deployment_info.json for reference_script_utxo fields
-cat deployments/$NETWORK/deployment_info.json | jq '.mailbox.reference_script_utxo'
-cat deployments/$NETWORK/deployment_info.json | jq '.ism.reference_script_utxo'
-cat deployments/$NETWORK/deployment_info.json | jq '.registry.reference_script_utxo'
+# Check deployment_info.json for referenceScriptUtxo fields
+cat deployments/$NETWORK/deployment_info.json | jq '.mailbox.referenceScriptUtxo'
+cat deployments/$NETWORK/deployment_info.json | jq '.ism.referenceScriptUtxo'
+cat deployments/$NETWORK/deployment_info.json | jq '.registry.referenceScriptUtxo'
 ```
 
 When configuring the relayer, use these UTXO references in your agent configuration:
@@ -510,13 +510,59 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 This command:
 1. Applies the mailbox NFT policy ID to `stored_message_nft` (minting policy for message storage)
 2. Applies both `mailbox_policy_id` and `message_nft_policy` to `example_deferred_recipient`
-3. Creates the two-UTXO pattern with the deferred recipient datum
+3. Creates the **three-UTXO pattern** with:
+   - State UTXO: holds the recipient state datum with state NFT (empty asset name)
+   - Recipient Reference Script UTXO: holds the recipient validator script with "ref" NFT
+   - Message NFT Reference Script UTXO: holds the `stored_message_nft` minting policy with "msg_ref" NFT
+
+#### Three-UTXO Pattern (Deferred Recipients)
+
+Deferred recipients require an additional reference script UTXO to provide the `stored_message_nft` minting policy. This allows the relayer to discover everything it needs from the registry without any additional configuration:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DEFERRED RECIPIENT DEPLOYMENT                        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                  │
+     ┌────────────────────────────┼────────────────────────────┐
+     │                            │                            │
+     ▼                            ▼                            ▼
+┌────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
+│  State UTXO    │     │  Ref Script UTXO     │     │  Msg Ref Script UTXO │
+│  (output #0)   │     │  (output #1)         │     │  (output #2)         │
+├────────────────┤     ├──────────────────────┤     ├──────────────────────┤
+│ NFT: "" (empty)│     │ NFT: "ref" (726566)  │     │ NFT: "msg_ref"       │
+│ Datum: state   │     │ Script: recipient    │     │      (6d73675f726566)│
+│ Location:      │     │ Location: deployer   │     │ Script: stored_      │
+│   script addr  │     │   address            │     │   message_nft        │
+└────────────────┘     └──────────────────────┘     │ Location: deployer   │
+                                                    │   address            │
+                                                    └──────────────────────┘
+```
+
+All three NFTs share the same policy ID, which is the `reference_script_locator` stored in the registry. The relayer:
+1. Looks up the "ref" NFT UTXO for the recipient script
+2. Looks up the "msg_ref" NFT UTXO for the `stored_message_nft` script
+3. Uses both as reference inputs when processing messages
 
 Output includes:
 ```
 Stored Message NFT Policy: abc123...
 Recipient Script Hash: def456...
 Message NFT Policy: abc123...
+
+State UTXO (output #0):
+  NFT Policy: xyz789...
+  NFT Asset Name: (empty)
+
+Recipient Reference Script UTXO (output #1):
+  NFT Policy: xyz789...
+  NFT Asset Name: 726566 ("ref")
+
+Message NFT Reference Script UTXO (output #2):
+  NFT Policy: xyz789...
+  NFT Asset Name: 6d73675f726566 ("msg_ref")
+  Contains: stored_message_nft minting policy script
 
 To register this recipient with the Hyperlane registry, run:
   hyperlane-cardano registry register \
@@ -531,6 +577,8 @@ To register this recipient with the Hyperlane registry, run:
 ```
 
 > **Important**: The `--message-policy` is required when registering deferred recipients. This is the `stored_message_nft` policy ID shown during deployment.
+
+> **Note**: The "msg_ref" NFT UTXO is automatically discovered by the relayer using the same policy ID as the reference_script_locator. No additional configuration is needed in the relayer config.
 
 After deployment, you can:
 - List pending deferred messages: `hyperlane-cardano deferred list --recipient <address>`

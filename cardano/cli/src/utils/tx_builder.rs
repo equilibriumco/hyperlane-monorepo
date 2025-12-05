@@ -157,6 +157,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
     /// Build a registry registration transaction
     /// Spends the registry UTXO and creates a new one with updated datum
+    ///
+    /// If `registry_ref_script_utxo` is provided (format: "txhash#index"), the transaction
+    /// will use a reference input instead of including the script inline.
     pub async fn build_registry_register_tx(
         &self,
         payer: &Keypair,
@@ -167,6 +170,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         existing_registrations: &[RegistrationData],
         new_registration: &RegistrationData,
         owner_pkh: &str,
+        registry_ref_script_utxo: Option<&str>, // Reference script UTXO (txhash#index)
     ) -> Result<BuiltTransaction> {
         // Get current slot for validity
         let current_slot = self.client.get_latest_slot().await?;
@@ -244,7 +248,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .input(registry_input)
             .collateral_input(collateral)
             .output(registry_output)
-            .script(ScriptKind::PlutusV3, registry_script_cbor.to_vec())
             .add_spend_redeemer(
                 Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64),
                 redeemer,
@@ -254,6 +257,17 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        // Use reference script if provided, otherwise include script inline
+        if let Some(ref_script_utxo) = registry_ref_script_utxo {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script_utxo)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else {
+            staging = staging.script(ScriptKind::PlutusV3, registry_script_cbor.to_vec());
+        }
 
         if change > 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -272,6 +286,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
     /// Build a registry unregister transaction
     /// Spends the registry UTXO and creates a new one with the registration removed
+    ///
+    /// If `registry_ref_script_utxo` is provided (format: "txhash#index"), the transaction
+    /// will use a reference input instead of including the script inline.
     pub async fn build_registry_unregister_tx(
         &self,
         payer: &Keypair,
@@ -282,6 +299,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         remaining_registrations: &[RegistrationData],
         script_hash_to_remove: &str,
         owner_pkh: &str,
+        registry_ref_script_utxo: Option<&str>, // Reference script UTXO (txhash#index)
     ) -> Result<BuiltTransaction> {
         use crate::utils::cbor::{build_registry_datum, build_registry_unregister_redeemer};
 
@@ -344,7 +362,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .input(registry_input)
             .collateral_input(collateral)
             .output(registry_output)
-            .script(ScriptKind::PlutusV3, registry_script_cbor.to_vec())
             .add_spend_redeemer(
                 Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64),
                 redeemer,
@@ -354,6 +371,17 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        // Use reference script if provided, otherwise include script inline
+        if let Some(ref_script_utxo) = registry_ref_script_utxo {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script_utxo)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else {
+            staging = staging.script(ScriptKind::PlutusV3, registry_script_cbor.to_vec());
+        }
 
         if change > 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -529,6 +557,135 @@ impl<'a> HyperlaneTxBuilder<'a> {
         Ok(tx)
     }
 
+    /// Build a deferred recipient initialization transaction with three-UTXO pattern
+    ///
+    /// This creates:
+    /// 1. State UTXO: script_address + state_NFT (empty name) + datum
+    /// 2. Recipient Reference Script UTXO: payer_address + ref_NFT ("ref") + recipient script
+    /// 3. Message NFT Reference Script UTXO: payer_address + msg_ref_NFT ("msg_ref") + stored_message_nft script
+    ///
+    /// All three NFTs use the same policy ID, enabling the relayer to discover
+    /// both reference script UTXOs via the registry's reference_script_locator.
+    /// The "msg_ref" NFT allows discovery of the stored_message_nft reference script.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_init_recipient_three_utxo_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        mint_script_cbor: &[u8],          // state_nft minting policy
+        recipient_script_cbor: &[u8],     // recipient validator to attach as reference script
+        msg_nft_script_cbor: &[u8],       // stored_message_nft policy to attach as reference script
+        script_address: &str,             // recipient script address
+        datum_cbor: &[u8],                // initial datum for state UTXO
+        state_output_lovelace: u64,       // ADA for state UTXO
+        ref_output_lovelace: u64,         // ADA for recipient reference script UTXO
+        msg_ref_output_lovelace: u64,     // ADA for message NFT reference script UTXO
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Calculate policy ID from mint script
+        let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Parse tx hashes
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Build inputs
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+
+        // Asset names: state NFT (empty), ref NFT ("ref"), msg_ref NFT ("msg_ref")
+        let state_asset_name: Vec<u8> = vec![];
+        let ref_asset_name: Vec<u8> = b"ref".to_vec();         // 0x726566
+        let msg_ref_asset_name: Vec<u8> = b"msg_ref".to_vec(); // 0x6d73675f726566
+
+        // Output 1: State UTXO at script address with state NFT + datum
+        let state_output = Output::new(
+            pallas_addresses::Address::from_bech32(script_address)
+                .map_err(|e| anyhow!("Invalid script address: {}", e))?,
+            state_output_lovelace,
+        )
+        .set_inline_datum(datum_cbor.to_vec())
+        .add_asset(Hash::new(policy_id), state_asset_name.clone(), 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+        // Output 2: Recipient Reference Script UTXO at payer address
+        let ref_script_output = Output::new(payer_addr.clone(), ref_output_lovelace)
+            .add_asset(Hash::new(policy_id), ref_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT: {:?}", e))?
+            .set_inline_script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec());
+
+        // Output 3: Message NFT Reference Script UTXO at payer address
+        let msg_ref_script_output = Output::new(payer_addr.clone(), msg_ref_output_lovelace)
+            .add_asset(Hash::new(policy_id), msg_ref_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add msg_ref NFT: {:?}", e))?
+            .set_inline_script(ScriptKind::PlutusV3, msg_nft_script_cbor.to_vec());
+
+        // Build mint redeemer
+        let mint_redeemer = build_mint_redeemer();
+
+        // Fee estimate (larger due to two reference scripts)
+        let fee_estimate = 4_000_000u64;
+        let total_outputs = state_output_lovelace + ref_output_lovelace + msg_ref_output_lovelace;
+        let change = input_utxo.lovelace.saturating_sub(total_outputs).saturating_sub(fee_estimate);
+
+        // Build staging transaction - mint all three NFTs
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .collateral_input(collateral)
+            .output(state_output)
+            .output(ref_script_output)
+            .output(msg_ref_script_output)
+            // Mint state NFT (empty name)
+            .mint_asset(Hash::new(policy_id), state_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add state NFT mint: {:?}", e))?
+            // Mint ref NFT ("ref")
+            .mint_asset(Hash::new(policy_id), ref_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT mint: {:?}", e))?
+            // Mint msg_ref NFT ("msg_ref")
+            .mint_asset(Hash::new(policy_id), msg_ref_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add msg_ref NFT mint: {:?}", e))?
+            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
+            .add_mint_redeemer(
+                Hash::new(policy_id),
+                mint_redeemer,
+                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        if change > 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        // Add required signer
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+        let tx = staging.build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
     /// Build a deferred message processing transaction
     ///
     /// This transaction:
@@ -618,9 +775,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
-            .input(fee_input)
+            .input(fee_input.clone())
             .input(message_input.clone())
             .input(state_input.clone())
+            .collateral_input(fee_input)  // Use fee input as collateral
             .output(state_output)
             // Burn the message NFT (-1)
             .mint_asset(Hash::new(nft_policy), message_id_bytes.clone(), -1)

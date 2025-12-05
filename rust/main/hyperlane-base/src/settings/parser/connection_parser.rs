@@ -914,6 +914,15 @@ pub fn build_cardano_connection_conf(
         })
         .unwrap_or_default();
 
+    // Mailbox asset name hex for NFT lookup (defaults to empty for backwards compat)
+    let mailbox_asset_name_hex = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxAssetNameHex")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
     let mailbox_script_hash = conn
         .chain(&mut local_err)
         .get_opt_key("mailboxScriptHash")
@@ -953,6 +962,15 @@ pub fn build_cardano_connection_conf(
         .end()
         .unwrap_or_default();
 
+    // Registry asset name hex for NFT lookup (defaults to empty for backwards compat)
+    let registry_asset_name_hex = conn
+        .chain(&mut local_err)
+        .get_opt_key("registryAssetNameHex")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
     let ism_policy_id = conn
         .chain(&mut local_err)
         .get_opt_key("ismPolicyId")
@@ -965,6 +983,22 @@ pub fn build_cardano_connection_conf(
                 .parse_string()
                 .end()
         })
+        .unwrap_or_default();
+
+    // ISM asset name hex for NFT lookup (defaults to empty for backwards compat)
+    let ism_asset_name_hex = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismAssetNameHex")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    let ism_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismScriptHash")
+        .parse_string()
+        .end()
         .unwrap_or_default();
 
     let igp_policy_id = conn
@@ -1023,6 +1057,7 @@ pub fn build_cardano_connection_conf(
         api_key: api_key.unwrap().to_string(),
         network,
         mailbox_policy_id: mailbox_policy_id.to_string(),
+        mailbox_asset_name_hex,
         mailbox_script_hash: mailbox_script_hash.to_string(),
         processed_messages_script_hash,
         processed_messages_nft_policy_id,
@@ -1030,7 +1065,10 @@ pub fn build_cardano_connection_conf(
         mailbox_script_cbor,
         mailbox_reference_script_utxo,
         registry_policy_id: registry_policy_id.to_string(),
+        registry_asset_name_hex,
         ism_policy_id: ism_policy_id.to_string(),
+        ism_asset_name_hex,
+        ism_script_hash: ism_script_hash.to_string(),
         ism_script_cbor,
         ism_reference_script_utxo,
         igp_policy_id: igp_policy_id.to_string(),

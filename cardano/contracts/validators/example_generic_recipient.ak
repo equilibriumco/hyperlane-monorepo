@@ -1,6 +1,7 @@
 use aiken/collection/list
+use aiken/collection/dict
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
-use cardano/assets.{lovelace_of, quantity_of}
+use cardano/assets.{lovelace_of, tokens}
 use types.{
   Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
   PolicyId, HandleMessage, ContractAction,
@@ -153,11 +154,16 @@ fn handle_message(
 /// The mailbox NFT is minted once during deployment and lives in the mailbox UTXO.
 /// Only the real mailbox UTXO contains this NFT - attackers cannot mint another.
 fn mailbox_is_caller(tx: Transaction, mailbox_policy_id: PolicyId) -> Bool {
-  // Check if any input contains the mailbox NFT
-  // The NFT has empty asset name "" by convention
+  // Check if any input contains a token with the mailbox NFT policy
+  // We check for ANY token under the policy (regardless of asset name)
+  // because deployments may use descriptive asset names like "Mailbox State"
   list.any(
     tx.inputs,
-    fn(input) { quantity_of(input.output.value, mailbox_policy_id, "") > 0 },
+    fn(input) {
+      let policy_tokens = tokens(input.output.value, mailbox_policy_id)
+      // Check if there's at least one token under this policy
+      !dict.is_empty(policy_tokens)
+    },
   )
 }
 

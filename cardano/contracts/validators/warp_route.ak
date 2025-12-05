@@ -1,7 +1,8 @@
+use aiken/collection/dict
 use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Script}
-use cardano/assets.{lovelace_of, quantity_of}
+use cardano/assets.{lovelace_of, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use types.{
   AssetName, Domain, HyperlaneAddress, PolicyId, ScriptHash, UtxoLocator,
@@ -374,8 +375,9 @@ fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
   list.any(
     tx.inputs,
     fn(input) {
-      // Check if any input contains the mailbox NFT
-      quantity_of(input.output.value, mailbox_policy_id, "") > 0
+      // Check if any input contains a token with the mailbox NFT policy
+      let policy_tokens = tokens(input.output.value, mailbox_policy_id)
+      !dict.is_empty(policy_tokens)
     },
   )
 }

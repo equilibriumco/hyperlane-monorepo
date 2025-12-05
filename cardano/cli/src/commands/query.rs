@@ -6,6 +6,7 @@ use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::context::CliContext;
+use crate::utils::plutus::script_hash_to_address;
 
 #[derive(Args)]
 pub struct QueryArgs {
@@ -76,11 +77,11 @@ enum QueryCommands {
 
     /// Query generic recipient state and received messages
     Recipient {
-        /// Recipient script address
+        /// Recipient script hash (28 bytes hex, as shown in registry)
         #[arg(long)]
-        address: Option<String>,
+        script_hash: Option<String>,
 
-        /// Recipient state NFT policy ID (alternative to address)
+        /// Recipient state NFT policy ID (alternative to script-hash)
         #[arg(long)]
         policy: Option<String>,
 
@@ -118,8 +119,8 @@ pub async fn execute(ctx: &CliContext, args: QueryArgs) -> Result<()> {
             message_id,
             mailbox_address,
         } => query_message(ctx, &message_id, mailbox_address).await,
-        QueryCommands::Recipient { address, policy, history, history_limit, raw } => {
-            query_recipient(ctx, address, policy, history, history_limit, raw).await
+        QueryCommands::Recipient { script_hash, policy, history, history_limit, raw } => {
+            query_recipient(ctx, script_hash, policy, history, history_limit, raw).await
         }
     }
 }
@@ -419,7 +420,7 @@ async fn query_message(
 
 async fn query_recipient(
     ctx: &CliContext,
-    address: Option<String>,
+    script_hash: Option<String>,
     policy: Option<String>,
     history: bool,
     history_limit: u32,
@@ -430,7 +431,7 @@ async fn query_recipient(
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    // Find recipient UTXO either by address or by NFT policy
+    // Find recipient UTXO either by script hash or by NFT policy
     let (recipient_utxo, recipient_address) = if let Some(policy_id) = policy.clone() {
         // Find by NFT policy (more reliable)
         let utxo = client
@@ -439,7 +440,9 @@ async fn query_recipient(
             .ok_or_else(|| anyhow!("Recipient UTXO not found with policy {}", policy_id))?;
         let addr = utxo.address.clone();
         (utxo, addr)
-    } else if let Some(addr) = address.clone() {
+    } else if let Some(hash) = script_hash.clone() {
+        // Convert script hash to bech32 address
+        let addr = script_hash_to_address(&hash, ctx.pallas_network())?;
         // Find by address - get UTXOs and find one with inline datum
         let utxos = client.get_utxos(&addr).await?;
         let utxo = utxos
@@ -449,7 +452,7 @@ async fn query_recipient(
         (utxo, addr)
     } else {
         return Err(anyhow!(
-            "Please provide either --address or --policy to identify the recipient"
+            "Please provide either --script-hash or --policy to identify the recipient"
         ));
     };
 

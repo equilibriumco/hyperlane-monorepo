@@ -8,9 +8,8 @@ use cardano/transaction.{
 }
 use merkle
 use types.{
-  Domain, HyperlaneAddress, MailboxDatum, MailboxRedeemer, Message,
-  ProcessedMessageDatum, ScriptHash, encode_message,
-  Dispatch, Process, SetDefaultIsm, TransferOwnership,
+  Domain, HyperlaneAddress, MailboxDatum, MailboxRedeemer, Message, ScriptHash,
+  encode_message, Dispatch, Process, SetDefaultIsm, TransferOwnership,
 }
 use utils.{
   find_input, has_script_input, hyperlane_address_to_script_hash,

@@ -77,7 +77,8 @@ impl CardanoMailbox {
     /// falls back to looking up UTXOs at the mailbox script address.
     async fn find_mailbox_utxo(&self) -> ChainResult<Utxo> {
         // First try to find by NFT (preferred method for production)
-        let mailbox_asset_name = ""; // Empty asset name for state NFT
+        // Asset name is configured from deployment info (e.g., "4d61696c626f78205374617465" for "Mailbox State")
+        let mailbox_asset_name = &self.conf.mailbox_asset_name_hex;
         let nft_result = self.provider
             .find_utxo_by_nft(&self.conf.mailbox_policy_id, mailbox_asset_name)
             .await;

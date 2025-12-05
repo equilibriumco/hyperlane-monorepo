@@ -21,7 +21,7 @@ use pallas_codec::utils::{KeyValuePairs, MaybeIndefArray};
 use pallas_txbuilder::{BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 #[derive(Error, Debug)]
 pub enum TxBuilderError {
@@ -53,12 +53,13 @@ pub enum TxBuilderError {
 /// Protocol limits (Conway): mem = 16,500,000, steps = 10,000,000,000 per transaction
 /// We use smaller values per redeemer to stay within limits when multiple scripts execute
 // Execution units per script - total must fit within network max (16.5M mem, 10B steps)
-// With 4 scripts (mailbox, recipient, ISM 2x, mint), we allocate conservatively:
-// 3M + 3M + 5M + 3M = 14M mem, 1.5B + 1.5B + 3B + 1.5B = 7.5B steps
-const DEFAULT_MEM_UNITS: u64 = 3_000_000;
+// For deferred recipients, we have 5 scripts: mailbox, recipient, ISM, message_nft_mint, processed_nft_mint
+// 2.5M + 2.5M + 4M + 2.5M + 2.5M = 14M mem (fits within 16.5M with headroom)
+// 1.5B + 1.5B + 2.5B + 1.5B + 1.5B = 8.5B steps (fits within 10B)
+const DEFAULT_MEM_UNITS: u64 = 2_500_000;
 const DEFAULT_STEP_UNITS: u64 = 1_500_000_000;
-const ISM_MEM_UNITS: u64 = 5_000_000;
-const ISM_STEP_UNITS: u64 = 3_000_000_000;
+const ISM_MEM_UNITS: u64 = 4_000_000;
+const ISM_STEP_UNITS: u64 = 2_500_000_000;
 
 /// Minimum lovelace per UTXO (Cardano protocol parameter ~1 ADA)
 const MIN_UTXO_LOVELACE: u64 = 2_000_000;
@@ -85,7 +86,7 @@ impl HyperlaneTxBuilder {
         let registry = RecipientRegistry::new(
             BlockfrostProvider::new(&conf.api_key, conf.network),
             conf.registry_policy_id.clone(),
-            "".to_string(), // Registry asset name (empty for state NFT)
+            conf.registry_asset_name_hex.clone(),
         );
 
         Self {
@@ -99,7 +100,7 @@ impl HyperlaneTxBuilder {
     async fn find_mailbox_utxo(&self) -> Result<Utxo, TxBuilderError> {
         // First try to find by NFT (preferred method for production)
         let nft_result = self.provider
-            .find_utxo_by_nft(&self.conf.mailbox_policy_id, "")
+            .find_utxo_by_nft(&self.conf.mailbox_policy_id, &self.conf.mailbox_asset_name_hex)
             .await;
 
         match nft_result {
@@ -161,9 +162,11 @@ impl HyperlaneTxBuilder {
         info!("Looking up recipient registration for script hash: {}", hex::encode(&recipient_script_hash));
 
         let registration = self.registry.get_registration(&recipient_script_hash).await?;
-        info!("Registration state_locator: policy_id={}, asset_name={}",
+        info!("Registration found for script_hash={}: state_locator.policy_id={}, state_locator.asset_name={}, recipient_type={:?}",
+              hex::encode(&recipient_script_hash),
               registration.state_locator.policy_id,
-              registration.state_locator.asset_name);
+              registration.state_locator.asset_name,
+              registration.recipient_type);
 
         // 3. Find recipient state UTXO
         let recipient_utxo = self
@@ -194,14 +197,47 @@ impl HyperlaneTxBuilder {
             None
         };
 
+        // 3c. For deferred recipients, find the stored_message_nft reference script UTXO
+        // The CLI deploys this with asset name "msg_ref" (hex: 6d73675f726566) at the same policy ID
+        let message_nft_ref_script_utxo = if matches!(registration.recipient_type, crate::types::RecipientType::Deferred { .. }) {
+            if let Some(ref ref_locator) = registration.reference_script_locator {
+                // Look up using the same policy ID but with "msg_ref" asset name
+                let msg_ref_asset_name = "6d73675f726566".to_string(); // "msg_ref" in hex
+                match self.provider.find_utxo_by_nft(&ref_locator.policy_id, &msg_ref_asset_name).await {
+                    Ok(msg_ref_utxo) => {
+                        info!(
+                            "Found message NFT reference script UTXO: {}#{}",
+                            msg_ref_utxo.tx_hash, msg_ref_utxo.output_index
+                        );
+                        Some(msg_ref_utxo)
+                    }
+                    Err(e) => {
+                        // This might happen for legacy deployments without the msg_ref NFT
+                        warn!(
+                            "Could not find msg_ref NFT for deferred recipient (policy: {}): {}. \
+                             The stored_message_nft script may need to be in the relayer config.",
+                            ref_locator.policy_id, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                debug!("No reference_script_locator for deferred recipient, cannot look up msg_ref");
+                None
+            }
+        } else {
+            None
+        };
+
         // 4. Find ISM UTXO (either custom or default)
-        let ism_policy_id = match &registration.custom_ism {
-            Some(ism) => hex::encode(ism),
-            None => self.conf.ism_policy_id.clone(),
+        // For custom ISM, use empty asset name; for default ISM, use config asset name
+        let (ism_policy_id, ism_asset_name) = match &registration.custom_ism {
+            Some(ism) => (hex::encode(ism), String::new()),
+            None => (self.conf.ism_policy_id.clone(), self.conf.ism_asset_name_hex.clone()),
         };
         let ism_utxo = self
             .provider
-            .find_utxo_by_nft(&ism_policy_id, "")
+            .find_utxo_by_nft(&ism_policy_id, &ism_asset_name)
             .await?;
         debug!("Found ISM UTXO: {}#{}", ism_utxo.tx_hash, ism_utxo.output_index);
 
@@ -339,6 +375,7 @@ impl HyperlaneTxBuilder {
             recipient_type: registration.recipient_type.clone(),
             stored_message_datum_cbor,
             message_nft_redeemer_cbor,
+            message_nft_ref_script_utxo,
         })
     }
 
@@ -442,6 +479,17 @@ impl HyperlaneTxBuilder {
             debug!(
                 "Added recipient reference script UTXO: {}#{}",
                 ref_utxo.tx_hash, ref_utxo.output_index
+            );
+        }
+
+        // Add message NFT reference script UTXO as reference input (for deferred recipients)
+        // This provides the stored_message_nft minting policy script via reference
+        if let Some(ref msg_ref_utxo) = components.message_nft_ref_script_utxo {
+            let msg_ref_input = utxo_to_input(msg_ref_utxo)?;
+            tx = tx.reference_input(msg_ref_input);
+            debug!(
+                "Added message NFT reference script UTXO: {}#{}",
+                msg_ref_utxo.tx_hash, msg_ref_utxo.output_index
             );
         }
 
@@ -834,17 +882,6 @@ impl HyperlaneTxBuilder {
         }
     }
 
-    /// Get the recipient policy ID from registration
-    fn get_recipient_policy_id(&self, recipient_utxo: &Utxo) -> Result<String, TxBuilderError> {
-        // Extract policy ID from the recipient UTXO's assets
-        for value in &recipient_utxo.value {
-            if value.unit != "lovelace" && value.unit.len() >= 56 {
-                return Ok(value.unit[..56].to_string());
-            }
-        }
-        Err(TxBuilderError::MissingInput("Recipient policy ID not found".to_string()))
-    }
-
     /// Create the processed message marker output
     /// This output is sent to the processed_messages_script address
     /// with an inline datum containing the message_id. No NFT is needed.
@@ -1089,6 +1126,9 @@ pub struct ProcessTxComponents {
     /// Deferred-specific: Encoded message NFT mint redeemer (CBOR)
     /// Only set when recipient_type is Deferred
     pub message_nft_redeemer_cbor: Option<Vec<u8>>,
+    /// Deferred-specific: Reference script UTXO for stored_message_nft minting policy
+    /// Discovered via the same policy ID as reference_script_locator but with asset name "msg_ref"
+    pub message_nft_ref_script_utxo: Option<Utxo>,
 }
 
 // ============================================================================
@@ -1774,15 +1814,12 @@ fn build_deferred_continuation_datum(
         };
 
     // Increment messages_stored (messages_processed stays the same - that's for bot processing)
+    // IMPORTANT: last_processed_nonce must remain unchanged - the validator preserves it
     let new_messages_stored = messages_stored + 1;
-    let new_nonce = match old_nonce {
-        Some(n) => Some(n + 1),
-        None => Some(1),
-    };
 
     let plutus_data = build_deferred_datum_plutus(
         ism_opt.as_deref(),
-        new_nonce,
+        old_nonce,  // Keep the same nonce - validator expects it unchanged
         new_messages_stored,
         messages_processed,
     );

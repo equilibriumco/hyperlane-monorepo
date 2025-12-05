@@ -7,16 +7,17 @@ use cardano/transaction.{OutputReference, Transaction}
 /// Used to create unique identifiers for protocol state UTXOs
 /// Validator parameterized by the UTXO that must be consumed
 ///
-/// For the two-UTXO reference script pattern, this allows minting up to 2 NFTs:
+/// For the reference script patterns, this allows minting up to 3 NFTs:
 /// - State NFT (empty asset name) for the state UTXO
-/// - Reference Script NFT ("ref") for the reference script UTXO
+/// - Reference Script NFT ("ref") for the recipient reference script UTXO
+/// - Message Ref NFT ("msg_ref") for the stored_message_nft reference script UTXO (deferred only)
 validator state_nft(utxo_ref: OutputReference) {
   mint(_redeemer: Data, _policy_id: ByteArray, tx: Transaction) {
     // Can only mint if specific UTXO is consumed (one-shot)
     let utxo_consumed =
       list.any(tx.inputs, fn(input) { input.output_reference == utxo_ref })
 
-    // Can mint 1-2 tokens (for two-UTXO pattern: state NFT + optional ref NFT)
+    // Can mint 1-3 tokens (for three-UTXO pattern: state NFT + ref NFT + msg_ref NFT)
     // Flatten the minted value to get all (policy_id, asset_name, quantity) tuples
     let minted_flat = assets.flatten(tx.mint)
     let total_minted =
@@ -29,7 +30,7 @@ validator state_nft(utxo_ref: OutputReference) {
         },
       )
 
-    utxo_consumed && total_minted >= 1 && total_minted <= 2
+    utxo_consumed && total_minted >= 1 && total_minted <= 3
   }
 
   else(_) {

@@ -30,6 +30,7 @@ async fn main() -> ChainResult<()> {
         api_key: api_key.clone(),
         network: CardanoNetwork::Preprod,
         mailbox_policy_id: "0000000000000000000000000000000000000000000000000000000000".to_string(),
+        mailbox_asset_name_hex: "".to_string(), // Empty for demo
         mailbox_script_hash: "0000000000000000000000000000000000000000000000000000000000".to_string(),
         processed_messages_script_hash: "0000000000000000000000000000000000000000000000000000000000".to_string(),
         processed_messages_nft_policy_id: None,
@@ -37,7 +38,10 @@ async fn main() -> ChainResult<()> {
         mailbox_script_cbor: None,
         mailbox_reference_script_utxo: None,
         registry_policy_id: "0000000000000000000000000000000000000000000000000000000000".to_string(),
+        registry_asset_name_hex: "".to_string(), // Empty for demo
         ism_policy_id: "0000000000000000000000000000000000000000000000000000000000".to_string(),
+        ism_asset_name_hex: "".to_string(), // Empty for demo
+        ism_script_hash: "0000000000000000000000000000000000000000000000000000000000".to_string(),
         ism_script_cbor: None,
         ism_reference_script_utxo: None,
         igp_policy_id: "0000000000000000000000000000000000000000000000000000000000".to_string(),

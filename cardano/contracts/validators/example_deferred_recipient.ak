@@ -1,9 +1,10 @@
+use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
-use cardano/assets.{lovelace_of, quantity_of}
+use cardano/assets.{lovelace_of, tokens}
 use types.{
   Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
   PolicyId, HandleMessage, ContractAction, StoredMessageDatum,
@@ -129,45 +130,71 @@ pub type ExampleDeferredRecipientInner {
 ///    - recipient_type: Deferred { message_policy: message_nft_policy }
 validator example_deferred_recipient(mailbox_policy_id: PolicyId, message_nft_policy: PolicyId) {
   spend(
-    datum: Option<HyperlaneRecipientDatum<ExampleDeferredRecipientInner>>,
+    datum_data: Option<Data>,
     redeemer: HyperlaneRecipientRedeemer<DeferredAction>,
     own_ref: OutputReference,
     tx: Transaction,
   ) {
-    expect Some(recipient_datum) = datum
+    expect Some(raw_datum) = datum_data
 
-    when redeemer is {
-      // Phase 1: Relayer stores an incoming message
-      HandleMessage { origin, sender, body } ->
-        handle_message(
-          recipient_datum,
-          origin,
-          sender,
-          body,
-          tx,
-          own_ref,
-          mailbox_policy_id,
-          message_nft_policy,
-        )
+    // Dispatch based on datum type
+    // State UTXO has HyperlaneRecipientDatum (Constr 0 with 3 fields, inner is Constr 0 with 2 fields)
+    // Message UTXO has StoredMessageDatum (Constr 0 with 5 fields)
+    if is_recipient_datum(raw_datum) {
+      // State UTXO path
+      expect recipient_datum: HyperlaneRecipientDatum<ExampleDeferredRecipientInner> = raw_datum
+      when redeemer is {
+        // Phase 1: Relayer stores an incoming message
+        HandleMessage { origin, sender, body } ->
+          handle_message(
+            recipient_datum,
+            origin,
+            sender,
+            body,
+            tx,
+            own_ref,
+            mailbox_policy_id,
+            message_nft_policy,
+          )
 
-      // Phase 2: Process a stored message
-      ContractAction { action } ->
-        when action is {
-          ProcessStoredMessage { message_id } ->
-            process_stored_message(
-              recipient_datum,
-              message_id,
-              tx,
-              own_ref,
-              message_nft_policy,
-            )
+        // Phase 2: Process a stored message
+        ContractAction { action } -> {
+          let ProcessStoredMessage { message_id } = action
+          process_stored_message(
+            recipient_datum,
+            message_id,
+            tx,
+            own_ref,
+            message_nft_policy,
+          )
         }
+      }
+    } else {
+      // Message UTXO path - only require NFT is being burned
+      when redeemer is {
+        ContractAction { action } -> {
+          let ProcessStoredMessage { message_id } = action
+          message_nft_burned(tx, message_nft_policy, message_id)
+        }
+        // HandleMessage should not be called on message UTXOs
+        _ -> False
+      }
     }
   }
 
   else(_) {
     fail
   }
+}
+
+/// Check if datum can be decoded as HyperlaneRecipientDatum
+/// HyperlaneRecipientDatum is Constr 0 with 3 fields, where inner is Constr 0 with 2 fields
+/// StoredMessageDatum is Constr 0 with 5 fields
+fn is_recipient_datum(d: Data) -> Bool {
+  // Use builtin to decompose the Data and check structure
+  let Pair(index, fields) = builtin.un_constr_data(d)
+  // HyperlaneRecipientDatum has 3 fields, StoredMessageDatum has 5
+  index == 0 && list.length(fields) == 3
 }
 
 /// Handle an incoming Hyperlane message by storing it
@@ -276,12 +303,15 @@ fn process_stored_message(
 
 /// Verify that the REAL mailbox is calling this recipient
 ///
-/// We check for the mailbox's unique NFT (empty asset name by convention).
+/// We check for the mailbox's unique NFT.
 /// This prevents attacks where someone creates a fake UTXO at the mailbox address.
 fn mailbox_is_caller(tx: Transaction, mailbox_policy_id: PolicyId) -> Bool {
   list.any(
     tx.inputs,
-    fn(input) { quantity_of(input.output.value, mailbox_policy_id, "") > 0 },
+    fn(input) {
+      let policy_tokens = tokens(input.output.value, mailbox_policy_id)
+      !dict.is_empty(policy_tokens)
+    },
   )
 }
 
@@ -394,12 +424,9 @@ fn validate_state_continuation(
           when output.datum is {
             InlineDatum(datum_data) -> {
               // Try to parse as our datum type
-              when datum_data is {
-                d -> {
-                  expect parsed: HyperlaneRecipientDatum<ExampleDeferredRecipientInner> = d
-                  parsed == new_datum
-                }
-              }
+              let d = datum_data
+              expect parsed: HyperlaneRecipientDatum<ExampleDeferredRecipientInner> = d
+              parsed == new_datum
             }
             _ -> False
           }

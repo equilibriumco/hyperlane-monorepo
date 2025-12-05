@@ -3,7 +3,7 @@ use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
-use cardano/assets.{lovelace_of, quantity_of}
+use cardano/assets.{lovelace_of, tokens}
 use types.{
   Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
   PolicyId, HandleMessage, ContractAction, StoredMessageDatum,
@@ -85,17 +85,16 @@ validator deferred_recipient(mailbox_policy_id: PolicyId, message_nft_policy: Po
           message_nft_policy,
         )
 
-      ContractAction { action } ->
-        when action is {
-          ProcessStoredMessage { message_id } ->
-            process_stored_message(
-              recipient_datum,
-              message_id,
-              tx,
-              own_ref,
-              message_nft_policy,
-            )
-        }
+      ContractAction { action } -> {
+        let ProcessStoredMessage { message_id } = action
+        process_stored_message(
+          recipient_datum,
+          message_id,
+          tx,
+          own_ref,
+          message_nft_policy,
+        )
+      }
     }
   }
 
@@ -195,7 +194,10 @@ fn process_stored_message(
 fn mailbox_is_caller(tx: Transaction, mailbox_policy_id: PolicyId) -> Bool {
   list.any(
     tx.inputs,
-    fn(input) { quantity_of(input.output.value, mailbox_policy_id, "") > 0 },
+    fn(input) {
+      let policy_tokens = tokens(input.output.value, mailbox_policy_id)
+      !dict.is_empty(policy_tokens)
+    },
   )
 }
 
@@ -296,14 +298,11 @@ fn validate_state_continuation(
           when output.datum is {
             InlineDatum(datum_data) -> {
               // Try to parse as HyperlaneRecipientDatum - if it works, this is the state UTXO
-              when datum_data is {
-                d -> {
-                  // Check if this looks like a HyperlaneRecipientDatum by comparing inner
-                  expect parsed: HyperlaneRecipientDatum<DeferredRecipientInner> = d
-                  // This is the state UTXO if it matches our expected new datum
-                  parsed == new_datum
-                }
-              }
+              let d = datum_data
+              // Check if this looks like a HyperlaneRecipientDatum by comparing inner
+              expect parsed: HyperlaneRecipientDatum<DeferredRecipientInner> = d
+              // This is the state UTXO if it matches our expected new datum
+              parsed == new_datum
             }
             _ -> False
           }

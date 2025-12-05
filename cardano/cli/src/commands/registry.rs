@@ -369,6 +369,17 @@ async fn register(
         .ok_or_else(|| anyhow!("Registry script missing cborHex field"))?;
     let registry_script_cbor = hex::decode(registry_script_hex)?;
 
+    // Check for reference script UTXO in deployment info
+    let deployment = ctx.load_deployment_info()?;
+    let ref_script_utxo = deployment.registry
+        .as_ref()
+        .and_then(|r| r.reference_script_utxo.as_ref())
+        .map(|r| format!("{}#{}", r.tx_hash, r.output_index));
+
+    if let Some(ref ref_utxo) = ref_script_utxo {
+        println!("  Using reference script: {}", ref_utxo);
+    }
+
     // Build transaction (owner_pkh already defined earlier)
     println!("\n{}", "Building transaction...".cyan());
     let tx = tx_builder
@@ -381,6 +392,7 @@ async fn register(
             &existing,
             &new_registration,
             &owner_pkh,
+            ref_script_utxo.as_deref(),
         )
         .await?;
 
@@ -604,6 +616,17 @@ async fn remove(
         .ok_or_else(|| anyhow!("Registry script missing cborHex field"))?;
     let registry_script_cbor = hex::decode(registry_script_hex)?;
 
+    // Check for reference script UTXO in deployment info
+    let deployment = ctx.load_deployment_info()?;
+    let ref_script_utxo = deployment.registry
+        .as_ref()
+        .and_then(|r| r.reference_script_utxo.as_ref())
+        .map(|r| format!("{}#{}", r.tx_hash, r.output_index));
+
+    if let Some(ref ref_utxo) = ref_script_utxo {
+        println!("  Using reference script: {}", ref_utxo);
+    }
+
     // Build transaction
     println!("\n{}", "Building transaction...".cyan());
     let tx_builder = HyperlaneTxBuilder::new(&client, network);
@@ -617,6 +640,7 @@ async fn remove(
             &remaining,
             &script_hash,
             &payer_pkh,
+            ref_script_utxo.as_deref(),
         )
         .await?;
 

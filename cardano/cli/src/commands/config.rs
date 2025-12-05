@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use crate::utils::context::CliContext;
+use crate::utils::plutus::{apply_validator_param_with_purpose, encode_script_hash_param};
 
 #[derive(Args)]
 pub struct ConfigArgs {
@@ -160,6 +161,27 @@ async fn update_relayer(
                 old,
                 nft.policy_id.clone(),
             ));
+
+            // Add mailbox asset name hex for NFT lookup
+            let old = get_old_value(connection, "mailboxAssetNameHex");
+            connection_updates.push((
+                "mailboxAssetNameHex".to_string(),
+                json!(nft.asset_name_hex.clone()),
+                old,
+                nft.asset_name_hex.clone(),
+            ));
+        }
+
+        // Update mailbox reference script UTXO
+        if let Some(ref ref_utxo) = mailbox.reference_script_utxo {
+            let ref_utxo_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
+            let old = get_old_value(connection, "mailboxReferenceScriptUtxo");
+            connection_updates.push((
+                "mailboxReferenceScriptUtxo".to_string(),
+                json!(ref_utxo_str.clone()),
+                old,
+                ref_utxo_str,
+            ));
         }
 
         // Update Hyperlane-format mailbox address (0x02000000 prefix for Cardano)
@@ -185,6 +207,27 @@ async fn update_relayer(
                 old,
                 nft.policy_id.clone(),
             ));
+
+            // Add ISM asset name hex for NFT lookup
+            let old = get_old_value(connection, "ismAssetNameHex");
+            connection_updates.push((
+                "ismAssetNameHex".to_string(),
+                json!(nft.asset_name_hex.clone()),
+                old,
+                nft.asset_name_hex.clone(),
+            ));
+        }
+
+        // Update ISM reference script UTXO
+        if let Some(ref ref_utxo) = ism.reference_script_utxo {
+            let ref_utxo_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
+            let old = get_old_value(connection, "ismReferenceScriptUtxo");
+            connection_updates.push((
+                "ismReferenceScriptUtxo".to_string(),
+                json!(ref_utxo_str.clone()),
+                old,
+                ref_utxo_str,
+            ));
         }
 
         // Update Hyperlane-format ISM address
@@ -202,6 +245,15 @@ async fn update_relayer(
                 old,
                 nft.policy_id.clone(),
             ));
+
+            // Add registry asset name hex for NFT lookup
+            let old = get_old_value(connection, "registryAssetNameHex");
+            connection_updates.push((
+                "registryAssetNameHex".to_string(),
+                json!(nft.asset_name_hex.clone()),
+                old,
+                nft.asset_name_hex.clone(),
+            ));
         }
 
         // The registry script hash is also used as processedMessagesScriptHash
@@ -212,6 +264,55 @@ async fn update_relayer(
             old,
             registry.hash.clone(),
         ));
+    }
+
+    // Generate processed_message_nft policy (parameterized with mailbox script hash)
+    // This is used for efficient O(1) processed message lookups
+    if let Some(ref mailbox) = deployment.mailbox {
+        println!("\n{}", "Generating processed_message_nft policy...".cyan());
+
+        // Apply mailbox script hash parameter to processed_message_nft validator
+        let mailbox_hash_param = encode_script_hash_param(&mailbox.hash)
+            .with_context(|| "Failed to encode mailbox hash as CBOR")?;
+        let mailbox_hash_param_hex = hex::encode(&mailbox_hash_param);
+
+        match apply_validator_param_with_purpose(
+            &ctx.contracts_dir,
+            "processed_message_nft",
+            "processed_message_nft",
+            Some("mint"),
+            &mailbox_hash_param_hex,
+        ) {
+            Ok(applied) => {
+                println!("  Applied mailbox_script_hash parameter: {}", mailbox.hash);
+                println!("  Resulting policy ID: {}", applied.policy_id.green());
+
+                let old_policy = get_old_value(connection, "processedMessagesNftPolicyId");
+                connection_updates.push((
+                    "processedMessagesNftPolicyId".to_string(),
+                    json!(applied.policy_id.clone()),
+                    old_policy,
+                    applied.policy_id.clone(),
+                ));
+
+                let old_cbor = get_old_value(connection, "processedMessagesNftScriptCbor");
+                let cbor_display = if applied.compiled_code.len() > 40 {
+                    format!("{}...", &applied.compiled_code[..40])
+                } else {
+                    applied.compiled_code.clone()
+                };
+                connection_updates.push((
+                    "processedMessagesNftScriptCbor".to_string(),
+                    json!(applied.compiled_code.clone()),
+                    if old_cbor.len() > 40 { format!("{}...", &old_cbor[..40]) } else { old_cbor },
+                    cbor_display,
+                ));
+            }
+            Err(e) => {
+                println!("  {} Failed to apply processed_message_nft parameter: {}", "[WARN]".yellow(), e);
+                println!("  {} NFT-based message lookup will not be available", "[WARN]".yellow());
+            }
+        }
     }
 
     // Update IGP info

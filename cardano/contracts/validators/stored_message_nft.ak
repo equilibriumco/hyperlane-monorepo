@@ -63,7 +63,10 @@ fn validate_mint(
   let mailbox_involved =
     list.any(
       tx.inputs,
-      fn(input) { assets.quantity_of(input.output.value, mailbox_policy_id, "") > 0 },
+      fn(input) {
+        let policy_tokens = assets.tokens(input.output.value, mailbox_policy_id)
+        !dict.is_empty(policy_tokens)
+      },
     )
 
   // 2. Get our mints
