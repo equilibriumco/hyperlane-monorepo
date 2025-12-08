@@ -316,12 +316,18 @@ pub struct HyperlaneRecipientDatum<T> {
 }
 
 /// Hyperlane recipient redeemer (matches Aiken HyperlaneRecipientRedeemer)
+///
+/// SECURITY: HandleMessage includes the full Message and message_id.
+/// Recipients MUST verify: keccak256(encode_message(message)) == message_id
+/// This ensures the data was validated by the ISM (which signs the message_id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HyperlaneRecipientRedeemer<T> {
     HandleMessage {
-        origin: Domain,
-        sender: HyperlaneAddress,
-        body: Vec<u8>,
+        /// The full message structure (for verification)
+        message: Message,
+        /// The message ID (keccak256 hash of encoded message)
+        /// Recipients must verify message hashes to this
+        message_id: [u8; 32],
     },
     ContractAction {
         action: T,

@@ -1,14 +1,15 @@
 use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
 use cardano/address.{Address}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use cardano/assets.{lovelace_of, tokens}
 use types.{
-  Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
+  HyperlaneRecipientDatum, HyperlaneRecipientRedeemer, Message,
   PolicyId, HandleMessage, ContractAction, StoredMessageDatum,
-  DeferredAction, ProcessStoredMessage,
+  DeferredAction, ProcessStoredMessage, encode_message,
 }
 use utils.{find_input}
 
@@ -145,12 +146,11 @@ validator example_deferred_recipient(mailbox_policy_id: PolicyId, message_nft_po
       expect recipient_datum: HyperlaneRecipientDatum<ExampleDeferredRecipientInner> = raw_datum
       when redeemer is {
         // Phase 1: Relayer stores an incoming message
-        HandleMessage { origin, sender, body } ->
+        HandleMessage { message, message_id } ->
           handle_message(
             recipient_datum,
-            origin,
-            sender,
-            body,
+            message,
+            message_id,
             tx,
             own_ref,
             mailbox_policy_id,
@@ -201,37 +201,57 @@ fn is_recipient_datum(d: Data) -> Bool {
 ///
 /// Called by the relayer when a cross-chain message arrives.
 /// We don't process the message immediately - instead:
-/// 1. Verify the mailbox is calling us (security)
-/// 2. Verify message NFT is being minted (legitimacy proof)
-/// 3. Verify message UTXO is being created (storage)
-/// 4. Update our counter (bookkeeping)
+/// 1. Verify message data matches ISM-validated message_id (CRITICAL)
+/// 2. Verify the mailbox is calling us (security)
+/// 3. Verify message NFT is being minted with correct message_id (legitimacy proof)
+/// 4. Verify message UTXO is being created (storage)
+/// 5. Update our counter (bookkeeping)
 fn handle_message(
   datum: HyperlaneRecipientDatum<ExampleDeferredRecipientInner>,
-  origin: Domain,
-  sender: HyperlaneAddress,
-  body: ByteArray,
+  message: Message,
+  message_id: ByteArray,
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
   message_nft_policy: PolicyId,
 ) -> Bool {
-  // 1. Verify called by the REAL Mailbox
+  // 1. CRITICAL SECURITY CHECK: Verify message data matches the ISM-validated message_id
+  //
+  // The ISM validates signatures on message_id = keccak256(encode_message(message)).
+  // Without this check, an attacker could provide fake origin/sender/body data
+  // while the ISM validates a different (legitimate) message.
+  //
+  // This ensures the data we store is EXACTLY what the ISM verified.
+  let computed_message_id = keccak_256(encode_message(message))
+  expect computed_message_id == message_id
+
+  // 2. Verify called by the REAL Mailbox
   //    We check for the mailbox NFT, not just the script address.
   //    This prevents attackers from creating fake mailbox UTXOs.
   expect mailbox_is_caller(tx, mailbox_policy_id)
 
-  // 2. Verify a message NFT is being minted
-  //    The NFT's asset name is the 32-byte message_id.
-  //    This NFT proves the message is legitimate (went through ISM).
-  expect message_nft_minted(tx, message_nft_policy)
+  // 3. Verify a message NFT is being minted WITH THE CORRECT MESSAGE_ID
+  //    The NFT's asset name must be the verified message_id.
+  //    This links the NFT to the specific verified message.
+  expect message_nft_minted_with_id(tx, message_nft_policy, message_id)
 
-  // 3. Verify a message UTXO is being created
+  // 4. Verify a message UTXO is being created with VERIFIED data
   //    The message UTXO stores the message data for later processing.
+  //    We use data from the verified message, not raw redeemer values.
   expect Some(own_input) = find_input(tx, own_ref)
   let own_address = own_input.output.address
-  expect message_utxo_created(tx, own_address, message_nft_policy, origin, sender, body)
+  expect message_utxo_created(
+    tx,
+    own_address,
+    message_nft_policy,
+    message.origin,
+    message.sender,
+    message.body,
+    message_id,
+    message.nonce,
+  )
 
-  // 4. Update state - just increment the counter
+  // 5. Update state - just increment the counter
   //    Complex state changes happen in Phase 2 when the message is processed
   let new_inner =
     ExampleDeferredRecipientInner {
@@ -246,7 +266,7 @@ fn handle_message(
       inner: new_inner,
     }
 
-  // 5. Validate state continuation
+  // 6. Validate state continuation
   validate_state_continuation(datum, new_datum, tx, own_ref)
 }
 
@@ -315,21 +335,23 @@ fn mailbox_is_caller(tx: Transaction, mailbox_policy_id: PolicyId) -> Bool {
   )
 }
 
-/// Verify a message NFT is being minted
+/// Verify a message NFT is being minted with the SPECIFIC message_id
 ///
-/// The message NFT has a 32-byte asset name (the message_id).
-/// We just check that at least one such NFT is being minted.
-fn message_nft_minted(tx: Transaction, message_nft_policy: PolicyId) -> Bool {
+/// The message NFT has the message_id as its asset name (32 bytes).
+/// We verify that the NFT being minted has the exact message_id we verified.
+/// This ensures the NFT is cryptographically linked to the verified message.
+fn message_nft_minted_with_id(
+  tx: Transaction,
+  message_nft_policy: PolicyId,
+  expected_message_id: ByteArray,
+) -> Bool {
   let nft_mints = assets.tokens(tx.mint, message_nft_policy)
-  let mint_pairs = dict.to_pairs(nft_mints)
 
-  list.any(
-    mint_pairs,
-    fn(pair) {
-      let Pair(asset_name, quantity) = pair
-      bytearray.length(asset_name) == 32 && quantity > 0
-    },
-  )
+  // Check the specific message_id NFT has positive quantity (mint)
+  when dict.get(nft_mints, expected_message_id) is {
+    Some(quantity) -> quantity > 0
+    None -> False
+  }
 }
 
 /// Verify a message NFT is being burned
@@ -349,19 +371,23 @@ fn message_nft_burned(
   }
 }
 
-/// Verify a message UTXO is being created
+/// Verify a message UTXO is being created with VERIFIED data
 ///
 /// The message UTXO should:
 /// - Be at the recipient address (our address)
-/// - Contain the message NFT (for identification)
-/// - Have a StoredMessageDatum with correct values
+/// - Contain the SPECIFIC message NFT (with verified message_id as asset name)
+/// - Have a StoredMessageDatum with ALL correct values including message_id and nonce
+///
+/// This ensures the stored message data is cryptographically linked to the ISM-verified message.
 fn message_utxo_created(
   tx: Transaction,
   recipient_address: Address,
   message_nft_policy: PolicyId,
-  expected_origin: Domain,
-  expected_sender: HyperlaneAddress,
+  expected_origin: Int,
+  expected_sender: ByteArray,
   expected_body: ByteArray,
+  expected_message_id: ByteArray,
+  expected_nonce: Int,
 ) -> Bool {
   list.any(
     tx.outputs,
@@ -369,30 +395,33 @@ fn message_utxo_created(
       // Must be at recipient address
       let at_our_address = output.address == recipient_address
 
-      // Must contain a message NFT (32-byte asset name)
-      let has_message_nft = {
+      // Must contain the SPECIFIC message NFT (verified message_id as asset name)
+      let has_correct_nft = {
         let nft_assets = assets.tokens(output.value, message_nft_policy)
-        let nft_pairs = dict.to_pairs(nft_assets)
-        list.any(
-          nft_pairs,
-          fn(pair) {
-            let Pair(asset_name, quantity) = pair
-            bytearray.length(asset_name) == 32 && quantity > 0
-          },
-        )
+        when dict.get(nft_assets, expected_message_id) is {
+          Some(quantity) -> quantity > 0
+          None -> False
+        }
       }
 
-      // Must have StoredMessageDatum with correct values
+      // Must have StoredMessageDatum with ALL correct values
+      // This includes message_id and nonce, ensuring complete data integrity
       let has_valid_datum =
         when output.datum is {
           InlineDatum(datum_data) -> {
             expect stored_msg: StoredMessageDatum = datum_data
-            stored_msg.origin == expected_origin && stored_msg.sender == expected_sender && stored_msg.body == expected_body
+            and {
+              stored_msg.origin == expected_origin,
+              stored_msg.sender == expected_sender,
+              stored_msg.body == expected_body,
+              stored_msg.message_id == expected_message_id,
+              stored_msg.nonce == expected_nonce,
+            }
           }
           _ -> False
         }
 
-      at_our_address && has_message_nft && has_valid_datum
+      at_our_address && has_correct_nft && has_valid_datum
     },
   )
 }

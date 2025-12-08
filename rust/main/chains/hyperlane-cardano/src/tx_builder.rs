@@ -259,11 +259,13 @@ impl HyperlaneTxBuilder {
         };
         let mailbox_redeemer_cbor = encode_mailbox_redeemer(&mailbox_redeemer)?;
 
+        // SECURITY: Pass the full message and message_id to recipient
+        // The recipient MUST verify: keccak256(encode_message(message)) == message_id
+        // This ensures the data is cryptographically linked to what the ISM validated
         let recipient_redeemer: HyperlaneRecipientRedeemer<()> =
             HyperlaneRecipientRedeemer::HandleMessage {
-                origin: msg.origin,
-                sender: msg.sender,
-                body: msg.body.clone(),
+                message: msg.clone(),
+                message_id,
             };
         let recipient_redeemer_cbor = encode_recipient_redeemer(&recipient_redeemer)?;
 
@@ -1714,19 +1716,32 @@ pub fn encode_recipient_redeemer<T>(
     redeemer: &HyperlaneRecipientRedeemer<T>,
 ) -> Result<Vec<u8>, TxBuilderError> {
     let plutus_data = match redeemer {
-        HyperlaneRecipientRedeemer::HandleMessage {
-            origin,
-            sender,
-            body,
-        } => {
-            // Constructor 0: HandleMessage
-            PlutusData::Constr(Constr {
-                tag: 121,
+        HyperlaneRecipientRedeemer::HandleMessage { message, message_id } => {
+            // Constructor 0: HandleMessage { message: Message, message_id: ByteArray }
+            //
+            // Message is Constructor 0 with fields:
+            // [version: Int, nonce: Int, origin: Int, sender: ByteArray,
+            //  destination: Int, recipient: ByteArray, body: ByteArray]
+            let message_data = PlutusData::Constr(Constr {
+                tag: 121, // Constructor 0
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
-                    PlutusData::BigInt(BigInt::Int((*origin as i64).into())),
-                    PlutusData::BoundedBytes(sender.to_vec().into()),
-                    PlutusData::BoundedBytes(body.clone().into()),
+                    PlutusData::BigInt(BigInt::Int((message.version as i64).into())),
+                    PlutusData::BigInt(BigInt::Int((message.nonce as i64).into())),
+                    PlutusData::BigInt(BigInt::Int((message.origin as i64).into())),
+                    PlutusData::BoundedBytes(message.sender.to_vec().into()),
+                    PlutusData::BigInt(BigInt::Int((message.destination as i64).into())),
+                    PlutusData::BoundedBytes(message.recipient.to_vec().into()),
+                    PlutusData::BoundedBytes(message.body.clone().into()),
+                ]),
+            });
+
+            PlutusData::Constr(Constr {
+                tag: 121, // Constructor 0 for HandleMessage
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    message_data,
+                    PlutusData::BoundedBytes(message_id.to_vec().into()),
                 ]),
             })
         }

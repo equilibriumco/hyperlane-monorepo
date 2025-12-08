@@ -1,10 +1,11 @@
 use aiken/collection/list
 use aiken/collection/dict
+use aiken/crypto.{keccak_256}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use cardano/assets.{lovelace_of, tokens}
 use types.{
-  Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
-  PolicyId, HandleMessage, ContractAction,
+  HyperlaneRecipientDatum, HyperlaneRecipientRedeemer, Message,
+  PolicyId, HandleMessage, ContractAction, encode_message,
 }
 use utils.{find_input}
 
@@ -82,12 +83,11 @@ validator example_generic_recipient(mailbox_policy_id: PolicyId) {
     expect Some(recipient_datum) = datum
 
     when redeemer is {
-      HandleMessage { origin, sender, body } ->
+      HandleMessage { message, message_id } ->
         handle_message(
           recipient_datum,
-          origin,
-          sender,
-          body,
+          message,
+          message_id,
           tx,
           own_ref,
           mailbox_policy_id,
@@ -107,28 +107,37 @@ validator example_generic_recipient(mailbox_policy_id: PolicyId) {
 /// Handle an incoming Hyperlane message
 fn handle_message(
   datum: HyperlaneRecipientDatum<GenericRecipientInner>,
-  _origin: Domain,
-  _sender: HyperlaneAddress,
-  body: ByteArray,
+  message: Message,
+  message_id: ByteArray,
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
 ) -> Bool {
-  // 1. Verify called by the REAL Mailbox (check for mailbox NFT, not just script hash)
+  // 1. CRITICAL SECURITY CHECK: Verify message data matches the ISM-validated message_id
+  //
+  // The ISM validates signatures on message_id = keccak256(encode_message(message)).
+  // Without this check, an attacker could provide fake origin/sender/body data
+  // while the ISM validates a different (legitimate) message.
+  //
+  // This ensures the data we use is EXACTLY what the ISM verified.
+  let computed_message_id = keccak_256(encode_message(message))
+  expect computed_message_id == message_id
+
+  // 2. Verify called by the REAL Mailbox (check for mailbox NFT, not just script hash)
   //
   // SECURITY: This is critical! We check for the unique mailbox NFT, not just
   // any input from the mailbox script address. This prevents attackers from
   // creating fake mailbox UTXOs to bypass security.
   expect mailbox_is_caller(tx, mailbox_policy_id)
 
-  // 2. Update state
+  // 3. Update state using the VERIFIED message data
   let new_inner =
     GenericRecipientInner {
       messages_received: datum.inner.messages_received + 1,
-      last_message: Some(body),
+      last_message: Some(message.body),
     }
 
-  // 3. Optionally update nonce for ordering
+  // 4. Optionally update nonce for ordering
   let new_nonce =
     when datum.last_processed_nonce is {
       Some(n) -> Some(n + 1)
@@ -142,7 +151,7 @@ fn handle_message(
       inner: new_inner,
     }
 
-  // 4. Validate continuation
+  // 5. Validate continuation
   validate_recipient_continuation(datum, new_datum, tx, own_ref)
 }
 

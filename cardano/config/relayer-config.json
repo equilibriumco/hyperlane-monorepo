@@ -60,7 +60,7 @@
       "chainId": 43113,
       "domainId": 43113,
       "index": {
-        "from": 48689079
+        "from": 48701193
       },
       "interchainGasPaymaster": "0x6895d3916B94b386fAA6ec9276756e16dAe7480E",
       "mailbox": "0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0",

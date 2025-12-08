@@ -146,9 +146,20 @@ pub type HyperlaneRecipientDatum<inner> {
 }
 
 /// Standard redeemer for recipients
+///
+/// SECURITY: Recipients MUST verify that keccak256(encode_message(message)) == message_id
+/// This ensures the data was validated by the ISM (which signs the message_id).
+/// Without this check, an attacker could provide fake origin/sender/body data.
 pub type HyperlaneRecipientRedeemer<contract_redeemer> {
   /// Handle incoming Hyperlane message
-  HandleMessage { origin: Domain, sender: HyperlaneAddress, body: ByteArray }
+  /// The recipient MUST verify: keccak256(encode_message(message)) == message_id
+  HandleMessage {
+    /// The full message structure (for verification)
+    message: Message,
+    /// The message ID (keccak256 hash of encoded message)
+    /// This is what the ISM validated - recipient must verify message hashes to this
+    message_id: ByteArray,
+  }
   /// Contract-specific actions
   ContractAction { action: contract_redeemer }
 }
