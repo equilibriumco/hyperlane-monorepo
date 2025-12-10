@@ -1,0 +1,226 @@
+
+@startuml Hyperlane Cardano Architecture
+/'
+    You can use planttext.com to render the diagram (in case the link below
+    doesn't work, just copy the code and paste on the website):
+
+    https://www.planttext.com?text=jLXjRzis4FwUNq4am9fwixlOUUtQe6dQj06QjgYpOi0w69HqiZdBeaPIJhnr_tt7Duco5QL8iRHE8l7kuV5UdZlcXLHKg7AHaRUh0aH6So3dL2Gqv-HCn3Ec85QbWAqjGkISvGKLT44Y6i-dWfTvSiupBiZEXVbgo2IGqZ9J5pnNx-a248tHx2w9CViRoDwmiIndDE4tB9-Ib6PopGA1Pj5ycW7v1z_hBsUEo46GlP_nvRzQun5v1Id3GyNQKDcEyUmP5spAyjFJ2ktb-WbFJk0a7VfLBX8GRcKFz3-_OIlyacOieGeDwDeYJUEJ-EI1MmZ8w0f4Dpx49m_5Xri58gTPzmRfFXm-S8FOPbqNVZHCXr7qGFnItV9xtFyTxk5vFAFT6OJUEKWF7keTlYXu3hdgsW56AKtZxytHISHlkyznV7Hyz1rHk6y3Uf0Sf-b37JM3U5vmrksfb1uC3nvQpIxMayfZ_rjHImIdK-Z2JtwEqcznrYFomN0SETUsuukQGRTxlN2DxC9WElY9N9H_iYTdU4YAvuN7lTus2OYIIc9_hmcu1Xn3ZdQGvAmej5AOlAYNqABOr7dz-OfSKPPXSf1pR0c2naehh-Sb0Yois0IMYqsSAn1p_7aj0CXRpkVRHiEydCpmcUmSdYJHKLmxfkvydokUNdTGcmpPvMdQDxdWlDFWUTosVcxpKeL4zkuuw7AlIsjubzQmI-lzNLfvInpPD8S4qyBNb3JX34iCDUjdMJkrrY5ZcyNhBjsKi4wianwntKDhaet84_BcV8pVt_6OPYRGSXIKX34bvme8PkfC4PxYkW5wJUDP7HrI5XcdYJHBqfuvE1HHtAoe6J11-4rUMHMLyHmKBcA-cutisJ_PNamkyrHGgKHfHwYryxTBMH_KtHpFv1xQV52dfKFR3XGcQ28w5oaesHz5cyf-phk-9IzBbYLEMzrE8liOgBgeldPJ01c3MB8ODkfaGy2U9vWUS0V_r7QYbncFvwdWKf6pZvV6eAX-LOyOFitS6Lw1L2odYl4DRlCYku6CgzTwvj1fxEHQZEhrnefY6lrw_Ti7To8_JfWSnRM9UL4fhm5SZg-CClcHlB-uzlfryJ6vC03jsfyWPWNJiUp245wg0yaJR1UEPzSkUwOC4tPrZpbMACGnGTlmxOUyRnjFIArdYYzOZ0a7SHb4h9wpT0Eo3tSv_Gel5mpBcMZlLzW1IgE3koXKhxeT-2rmtf7tGDRH_HRGEihtm7uK7CjF8fLTuG-a0edjLSoX2xpmEfE54Qt2LjMRTYKgb0kyKEKAD3iQtdCycq5gQDRdSsEOw_MqzYkZVUwqUpspr6_zibgrMqXHHdDOoT__S2lNCm5onhF4pYna-6Jqs2svYIRX2plkD1dw8kCtX0h1RoJfErbSq9C9wUEjC--VXbC6UKgszmOaORAWAfvjesYuMca4KmPg30UaGDBgrsejUpT6ZkLUXTLigilXNGlv7Gic73md6SkDCVi3qza2gLPpWgPicoBAXAsmRpefxeQDLgD60oU7JTAtnLRWIvm8R_4ohrqNk6amE0sd98GS3GZJiYXcqxOLpZVF5D2nvcy4WY-y0NgS7bL-QNP3tE5WODMCGwXkkl9B7khh-BhXLjjtDu0piTL2trNjcPiOthIWrIBiuO2O9tojBGWMAwytIDNf_5M2M7t9As90zwMyrQHn6IsObBP7Xl3EdA3H8lGHPenMKCwUOBLAETSoKVfuuDcZTMlaUClLii1Aj3wfI48xkS6z6b0BAXAjmcAhf3UeTLsZsGnT63UOiwbbp1vZln5ChNnMehE8jRol1q22_6E2gHVaZ1NI7QJ6h8ArQUJE56yb-IzOap28D6tX_aiGB6N8pfeSiPDY-F1_KUAi7Poy1RxjF9qR-DwrjabBj6oZ8B40Fr6rsE5oOBrdw2sD8X3xOhlk7DQKs7erx1iHLzZlVUS8pXFyqSIsZx6lMV8v07Dj13dw4o0NBTSxXgM7gdaPuQ4JLbKJQH52DZBxhCZfyq2oPWxDiOu69YmnEaYrvdvH2La6nKvCfvX8M3-sZ47WAsVWHeTw1yWK6YyplzWRZ87_-XplIr3edpZHne8LnfrVxIBPmu--U5VT2gGtK7EqJm8lFiIFVuUNg0pJPEq2NOcEy1ECQ4sMhgJscr9hJIUGY_1RSBDqVGJ2Ja9snwCdUCLxN6aTuAV1_I33O8GiNkaSugU-unY-rELGJR4_MDhLDvzAvqZh29fB6XllMYPKQDsIKH9SKhp2iJwDeqDV4eWOG3Z9PpkP3gKfr5DCwefmp0pSwrM8NuEIWU1l2U5vQzagXjgZBMGIYDO3fnDk9GQZW9bdyszhirBzz1sSnzMfSHnJR0ardRufARvL0AvKpx8iRFnWvdmWr8pzc8UhmPQRv8mNh6Gps2tLr2Zy3EyFhhOqZZ_b9k7gN6w4odbW5mEvT8AuwaVBsd_jr7eVd1Ssa0RpUeRMfrp0qm1SYLAgkdOZY6afeJu6Bqtserhe8alN8PUym8ToaVq7
+'/
+
+  skinparam backgroundColor #FFFFFF
+  skinparam defaultFontName Arial
+  skinparam defaultFontSize 12
+  skinparam shadowing false
+
+  skinparam rectangle {
+      roundCorner 10
+  }
+
+  ' Define colors
+  skinparam rectangle<<origin>> {
+      BackgroundColor #99e9f2
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<validators>> {
+      BackgroundColor #ffc9c9
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<relayer>> {
+      BackgroundColor #ffec99
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<external>> {
+      BackgroundColor #fff4e6
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<cardano>> {
+      BackgroundColor #b2f2bb
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<utxos>> {
+      BackgroundColor #ffec99
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<onchain>> {
+      BackgroundColor #fff5f5
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<component>> {
+      BackgroundColor #e3fafc
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<validator_box>> {
+      BackgroundColor #ff8787
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<utxo_box>> {
+      BackgroundColor #a5d8ff
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<checkpoint>> {
+      BackgroundColor #fa5252
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<onchain_validator>> {
+      BackgroundColor #ffc9c9
+      BorderColor #1e1e1e
+  }
+
+  skinparam rectangle<<storage>> {
+      BackgroundColor #d0bfff
+      BorderColor #1e1e1e
+  }
+
+  ' Origin Chain
+  rectangle "**Origin Chain (e.g., Fuji/Avalanche)**" <<origin>> as origin {
+      rectangle "Sender dApp" <<component>> as dapp
+      rectangle "EVM Mailbox Contract" <<validator_box>> as mailbox_evm
+      rectangle "Merkle Tree Hook" as merkle_hook #69db7c
+  }
+
+  ' Hyperlane Validators
+  rectangle "**Hyperlane Validators (off-chain)**" <<validators>> as validators {
+      rectangle "Validator 1" <<validator_box>> as v1
+      rectangle "Validator 2" <<validator_box>> as v2
+      rectangle "Validator N" <<validator_box>> as vn
+      rectangle "Signed Checkpoints" <<checkpoint>> as checkpoints
+  }
+
+  ' Checkpoint Storage
+  rectangle "**Checkpoint Storage**" <<storage>> as storage {
+      rectangle "S3 / GCS / Local" as s3 #d0bfff
+  }
+
+  note right of s3
+    Each validator uploads
+    signed checkpoints to
+    their own storage bucket
+  end note
+
+  ' Relayer Infrastructure
+  rectangle "**Relayer Infrastructure**" <<relayer>> as relayer {
+      rectangle "Hyperlane Relayer" as relayer_agent #ffd43b
+      rectangle "Cardano Tx Builder" as tx_builder #ffd43b
+  }
+
+  ' External Services
+  rectangle "**External Services**" <<external>> as external {
+      rectangle "Blockfrost API" as blockfrost #fff4e6
+  }
+
+  ' Cardano Destination
+  rectangle "**Cardano (Destination)**" <<cardano>> as cardano {
+      rectangle "**State UTXOs**" <<utxos>> as state_utxos {
+          rectangle "ISM UTXO + NFT" <<utxo_box>> as ism_utxo
+          rectangle "Recipient UTXO + NFT" <<utxo_box>> as recipient_utxo
+          rectangle "Mailbox UTXO + NFT" <<utxo_box>> as mailbox_utxo
+          rectangle "Registry UTXO + NFT" <<utxo_box>> as registry_utxo
+      }
+
+      rectangle "**On-Chain Validators (Atomic Execution)**" <<onchain>> as onchain {
+          rectangle "Multisig ISM Validator" <<onchain_validator>> as ism_validator
+          rectangle "Mailbox Validator" <<onchain_validator>> as mailbox_validator
+          rectangle "Recipient Validator" <<onchain_validator>> as recipient_validator
+          rectangle "Processed Messages Marker" <<onchain_validator>> as processed_marker
+      }
+  }
+
+  ' ISM datum contents note
+  note left of ism_utxo #a5d8ff
+    **ISM Datum Contents**
+    ----------------------
+    * Validator pubkeys[]
+    * Threshold (e.g. 2/3)
+    * Origin domain
+  end note
+
+  ' Flow arrows - Origin
+  dapp -down-> mailbox_evm : "1. dispatch"
+  mailbox_evm -down-> merkle_hook : "2. post-dispatch"
+
+  ' Flow arrows - Validators
+  v1 -down-> checkpoints
+  v2 -down-> checkpoints
+  vn -down-> checkpoints
+  note on link : "4. sign checkpoint"
+
+  ' Flow arrows - Checkpoint upload
+  checkpoints -right-> s3 : "4b. upload to storage"
+
+  ' Flow arrows - Indexing
+  merkle_hook ..> validators : "3. index messages"
+
+  ' Flow arrows - Relayer fetching from storage
+  s3 -down-> relayer_agent : "5. fetch signatures\nfrom storage"
+  origin ..> relayer_agent : "5. fetch message"
+
+  ' Flow arrows - Tx Building
+  relayer_agent -down-> tx_builder : "6. build tx"
+  tx_builder -right-> registry_utxo : "6. query\nrecipient info"
+
+  ' Flow arrows - Submission
+  tx_builder -down-> blockfrost : "7. submit tx"
+  blockfrost -down-> cardano : "8. process"
+
+  ' Flow arrows - On-chain spending
+  ism_utxo ..> ism_validator : "spent by"
+  mailbox_utxo ..> mailbox_validator : "spent by"
+  recipient_utxo ..> recipient_validator : "spent by"
+
+  ' Security validation chain - the key relationships
+  ism_validator -right-> mailbox_validator #green;line.bold : "verifies ISM NFT in inputs"
+  mailbox_validator -right-> recipient_validator #green;line.bold : "verifies Mailbox NFT in inputs"
+
+  ' Flow arrows - Marker creation
+  mailbox_validator -down-> processed_marker : "create marker"
+
+  ' ISM verification note
+  note bottom of ism_validator #fff5f5
+    **ISM Signature Verification**
+    1. Read validator pubkeys from ISM datum
+    2. Read threshold from ISM datum
+    3. Verify >= threshold signatures on message_id
+    4. Each signature checked against registered pubkeys
+  end note
+
+  ' Legend
+  legend right
+    |= Step |= Description |
+    | 1 | dApp dispatches message to Mailbox |
+    | 2 | Mailbox calls Merkle Tree Hook |
+    | 3 | Validators index messages |
+    | 4 | Validators sign checkpoints |
+    | 4b | Checkpoints uploaded to storage (S3/GCS) |
+    | 5 | Relayer fetches signatures from storage |
+    | 6 | Tx Builder queries Registry & builds tx |
+    | 7 | Transaction submitted via Blockfrost |
+    | 8 | Cardano processes transaction |
+    |<#lightgreen> **Security Chain** |
+    | | ISM verifies validator signatures |
+    | | Mailbox checks ISM NFT in inputs |
+    | | Recipient checks Mailbox NFT in inputs |
+  endlegend
+
+  note bottom of onchain #lightgreen
+    **Transitive Security Guarantee**
+    All validators execute atomically.
+
+    * ISM validates signatures against registered validator public keys
+    * Mailbox verifies ISM NFT is in transaction inputs (proves ISM ran)
+    * Recipient verifies Mailbox NFT is in transaction inputs (proves Mailbox ran)
+
+    Therefore: Recipient trusts message because Mailbox vouches for ISM validation
+  end note
+
+@enduml

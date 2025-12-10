@@ -525,18 +525,14 @@ Blockfrost cache may be stale. Wait 30 seconds and retry.
 ### Script hash mismatch
 Ensure you're using the parameterized script, not the raw blueprint validator.
 
-## Contract Addresses (Preview Testnet)
+## Contract Addresses
 
-| Contract | Hash |
-|----------|------|
-| Mailbox | `f01158af16d6f625eae141c3d495d0f57913847ca87ebd6bfdc4a719` |
-| Multisig ISM | `02993c46cdcf8eb56ada209e277acc288dc0263b6a502d17b8cbfa56` |
-| Registry | `b46f18719b2d20b87474eb9cd761d82f1d7f750548eed38e775d2caf` |
+Contract addresses and reference script UTXOs change with each deployment. After deployment, check:
 
-## Reference Scripts (Preview Testnet)
+```bash
+# View current deployment info
+cat deployments/$NETWORK/deployment_info.json
 
-| Script | UTXO Reference |
-|--------|----------------|
-| Mailbox | `3081333c4d7becb16186fb9dfb29af70c4a309bdc0a53436b9ed8e6d01793994#0` |
-| Multisig ISM | `1b03aac93a0dfd797fe52256b5d121fdb3d7f8fdbda411e74a01d10c5f37455d#0` |
-| Registry | `26f3d562cbacecdcc13dd8b0b7da7477569d49a4a877968717c7a59afc2a22aa#0` |
+# Or use CLI
+./cli/target/release/hyperlane-cardano --network $NETWORK init status
+```

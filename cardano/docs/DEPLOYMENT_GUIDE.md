@@ -14,6 +14,7 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 8. [Phase 6: Deploy Recipients](#phase-6-deploy-recipients)
 9. [Verification & Troubleshooting](#verification--troubleshooting)
 10. [Complete Deployment Script](#complete-deployment-script)
+11. [Appendix: Script Parameterization](#appendix-script-parameterization)
 
 ---
 
@@ -63,12 +64,12 @@ Your signing key must control a wallet with sufficient ADA:
 | Contract | Purpose | Parameters | Dependencies |
 |----------|---------|------------|--------------|
 | **state_nft** | Unique NFT minting policy | UTXO reference | None |
-| **mailbox** | Message dispatch/process hub | processed_messages_script | registry (default) |
+| **mailbox** | Message dispatch/process hub | processed_messages_nft_policy | processed_message_nft |
 | **multisig_ism** | Signature verification | None | None |
 | **registry** | Recipient metadata store | None | None |
-| **processed_message_nft** | Replay prevention | mailbox_script_hash | mailbox |
+| **processed_message_nft** | Replay prevention | mailbox_policy_id | mailbox (state NFT) |
 
-> **Note**: The mailbox validator is parameterized with `processed_messages_script`, which is the script address where processed message markers are stored. By default, this is set to the registry script hash, which allows the registry to double as processed message storage.
+> **Note**: The mailbox validator is parameterized with `processed_messages_nft_policy`, which is the minting policy for processed message NFTs. These NFTs provide replay protection by marking each message_id as processed. The `processed_message_nft` policy is parameterized by `mailbox_policy_id` (stable across upgrades) to ensure replay protection persists even when the mailbox code is updated. See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
 
 ### Recipient Contracts
 
@@ -882,3 +883,270 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `query utxo` | Query specific UTXO |
 | `query params` | Get protocol parameters |
 | `query tip` | Get latest slot |
+
+---
+
+## Appendix: Script Parameterization
+
+### What is Parameterization?
+
+In Aiken (Cardano's smart contract language), validators can be **parameterized** - they accept compile-time parameters that are "baked into" the script bytecode. This is similar to constructor arguments in Solidity, but the parameters become part of the script hash itself.
+
+```aiken
+// Example: A validator parameterized by a policy ID
+validator my_validator(some_policy_id: PolicyId) {
+  spend(datum, redeemer, own_ref, tx) {
+    // Can use some_policy_id in validation logic
+    ...
+  }
+}
+```
+
+**Key implications:**
+- Different parameter values → different script hashes → different addresses
+- Parameters are immutable once applied
+- The `aiken blueprint apply` command applies parameters to create the final script
+
+### How Parameterization Works
+
+1. **Build contracts**: `aiken build` compiles validators to `plutus.json` with parameters as placeholders
+2. **Apply parameters**: `aiken blueprint apply` fills in parameter values, producing the final CBOR bytecode
+3. **Deploy**: The parameterized script is deployed as a reference script or used directly
+
+```bash
+# Example: Apply mailbox_policy_id to the example_generic_recipient validator
+aiken blueprint apply \
+  -v example_generic_recipient.example_generic_recipient \
+  -o recipient_applied.plutus \
+  "6421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7"
+```
+
+### Parameterization Dependency Graph
+
+The scripts in Hyperlane-Cardano have dependencies that must be resolved in a specific order:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      PARAMETERIZATION DEPENDENCY GRAPH                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                         ┌─────────────────────┐
+                         │   UTXO Reference    │
+                         │ (consumed at init)  │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │   state_nft (mint)  │
+                         │   One-shot policy   │
+                         └──────────┬──────────┘
+                                    │
+               Creates unique NFT policy IDs for each contract
+                                    │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          ▼                         ▼                         ▼
+┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
+│  mailbox_policy_id  │  │   ism_policy_id     │  │ registry_policy_id  │
+│                     │  │                     │  │                     │
+│ Identifies mailbox  │  │ Identifies ISM      │  │ Identifies registry │
+│ state UTXO          │  │ state UTXO          │  │ state UTXO          │
+└──────────┬──────────┘  └─────────────────────┘  └─────────────────────┘
+           │
+           │ Used as parameter for:
+           │
+           ├─────────────────────────────────────────────────────────────┐
+           │                                                             │
+           ▼                                                             ▼
+┌─────────────────────────────┐                    ┌─────────────────────────────┐
+│  processed_message_nft      │                    │  stored_message_nft         │
+│  (mint)                     │                    │  (mint)                     │
+│                             │                    │                             │
+│  Parameter: mailbox_policy  │                    │  Parameter: mailbox_policy  │
+│                             │                    │                             │
+│  Used for: Replay protection│                    │  Used for: Deferred message │
+│  (one NFT per message_id)   │                    │  authentication             │
+└──────────┬──────────────────┘                    └──────────┬──────────────────┘
+           │                                                  │
+           │ processed_message_nft_policy                     │ stored_message_nft_policy
+           │                                                  │
+           ▼                                                  ▼
+┌─────────────────────────────┐                    ┌─────────────────────────────┐
+│  mailbox (spend)            │                    │  example_deferred_recipient │
+│                             │                    │  (spend)                    │
+│  Parameter:                 │                    │                             │
+│  processed_messages_nft_    │                    │  Parameters:                │
+│  policy                     │                    │  - mailbox_policy_id        │
+│                             │                    │  - stored_message_nft_policy│
+└─────────────────────────────┘                    └─────────────────────────────┘
+
+           │
+           │ mailbox_policy_id
+           │
+           ▼
+┌─────────────────────────────┐
+│  example_generic_recipient  │
+│  (spend)                    │
+│                             │
+│  Parameter: mailbox_policy  │
+│                             │
+│  Verifies mailbox is caller │
+│  by checking for NFT        │
+└─────────────────────────────┘
+```
+
+### Script Parameterization Table
+
+| Script | Type | Parameter(s) | Parameter Source | Purpose |
+|--------|------|--------------|------------------|---------|
+| `state_nft` | Mint | `utxo_ref: OutputReference` | Any unspent UTXO | One-shot minting, ensures unique NFT |
+| `mailbox` | Spend | `processed_messages_nft_policy: PolicyId` | Derived from `processed_message_nft` | Replay protection via NFT minting |
+| `multisig_ism` | Spend | (none) | - | No parameters needed |
+| `registry` | Spend | (none) | - | No parameters needed |
+| `processed_message_nft` | Mint | `mailbox_policy_id: PolicyId` | `state_nft` policy for mailbox | Ensures only mailbox can trigger minting |
+| `stored_message_nft` | Mint | `mailbox_policy_id: PolicyId` | `state_nft` policy for mailbox | Ensures only mailbox can mint message NFTs |
+| `example_generic_recipient` | Spend | `mailbox_policy_id: PolicyId` | `state_nft` policy for mailbox | Verifies mailbox is calling |
+| `example_deferred_recipient` | Spend | `mailbox_policy_id: PolicyId`, `message_nft_policy: PolicyId` | `state_nft` for mailbox, `stored_message_nft` policy | Verifies mailbox and message authenticity |
+| `warp_route` | Spend | `mailbox_policy_id: PolicyId` | `state_nft` policy for mailbox | Verifies mailbox is calling |
+
+### Why Stable vs Changing Parameters Matter
+
+**Stable parameters** (like `mailbox_policy_id`) allow contracts to be upgraded without breaking dependencies:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     STABLE vs CHANGING PARAMETERS                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  STABLE: mailbox_policy_id                    CHANGING: mailbox_script_hash
+  ───────────────────────────                  ─────────────────────────────
+
+  Initialization:                              Initialization:
+  ┌─────────────────────┐                      ┌─────────────────────┐
+  │ mailbox_policy_id = │                      │ mailbox_script_hash │
+  │ 6421905a7b782eda... │                      │ = a1d95abf5b095036..│
+  │ (one-shot, fixed)   │                      │ (from script code)  │
+  └──────────┬──────────┘                      └──────────┬──────────┘
+             │                                            │
+             │ After mailbox upgrade:                     │ After mailbox upgrade:
+             │                                            │
+             ▼                                            ▼
+  ┌─────────────────────┐                      ┌─────────────────────┐
+  │ mailbox_policy_id = │                      │ mailbox_script_hash │
+  │ 6421905a7b782eda... │  ◄── SAME!           │ = NEW_HASH_xyz...   │  ◄── CHANGED!
+  │ (still the same)    │                      │ (code changed)      │
+  └─────────────────────┘                      └─────────────────────┘
+
+  Result: Recipients and                       Result: Recipients and
+  processed_message_nft                        processed_message_nft
+  continue working                             would need redeployment
+```
+
+**Critical insight**: `processed_message_nft` is parameterized by `mailbox_policy_id` (stable) rather than `mailbox_script_hash` (changes with code). This ensures:
+
+1. **Replay protection persists across upgrades**: Old processed message NFTs are still recognized
+2. **No double-processing**: A message processed before an upgrade cannot be replayed after
+3. **No recipient redeployment**: Recipients don't need updating when mailbox code changes
+
+### Deployment Order (Parameterization-Aware)
+
+Due to parameterization dependencies, contracts must be deployed in this specific order:
+
+```
+Step 1: Build all contracts
+        └─ aiken build → plutus.json
+
+Step 2: Initialize mailbox (creates mailbox_policy_id)
+        ├─ Consumes a UTXO → creates unique state_nft policy
+        └─ mailbox_policy_id = state_nft policy ID
+
+Step 3: Apply mailbox_policy_id to processed_message_nft
+        └─ aiken blueprint apply -v processed_message_nft ... "mailbox_policy_id"
+           → processed_message_nft_policy
+
+Step 4: Apply processed_message_nft_policy to mailbox
+        └─ aiken blueprint apply -v mailbox ... "processed_message_nft_policy"
+           → mailbox_applied.plutus (final mailbox script)
+
+Step 5: Deploy mailbox reference script
+        └─ Uses mailbox_applied.plutus
+
+Step 6: Initialize other core contracts (ISM, Registry)
+        └─ Each gets its own state_nft policy
+
+Step 7: Deploy recipients
+        ├─ Generic: Apply mailbox_policy_id → recipient_applied.plutus
+        └─ Deferred: Apply mailbox_policy_id to stored_message_nft
+                     Apply both to deferred_recipient
+```
+
+### CLI Automation
+
+The Hyperlane CLI automates most parameterization steps. When you run:
+
+```bash
+./cli/target/release/hyperlane-cardano init all --domain 2003
+```
+
+The CLI internally:
+1. Creates state NFT policies for mailbox, ISM, and registry
+2. Applies `mailbox_policy_id` to `processed_message_nft`
+3. Applies the resulting policy to `mailbox`
+4. Saves all parameterized scripts to `deployments/<network>/`
+
+For recipients:
+
+```bash
+./cli/target/release/hyperlane-cardano init recipient
+```
+
+The CLI:
+1. Reads `mailbox_policy_id` from `deployment_info.json`
+2. Applies it to the recipient validator
+3. Saves the parameterized script
+
+### Manual Parameterization Example
+
+If you need to manually apply parameters (e.g., for custom contracts):
+
+```bash
+# 1. Get the mailbox_policy_id from deployment info
+MAILBOX_POLICY=$(cat deployments/preview/deployment_info.json | jq -r '.mailbox.state_nft_policy')
+
+# 2. Apply parameter to your custom recipient
+cd contracts
+aiken blueprint apply \
+  -v my_custom_recipient.my_custom_recipient \
+  -o ../deployments/preview/my_custom_recipient_applied.plutus \
+  "$MAILBOX_POLICY"
+
+# 3. The resulting script hash will differ from the base script
+# because the parameter is now embedded in the bytecode
+```
+
+### Troubleshooting Parameterization Issues
+
+**Error: "Parameter type mismatch"**
+
+Ensure the parameter value matches the expected type. Policy IDs and script hashes are 28-byte hex strings:
+```bash
+# Correct: 56 hex characters (28 bytes)
+aiken blueprint apply -v validator ... "6421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7"
+
+# Wrong: 64 hex characters (32 bytes) - this is a Hyperlane address, not a policy ID
+aiken blueprint apply -v validator ... "020000006421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7"
+```
+
+**Error: "Script hash mismatch after upgrade"**
+
+If you upgrade a contract and the script hash changes, that's expected. However, ensure:
+1. Recipients use `mailbox_policy_id` (stable), not `mailbox_script_hash` (changes)
+2. Update the relayer config with the new script hash and reference script UTXO
+3. The mailbox state UTXO is migrated to the new script address (if address changed)
+
+**Error: "Processed message NFT not found"**
+
+After upgrading, ensure `processed_message_nft` still uses the same `mailbox_policy_id`. If it was accidentally parameterized with a different value:
+1. Previous processed message NFTs are under a different policy
+2. Replay attacks become possible
+3. Redeploy with correct `mailbox_policy_id` and migrate state
