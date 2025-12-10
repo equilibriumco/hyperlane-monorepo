@@ -567,8 +567,12 @@ async fn query_recipient(
                             };
 
                             if let Some((_ism, nonce, _count, last_msg)) = parsed {
-                                // Store: tx_hash, block_time, nonce, message
-                                messages.push((tx.tx_hash.clone(), tx.block_time, nonce, last_msg));
+                                // Skip initial state (nonce=None means no messages processed yet)
+                                // This filters out the initialization transaction
+                                if nonce.is_some() {
+                                    // Store: tx_hash, block_time, nonce, message
+                                    messages.push((tx.tx_hash.clone(), tx.block_time, nonce, last_msg));
+                                }
                             }
                         }
                     }

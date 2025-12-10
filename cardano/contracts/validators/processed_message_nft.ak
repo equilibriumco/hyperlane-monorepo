@@ -1,10 +1,9 @@
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/primitive/bytearray
-use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{Transaction}
-use types.{ScriptHash}
+use types.{PolicyId}
 
 /// Processed Message NFT minting policy
 /// Allows minting one NFT per processed message for efficient off-chain tracking
@@ -14,22 +13,36 @@ use types.{ScriptHash}
 /// - Asset name: The 32-byte message_id
 ///
 /// Minting is allowed when:
-/// - The mailbox script is being spent (in transaction inputs)
+/// - The mailbox NFT (from mailbox_policy_id) is in transaction inputs
 /// - Exactly one NFT is minted with a 32-byte asset name (the message_id)
 ///
 /// This allows the relayer to efficiently query processed messages using
 /// Blockfrost's asset API instead of scanning all UTXOs at an address.
-validator processed_message_nft(mailbox_script_hash: ScriptHash) {
+///
+/// ## Why parameterized by mailbox_policy_id (not mailbox_script_hash)?
+///
+/// Using mailbox_policy_id (the one-shot NFT policy) instead of the mailbox script hash
+/// ensures this policy remains stable across mailbox upgrades. The mailbox_policy_id
+/// is determined at initialization time and never changes, while the script hash
+/// changes whenever the mailbox code is updated.
+///
+/// This stability is critical for replay protection - if the policy changed with
+/// each mailbox upgrade, previously processed message markers would be at a different
+/// policy, potentially allowing replay attacks.
+///
+/// Security: The mailbox NFT can only exist at the real mailbox UTXO (one-shot policy),
+/// so requiring it in inputs guarantees the real mailbox validator runs.
+validator processed_message_nft(mailbox_policy_id: PolicyId) {
   mint(_redeemer: Data, own_policy: ByteArray, tx: Transaction) {
-    // 1. Verify mailbox script is being spent
-    let mailbox_spent =
+    // 1. Verify mailbox NFT is in transaction inputs
+    // The mailbox NFT can only exist at the real mailbox UTXO (one-shot minting),
+    // so its presence guarantees the mailbox validator is running
+    let mailbox_involved =
       list.any(
         tx.inputs,
         fn(input) {
-          when input.output.address.payment_credential is {
-            Script(hash) -> hash == mailbox_script_hash
-            _ -> False
-          }
+          let policy_tokens = assets.tokens(input.output.value, mailbox_policy_id)
+          !dict.is_empty(policy_tokens)
         },
       )
 
@@ -49,7 +62,7 @@ validator processed_message_nft(mailbox_script_hash: ScriptHash) {
         },
       )
 
-    mailbox_spent && mint_count == 1 && valid_mint
+    mailbox_involved && mint_count == 1 && valid_mint
   }
 
   else(_) {

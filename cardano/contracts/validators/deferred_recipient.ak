@@ -1,7 +1,6 @@
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{keccak_256}
-use aiken/primitive/bytearray
 use cardano/address.{Address}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use cardano/assets.{lovelace_of, tokens}

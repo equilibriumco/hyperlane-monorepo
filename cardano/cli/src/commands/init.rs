@@ -227,20 +227,27 @@ async fn init_mailbox(
     ctx: &CliContext,
     domain: u32,
     ism_hash: &str,
-    processed_messages_hash: Option<String>,
+    _processed_messages_hash: Option<String>,
     utxo: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    init_mailbox_internal(ctx, domain, ism_hash, processed_messages_hash, utxo, dry_run, &[]).await?;
+    // Note: processed_messages_hash is now ignored - we derive it from processed_message_nft
+    init_mailbox_internal(ctx, domain, ism_hash, utxo, dry_run, &[]).await?;
     Ok(())
 }
 
 /// Internal mailbox init that excludes already-spent UTXOs and returns the spent UTXO reference
+///
+/// The mailbox initialization follows a specific parameterization chain:
+/// 1. Create state_nft policy (one-shot) -> mailbox_policy_id
+/// 2. Apply mailbox_policy_id to processed_message_nft -> processed_messages_nft_policy
+/// 3. Apply processed_messages_nft_policy to mailbox -> final mailbox script
+///
+/// This ensures replay protection is stable across mailbox upgrades.
 async fn init_mailbox_internal(
     ctx: &CliContext,
     domain: u32,
     ism_hash: &str,
-    processed_messages_hash: Option<String>,
     utxo: Option<String>,
     dry_run: bool,
     exclude_utxos: &[String],
@@ -255,29 +262,9 @@ async fn init_mailbox_internal(
 
     println!("  Owner: {}", owner_pkh);
 
-    // Get deployment info for default processed_messages_hash
+    // Get deployment info
     let deployment = ctx.load_deployment_info()
         .with_context(|| "Run 'deploy extract' first")?;
-
-    // Determine processed_messages_hash - default to registry hash
-    let pm_hash = match processed_messages_hash {
-        Some(h) => {
-            let h = h.strip_prefix("0x").unwrap_or(&h).to_lowercase();
-            if h.len() != 56 {
-                return Err(anyhow!("processed-messages-hash must be 28 bytes (56 hex chars)"));
-            }
-            h
-        }
-        None => {
-            // Default to registry hash
-            deployment
-                .registry
-                .as_ref()
-                .map(|r| r.hash.clone())
-                .ok_or_else(|| anyhow!("Registry hash not found. Use --processed-messages-hash or run 'deploy extract' first"))?
-        }
-    };
-    println!("  Processed Messages Script: {}", pm_hash);
 
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let address = keypair.address_bech32(ctx.pallas_network());
@@ -332,16 +319,25 @@ async fn init_mailbox_internal(
     let output_ref_hex = hex::encode(&output_ref_cbor);
     println!("  OutputRef CBOR: {}", output_ref_hex.yellow());
 
-    // Apply parameter to state_nft minting policy using aiken CLI
-    println!("\n{}", "Applying state_nft parameter...".cyan());
+    // Step 1: Apply parameter to state_nft minting policy to get mailbox_policy_id
+    println!("\n{}", "Step 1: Creating state_nft policy (mailbox_policy_id)...".cyan());
     let applied_nft = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
-    println!("  State NFT Policy ID: {}", applied_nft.policy_id.green());
+    let mailbox_policy_id = applied_nft.policy_id.clone();
+    println!("  Mailbox Policy ID: {}", mailbox_policy_id.green());
 
-    // Apply processed_messages_script parameter to mailbox validator
-    println!("{}", "Applying mailbox parameter...".cyan());
-    let pm_param_cbor = encode_script_hash_param(&pm_hash)?;
-    let pm_param_hex = hex::encode(&pm_param_cbor);
-    let applied_mailbox = apply_validator_param(&ctx.contracts_dir, "mailbox", "mailbox", &pm_param_hex)?;
+    // Step 2: Apply mailbox_policy_id to processed_message_nft to get the NFT policy
+    println!("\n{}", "Step 2: Creating processed_message_nft policy...".cyan());
+    let mailbox_policy_cbor = encode_script_hash_param(&mailbox_policy_id)?;
+    let mailbox_policy_hex = hex::encode(&mailbox_policy_cbor);
+    let applied_processed_nft = apply_validator_param(&ctx.contracts_dir, "processed_message_nft", "processed_message_nft", &mailbox_policy_hex)?;
+    let processed_messages_nft_policy = applied_processed_nft.policy_id.clone();
+    println!("  Processed Messages NFT Policy: {}", processed_messages_nft_policy.green());
+
+    // Step 3: Apply processed_messages_nft_policy to mailbox validator
+    println!("\n{}", "Step 3: Creating mailbox validator...".cyan());
+    let pm_policy_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
+    let pm_policy_hex = hex::encode(&pm_policy_cbor);
+    let applied_mailbox = apply_validator_param(&ctx.contracts_dir, "mailbox", "mailbox", &pm_policy_hex)?;
     let mailbox_addr = script_hash_to_address(&applied_mailbox.policy_id, ctx.pallas_network())?;
     println!("  Mailbox Script Hash: {}", applied_mailbox.policy_id.green());
     println!("  Mailbox Address: {}", mailbox_addr);
@@ -357,9 +353,10 @@ async fn init_mailbox_internal(
         println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
         println!("  - Mint state NFT with policy {}", applied_nft.policy_id);
         println!("  - Create output at {} with {} ADA + NFT + datum", mailbox_addr, 5);
-        println!("\n{}", "Mailbox will be parameterized with:".green());
-        println!("  - processed_messages_script: {}", pm_hash);
-        println!("  - Resulting mailbox hash: {}", applied_mailbox.policy_id);
+        println!("\n{}", "Parameterization chain:".green());
+        println!("  1. mailbox_policy_id (state NFT): {}", mailbox_policy_id);
+        println!("  2. processed_messages_nft_policy: {}", processed_messages_nft_policy);
+        println!("  3. Resulting mailbox hash: {}", applied_mailbox.policy_id);
         return Ok(None);
     }
 
@@ -405,13 +402,13 @@ async fn init_mailbox_internal(
     // Update deployment info with complete initialization details
     let mut deployment = deployment;
     if let Some(ref mut mailbox) = deployment.mailbox {
-        // Record the parameter that was applied
+        // Record the parameter that was applied (now using processed_messages_nft_policy)
         mailbox.applied_parameters = vec![
             AppliedParameter {
-                name: "processed_messages_script".to_string(),
-                param_type: "ScriptHash".to_string(),
-                value: pm_hash.clone(),
-                description: Some("Script hash where processed message markers are stored".to_string()),
+                name: "processed_messages_nft_policy".to_string(),
+                param_type: "PolicyId".to_string(),
+                value: processed_messages_nft_policy.clone(),
+                description: Some("Policy ID for processed message NFTs (parameterized by mailbox_policy_id)".to_string()),
             }
         ];
 
@@ -440,10 +437,14 @@ async fn init_mailbox_internal(
     println!("\n{}", "✓ Deployment info updated".green());
     println!("  Mailbox hash updated to: {}", applied_mailbox.policy_id);
 
-    // Also save the applied mailbox script for reference
+    // Save the applied scripts for reference
     let mailbox_script_path = ctx.network_deployments_dir().join("mailbox_applied.plutus");
     applied_mailbox.save_plutus_file(&mailbox_script_path, "Applied mailbox validator")?;
     println!("  Mailbox script saved to: {:?}", mailbox_script_path);
+
+    let processed_nft_path = ctx.network_deployments_dir().join("processed_message_nft_applied.plutus");
+    applied_processed_nft.save_plutus_file(&processed_nft_path, "Applied processed_message_nft minting policy")?;
+    println!("  Processed message NFT script saved to: {:?}", processed_nft_path);
 
     // Return the spent UTXO reference
     Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))
@@ -1255,7 +1256,7 @@ async fn init_all(
     }
 
     println!("\n{}", "2. Initializing Mailbox...".cyan());
-    let mailbox_spent = init_mailbox_internal(ctx, domain, &ism_hash, None, None, dry_run, &spent_utxos).await?;
+    let mailbox_spent = init_mailbox_internal(ctx, domain, &ism_hash, None, dry_run, &spent_utxos).await?;
     if let Some(utxo) = mailbox_spent {
         spent_utxos.push(utxo);
     }

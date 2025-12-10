@@ -266,25 +266,32 @@ async fn update_relayer(
         ));
     }
 
-    // Generate processed_message_nft policy (parameterized with mailbox script hash)
+    // Generate processed_message_nft policy (parameterized with mailbox_policy_id)
     // This is used for efficient O(1) processed message lookups
+    // IMPORTANT: We use mailbox_policy_id (state NFT policy, stable) NOT mailbox.hash (script hash, changes with code)
     if let Some(ref mailbox) = deployment.mailbox {
         println!("\n{}", "Generating processed_message_nft policy...".cyan());
 
-        // Apply mailbox script hash parameter to processed_message_nft validator
-        let mailbox_hash_param = encode_script_hash_param(&mailbox.hash)
-            .with_context(|| "Failed to encode mailbox hash as CBOR")?;
-        let mailbox_hash_param_hex = hex::encode(&mailbox_hash_param);
+        // Get the mailbox_policy_id (state NFT policy) - this is stable across upgrades
+        let mailbox_policy_id = mailbox.state_nft.as_ref()
+            .map(|nft| nft.policy_id.clone())
+            .or_else(|| mailbox.state_nft_policy.clone())
+            .ok_or_else(|| anyhow!("Mailbox state NFT policy not found. Ensure mailbox is initialized."))?;
+
+        // Apply mailbox_policy_id parameter to processed_message_nft validator
+        let mailbox_policy_param = encode_script_hash_param(&mailbox_policy_id)
+            .with_context(|| "Failed to encode mailbox_policy_id as CBOR")?;
+        let mailbox_policy_param_hex = hex::encode(&mailbox_policy_param);
 
         match apply_validator_param_with_purpose(
             &ctx.contracts_dir,
             "processed_message_nft",
             "processed_message_nft",
             Some("mint"),
-            &mailbox_hash_param_hex,
+            &mailbox_policy_param_hex,
         ) {
             Ok(applied) => {
-                println!("  Applied mailbox_script_hash parameter: {}", mailbox.hash);
+                println!("  Applied mailbox_policy_id parameter: {}", mailbox_policy_id);
                 println!("  Resulting policy ID: {}", applied.policy_id.green());
 
                 let old_policy = get_old_value(connection, "processedMessagesNftPolicyId");

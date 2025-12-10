@@ -1,73 +1,73 @@
 {
   "network": "preview",
   "mailbox": {
-    "hashBeforeParametrization": "96832bee2f5dfaa73ab8f579c55c22dec5b2ae98935651b651bd98ae",
-    "hash": "b034d68bdbc8b9e9a3c6352f1450105ed2a43b74d47c8369b7176fe9",
-    "address": "addr_test1wzcrf45tm0ytn6drcc6j79zszp0d9fpmwn28eqmfkutkl6gfx7wpe",
+    "hashBeforeParametrization": "fd00e5eb944ba48e702ea7b80bc511fe9696ae621a0526801bc87a6c",
+    "hash": "fce299aa67876b0488d8656d16277e2a7667bc62e7260d7a807586fd",
+    "address": "addr_test1wr7w9xd2v7rkkpygmpjk69380c48veauvtnjvrt6sp6cdlgatneka",
     "appliedParameters": [
       {
-        "name": "processed_messages_script",
-        "paramType": "ScriptHash",
-        "value": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
-        "description": "Script hash where processed message markers are stored"
+        "name": "processed_messages_nft_policy",
+        "paramType": "PolicyId",
+        "value": "c10acba5ac9a98bd15a7d5d49f6fc775a819fe26509477007cdaf274",
+        "description": "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
       }
     ],
     "stateNft": {
-      "policyId": "6421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7",
+      "policyId": "9359cd30a4acf5447ab2918b98ec1f5acffab048b8e846f0d3003855",
       "assetNameHex": "4d61696c626f78205374617465",
       "assetName": "Mailbox State",
-      "seedUtxo": "1b2d4af65713b55b217e895713630f7fe1af52efe6c2bf64c5afb4272ee8f735#1"
+      "seedUtxo": "18ce4c203bba9b293ce5307986e26fb9479e89232c2e91788748e9cdc23ec471#1"
     },
-    "stateUtxo": "191beaef276cc48983e98cb25b921f710ba3bd6e437d602fa26482064e3feac7#0",
+    "stateUtxo": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747#0",
     "referenceScriptUtxo": {
-      "txHash": "c4b6aebf94fded3b2364f787cf46ea048091f860f662792838b5de8aa3c76949",
+      "txHash": "171c3e07a8290fd200f1d40c77df76a7054235bf9becf165d27d8fe73b95579c",
       "outputIndex": 0,
-      "lovelace": 16000000
+      "lovelace": 18000000
     },
-    "initTxHash": "191beaef276cc48983e98cb25b921f710ba3bd6e437d602fa26482064e3feac7",
+    "initTxHash": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747",
     "initialized": true,
-    "utxo": "191beaef276cc48983e98cb25b921f710ba3bd6e437d602fa26482064e3feac7#0",
-    "stateNftPolicy": "6421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7"
+    "utxo": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747#0",
+    "stateNftPolicy": "9359cd30a4acf5447ab2918b98ec1f5acffab048b8e846f0d3003855"
   },
   "ism": {
     "hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
     "address": "addr_test1wr2ftw69psy3nfr2e72plg73g02pxtynmw9w6727s8gkkcgtk4t3x",
     "stateNft": {
-      "policyId": "0d4f1a151277f18840ad37bb1068f567fa86bae99e448861bea7cfcc",
+      "policyId": "e26631e4ef1d044abcd7f6cbdde62fda4e9c8cbac191a157eaeae80c",
       "assetNameHex": "49534d205374617465",
       "assetName": "ISM State",
-      "seedUtxo": "58678d2c8b16b8c567e94c150ac19624421a81a47bf7ed85e69ecab8c9ef8979#1"
+      "seedUtxo": "ab5c788526954d80213f5db2c6e41fee6d58aea7437c58565969d36614fb7abe#1"
     },
-    "stateUtxo": "0d2cb8a02aa1ef437e4604fe709dc49ab8b8ce4094c405ee5cc643bde67cc6dc#0",
+    "stateUtxo": "37783de0919bdc87a8e4d059fa4a024f4e4ae47eb899c9793219ab700c543947#0",
     "referenceScriptUtxo": {
-      "txHash": "7d5bd3ea61d0d4ef98be2bb7e95372f209d2635fcff7641d47e5c84e88ed1d35",
+      "txHash": "94fa9fbe1e64db7cbe911360eaaf937efa844f38489b9169d4e539d458167489",
       "outputIndex": 0,
       "lovelace": 13000000
     },
-    "initTxHash": "0d2cb8a02aa1ef437e4604fe709dc49ab8b8ce4094c405ee5cc643bde67cc6dc",
+    "initTxHash": "37783de0919bdc87a8e4d059fa4a024f4e4ae47eb899c9793219ab700c543947",
     "initialized": true,
-    "utxo": "0d2cb8a02aa1ef437e4604fe709dc49ab8b8ce4094c405ee5cc643bde67cc6dc#0",
-    "stateNftPolicy": "0d4f1a151277f18840ad37bb1068f567fa86bae99e448861bea7cfcc"
+    "utxo": "37783de0919bdc87a8e4d059fa4a024f4e4ae47eb899c9793219ab700c543947#0",
+    "stateNftPolicy": "e26631e4ef1d044abcd7f6cbdde62fda4e9c8cbac191a157eaeae80c"
   },
   "registry": {
     "hash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
     "address": "addr_test1wp72505hut0xfafcdty9sl05as8jgwvw5pdu583v2nm8jkcjpntdz",
     "stateNft": {
-      "policyId": "29af5c09ca1a5e707ac508995cb05f9f3d5e1a6dffa442da2cbd5a6d",
+      "policyId": "d99b96c7bcaf8bc41fcdb71ab7b9e73ea948cbdc0d1b52b62c0def81",
       "assetNameHex": "5265676973747279205374617465",
       "assetName": "Registry State",
-      "seedUtxo": "4693132c0b4adb7952f9a66b19a32a279895339ac89a50716b2a55ef72f94f94#1"
+      "seedUtxo": "0d38edb3af1b71e336246144159f7fc130ed895b70370683df197f7eca875ec2#1"
     },
-    "stateUtxo": "015b1ca1074046c1ca7b791d072967cf37a0519c1bf646a01a20ee8997f512df#0",
+    "stateUtxo": "e2fc027f8282fd3cc353023d8aea3a963bf29c9cd22c45dfeff91ed532ae44dd#0",
     "referenceScriptUtxo": {
-      "txHash": "28f5301c2579334be5e620d31dc2e04ee9a06f370f9fd1355ef1ff6c3106f5bb",
+      "txHash": "209a90d7d2c49922a2c21b8a522d8f6e6ada101c3382df3c0e8fd2cf2b0711e0",
       "outputIndex": 0,
       "lovelace": 16000000
     },
-    "initTxHash": "015b1ca1074046c1ca7b791d072967cf37a0519c1bf646a01a20ee8997f512df",
+    "initTxHash": "e2fc027f8282fd3cc353023d8aea3a963bf29c9cd22c45dfeff91ed532ae44dd",
     "initialized": true,
-    "utxo": "015b1ca1074046c1ca7b791d072967cf37a0519c1bf646a01a20ee8997f512df#0",
-    "stateNftPolicy": "29af5c09ca1a5e707ac508995cb05f9f3d5e1a6dffa442da2cbd5a6d"
+    "utxo": "e2fc027f8282fd3cc353023d8aea3a963bf29c9cd22c45dfeff91ed532ae44dd#0",
+    "stateNftPolicy": "d99b96c7bcaf8bc41fcdb71ab7b9e73ea948cbdc0d1b52b62c0def81"
   },
   "igp": {
     "hash": "41f6064ba9989daf8efaec0793360423552d2dcb2f16991254a2902d",
@@ -81,9 +81,9 @@
     "initialized": false
   },
   "warp_route": {
-    "hashBeforeParametrization": "e4ca8279338ac8786987f6be49298619b19c2deed6988bf16e310dd1",
-    "hash": "e4ca8279338ac8786987f6be49298619b19c2deed6988bf16e310dd1",
-    "address": "addr_test1wrjv4qnexw9vs7rfslmtujffscvmr8pdamtf3zl3dccsm5ga0ztgu",
+    "hashBeforeParametrization": "542a1d72a36ab4a4eadf10b8a2af3f28b6147227ef58bdff4227ffb1",
+    "hash": "542a1d72a36ab4a4eadf10b8a2af3f28b6147227ef58bdff4227ffb1",
+    "address": "addr_test1wp2z58tj5d4tff82mugt3g408u5tv9rjylh4300lggnllvgfwn75e",
     "initialized": false
   },
   "vault": {
