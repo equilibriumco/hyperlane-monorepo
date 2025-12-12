@@ -642,6 +642,70 @@ flowchart TB
     TX -->|"minimal"| WITNESS
 ```
 
+## Known Limitations
+
+### UTXO Contention (Sequential Message Processing)
+
+Due to Cardano's eUTXO model, the current architecture has throughput limitations caused by UTXO contention.
+
+#### Incoming Messages (Process)
+
+Processing a message requires spending multiple UTXOs in a single transaction:
+
+```
+Transaction inputs (all must be spent):
+  - Mailbox UTXO → validator runs
+  - ISM UTXO → validator runs
+  - Recipient UTXO → validator runs
+```
+
+Since each UTXO can only be spent once per block, messages must be processed sequentially:
+
+```
+Block N:   Message 1 spends Mailbox v1 → creates Mailbox v2
+Block N+1: Message 2 spends Mailbox v2 → creates Mailbox v3
+Block N+2: Message 3 spends Mailbox v3 → creates Mailbox v4
+```
+
+**Impact:**
+- Maximum throughput: ~1 message per block (~3 messages/minute)
+- Messages to different recipients still sequential (mailbox contention)
+- Relayer queue grows during traffic spikes
+
+#### Outgoing Messages (Dispatch)
+
+Dispatch has similar contention on the mailbox UTXO:
+
+```
+Each dispatch:
+  - Increments outbound_nonce
+  - Updates merkle_root
+  - Updates merkle_count
+```
+
+Multiple dispatches cannot be included in the same block unless batched into a single transaction.
+
+#### Mitigation Strategies
+
+**Current:**
+- Retry with backoff on UTXO contention errors
+- Sequential processing with queue management
+
+**Future optimization:**
+- Convert Mailbox and ISM to minting policies (eliminates their contention)
+- See [FUTURE_OPTIMIZATIONS.md](./FUTURE_OPTIMIZATIONS.md) for detailed design
+
+#### When This Matters
+
+The limitation becomes relevant when:
+- Sustained message volume exceeds ~100/hour
+- Multiple applications share the same mailbox
+- Low-latency delivery is required
+
+For most initial deployments, this limitation is acceptable.
+
+---
+
 ## Appendix: Domain and Address Encoding
 
 ### Hyperlane Address Format
