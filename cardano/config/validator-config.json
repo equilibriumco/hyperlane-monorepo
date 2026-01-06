@@ -1,17 +1,5 @@
 {
-  "originChainName": "cardanopreview",
-  "db": "/tmp/hyperlane-validator-cardano-db",
   "allowPublicRpcs": false,
-  "interval": 5,
-  "maxSignConcurrency": 50,
-  "validator": {
-    "type": "hexKey",
-    "key": "0x8ab7a00c32d023e31b7763e7d44d4868d82ecd618fd77a322c61783a57b02505"
-  },
-  "checkpointSyncer": {
-    "type": "localStorage",
-    "path": "/tmp/hyperlane-validator-cardano-checkpoints"
-  },
   "chains": {
     "cardanopreview": {
       "blocks": {
@@ -21,8 +9,7 @@
       },
       "chainId": 2003,
       "connection": {
-        "apiKey": "previewjtDS4mHuhJroFIX0BfOpVmMdnyTrWMfh",
-        "igpPolicyId": "00000000000000000000000000000000000000000000000000000000",
+        "apiKey": "",
         "ismAssetNameHex": "49534d205374617465",
         "ismPolicyId": "e26631e4ef1d044abcd7f6cbdde62fda4e9c8cbac191a157eaeae80c",
         "ismReferenceScriptUtxo": "94fa9fbe1e64db7cbe911360eaaf937efa844f38489b9169d4e539d458167489#0",
@@ -37,8 +24,7 @@
         "processedMessagesScriptHash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
         "registryAssetNameHex": "5265676973747279205374617465",
         "registryPolicyId": "d99b96c7bcaf8bc41fcdb71ab7b9e73ea948cbdc0d1b52b62c0def81",
-        "url": "https://cardano-preview.blockfrost.io/api/v0",
-        "validatorAnnouncePolicyId": "00000000000000000000000000000000000000000000000000000000"
+        "url": "https://cardano-preview.blockfrost.io/api/v0"
       },
       "domainId": 2003,
       "index": {
@@ -55,12 +41,24 @@
           "http": "https://cardano-preview.blockfrost.io/api/v0"
         }
       ],
-      "validatorAnnounce": "0x0200000000000000000000000000000000000000000000000000000000000002",
       "signer": {
-        "type": "hexKey",
-        "key": "0x8ab7a00c32d023e31b7763e7d44d4868d82ecd618fd77a322c61783a57b02505"
-      }
+        "key": "0x8ab7a00c32d023e31b7763e7d44d4868d82ecd618fd77a322c61783a57b02505",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "0x0200000000000000000000000000000000000000000000000000000000000002"
     }
   },
-  "metricsPort": 9091
+  "checkpointSyncer": {
+    "path": "./signatures",
+    "type": "localStorage"
+  },
+  "db": "/tmp/hyperlane-validator-db",
+  "interval": 5,
+  "maxSignConcurrency": 50,
+  "metricsPort": 9091,
+  "originChainName": "cardanopreview",
+  "validator": {
+    "key": "0x8ab7a00c32d023e31b7763e7d44d4868d82ecd618fd77a322c61783a57b02505",
+    "type": "hexKey"
+  }
 }
