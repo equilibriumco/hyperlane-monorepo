@@ -121,7 +121,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
@@ -269,7 +269,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             staging = staging.script(ScriptKind::PlutusV3, registry_script_cbor.to_vec());
         }
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
@@ -383,7 +383,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             staging = staging.script(ScriptKind::PlutusV3, registry_script_cbor.to_vec());
         }
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
@@ -434,7 +434,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
@@ -542,7 +542,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
@@ -671,7 +671,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .invalid_from_slot(validity_end)
             .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
 
-        if change > 1_000_000 {
+        if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 

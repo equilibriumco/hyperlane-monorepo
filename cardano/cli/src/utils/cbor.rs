@@ -469,6 +469,26 @@ pub fn build_mailbox_set_default_ism_redeemer(new_ism_hash: &str) -> Result<Vec<
     Ok(builder.build())
 }
 
+/// Build a Mailbox Dispatch redeemer
+/// Redeemer: Dispatch { destination: Domain, recipient: HyperlaneAddress, body: ByteArray }
+/// Dispatch is constructor index 0 in MailboxRedeemer
+pub fn build_mailbox_dispatch_redeemer(
+    destination: u32,
+    recipient_hex: &str, // 32 bytes hex (64 chars)
+    body_hex: &str,      // variable length hex
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // Dispatch is constructor 0
+    builder.start_constr(0);
+    builder.uint(destination as u64);
+    builder.bytes_hex(recipient_hex)?;
+    builder.bytes_hex(body_hex)?;
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
 /// Build a GenericRecipient datum
 /// Structure: HyperlaneRecipientDatum<GenericRecipientInner>
 /// HyperlaneRecipientDatum { ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: GenericRecipientInner }

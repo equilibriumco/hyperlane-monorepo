@@ -2,32 +2,32 @@
   "network": "preview",
   "mailbox": {
     "hashBeforeParametrization": "fd00e5eb944ba48e702ea7b80bc511fe9696ae621a0526801bc87a6c",
-    "hash": "fce299aa67876b0488d8656d16277e2a7667bc62e7260d7a807586fd",
-    "address": "addr_test1wr7w9xd2v7rkkpygmpjk69380c48veauvtnjvrt6sp6cdlgatneka",
+    "hash": "8686241854a51b260ce7c089375ceb2137dbf6dec3c8f5fa984f92aa",
+    "address": "addr_test1wzrgvfqc2jj3kfsvulqgjd6uavsn0klkmmpu3a06np8e92suvvhsx",
     "appliedParameters": [
       {
         "name": "processed_messages_nft_policy",
         "paramType": "PolicyId",
-        "value": "c10acba5ac9a98bd15a7d5d49f6fc775a819fe26509477007cdaf274",
+        "value": "fba607b19bf627d0a57ddb5ba3b52767008cdf2776ea42ceccb28d22",
         "description": "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
       }
     ],
     "stateNft": {
-      "policyId": "9359cd30a4acf5447ab2918b98ec1f5acffab048b8e846f0d3003855",
+      "policyId": "7f4de3b72a403d150600617371ff9043382133d7e179efe4a40926b0",
       "assetNameHex": "4d61696c626f78205374617465",
       "assetName": "Mailbox State",
-      "seedUtxo": "18ce4c203bba9b293ce5307986e26fb9479e89232c2e91788748e9cdc23ec471#1"
+      "seedUtxo": "d9c8e30fca1c833b36a985dee85e46cbded0acf309bf8f44143aaf80902bf65a#1"
     },
-    "stateUtxo": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747#0",
+    "stateUtxo": "f560b930a79d957210425e1d3d78d2637ed2b789d5324c4e2af1c0f1d505f6de#0",
     "referenceScriptUtxo": {
-      "txHash": "171c3e07a8290fd200f1d40c77df76a7054235bf9becf165d27d8fe73b95579c",
+      "txHash": "350e18d6c046f45fb21f483bde17df38bb5de4d07b0de3b9b275618f7f715723",
       "outputIndex": 0,
-      "lovelace": 18000000
+      "lovelace": 17000000
     },
-    "initTxHash": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747",
+    "initTxHash": "f560b930a79d957210425e1d3d78d2637ed2b789d5324c4e2af1c0f1d505f6de",
     "initialized": true,
-    "utxo": "8f29401546c8ff70440140bfa1ae9e00d604786e63cc5aec253acc4ff5f30747#0",
-    "stateNftPolicy": "9359cd30a4acf5447ab2918b98ec1f5acffab048b8e846f0d3003855"
+    "utxo": "f560b930a79d957210425e1d3d78d2637ed2b789d5324c4e2af1c0f1d505f6de#0",
+    "stateNftPolicy": "7f4de3b72a403d150600617371ff9043382133d7e179efe4a40926b0"
   },
   "ism": {
     "hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",

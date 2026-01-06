@@ -353,7 +353,7 @@ async fn init_mailbox_internal(
         println!("\nTransaction would:");
         println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
         println!("  - Mint state NFT with policy {}", applied_nft.policy_id);
-        println!("  - Create output at {} with {} ADA + NFT + datum", mailbox_addr, 5);
+        println!("  - Create output at {} with {} ADA + NFT + datum", mailbox_addr, 7);
         println!("\n{}", "Parameterization chain:".green());
         println!("  1. mailbox_policy_id (state NFT): {}", mailbox_policy_id);
         println!("  2. processed_messages_nft_policy: {}", processed_messages_nft_policy);
@@ -378,7 +378,7 @@ async fn init_mailbox_internal(
             &mint_script_cbor,
             &mailbox_addr,
             &datum_cbor,
-            5_000_000, // 5 ADA output
+            7_000_000, // 7 ADA output (increased for larger merkle tree datum)
             Some(mailbox_asset_name),
         )
         .await?;
