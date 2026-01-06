@@ -54,7 +54,7 @@ async fn main() -> ChainResult<()> {
             match mailbox.tree_and_tip(None).await {
                 Ok((tree, tip)) => {
                     println!("Tree count: {:?}", tree.count());
-                    println!("Tree root: {:?}", tree.root());
+                    println!("Merkle root: {:?}", tree.root());
                     println!("Block tip: {:?}", tip);
                 }
                 Err(e) => {

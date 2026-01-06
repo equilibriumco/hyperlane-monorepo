@@ -342,9 +342,10 @@ async fn init_mailbox_internal(
     println!("  Mailbox Script Hash: {}", applied_mailbox.policy_id.green());
     println!("  Mailbox Address: {}", mailbox_addr);
 
-    // Build mailbox datum
-    let merkle_root = "0".repeat(64); // 32 bytes of zeros
-    let datum_cbor = build_mailbox_datum(domain, ism_hash, &owner_pkh, 0, &merkle_root, 0)?;
+    // Build mailbox datum with empty merkle tree (32 zero branches)
+    let zero_branch = "0".repeat(64); // 32 bytes of zeros
+    let empty_branches: Vec<&str> = vec![zero_branch.as_str(); 32];
+    let datum_cbor = build_mailbox_datum(domain, ism_hash, &owner_pkh, 0, &empty_branches, 0)?;
     println!("  Datum CBOR: {}...", hex::encode(&datum_cbor[..32.min(datum_cbor.len())]));
 
     if dry_run {
@@ -1383,9 +1384,16 @@ async fn generate_datums(
         None => ctx.ensure_deployments_dir()?,
     };
 
-    // Mailbox datum
-    let merkle_root = "0".repeat(64);
-    let mailbox_datum = build_mailbox_datum(domain, ism_hash, &owner_pkh, 0, &merkle_root, 0)?;
+    // Mailbox datum with empty merkle tree (32 zero branches)
+    let zero_branch = "0".repeat(64); // 32 bytes of zeros
+    let empty_branches: Vec<&str> = vec![zero_branch.as_str(); 32];
+    let mailbox_datum = build_mailbox_datum(domain, ism_hash, &owner_pkh, 0, &empty_branches, 0)?;
+
+    // Build branches JSON array
+    let branches_json: Vec<serde_json::Value> = empty_branches
+        .iter()
+        .map(|b| serde_json::json!({"bytes": b}))
+        .collect();
 
     let mailbox_json = serde_json::json!({
         "constructor": 0,
@@ -1394,8 +1402,13 @@ async fn generate_datums(
             {"bytes": ism_hash},
             {"bytes": owner_pkh},
             {"int": 0},
-            {"bytes": merkle_root},
-            {"int": 0}
+            {
+                "constructor": 0,
+                "fields": [
+                    {"list": branches_json},
+                    {"int": 0}
+                ]
+            }
         ]
     });
 

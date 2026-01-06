@@ -168,18 +168,31 @@ async fn query_mailbox(ctx: &CliContext, mailbox_policy: Option<String>) -> Resu
             let outbound_nonce = fields.get(3)
                 .and_then(|n| n.get("int"))
                 .and_then(|i| i.as_u64());
-            let merkle_root = fields.get(4)
-                .and_then(|r| r.get("bytes"))
-                .and_then(|b| b.as_str());
-            let merkle_count = fields.get(5)
-                .and_then(|c| c.get("int"))
-                .and_then(|i| i.as_u64());
+            // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
+            let merkle_tree = fields.get(4);
+            let (merkle_branches_count, merkle_count) = if let Some(mt) = merkle_tree {
+                let mt_fields = mt.get("fields").and_then(|f| f.as_array());
+                if let Some(mtf) = mt_fields {
+                    let branches_count = mtf.get(0)
+                        .and_then(|b| b.get("list"))
+                        .and_then(|l| l.as_array())
+                        .map(|arr| arr.len());
+                    let count = mtf.get(1)
+                        .and_then(|c| c.get("int"))
+                        .and_then(|i| i.as_u64());
+                    (branches_count, count)
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
 
             println!("  Local Domain: {:?}", local_domain);
             println!("  Default ISM: {:?}", default_ism);
             println!("  Owner: {:?}", owner);
             println!("  Outbound Nonce: {:?}", outbound_nonce);
-            println!("  Merkle Root: {:?}", merkle_root);
+            println!("  Merkle Branches: {:?} stored", merkle_branches_count);
             println!("  Merkle Count: {:?}", merkle_count);
         }
 

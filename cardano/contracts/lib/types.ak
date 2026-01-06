@@ -207,6 +207,17 @@ pub type DeferredAction {
 // Mailbox Types
 // ============================================================================
 
+/// Merkle tree state stored in datum
+/// Stores full branch state for incremental tree updates
+/// This costs ~4.4 ADA more in minUTxO but enables proper on-chain merkle validation
+pub type MerkleTreeState {
+  /// Branch hashes at each level (32 branches, each 32 bytes)
+  /// From leaf level to root level
+  branches: List<ByteArray>,
+  /// Number of leaves inserted
+  count: Int,
+}
+
 /// Mailbox state stored in datum
 pub type MailboxDatum {
   /// Cardano domain ID
@@ -217,10 +228,8 @@ pub type MailboxDatum {
   owner: VerificationKeyHash,
   /// Next nonce for dispatched messages
   outbound_nonce: Int,
-  /// Current merkle tree root (32 bytes)
-  merkle_root: ByteArray,
-  /// Number of leaves in merkle tree
-  merkle_count: Int,
+  /// Full merkle tree state (branches + count)
+  merkle_tree: MerkleTreeState,
 }
 
 /// Mailbox redeemer actions

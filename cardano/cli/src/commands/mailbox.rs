@@ -150,12 +150,14 @@ async fn set_default_ism(
     }
 
     // Build new datum with updated default_ism
+    // Convert branches from Vec<String> to Vec<&str> for build_mailbox_datum
+    let branches_refs: Vec<&str> = mailbox_data.merkle_branches.iter().map(|s| s.as_str()).collect();
     let new_datum_cbor = build_mailbox_datum(
         mailbox_data.local_domain,
         new_ism_hash,
         &mailbox_data.owner,
         mailbox_data.outbound_nonce,
-        &mailbox_data.merkle_root,
+        &branches_refs,
         mailbox_data.merkle_count,
     )?;
 
@@ -388,7 +390,7 @@ async fn show_config(
                 println!("  Default ISM: {}", data.default_ism);
                 println!("  Owner: {}", data.owner);
                 println!("  Outbound Nonce: {}", data.outbound_nonce);
-                println!("  Merkle Root: {}", data.merkle_root);
+                println!("  Merkle Branches: {} branches stored", data.merkle_branches.len());
                 println!("  Merkle Count: {}", data.merkle_count);
             }
             Err(e) => {
@@ -417,17 +419,20 @@ fn get_mailbox_policy(ctx: &CliContext, mailbox_policy: Option<String>) -> Resul
         .ok_or_else(|| anyhow!("Mailbox policy not found. Use --mailbox-policy or update deployment_info.json"))
 }
 
-/// Parsed mailbox datum
+/// Parsed mailbox datum with nested MerkleTreeState
 struct MailboxData {
     local_domain: u32,
     default_ism: String,
     owner: String,
     outbound_nonce: u32,
-    merkle_root: String,
+    /// Full branch state from MerkleTreeState (32 branches, each 32 bytes hex)
+    merkle_branches: Vec<String>,
     merkle_count: u32,
 }
 
 /// Parse mailbox datum from Blockfrost JSON
+/// New structure with nested MerkleTreeState:
+/// MailboxDatum { local_domain, default_ism, owner, outbound_nonce, merkle_tree: { branches, count } }
 fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
     // Check if datum is a hex string (raw CBOR)
     if let Some(hex_str) = datum.as_str() {
@@ -440,8 +445,8 @@ fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    if fields.len() < 6 {
-        return Err(anyhow!("Mailbox datum must have 6 fields, got {}", fields.len()));
+    if fields.len() < 5 {
+        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields.len()));
     }
 
     let local_domain = fields
@@ -470,15 +475,34 @@ fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
 
-    let merkle_root = fields
+    // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
+    let merkle_tree = fields
         .get(4)
-        .and_then(|f| f.get("bytes"))
-        .and_then(|b| b.as_str())
-        .ok_or_else(|| anyhow!("Invalid merkle_root"))?
-        .to_string();
+        .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
 
-    let merkle_count = fields
-        .get(5)
+    let merkle_tree_fields = merkle_tree
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid merkle_tree structure - missing fields"))?;
+
+    if merkle_tree_fields.len() < 2 {
+        return Err(anyhow!("MerkleTreeState must have 2 fields, got {}", merkle_tree_fields.len()));
+    }
+
+    // Parse branches list
+    let branches_list = merkle_tree_fields
+        .get(0)
+        .and_then(|f| f.get("list"))
+        .and_then(|l| l.as_array())
+        .ok_or_else(|| anyhow!("Invalid branches list"))?;
+
+    let merkle_branches: Vec<String> = branches_list
+        .iter()
+        .filter_map(|b| b.get("bytes").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let merkle_count = merkle_tree_fields
+        .get(1)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
@@ -488,41 +512,65 @@ fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
         default_ism,
         owner,
         outbound_nonce,
-        merkle_root,
+        merkle_branches,
         merkle_count,
     })
 }
 
 /// Parse mailbox datum from raw CBOR hex
+/// New structure with nested MerkleTreeState:
+/// MailboxDatum { local_domain, default_ism, owner, outbound_nonce, merkle_tree: { branches, count } }
 fn parse_mailbox_datum_from_cbor(hex_str: &str) -> Result<MailboxData> {
     let cbor_bytes = hex::decode(hex_str)?;
     let datum: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
         .map_err(|e| anyhow!("Failed to decode CBOR datum: {:?}", e))?;
 
-    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_root, merkle_count]
+    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree]
     let fields = match &datum {
         PlutusData::Constr(c) if c.tag == 121 => &c.fields,
         _ => return Err(anyhow!("Expected Constr 0 datum")),
     };
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 6 {
-        return Err(anyhow!("Mailbox datum must have 6 fields, got {}", fields_vec.len()));
+    if fields_vec.len() < 5 {
+        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields_vec.len()));
     }
 
     let local_domain = extract_u32(fields_vec[0])?;
     let default_ism = extract_bytes_hex(fields_vec[1])?;
     let owner = extract_bytes_hex(fields_vec[2])?;
     let outbound_nonce = extract_u32(fields_vec[3])?;
-    let merkle_root = extract_bytes_hex(fields_vec[4])?;
-    let merkle_count = extract_u32(fields_vec[5])?;
+
+    // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
+    let merkle_tree_fields = match fields_vec[4] {
+        PlutusData::Constr(c) if c.tag == 121 => {
+            let f: Vec<&PlutusData> = c.fields.iter().collect();
+            if f.len() < 2 {
+                return Err(anyhow!("MerkleTreeState must have 2 fields"));
+            }
+            f
+        }
+        _ => return Err(anyhow!("Expected Constr 0 for MerkleTreeState")),
+    };
+
+    // Parse branches list
+    let merkle_branches = match merkle_tree_fields[0] {
+        PlutusData::Array(arr) => {
+            arr.iter()
+                .map(|item| extract_bytes_hex(item))
+                .collect::<Result<Vec<String>>>()?
+        }
+        _ => return Err(anyhow!("Expected array for merkle branches")),
+    };
+
+    let merkle_count = extract_u32(merkle_tree_fields[1])?;
 
     Ok(MailboxData {
         local_domain,
         default_ism,
         owner,
         outbound_nonce,
-        merkle_root,
+        merkle_branches,
         merkle_count,
     })
 }

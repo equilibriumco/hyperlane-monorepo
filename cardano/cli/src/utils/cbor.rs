@@ -119,13 +119,27 @@ impl Default for CborBuilder {
     }
 }
 
-/// Build a Mailbox datum
+/// Build a Mailbox datum with nested MerkleTreeState
+///
+/// Structure:
+/// ```
+/// MailboxDatum {
+///   local_domain: Domain,
+///   default_ism: ScriptHash,
+///   owner: VerificationKeyHash,
+///   outbound_nonce: Int,
+///   merkle_tree: MerkleTreeState {
+///     branches: List<ByteArray>,  // 32 branches, each 32 bytes
+///     count: Int,
+///   },
+/// }
+/// ```
 pub fn build_mailbox_datum(
     local_domain: u32,
     default_ism_hash: &str,
     owner_pkh: &str,
     outbound_nonce: u32,
-    merkle_root: &str,
+    branches: &[&str],  // 32 branch hashes (each 64 hex chars = 32 bytes)
     merkle_count: u32,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
@@ -137,14 +151,24 @@ pub fn build_mailbox_datum(
     builder.bytes_hex(default_ism_hash)?;
     builder.bytes_hex(owner_pkh)?;
 
-    builder
-        .uint(outbound_nonce as u64);
+    builder.uint(outbound_nonce as u64);
 
-    builder.bytes_hex(merkle_root)?;
+    // MerkleTreeState { branches: List<ByteArray>, count: Int }
+    builder.start_constr(0);
 
-    builder
-        .uint(merkle_count as u64)
-        .end_constr();
+    // branches: List<ByteArray>
+    builder.start_list();
+    for branch in branches {
+        builder.bytes_hex(branch)?;
+    }
+    builder.end_list();
+
+    // count: Int
+    builder.uint(merkle_count as u64);
+
+    builder.end_constr(); // End MerkleTreeState
+
+    builder.end_constr(); // End MailboxDatum
 
     Ok(builder.build())
 }

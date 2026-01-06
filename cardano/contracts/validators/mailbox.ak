@@ -11,8 +11,8 @@ use cardano/transaction.{
 use merkle
 use types.{
   Checkpoint, Domain, HyperlaneAddress, MailboxDatum, MailboxRedeemer, Message,
-  MultisigIsmRedeemer, PolicyId, ScriptHash, Verify, encode_message, Dispatch, Process,
-  SetDefaultIsm, TransferOwnership,
+  MerkleTreeState, MultisigIsmRedeemer, PolicyId, ScriptHash, Verify, encode_message,
+  Dispatch, Process, SetDefaultIsm, TransferOwnership,
 }
 use utils.{
   find_input, has_script_input, hyperlane_address_to_script_hash,
@@ -103,21 +103,23 @@ fn validate_dispatch(
   // Compute message hash for merkle tree
   let message_hash = keccak_256(encode_message(message))
 
-  // Update merkle tree with new message
+  // Update merkle tree with new message using full branch state from datum
   let current_tree =
     merkle.MerkleTree {
-      branches: datum_branches_to_list(datum.merkle_root),
-      count: datum.merkle_count,
+      branches: datum.merkle_tree.branches,
+      count: datum.merkle_tree.count,
     }
   let new_tree = merkle.insert(current_tree, message_hash)
 
-  // Build expected new datum
+  // Build expected new datum with updated merkle tree
   let new_datum =
     MailboxDatum {
       ..datum,
       outbound_nonce: datum.outbound_nonce + 1,
-      merkle_root: merkle.root(new_tree),
-      merkle_count: new_tree.count,
+      merkle_tree: MerkleTreeState {
+        branches: new_tree.branches,
+        count: new_tree.count,
+      },
     }
 
   // Validate continuation
@@ -214,8 +216,8 @@ fn validate_continuation(
       cont_datum.default_ism == new_datum.default_ism,
       cont_datum.owner == new_datum.owner,
       cont_datum.outbound_nonce == new_datum.outbound_nonce,
-      cont_datum.merkle_root == new_datum.merkle_root,
-      cont_datum.merkle_count == new_datum.merkle_count,
+      cont_datum.merkle_tree.branches == new_datum.merkle_tree.branches,
+      cont_datum.merkle_tree.count == new_datum.merkle_tree.count,
     }
 
   // Verify value preserved (NFT marker stays)
@@ -357,11 +359,3 @@ fn processed_nft_minted(
   }
 }
 
-/// Convert datum merkle root to list of branches
-/// This is a placeholder - actual implementation depends on how we store the tree
-fn datum_branches_to_list(_merkle_root: ByteArray) -> List<ByteArray> {
-  // For now, we store just the root. In a full implementation,
-  // we'd store the full branch state for incremental updates.
-  // This is a simplification that works for verification but not incremental building.
-  []
-}

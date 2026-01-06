@@ -69,11 +69,19 @@ impl MerkleTreeHook for CardanoMerkleTreeHook {
         &self,
         _reorg_period: &ReorgPeriod,
     ) -> ChainResult<CheckpointAtBlock> {
-        // Get the tree and tip from the mailbox
+        // Get the tree state from the mailbox datum
+        // The Aiken contracts now store full branch state, so tree.root() is correct
         let (tree, block_height) = self.mailbox.tree_and_tip(None).await?;
 
         let root = tree.root();
         let index = tree.count().saturating_sub(1) as u32;
+
+        info!(
+            root = ?root,
+            index = index,
+            block_height = block_height,
+            "Returning latest checkpoint from Cardano mailbox"
+        );
 
         Ok(CheckpointAtBlock {
             checkpoint: Checkpoint {
@@ -88,7 +96,8 @@ impl MerkleTreeHook for CardanoMerkleTreeHook {
 
     #[instrument(skip(self))]
     async fn tree(&self, _reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
-        // Get the tree and tip from the mailbox
+        // Get the tree state from the mailbox
+        // The Aiken contracts now store full branch state, so the tree is complete
         let (tree, block_height) = self.mailbox.tree_and_tip(None).await?;
 
         Ok(IncrementalMerkleAtBlock {

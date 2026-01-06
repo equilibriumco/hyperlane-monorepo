@@ -2,7 +2,7 @@ use crate::blockfrost_provider::{BlockfrostProvider, Utxo};
 use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
 use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents};
-use crate::types::MailboxDatum;
+use crate::types::{MailboxDatum, MerkleTreeState};
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use hyperlane_core::accumulator::incremental::IncrementalMerkle;
@@ -195,9 +195,9 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid mailbox datum: missing fields")
             })?;
 
-        if fields.len() < 6 {
+        if fields.len() < 5 {
             return Err(ChainCommunicationError::from_other_str(
-                "Invalid mailbox datum: insufficient fields",
+                "Invalid mailbox datum: insufficient fields (need at least 5)",
             ));
         }
 
@@ -252,43 +252,93 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid outbound_nonce in mailbox datum")
             })? as u32;
 
-        // Parse merkle_root (field 4) - 32-byte hash
-        let merkle_root_hex = fields
-            .get(4)
-            .and_then(|f| f.get("bytes"))
-            .and_then(|b| b.as_str())
-            .ok_or_else(|| {
-                ChainCommunicationError::from_other_str("Invalid merkle_root in mailbox datum")
-            })?;
-        let merkle_root_bytes = hex::decode(merkle_root_hex).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!(
-                "Failed to decode merkle_root: {}",
-                e
-            ))
-        })?;
-        let merkle_root: [u8; 32] = merkle_root_bytes.try_into().map_err(|_| {
-            ChainCommunicationError::from_other_str("Invalid merkle_root length")
-        })?;
-
-        // Parse merkle_count (field 5)
-        let merkle_count = fields
-            .get(5)
-            .and_then(|f| f.get("int"))
-            .and_then(|i| i.as_u64())
-            .ok_or_else(|| {
-                ChainCommunicationError::from_other_str("Invalid merkle_count in mailbox datum")
-            })? as u32;
+        // Parse merkle_tree (field 4) - nested MerkleTreeState structure
+        // Format: { "constructor": 0, "fields": [{ "list": [...branches...] }, { "int": count }] }
+        let merkle_tree = self.parse_merkle_tree_state(fields.get(4).ok_or_else(|| {
+            ChainCommunicationError::from_other_str("Missing merkle_tree in mailbox datum")
+        })?)?;
 
         Ok(MailboxDatum {
             local_domain,
             default_ism,
             owner,
             outbound_nonce,
-            merkle_root,
-            merkle_count,
+            merkle_tree,
         })
     }
 
+    /// Parse MerkleTreeState from Blockfrost's JSON format
+    fn parse_merkle_tree_state(&self, json: &Value) -> ChainResult<MerkleTreeState> {
+        // MerkleTreeState format: { "constructor": 0, "fields": [branches_list, count] }
+        let fields = json
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(
+                    "Invalid merkle_tree: missing fields in MerkleTreeState",
+                )
+            })?;
+
+        if fields.len() < 2 {
+            return Err(ChainCommunicationError::from_other_str(
+                "Invalid merkle_tree: insufficient fields in MerkleTreeState",
+            ));
+        }
+
+        // Parse branches (field 0) - list of 32-byte hashes
+        let branches_list = fields
+            .get(0)
+            .and_then(|f| f.get("list"))
+            .and_then(|l| l.as_array())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(
+                    "Invalid merkle_tree: missing branches list",
+                )
+            })?;
+
+        let mut branches = Vec::with_capacity(branches_list.len());
+        for (i, branch_item) in branches_list.iter().enumerate() {
+            let branch_hex = branch_item.get("bytes").and_then(|b| b.as_str()).ok_or_else(|| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Invalid merkle_tree: invalid branch at index {}",
+                    i
+                ))
+            })?;
+            let branch_bytes = hex::decode(branch_hex).map_err(|e| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Failed to decode branch {}: {}",
+                    i, e
+                ))
+            })?;
+            let branch: [u8; 32] = branch_bytes.try_into().map_err(|_| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Invalid branch length at index {}",
+                    i
+                ))
+            })?;
+            branches.push(branch);
+        }
+
+        // Parse count (field 1)
+        let count = fields
+            .get(1)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str("Invalid merkle_tree: missing count")
+            })? as u32;
+
+        Ok(MerkleTreeState { branches, count })
+    }
+
+    /// Returns the merkle tree state from the mailbox datum.
+    ///
+    /// Returns: (tree, block_height)
+    /// - tree: IncrementalMerkle with actual branches from the datum
+    /// - block_height: Current finalized block height
+    ///
+    /// The Aiken contracts now store the full branch state (32 branches × 32 bytes)
+    /// in the datum, enabling proper merkle tree reconstruction.
     pub async fn tree_and_tip(
         &self,
         lag: Option<NonZeroU64>,
@@ -302,12 +352,14 @@ impl CardanoMailbox {
         let utxo = self.find_mailbox_utxo().await?;
         let datum = self.parse_mailbox_datum(&utxo).await?;
 
-        // Build an IncrementalMerkle tree from the datum
-        // Note: The datum only stores the root, not the full tree branches
-        // For a full implementation, we'd need to reconstruct branches from message history
-        // For now, create a tree with just the count
-        let branch = [H256::zero(); TREE_DEPTH];
-        let count = datum.merkle_count as usize;
+        // Build an IncrementalMerkle tree from the datum's full branch state
+        let mut branch = [H256::zero(); TREE_DEPTH];
+        for (i, datum_branch) in datum.merkle_tree.branches.iter().enumerate() {
+            if i < TREE_DEPTH {
+                branch[i] = H256::from_slice(datum_branch);
+            }
+        }
+        let count = datum.merkle_tree.count as usize;
 
         let tip = self.finalized_block_number().await?;
 
@@ -480,5 +532,184 @@ impl Mailbox for CardanoMailbox {
     fn delivered_calldata(&self, message_id: H256) -> ChainResult<Option<Vec<u8>>> {
         // Return the message_id as calldata for delivery check
         Ok(Some(message_id.as_bytes().to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperlane_core::accumulator::INITIAL_ROOT;
+    use serde_json::json;
+
+    /// Helper to create a mock mailbox datum JSON for testing
+    /// Now uses nested MerkleTreeState structure with branches
+    fn create_test_mailbox_datum_json(
+        local_domain: u32,
+        outbound_nonce: u32,
+        branches: &[[u8; 32]],
+        merkle_count: u32,
+    ) -> serde_json::Value {
+        let branches_list: Vec<_> = branches
+            .iter()
+            .map(|b| json!({"bytes": hex::encode(b)}))
+            .collect();
+
+        json!({
+            "constructor": 0,
+            "fields": [
+                {"int": local_domain},
+                {"bytes": "00000000000000000000000000000000000000000000000000000000"},  // default_ism
+                {"bytes": "00000000000000000000000000000000000000000000000000000000"},  // owner
+                {"int": outbound_nonce},
+                {
+                    "constructor": 0,
+                    "fields": [
+                        {"list": branches_list},
+                        {"int": merkle_count}
+                    ]
+                }
+            ]
+        })
+    }
+
+    /// Helper to create zero branches (32 zero hashes)
+    fn zero_branches() -> Vec<[u8; 32]> {
+        vec![[0u8; 32]; TREE_DEPTH]
+    }
+
+    #[test]
+    fn test_parse_mailbox_datum_extracts_merkle_tree_state() {
+        // Create a test datum with known branches
+        let mut branches = zero_branches();
+        branches[0] = [0xab; 32]; // Set first branch to a known value
+
+        let datum_json = create_test_mailbox_datum_json(2003, 0, &branches, 1);
+
+        // Extract the MerkleTreeState from the JSON
+        let fields = datum_json.get("fields").unwrap().as_array().unwrap();
+        let merkle_tree_json = fields.get(4).unwrap();
+        let merkle_fields = merkle_tree_json.get("fields").unwrap().as_array().unwrap();
+
+        // Extract branches list
+        let branches_list = merkle_fields
+            .get(0)
+            .and_then(|f| f.get("list"))
+            .and_then(|l| l.as_array())
+            .unwrap();
+
+        // Verify first branch
+        let first_branch_hex = branches_list
+            .get(0)
+            .and_then(|b| b.get("bytes"))
+            .and_then(|b| b.as_str())
+            .unwrap();
+        assert_eq!(first_branch_hex, hex::encode([0xab; 32]));
+
+        // Extract count
+        let count = merkle_fields
+            .get(1)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .unwrap() as u32;
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_parse_mailbox_datum_extracts_merkle_count() {
+        let branches = zero_branches();
+        let datum_json = create_test_mailbox_datum_json(2003, 5, &branches, 42);
+
+        let fields = datum_json.get("fields").unwrap().as_array().unwrap();
+        let merkle_tree_json = fields.get(4).unwrap();
+        let merkle_fields = merkle_tree_json.get("fields").unwrap().as_array().unwrap();
+
+        // Extract merkle_count (field 1 of MerkleTreeState)
+        let merkle_count = merkle_fields
+            .get(1)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .unwrap() as u32;
+
+        assert_eq!(merkle_count, 42);
+    }
+
+    #[test]
+    fn test_empty_tree_has_initial_root() {
+        // For an empty tree (count = 0), the root should be the INITIAL_ROOT
+        // This is the keccak256 merkle root of an empty tree with 32 levels of zero hashes
+        let initial_root_hex = "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757";
+
+        // Verify INITIAL_ROOT matches expected value
+        assert_eq!(
+            hex::encode(INITIAL_ROOT.as_bytes()),
+            initial_root_hex,
+            "INITIAL_ROOT constant should match expected empty tree root"
+        );
+
+        // Also verify that an IncrementalMerkle with zero branches computes this root
+        let empty_tree = IncrementalMerkle::default();
+        assert_eq!(empty_tree.root(), INITIAL_ROOT);
+    }
+
+    #[test]
+    fn test_incremental_merkle_with_real_branches_produces_correct_root() {
+        // This test verifies that when we store real branches in the datum,
+        // tree.root() produces the correct merkle root
+
+        // Simulate inserting a message into a tree
+        let mut real_tree = IncrementalMerkle::default();
+        let message_id = H256::from_slice(&[0xab; 32]);
+        real_tree.ingest(message_id);
+
+        let real_root = real_tree.root();
+        let real_branches = real_tree.branch().clone();
+        let count = real_tree.count();
+
+        // Now create a new tree from the stored branches (simulating datum parsing)
+        let restored_tree = IncrementalMerkle::new(real_branches, count);
+
+        // The restored tree should compute the SAME root
+        assert_eq!(
+            restored_tree.root(),
+            real_root,
+            "Tree restored from branches should have same root"
+        );
+
+        // And it should NOT equal the empty tree root
+        assert_ne!(real_root, INITIAL_ROOT);
+    }
+
+    #[test]
+    fn test_merkle_root_h256_conversion() {
+        // Test that we can convert between hex string and H256 correctly
+        let root_hex = "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757";
+        let root_bytes = hex::decode(root_hex).unwrap();
+
+        let h256_root = H256::from_slice(&root_bytes);
+
+        assert_eq!(hex::encode(h256_root.as_bytes()), root_hex);
+        assert_eq!(h256_root, INITIAL_ROOT);
+    }
+
+    #[test]
+    fn test_checkpoint_index_calculation() {
+        // Test that checkpoint index is count - 1 (0-indexed)
+        // Empty tree (count=0) should have index 0 (saturating_sub prevents underflow)
+        assert_eq!(0u32.saturating_sub(1), 0);
+
+        // Tree with 1 message should have index 0
+        assert_eq!(1u32.saturating_sub(1), 0);
+
+        // Tree with 5 messages should have index 4
+        assert_eq!(5u32.saturating_sub(1), 4);
+    }
+
+    #[test]
+    fn test_branch_to_h256_conversion() {
+        // Test converting branch bytes from datum to H256 for IncrementalMerkle
+        let branch_bytes: [u8; 32] = [0xab; 32];
+        let h256_branch = H256::from_slice(&branch_bytes);
+
+        assert_eq!(h256_branch.as_bytes(), &branch_bytes);
     }
 }

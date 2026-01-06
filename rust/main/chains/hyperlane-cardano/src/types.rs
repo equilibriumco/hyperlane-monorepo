@@ -103,6 +103,16 @@ impl Message {
     }
 }
 
+/// Merkle tree state stored in datum (matches Aiken MerkleTreeState)
+/// Stores full branch state for incremental tree updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleTreeState {
+    /// Branch hashes at each level (32 branches, each 32 bytes)
+    pub branches: Vec<[u8; 32]>,
+    /// Number of leaves inserted
+    pub count: u32,
+}
+
 /// Mailbox datum structure (matches Aiken MailboxDatum)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxDatum {
@@ -110,8 +120,8 @@ pub struct MailboxDatum {
     pub default_ism: ScriptHash,
     pub owner: [u8; 28], // VerificationKeyHash
     pub outbound_nonce: u32,
-    pub merkle_root: [u8; 32],
-    pub merkle_count: u32,
+    /// Full merkle tree state (branches + count)
+    pub merkle_tree: MerkleTreeState,
 }
 
 /// Mailbox redeemer (matches Aiken MailboxRedeemer)
@@ -575,9 +585,17 @@ mod tests {
 
     #[test]
     fn test_hyperlane_address_to_script_hash_invalid() {
-        // Not a script credential
-        let addr: HyperlaneAddress = [0x00; 32];
+        // Not a script credential - use 0x01 prefix which is invalid
+        // Valid prefixes are 0x02000000 (canonical) and 0x00000000 (legacy/compat)
+        let mut addr: HyperlaneAddress = [0x00; 32];
+        addr[0] = 0x01; // Invalid prefix
         assert!(hyperlane_address_to_script_hash(&addr).is_none());
+
+        // Also test with non-zero bytes in positions 1-3
+        let mut addr2: HyperlaneAddress = [0x00; 32];
+        addr2[0] = 0x02;
+        addr2[1] = 0x01; // Invalid: must be 0x02000000
+        assert!(hyperlane_address_to_script_hash(&addr2).is_none());
     }
 
     #[test]

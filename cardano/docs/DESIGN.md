@@ -203,7 +203,7 @@ sequenceDiagram
 ```mermaid
 flowchart TB
     subgraph Inputs["Transaction Inputs"]
-        MI[/"Mailbox UTXO<br/>with State NFT<br/>datum: {nonce: N, merkleRoot, ...}"/]
+        MI[/"Mailbox UTXO<br/>with State NFT<br/>datum: {nonce: N, merkle_tree: {branches, count}}"/]
         SI[/"Sender UTXO<br/>(pays for tx)"/]
     end
 
@@ -218,12 +218,12 @@ flowchart TB
     subgraph Validation["On-Chain Validation"]
         V1["1. Build message struct"]
         V2["2. Compute message_hash = keccak256(message)"]
-        V3["3. Insert hash into merkle tree"]
-        V4["4. Verify continuation datum:<br/>- nonce = N + 1<br/>- merkle_root updated<br/>- merkle_count incremented"]
+        V3["3. Insert hash into merkle tree (update branches)"]
+        V4["4. Verify continuation datum:<br/>- nonce = N + 1<br/>- merkle_tree.branches updated<br/>- merkle_tree.count incremented"]
     end
 
     subgraph Outputs["Transaction Outputs"]
-        MO[/"Mailbox UTXO<br/>datum: {nonce: N+1, newMerkleRoot, ...}"/]
+        MO[/"Mailbox UTXO<br/>datum: {nonce: N+1, merkle_tree: {newBranches, count+1}}"/]
         CO[/"Change UTXO"/]
     end
 
@@ -241,25 +241,31 @@ flowchart TB
 
 ### Merkle Tree Updates
 
+The mailbox stores the full incremental merkle tree state (32 branches × 32 bytes = 1024 bytes) in the datum. This enables proper on-chain merkle validation at the cost of ~4.4 ADA in minUTxO.
+
 ```mermaid
 flowchart LR
     subgraph Before["Before Dispatch"]
-        T1["Merkle Tree<br/>count: 5<br/>root: 0xabc..."]
+        T1["MerkleTreeState {<br/>branches: [h0, h1, ...h31]<br/>count: 5<br/>}"]
     end
 
     subgraph Message["New Message"]
         MSG["Message {<br/>version: 3<br/>nonce: 5<br/>origin: 2003<br/>sender: 0x...<br/>destination: 43113<br/>recipient: 0x...<br/>body: ...}"]
         HASH["message_hash =<br/>keccak256(encode(message))"]
+        INSERT["merkle.insert(tree, hash)<br/>updates affected branches"]
     end
 
     subgraph After["After Dispatch"]
-        T2["Merkle Tree<br/>count: 6<br/>root: 0xdef..."]
+        T2["MerkleTreeState {<br/>branches: [h0', h1', ...h31']<br/>count: 6<br/>}"]
     end
 
     T1 --> MSG
     MSG --> HASH
-    HASH --> T2
+    HASH --> INSERT
+    INSERT --> T2
 ```
+
+The incremental merkle tree uses a fixed-size branch array (32 branches for 2³² capacity). When a new message is inserted, only the affected branches are updated - storage remains constant regardless of message count.
 
 ---
 
@@ -679,8 +685,8 @@ Dispatch has similar contention on the mailbox UTXO:
 ```
 Each dispatch:
   - Increments outbound_nonce
-  - Updates merkle_root
-  - Updates merkle_count
+  - Updates merkle_tree.branches (affected levels only)
+  - Increments merkle_tree.count
 ```
 
 Multiple dispatches cannot be included in the same block unless batched into a single transaction.
@@ -730,4 +736,4 @@ Hyperlane Address:   0x020000001234567890abcdef... (32 bytes)
 
 ---
 
-*Last Updated: December 2024*
+*Last Updated: January 2025*
