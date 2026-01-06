@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use commands::{config, deferred, deploy, init, ism, mailbox, query, registry, tx, utxo, warp};
+use commands::{config, deferred, deploy, init, ism, mailbox, query, registry, tx, utxo, validator, warp};
 
 /// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
 #[derive(Parser)]
@@ -65,6 +65,9 @@ enum Commands {
 
     /// Manage warp routes (token bridges)
     Warp(warp::WarpArgs),
+
+    /// Manage validator announcements
+    Validator(validator::ValidatorArgs),
 
     /// Query contract state and UTXOs
     Query(query::QueryArgs),
@@ -136,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mailbox(args) => mailbox::execute(&ctx, args).await,
         Commands::Registry(args) => registry::execute(&ctx, args).await,
         Commands::Warp(args) => warp::execute(&ctx, args).await,
+        Commands::Validator(args) => validator::execute(&ctx, args).await,
         Commands::Query(args) => query::execute(&ctx, args).await,
         Commands::Utxo(args) => utxo::execute(&ctx, args).await,
         Commands::Tx(args) => tx::execute(&ctx, args).await,
