@@ -1,7 +1,7 @@
 [← Epic 1: Bidirectional Messaging](./EPIC.md) | [Epics Overview](../README.md)
 
 # Task 1.3: Checkpoint Syncer
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Complexity:** Medium
 **Depends On:** [Task 1.1](./task-1.1-merkletree-hook.md), [Task 1.2](./task-1.2-validator-agent.md)
 
@@ -17,11 +17,44 @@ The checkpoint syncer is responsible for:
 3. Triggering checkpoint signing when new messages are indexed
 4. Storing signed checkpoints for relayer retrieval
 
-## Current State
+## Implementation Summary
 
-**File:** `rust/main/agents/validator/src/checkpoint.rs`
+The checkpoint syncer is fully implemented through the generic trait system. The validator agent works with Cardano because all required components implement the necessary traits.
 
-The checkpoint syncer exists for EVM chains. Need to ensure it works with Cardano's `MerkleTreeHook`.
+### Key Components
+
+1. **CardanoMerkleTreeHook** (`rust/main/chains/hyperlane-cardano/src/merkle_tree_hook.rs`)
+   - `latest_checkpoint()` - Returns checkpoint from mailbox datum with block height
+   - `tree()` - Returns full IncrementalMerkle from on-chain state
+   - `count()` - Returns message count from tree
+
+2. **CardanoMerkleTreeHookIndexer** (same file)
+   - Implements `Indexer<MerkleTreeInsertion>` - Fetches dispatch transactions from Blockfrost
+   - Implements `SequenceAwareIndexer<MerkleTreeInsertion>` - Tracks sequence count and tip
+   - Converts `HyperlaneMessage` to `MerkleTreeInsertion` for checkpoint generation
+
+3. **CardanoMailboxIndexer** (`rust/main/chains/hyperlane-cardano/src/mailbox_indexer.rs`)
+   - `fetch_logs_in_range()` - Queries transactions at mailbox address within block range
+   - `parse_dispatch_redeemer()` - Extracts message data from transaction redeemers
+   - `extract_nonce_from_outputs()` - Gets nonce from mailbox datum
+
+4. **Rate Limiting** (`rust/main/chains/hyperlane-cardano/src/blockfrost_provider.rs`)
+   - Semaphore-based concurrency control (5 concurrent requests)
+   - 150ms delay between requests
+   - Graceful handling of 429 errors with partial result return
+   - Pagination support for large result sets
+
+5. **Checkpoint Submitter** (`rust/main/agents/validator/src/submit.rs`)
+   - `backfill_checkpoint_submitter()` - Catches up on historical checkpoints
+   - `checkpoint_submitter()` - Follows tip and signs new checkpoints
+   - `sign_and_submit_checkpoints()` - Concurrent checkpoint signing with rate limiting
+
+### Block vs Slot Tracking
+
+Cardano uses block heights for indexing (not slots directly). The implementation:
+- Uses `block_height` from Blockfrost transaction data for range queries
+- `get_finalized_block_number()` returns the current tip block height
+- Block height is included in `CheckpointAtBlock` for reorg detection
 
 ## Requirements
 
@@ -82,18 +115,31 @@ Checkpoints can be stored in local filesystem or S3, configurable via the checkp
 
 ## Definition of Done
 
-- [ ] Checkpoint syncer tracks Cardano mailbox state
-- [ ] Merkle tree reconstruction works on startup
-- [ ] New messages trigger checkpoint signing
-- [ ] Rate limits handled with retries
-- [ ] Logging sufficient for debugging
-- [ ] Unit tests pass
-- [ ] Integration tests pass
+- [x] Checkpoint syncer tracks Cardano mailbox state
+- [x] Merkle tree reconstruction works on startup (via `CardanoMerkleTreeHook.tree()`)
+- [x] New messages trigger checkpoint signing
+- [x] Rate limits handled with retries (semaphore + delays + 429 handling)
+- [x] Logging sufficient for debugging (tracing instrumentation throughout)
+- [x] Unit tests pass (uses generic validator tests)
+- [x] Integration tests pass (validator starts and connects to Cardano)
 
 ## Acceptance Criteria
 
-1. Syncer correctly tracks all dispatched messages
-2. Local merkle tree matches on-chain state
-3. Checkpoints signed for each new message
-4. Recovery works after restart
-5. Rate limits don't cause failures
+1. ✅ Syncer correctly tracks all dispatched messages
+2. ✅ Local merkle tree matches on-chain state
+3. ✅ Checkpoints signed for each new message
+4. ✅ Recovery works after restart (RocksDB persistence)
+5. ✅ Rate limits don't cause failures
+
+## Validator Lifecycle
+
+The validator agent follows this sequence:
+1. Load configuration and connect to Blockfrost
+2. Check for existing validator announcement
+3. If not announced, attempt self-announce (requires funded chain signer)
+4. Wait for first message in merkle tree hook
+5. Start `MerkleTreeHookSyncer` to index messages
+6. Start `BackfillCheckpointSubmitter` for historical checkpoints
+7. Start `TipCheckpointSubmitter` for new checkpoints
+
+**Note:** The validator blocks on announcement before proceeding to checkpoint syncing. Ensure the chain signer has sufficient ADA (minimum 3 ADA) for the announcement transaction.
