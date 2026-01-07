@@ -1,10 +1,16 @@
 //! Validator command - Manage validator announcements for Hyperlane
+//!
+//! Implements Hyperlane-compatible validator announcements using ECDSA secp256k1 signatures.
+//! This ensures cross-chain interoperability - the validator's Ethereum address is used as
+//! their identity across all chains.
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use k256::ecdsa::{SigningKey, Signature, signature::hazmat::PrehashSigner};
 use pallas_crypto::hash::Hash;
 use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
+use tiny_keccak::{Hasher, Keccak};
 
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::CborBuilder;
@@ -25,12 +31,23 @@ enum ValidatorCommands {
     ///
     /// Validators must announce their checkpoint storage location so relayers
     /// can discover where to fetch signed checkpoints.
+    ///
+    /// This command requires a secp256k1 private key (the same key used for
+    /// signing Hyperlane checkpoints). The Ethereum address derived from this
+    /// key will be stored as the validator's identity.
     Announce {
         /// Storage location URL (e.g., "s3://bucket-name/cardano-validator")
         #[arg(long)]
         storage_location: String,
 
-        /// Path to signing key (if not using CARDANO_SIGNING_KEY env)
+        /// Validator's secp256k1 private key (hex, 32 bytes)
+        /// This is the key used for signing Hyperlane checkpoints.
+        /// Can also be set via HYPERLANE_VALIDATOR_KEY env var.
+        #[arg(long, env = "HYPERLANE_VALIDATOR_KEY")]
+        validator_key: String,
+
+        /// Path to Cardano signing key for paying transaction fees
+        /// (if not using CARDANO_SIGNING_KEY env)
         #[arg(long)]
         signing_key: Option<String>,
 
@@ -41,7 +58,7 @@ enum ValidatorCommands {
 
     /// Show validator announcements
     Show {
-        /// Filter by validator pubkey (32 bytes hex)
+        /// Filter by validator address (20 bytes hex, Ethereum address)
         #[arg(long)]
         validator: Option<String>,
     },
@@ -51,17 +68,19 @@ pub async fn execute(ctx: &CliContext, args: ValidatorArgs) -> Result<()> {
     match args.command {
         ValidatorCommands::Announce {
             storage_location,
+            validator_key,
             signing_key,
             dry_run,
-        } => announce_validator(ctx, &storage_location, signing_key, dry_run).await,
+        } => announce_validator(ctx, &storage_location, &validator_key, signing_key, dry_run).await,
         ValidatorCommands::Show { validator } => show_announcements(ctx, validator).await,
     }
 }
 
-/// Announce validator storage location
+/// Announce validator storage location using ECDSA secp256k1 signature
 async fn announce_validator(
     ctx: &CliContext,
     storage_location: &str,
+    validator_key_hex: &str,
     signing_key: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -72,17 +91,41 @@ async fn announce_validator(
         return Err(anyhow!("Storage location cannot be empty"));
     }
 
-    // Load signing key
-    let keypair = if let Some(path) = signing_key {
+    // Parse the secp256k1 validator key
+    let validator_key_hex = validator_key_hex.strip_prefix("0x").unwrap_or(validator_key_hex);
+    let validator_key_bytes = hex::decode(validator_key_hex)
+        .map_err(|e| anyhow!("Invalid validator key hex: {}", e))?;
+
+    if validator_key_bytes.len() != 32 {
+        return Err(anyhow!("Validator key must be 32 bytes, got {}", validator_key_bytes.len()));
+    }
+
+    let signing_key_secp = SigningKey::from_slice(&validator_key_bytes)
+        .map_err(|e| anyhow!("Invalid secp256k1 private key: {}", e))?;
+
+    // Derive public keys and Ethereum address
+    let verifying_key = signing_key_secp.verifying_key();
+    let pubkey_uncompressed = verifying_key.to_encoded_point(false);
+    let pubkey_compressed = verifying_key.to_encoded_point(true);
+
+    // Uncompressed without prefix (64 bytes: x || y)
+    let uncompressed_bytes: Vec<u8> = pubkey_uncompressed.as_bytes()[1..].to_vec();
+    // Compressed with prefix (33 bytes: 0x02/0x03 || x)
+    let compressed_bytes: Vec<u8> = pubkey_compressed.as_bytes().to_vec();
+
+    // Derive Ethereum address: keccak256(uncompressed_pubkey)[12:32]
+    let eth_address = pubkey_to_eth_address(&uncompressed_bytes);
+    println!("  Validator Address: 0x{}", hex::encode(&eth_address));
+
+    // Load Cardano signing key for paying transaction fees
+    let cardano_keypair = if let Some(path) = signing_key {
         ctx.load_signing_key_from(std::path::Path::new(&path))?
     } else {
         ctx.load_signing_key()?
     };
 
-    let payer_address = keypair.address_bech32(ctx.pallas_network());
-    let payer_pkh = keypair.pub_key_hash();
-    println!("  Validator: {}", hex::encode(&payer_pkh));
-    println!("  Address: {}", payer_address);
+    let payer_address = cardano_keypair.address_bech32(ctx.pallas_network());
+    println!("  Payer Address: {}", payer_address);
 
     // Get mailbox info from deployment
     let deployment = ctx.load_deployment_info()?;
@@ -112,9 +155,6 @@ async fn announce_validator(
     // Parametrize the validator_announce script
     let contracts_dir = ctx.contracts_dir.clone();
 
-    // Encode parameters for validator_announce:
-    // 1. mailbox_policy_id (28 bytes as ByteArray)
-    // 2. mailbox_domain (Int)
     let policy_id_cbor = encode_policy_id_param(mailbox_policy_id)?;
     let domain_cbor = encode_int_param(local_domain);
 
@@ -131,16 +171,27 @@ async fn announce_validator(
     println!("  Script Hash: {}", va_script_hash);
     println!("  Script Address: {}", va_address);
 
-    // Build validator pubkey (32 bytes): 4 zero bytes + 28 byte verification key hash
-    let mut validator_pubkey = vec![0u8; 4];
-    validator_pubkey.extend_from_slice(&payer_pkh);
-    println!("  Validator Pubkey: {}", hex::encode(&validator_pubkey));
+    // Compute the announcement digest (matching contract's formula)
+    let announcement_digest = compute_announcement_digest(
+        mailbox_policy_id,
+        local_domain,
+        storage_location,
+    )?;
+    println!("\n{}", "Announcement Digest:".green());
+    println!("  Hash: 0x{}", hex::encode(&announcement_digest));
+
+    // Sign the digest with secp256k1 (EIP-191 style already included in digest)
+    // Use sign_prehash since the digest is already a hash - don't hash again!
+    let signature: Signature = signing_key_secp.sign_prehash(&announcement_digest)
+        .map_err(|e| anyhow!("Failed to sign announcement: {:?}", e))?;
+    let signature_bytes = signature.to_bytes().to_vec();
+    println!("  Signature: 0x{}", hex::encode(&signature_bytes));
 
     // Check for existing announcement from this validator
     let existing_announcement: Option<Utxo> = find_existing_announcement(
         &client,
         &va_address,
-        &validator_pubkey,
+        &eth_address,
     ).await?;
 
     // Check for bare UTXO at script address (for new announcements)
@@ -151,9 +202,9 @@ async fn announce_validator(
     };
 
     // Build ValidatorAnnounceDatum
-    // { validator_pubkey, mailbox_policy_id, mailbox_domain, storage_location }
+    // { validator_address (20 bytes), mailbox_policy_id, mailbox_domain, storage_location }
     let datum_cbor = build_validator_announce_datum(
-        &validator_pubkey,
+        &eth_address,
         mailbox_policy_id,
         local_domain,
         storage_location,
@@ -161,9 +212,14 @@ async fn announce_validator(
     println!("\n{}", "ValidatorAnnounceDatum:".green());
     println!("  CBOR: {}", hex::encode(&datum_cbor));
 
-    // Build Announce redeemer
-    // Announce { storage_location: ByteArray } = Constr 0 [storage_location]
-    let redeemer_cbor = build_announce_redeemer(storage_location)?;
+    // Build Announce redeemer with signature
+    // { storage_location, compressed_pubkey, uncompressed_pubkey, signature }
+    let redeemer_cbor = build_announce_redeemer(
+        storage_location,
+        &compressed_bytes,
+        &uncompressed_bytes,
+        &signature_bytes,
+    )?;
     println!("\n{}", "Announce Redeemer:".green());
     println!("  CBOR: {}", hex::encode(&redeemer_cbor));
 
@@ -188,7 +244,7 @@ async fn announce_validator(
             }
 
             // Create seed UTXO transaction
-            let seed_tx_hash = create_seed_utxo(ctx, &client, &keypair, &va_address).await?;
+            let seed_tx_hash = create_seed_utxo(ctx, &client, &cardano_keypair, &va_address).await?;
             println!("  Seed TX: {}", seed_tx_hash);
             println!("  Waiting for confirmation...");
 
@@ -209,11 +265,6 @@ async fn announce_validator(
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
-        println!("\nTo announce validator, build a transaction that:");
-        println!("1. Spends: {}#{}", script_utxo.tx_hash, script_utxo.output_index);
-        println!("2. Uses Announce redeemer: {}", hex::encode(&redeemer_cbor));
-        println!("3. Creates UTXO at {} with datum", va_address);
-        println!("4. Requires validator signature: {}", hex::encode(&payer_pkh));
         return Ok(());
     }
 
@@ -264,8 +315,6 @@ async fn announce_validator(
         .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
         .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
-    let signer_hash: [u8; 28] = payer_pkh.clone()
-        .try_into().map_err(|_| anyhow!("Invalid signer hash"))?;
 
     // Output lovelace (minimum for datum UTXO)
     let output_lovelace = std::cmp::max(script_utxo.lovelace, 2_000_000);
@@ -274,8 +323,8 @@ async fn announce_validator(
     let va_output = Output::new(va_addr, output_lovelace)
         .set_inline_datum(datum_cbor.clone());
 
-    // Calculate change (script execution requires higher fee)
-    let fee_estimate = 1_000_000u64;
+    // Calculate change (script execution requires higher fee for ECDSA verification)
+    let fee_estimate = 2_000_000u64;
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
     // Get the script bytes
@@ -291,18 +340,16 @@ async fn announce_validator(
         .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
         // Continuation output
         .output(va_output)
-        // Spend redeemer
+        // Spend redeemer (with higher execution units for ECDSA)
         .add_spend_redeemer(
             Input::new(Hash::new(script_tx_hash), script_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(pallas_txbuilder::ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(pallas_txbuilder::ExUnits { mem: 14_000_000, steps: 10_000_000_000 }),
         )
         // Script (embedded since not deployed as reference script)
         .script(ScriptKind::PlutusV3, script_bytes)
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
-        // Required signer
-        .disclosed_signer(Hash::new(signer_hash))
         // Fee and validity
         .fee(fee_estimate)
         .invalid_from_slot(validity_end)
@@ -319,11 +366,11 @@ async fn announce_validator(
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
 
-    // Sign the transaction
+    // Sign the transaction with Cardano key
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
-    let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signature = cardano_keypair.sign(tx_hash_bytes);
+    let signed_tx = tx.add_signature(cardano_keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
@@ -333,7 +380,7 @@ async fn announce_validator(
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
-    println!("\n  Validator: {}", hex::encode(&validator_pubkey));
+    println!("\n  Validator Address: 0x{}", hex::encode(&eth_address));
     println!("  Storage Location: {}", storage_location);
     println!("  Action: {}", if is_update { "Updated" } else { "Created" });
 
@@ -397,17 +444,17 @@ async fn show_announcements(ctx: &CliContext, validator_filter: Option<String>) 
     let mut count = 0;
     for utxo in utxos {
         if let Some(ref datum_val) = utxo.inline_datum {
-            if let Some((validator, storage_location)) = parse_announcement_datum(datum_val)? {
+            if let Some((validator_addr, storage_location)) = parse_announcement_datum(datum_val)? {
                 // Apply filter if specified
                 if let Some(ref filter) = validator_filter {
                     let filter_normalized = filter.strip_prefix("0x").unwrap_or(filter).to_lowercase();
-                    if !hex::encode(&validator).contains(&filter_normalized) {
+                    if !hex::encode(&validator_addr).contains(&filter_normalized) {
                         continue;
                     }
                 }
 
                 count += 1;
-                println!("\n  Validator: 0x{}", hex::encode(&validator));
+                println!("\n  Validator: 0x{}", hex::encode(&validator_addr));
                 println!("  Storage: {}", storage_location);
                 println!("  UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
                 println!("  Lovelace: {}", utxo.lovelace);
@@ -425,7 +472,74 @@ async fn show_announcements(ctx: &CliContext, validator_filter: Option<String>) 
 }
 
 // ============================================================================
-// Helper functions
+// Crypto Helper Functions
+// ============================================================================
+
+/// Compute keccak256 hash
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak::v256();
+    let mut output = [0u8; 32];
+    hasher.update(data);
+    hasher.finalize(&mut output);
+    output
+}
+
+/// Convert uncompressed secp256k1 public key (64 bytes) to Ethereum address (20 bytes)
+fn pubkey_to_eth_address(uncompressed_pubkey: &[u8]) -> Vec<u8> {
+    assert_eq!(uncompressed_pubkey.len(), 64, "Expected 64-byte uncompressed pubkey");
+    let hash = keccak256(uncompressed_pubkey);
+    hash[12..32].to_vec()
+}
+
+/// Compute the announcement digest that validators sign
+/// Matches the Hyperlane EVM ValidatorAnnounce format:
+/// 1. domain_hash = keccak256(localDomain || mailboxAddress || "HYPERLANE_ANNOUNCEMENT")
+/// 2. inner_hash = keccak256(domain_hash || storage_location)
+/// 3. announcement_digest = keccak256("\x19Ethereum Signed Message:\n32" || inner_hash)
+fn compute_announcement_digest(
+    mailbox_policy_id: &str,
+    mailbox_domain: u32,
+    storage_location: &str,
+) -> Result<[u8; 32]> {
+    // Step 1: domain_hash
+    // Domain as 4-byte big-endian
+    let domain_bytes = mailbox_domain.to_be_bytes();
+
+    // Mailbox address as 32 bytes (policy ID padded with zeros on right)
+    let policy_bytes = hex::decode(mailbox_policy_id)?;
+    let mut mailbox_address = [0u8; 32];
+    mailbox_address[..policy_bytes.len()].copy_from_slice(&policy_bytes);
+
+    // "HYPERLANE_ANNOUNCEMENT" as bytes
+    let announcement_string = b"HYPERLANE_ANNOUNCEMENT";
+
+    let mut domain_hash_input = Vec::new();
+    domain_hash_input.extend_from_slice(&domain_bytes);
+    domain_hash_input.extend_from_slice(&mailbox_address);
+    domain_hash_input.extend_from_slice(announcement_string);
+
+    let domain_hash = keccak256(&domain_hash_input);
+
+    // Step 2: inner_hash = keccak256(domain_hash || storage_location)
+    let mut inner_hash_input = Vec::new();
+    inner_hash_input.extend_from_slice(&domain_hash);
+    inner_hash_input.extend_from_slice(storage_location.as_bytes());
+
+    let inner_hash = keccak256(&inner_hash_input);
+
+    // Step 3: EIP-191 signed message hash
+    // Prefix: "\x19Ethereum Signed Message:\n32"
+    let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
+
+    let mut prefixed = Vec::new();
+    prefixed.extend_from_slice(eip191_prefix);
+    prefixed.extend_from_slice(&inner_hash);
+
+    Ok(keccak256(&prefixed))
+}
+
+// ============================================================================
+// CBOR Building Helper Functions
 // ============================================================================
 
 /// Parse local domain from mailbox datum
@@ -435,7 +549,6 @@ fn parse_mailbox_domain(datum: &Option<serde_json::Value>) -> Result<u32> {
     // Handle CBOR hex string format
     if let Some(hex_str) = datum.as_str() {
         let cbor_bytes = hex::decode(hex_str)?;
-        // Parse CBOR to get first field (local_domain)
         use pallas_primitives::conway::{PlutusData, BigInt};
         let parsed: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
             .map_err(|e| anyhow!("Failed to decode mailbox datum: {:?}", e))?;
@@ -486,9 +599,9 @@ fn encode_int_param(n: u32) -> Vec<u8> {
 }
 
 /// Build ValidatorAnnounceDatum CBOR
-/// Structure: Constr 0 [validator_pubkey, mailbox_policy_id, mailbox_domain, storage_location]
+/// Structure: Constr 0 [validator_address (20 bytes), mailbox_policy_id, mailbox_domain, storage_location]
 fn build_validator_announce_datum(
-    validator_pubkey: &[u8],
+    validator_address: &[u8],
     mailbox_policy_id: &str,
     mailbox_domain: u32,
     storage_location: &str,
@@ -496,8 +609,8 @@ fn build_validator_announce_datum(
     let mut builder = CborBuilder::new();
     builder.start_constr(0);
 
-    // validator_pubkey (32 bytes)
-    builder.bytes_hex(&hex::encode(validator_pubkey))?;
+    // validator_address (20 bytes)
+    builder.bytes_hex(&hex::encode(validator_address))?;
 
     // mailbox_policy_id (28 bytes)
     builder.bytes_hex(mailbox_policy_id)?;
@@ -513,27 +626,48 @@ fn build_validator_announce_datum(
 }
 
 /// Build Announce redeemer CBOR
-/// Structure: Constr 0 [storage_location]
-fn build_announce_redeemer(storage_location: &str) -> Result<Vec<u8>> {
+/// Structure: Constr 0 [storage_location, compressed_pubkey, uncompressed_pubkey, signature]
+fn build_announce_redeemer(
+    storage_location: &str,
+    compressed_pubkey: &[u8],
+    uncompressed_pubkey: &[u8],
+    signature: &[u8],
+) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
     builder.start_constr(0); // Announce = Constr 0
+
+    // storage_location
     builder.bytes_hex(&hex::encode(storage_location.as_bytes()))?;
+
+    // compressed_pubkey (33 bytes)
+    builder.bytes_hex(&hex::encode(compressed_pubkey))?;
+
+    // uncompressed_pubkey (64 bytes)
+    builder.bytes_hex(&hex::encode(uncompressed_pubkey))?;
+
+    // signature (64 bytes)
+    builder.bytes_hex(&hex::encode(signature))?;
+
     builder.end_constr();
     Ok(builder.build())
 }
 
-/// Find existing announcement from a specific validator
+// ============================================================================
+// UTXO Query Helper Functions
+// ============================================================================
+
+/// Find existing announcement from a specific validator (by Ethereum address)
 async fn find_existing_announcement(
     client: &BlockfrostClient,
     address: &str,
-    validator_pubkey: &[u8],
+    validator_address: &[u8],
 ) -> Result<Option<Utxo>> {
     let utxos = client.get_utxos(address).await?;
 
     for utxo in utxos {
         if let Some(ref datum_val) = utxo.inline_datum {
-            if let Some((validator, _)) = parse_announcement_datum(datum_val)? {
-                if validator == validator_pubkey {
+            if let Some((addr, _)) = parse_announcement_datum(datum_val)? {
+                if addr == validator_address {
                     return Ok(Some(utxo));
                 }
             }
@@ -559,7 +693,7 @@ async fn find_bare_utxo(
     Ok(None)
 }
 
-/// Parse announcement datum to extract validator and storage_location
+/// Parse announcement datum to extract validator address and storage_location
 fn parse_announcement_datum(datum_val: &serde_json::Value) -> Result<Option<(Vec<u8>, String)>> {
     // Try CBOR hex format first (Blockfrost returns datum as hex string in Value)
     if let Some(hex_str) = datum_val.as_str() {

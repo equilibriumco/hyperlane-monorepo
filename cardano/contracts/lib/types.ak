@@ -485,9 +485,15 @@ pub type WarpTransferBody {
 
 /// Validator announcement datum
 /// Each validator creates a UTXO with this datum to announce their storage location
+///
+/// The validator_address is the 20-byte Ethereum address derived from the validator's
+/// secp256k1 public key. This is the same address used to verify checkpoints on all
+/// chains, enabling cross-chain validator discovery.
 pub type ValidatorAnnounceDatum {
-  /// Validator public key (32 bytes - ed25519 pubkey or derived address)
-  validator_pubkey: ByteArray,
+  /// Validator Ethereum address (20 bytes)
+  /// Derived from secp256k1 pubkey: keccak256(uncompressed_pubkey)[12:32]
+  /// This must match the address used for checkpoint signing
+  validator_address: ByteArray,
   /// Mailbox policy ID this announcement applies to
   mailbox_policy_id: PolicyId,
   /// Mailbox domain (Cardano domain ID)
@@ -497,9 +503,30 @@ pub type ValidatorAnnounceDatum {
 }
 
 /// Validator announce redeemer
+///
+/// For announcements, the validator must provide an ECDSA secp256k1 signature
+/// over the announcement digest. This proves they control the private key
+/// corresponding to the announced Ethereum address.
 pub type ValidatorAnnounceRedeemer {
   /// Create new announcement or update existing
-  Announce { storage_location: ByteArray }
-  /// Remove announcement
-  Revoke
+  /// Requires ECDSA signature from the validator's secp256k1 key
+  Announce {
+    /// Storage location URL
+    storage_location: ByteArray,
+    /// Compressed secp256k1 public key (33 bytes: 0x02/0x03 prefix + x-coordinate)
+    compressed_pubkey: ByteArray,
+    /// Uncompressed secp256k1 public key (64 bytes: x || y, no 0x04 prefix)
+    uncompressed_pubkey: ByteArray,
+    /// ECDSA signature (64 bytes: r || s)
+    signature: ByteArray,
+  }
+  /// Remove announcement (requires signature proving ownership)
+  Revoke {
+    /// Compressed secp256k1 public key (33 bytes)
+    compressed_pubkey: ByteArray,
+    /// Uncompressed secp256k1 public key (64 bytes)
+    uncompressed_pubkey: ByteArray,
+    /// ECDSA signature over revocation message
+    signature: ByteArray,
+  }
 }
