@@ -42,8 +42,12 @@ pallas-codec = "1.0.0-alpha.3"
 pallas-traverse = "1.0.0-alpha.3"
 pallas-txbuilder = "1.0.0-alpha.3"
 
+# CBOR decoding
+ciborium = "0.2"
+
 # Crypto
 blake2 = "0.10"
 ed25519-dalek = "2.1"
 sha3 = "0.10"
 k256 = "0.13"
+bech32 = "0.9"

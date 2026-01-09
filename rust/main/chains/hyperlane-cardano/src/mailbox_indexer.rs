@@ -1,12 +1,13 @@
 use crate::blockfrost_provider::BlockfrostProvider;
 use crate::{CardanoMailbox, CardanoNetwork, ConnectionConf};
 use async_trait::async_trait;
+use bech32::FromBase32;
+use ciborium::Value as CborValue;
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneMessage, Indexed, Indexer, LogMeta,
     SequenceAwareIndexer, H256, H512, U256,
 };
-use serde_json::Value;
-use sha3::Digest;
+use serde_json::Value as JsonValue;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -53,7 +54,7 @@ impl CardanoMailboxIndexer {
     /// Parse a Dispatch redeemer from Blockfrost's JSON format to extract message data
     fn parse_dispatch_redeemer(
         &self,
-        json: &Value,
+        json: &JsonValue,
         sender: H256,
         nonce: u32,
     ) -> Option<HyperlaneMessage> {
@@ -98,32 +99,59 @@ impl CardanoMailboxIndexer {
 
     /// Extract the sender address from transaction inputs
     /// The sender is the first input's address, converted to a Hyperlane address
+    ///
+    /// The on-chain Aiken contract computes sender as:
+    /// - For payment key credential: 0x00000000 || payment_key_hash (4 + 28 = 32 bytes)
+    /// - For script credential: 0x02000000 || script_hash (4 + 28 = 32 bytes)
     fn extract_sender_from_tx(&self, tx_utxos: &crate::blockfrost_provider::TransactionUtxos) -> H256 {
         // Get the first input's address
         if let Some(first_input) = tx_utxos.inputs.first() {
-            // Try to extract script hash from the address
-            // Cardano addresses can be verified using their credential
-            // For simplicity, we hash the address string to get a unique identifier
-            let address_bytes = first_input.address.as_bytes();
-
-            // Create a Hyperlane address from the Cardano address
-            // For script addresses, extract the script hash
-            // For key addresses, hash the address
             if first_input.address.starts_with("addr") {
-                // Try to decode as a Shelley address and extract credential
-                let mut sender_bytes = [0u8; 32];
-                // Use keccak256 hash of the address string as a fallback
-                let hash = sha3::Keccak256::digest(address_bytes);
-                sender_bytes.copy_from_slice(&hash);
-                return H256::from(sender_bytes);
+                // Decode the bech32 address to get raw bytes
+                if let Ok((_, data_5bit, _)) = bech32::decode(&first_input.address) {
+                    // Convert 5-bit groups to 8-bit bytes using FromBase32 trait
+                    if let Ok(data_8bit) = Vec::<u8>::from_base32(&data_5bit) {
+                        if data_8bit.len() >= 29 {
+                            let header = data_8bit[0];
+                            // Extract payment credential (bytes 1-28)
+                            let credential = &data_8bit[1..29];
+
+                            let mut sender_bytes = [0u8; 32];
+                            // Determine credential type from header
+                            // Bits 4-7 of header byte indicate address type:
+                            // Even types (0,2,4,6) = payment key credential
+                            // Odd types (1,3,5,7) = script credential
+                            let is_script = (header >> 4) & 1 == 1;
+
+                            if is_script {
+                                // Script credential: prefix 0x02000000
+                                sender_bytes[0] = 0x02;
+                            } else {
+                                // Payment key credential: prefix 0x00000000
+                                sender_bytes[0] = 0x00;
+                            }
+                            // Remaining prefix bytes are zero (already set)
+                            // Copy 28-byte credential hash starting at byte 4
+                            sender_bytes[4..32].copy_from_slice(credential);
+
+                            info!(
+                                "Extracted sender from address {}: 0x{}",
+                                first_input.address,
+                                hex::encode(&sender_bytes)
+                            );
+
+                            return H256::from(sender_bytes);
+                        }
+                    }
+                }
             }
         }
 
         H256::zero()
     }
 
-    /// Parse the nonce from a mailbox datum
-    fn parse_mailbox_nonce(&self, datum_json: &Value) -> Option<u32> {
+    /// Parse the nonce from a mailbox datum (JSON format)
+    fn parse_mailbox_nonce_json(&self, datum_json: &JsonValue) -> Option<u32> {
         // MailboxDatum format:
         // { "constructor": 0, "fields": [local_domain, default_ism, owner, outbound_nonce, merkle_root, merkle_count] }
         let fields = datum_json.get("fields")?.as_array()?;
@@ -136,17 +164,53 @@ impl CardanoMailboxIndexer {
         Some(nonce)
     }
 
+    /// Parse the nonce from a mailbox datum (CBOR format)
+    /// MailboxDatum CBOR structure: Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_root, merkle_count]
+    fn parse_mailbox_nonce_cbor(&self, cbor_hex: &str) -> Option<u32> {
+        let cbor_bytes = hex::decode(cbor_hex).ok()?;
+        let value: CborValue = ciborium::from_reader(&cbor_bytes[..]).ok()?;
+
+        // Extract the tagged value (Constr 0 = tag 121)
+        let fields = match &value {
+            CborValue::Tag(121, inner) => {
+                match inner.as_ref() {
+                    CborValue::Array(arr) => arr,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+
+        if fields.len() < 4 {
+            return None;
+        }
+
+        // outbound_nonce is at index 3
+        match &fields[3] {
+            CborValue::Integer(n) => {
+                let nonce: i128 = (*n).into();
+                Some(nonce as u32)
+            }
+            _ => None,
+        }
+    }
+
     /// Extract the nonce from transaction outputs (the new mailbox datum after dispatch)
     fn extract_nonce_from_outputs(&self, tx_utxos: &crate::blockfrost_provider::TransactionUtxos) -> u32 {
         // Look for the mailbox output and extract the nonce from its datum
         // The nonce in the output is already incremented, so subtract 1 to get the message nonce
         for output in &tx_utxos.outputs {
             if let Some(inline_datum) = &output.inline_datum {
-                if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
-                    if let Some(nonce) = self.parse_mailbox_nonce(&datum_json) {
-                        // The output nonce is incremented, so the message nonce is one less
-                        return nonce.saturating_sub(1);
-                    }
+                // Try JSON format first, then CBOR
+                let nonce = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum) {
+                    self.parse_mailbox_nonce_json(&datum_json)
+                } else {
+                    self.parse_mailbox_nonce_cbor(inline_datum)
+                };
+
+                if let Some(n) = nonce {
+                    // The output nonce is incremented, so the message nonce is one less
+                    return n.saturating_sub(1);
                 }
             }
         }
@@ -157,7 +221,7 @@ impl CardanoMailboxIndexer {
     }
 
     /// Parse ProcessedMessageDatum from inline datum
-    fn parse_processed_message_datum(&self, json: &Value) -> Option<H256> {
+    fn parse_processed_message_datum(&self, json: &JsonValue) -> Option<H256> {
         // ProcessedMessageDatum format:
         // { "constructor": 0, "fields": [message_id] }
         let fields = json.get("fields")?.as_array()?;
@@ -181,14 +245,13 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
         let from = *range.start();
         let to = *range.end();
 
-        info!(
-            "Fetching Cardano HyperlaneMessage logs from block {} to {}",
-            from, to
-        );
-
         // Get mailbox script address
         let mailbox_address = self.get_mailbox_address()?;
-        debug!("Mailbox address: {}", mailbox_address);
+
+        info!(
+            "Fetching Cardano HyperlaneMessage logs from block {} to {} at address {}",
+            from, to, mailbox_address
+        );
 
         // Get transactions at mailbox address in the block range
         let transactions = self
@@ -207,6 +270,8 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
         let mut results = Vec::new();
 
         for tx_info in transactions {
+            info!("Processing transaction: {}", tx_info.tx_hash);
+
             // Get transaction redeemers to find Dispatch actions
             let redeemers = match self
                 .provider
@@ -215,7 +280,7 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    debug!(
+                    info!(
                         "Could not get redeemers for tx {}: {}",
                         tx_info.tx_hash, e
                     );
@@ -223,9 +288,13 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 }
             };
 
+            info!("Found {} redeemers for tx {}", redeemers.len(), tx_info.tx_hash);
+
             // Find redeemers that are for spending (not minting)
             for redeemer in redeemers {
-                if redeemer.purpose != "Spend" {
+                info!("Redeemer purpose: {}, data_hash: {}", redeemer.purpose, redeemer.redeemer_data_hash);
+                if redeemer.purpose != "spend" && redeemer.purpose != "Spend" {
+                    info!("Skipping non-spend redeemer");
                     continue;
                 }
 
@@ -237,13 +306,15 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 {
                     Ok(d) => d,
                     Err(e) => {
-                        debug!(
+                        info!(
                             "Could not get redeemer datum for tx {}: {}",
                             tx_info.tx_hash, e
                         );
                         continue;
                     }
                 };
+
+                info!("Got redeemer datum: {:?}", redeemer_datum);
 
                 // Get transaction UTXOs to extract sender
                 let tx_utxos = match self
@@ -253,7 +324,7 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 {
                     Ok(u) => u,
                     Err(e) => {
-                        debug!(
+                        info!(
                             "Could not get UTXOs for tx {}: {}",
                             tx_info.tx_hash, e
                         );
@@ -266,10 +337,13 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
 
                 // Try to extract nonce from mailbox output datum
                 let nonce = self.extract_nonce_from_outputs(&tx_utxos);
+                info!("Extracted sender: {:?}, nonce: {}", sender, nonce);
 
                 if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, sender, nonce) {
                     let message_id = message.id();
-                    let indexed = Indexed::new(message);
+                    // Use the From trait conversion which automatically sets sequence from message.nonce
+                    let indexed: Indexed<HyperlaneMessage> = message.into();
+                    info!("Created indexed message with nonce: {}, sequence: {:?}", nonce, indexed.sequence);
 
                     let log_meta = LogMeta {
                         address: H256::zero(), // Cardano doesn't have contract addresses like EVM
@@ -370,7 +444,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
             for output in tx_utxos.outputs {
                 if let Some(inline_datum) = &output.inline_datum {
                     // Try to parse the datum as JSON
-                    if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
+                    if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum) {
                         if let Some(message_id) = self.parse_processed_message_datum(&datum_json) {
                             let indexed = Indexed::new(message_id);
 

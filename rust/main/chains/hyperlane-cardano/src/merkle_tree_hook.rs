@@ -154,12 +154,15 @@ impl Indexer<MerkleTreeInsertion> for CardanoMerkleTreeHookIndexer {
             ).await?;
 
         // Convert HyperlaneMessage to MerkleTreeInsertion
+        // Use the From trait which automatically sets the sequence from message.nonce
         let insertions = messages
             .into_iter()
             .map(|(indexed_message, log_meta)| {
                 let message = indexed_message.inner();
                 let insertion = MerkleTreeInsertion::new(message.nonce, message.id());
-                (Indexed::new(insertion), log_meta)
+                // Use .into() to leverage the From<MerkleTreeInsertion> impl which sets sequence
+                let indexed: Indexed<MerkleTreeInsertion> = insertion.into();
+                (indexed, log_meta)
             })
             .collect();
 
