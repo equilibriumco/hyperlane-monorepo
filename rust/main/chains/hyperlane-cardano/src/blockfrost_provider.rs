@@ -602,6 +602,7 @@ impl BlockfrostProvider {
     }
 
     /// Get redeemer data by hash (the actual datum content)
+    /// Returns the json_value from the Blockfrost response which contains the actual datum
     #[instrument(skip(self))]
     pub async fn get_redeemer_datum(
         &self,
@@ -609,7 +610,13 @@ impl BlockfrostProvider {
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
         let datum = self.api.scripts_datum_hash(datum_hash).await?;
-        Ok(datum)
+        // Blockfrost returns the datum under "json_value" key
+        if let Some(json_value) = datum.get("json_value") {
+            Ok(json_value.clone())
+        } else {
+            // Fall back to the full response if json_value is not present
+            Ok(datum)
+        }
     }
 
     /// Get script address from hash
