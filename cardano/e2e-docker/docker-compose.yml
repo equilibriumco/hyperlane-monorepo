@@ -1,0 +1,119 @@
+# Docker Compose for Cardano <-> Fuji E2E Testing
+# This sets up validators and a bidirectional relayer for cross-chain message testing
+
+services:
+  # Cardano Preview Validator
+  # Signs checkpoints for messages dispatched from Cardano
+  validator-cardano:
+    build:
+      context: ../..
+      dockerfile: cardano/e2e-docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-validator-cardano
+    environment:
+      AGENT_TYPE: validator
+      RUST_LOG: ${RUST_LOG:-info}
+
+      # Validator signing key (ECDSA secp256k1)
+      VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY}
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses (H256 format with 0x00000000 prefix)
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_PROCESSED_MSG_POLICY_ID: ${CARDANO_PROCESSED_MSG_POLICY_ID}
+      CARDANO_REGISTRY_POLICY_ID: ${CARDANO_REGISTRY_POLICY_ID}
+      CARDANO_ISM_POLICY_ID: ${CARDANO_ISM_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+    volumes:
+      - validator-cardano-data:/data
+      # Shared checkpoint directory - validator writes, relayer reads
+      - checkpoints-cardano:/shared/checkpoints
+    ports:
+      - "9090:9090"  # Metrics
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Bidirectional Relayer
+  # Relays messages between Cardano Preview and Avalanche Fuji
+  relayer:
+    build:
+      context: ../..
+      dockerfile: cardano/e2e-docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-relayer-cardano-fuji
+    environment:
+      AGENT_TYPE: relayer
+      RUST_LOG: ${RUST_LOG:-info}
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_PROCESSED_MSG_POLICY_ID: ${CARDANO_PROCESSED_MSG_POLICY_ID}
+      CARDANO_REGISTRY_POLICY_ID: ${CARDANO_REGISTRY_POLICY_ID}
+      CARDANO_ISM_POLICY_ID: ${CARDANO_ISM_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+
+      # Cardano signer for Fuji -> Cardano direction
+      CARDANO_SIGNER_KEY: ${CARDANO_SIGNER_KEY}
+
+      # Fuji (Avalanche testnet) configuration
+      FUJI_MAILBOX: ${FUJI_MAILBOX}
+      FUJI_VALIDATOR_ANNOUNCE: ${FUJI_VALIDATOR_ANNOUNCE}
+      FUJI_MERKLE_TREE_HOOK: ${FUJI_MERKLE_TREE_HOOK}
+      FUJI_IGP: ${FUJI_IGP}
+      FUJI_ISM: ${FUJI_ISM}
+      FUJI_RPC_URL: ${FUJI_RPC_URL}
+      FUJI_SIGNER_KEY: ${FUJI_SIGNER_KEY}
+      FUJI_INDEX_FROM: ${FUJI_INDEX_FROM:-48764210}
+    volumes:
+      - relayer-data:/data
+      # Mount Cardano checkpoint directories (read-only)
+      - checkpoints-cardano:/shared/checkpoints:ro
+    ports:
+      - "9091:9090"  # Metrics (internal 9090)
+    depends_on:
+      validator-cardano:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  validator-cardano-data:
+    driver: local
+  relayer-data:
+    driver: local
+  checkpoints-cardano:
+    driver: local

@@ -1,0 +1,5 @@
+# Ignore secrets
+.env
+
+# Ignore local data
+data/

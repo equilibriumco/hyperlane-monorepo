@@ -1,0 +1,93 @@
+{
+  "allowContractCallCaching": false,
+  "allowLocalCheckpointSyncers": true,
+  "chains": {
+    "cardanopreview": {
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 20,
+        "reorgPeriod": 20
+      },
+      "chainId": 2003,
+      "connection": {
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "igpPolicyId": "00000000000000000000000000000000000000000000000000000000",
+        "ismAssetNameHex": "49534d205374617465",
+        "ismPolicyId": "${CARDANO_ISM_POLICY_ID}",
+        "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
+        "ismScriptHash": "${CARDANO_ISM_POLICY_ID}",
+        "mailboxAssetNameHex": "4d61696c626f78205374617465",
+        "mailboxPolicyId": "${CARDANO_MAILBOX_POLICY_ID}",
+        "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
+        "mailboxScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "network": "preview",
+        "processedMessagesNftPolicyId": "${CARDANO_PROCESSED_MSG_POLICY_ID}",
+        "processedMessagesScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "registryAssetNameHex": "5265676973747279205374617465",
+        "registryPolicyId": "${CARDANO_REGISTRY_POLICY_ID}",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}"
+      },
+      "domainId": 2003,
+      "index": {
+        "from": ${CARDANO_INDEX_FROM}
+      },
+      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "interchainSecurityModule": "${CARDANO_ISM}",
+      "mailbox": "${CARDANO_MAILBOX}",
+      "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
+      "name": "cardanopreview",
+      "protocol": "cardano",
+      "rpcUrls": [
+        {
+          "http": "https://cardano-preview.blockfrost.io/api/v0"
+        }
+      ],
+      "signer": {
+        "key": "${CARDANO_SIGNER_KEY}",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}"
+    },
+    "fuji": {
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 2,
+        "reorgPeriod": 3
+      },
+      "chainId": 43113,
+      "domainId": 43113,
+      "index": {
+        "from": ${FUJI_INDEX_FROM}
+      },
+      "interchainGasPaymaster": "${FUJI_IGP}",
+      "interchainSecurityModule": "${FUJI_ISM}",
+      "mailbox": "${FUJI_MAILBOX}",
+      "merkleTreeHook": "${FUJI_MERKLE_TREE_HOOK}",
+      "name": "fuji",
+      "protocol": "ethereum",
+      "rpcUrls": [
+        {
+          "http": "${FUJI_RPC_URL}"
+        }
+      ],
+      "signer": {
+        "key": "${FUJI_SIGNER_KEY}",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "${FUJI_VALIDATOR_ANNOUNCE}"
+    }
+  },
+  "db": "/data/relayer_db",
+  "destinationChainNames": "cardanopreview,fuji",
+  "gasPaymentEnforcement": [
+    {
+      "type": "none"
+    }
+  ],
+  "metrics": {
+    "port": 9094
+  },
+  "originChainNames": "cardanopreview,fuji",
+  "relayChains": "cardanopreview,fuji"
+}

@@ -1,0 +1,66 @@
+{
+  "originChainName": "cardanopreview",
+
+  "validator": {
+    "type": "hexKey",
+    "key": "${VALIDATOR_KEY}"
+  },
+
+  "checkpointSyncer": {
+    "type": "localStorage",
+    "path": "/shared/checkpoints"
+  },
+
+  "interval": 10,
+
+  "chains": {
+    "cardanopreview": {
+      "name": "cardanopreview",
+      "domainId": 2003,
+      "protocol": "cardano",
+      "chainId": 2003,
+      "blocks": {
+        "reorgPeriod": 20,
+        "estimateBlockTime": 20
+      },
+      "rpcUrls": [
+        {
+          "http": "https://cardano-preview.blockfrost.io/api/v0"
+        }
+      ],
+      "mailbox": "${CARDANO_MAILBOX}",
+      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}",
+      "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
+      "interchainSecurityModule": "${CARDANO_ISM}",
+      "connection": {
+        "type": "blockfrost",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "network": "preview",
+        "mailboxPolicyId": "${CARDANO_MAILBOX_POLICY_ID}",
+        "mailboxAssetNameHex": "4d61696c626f78205374617465",
+        "mailboxScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
+        "processedMessagesScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "processedMessagesNftPolicyId": "${CARDANO_PROCESSED_MSG_POLICY_ID}",
+        "registryPolicyId": "${CARDANO_REGISTRY_POLICY_ID}",
+        "registryAssetNameHex": "5265676973747279205374617465",
+        "ismPolicyId": "${CARDANO_ISM_POLICY_ID}",
+        "ismScriptHash": "${CARDANO_ISM_POLICY_ID}",
+        "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}"
+      },
+      "index": {
+        "from": 0,
+        "chunk": 100
+      }
+    }
+  },
+
+  "db": "/data/validator_db",
+
+  "metrics": {
+    "port": 9093
+  }
+}
