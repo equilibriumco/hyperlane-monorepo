@@ -2,7 +2,7 @@ use std::ops::Add;
 
 use async_trait::async_trait;
 use eyre::{bail, Result};
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace};
 
 use hyperlane_core::{
     identifiers::UniqueIdentifier, Decode, Encode, GasPaymentKey, HyperlaneDomain,
@@ -91,10 +91,12 @@ impl HyperlaneRocksDB {
         message: &HyperlaneMessage,
         dispatched_block_number: u64,
     ) -> DbResult<bool> {
+        info!(nonce = message.nonce, domain = %self.domain(), "store_message called");
         if let Ok(Some(_)) = self.retrieve_message_id_by_nonce(&message.nonce) {
-            trace!(hyp_message=?message, "Message already stored in db");
+            info!(nonce = message.nonce, "Message already stored in db");
             return Ok(false);
         }
+        info!(nonce = message.nonce, "Storing new message");
         self.upsert_message(message, dispatched_block_number)?;
         Ok(true)
     }

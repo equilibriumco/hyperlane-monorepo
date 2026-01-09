@@ -337,15 +337,18 @@ async fn receive_task(
     mut rx: mpsc::UnboundedReceiver<QueueOperation>,
     prepare_queue: OpQueue,
 ) {
+    info!(%domain, "receive_task started, waiting for operations");
     // Pull any messages sent to this message processor
     while let Some(op) = rx.recv().await {
-        trace!(?op, "Received new operation");
+        info!(%domain, op_id = ?op.id(), "Received new operation, pushing to prepare_queue");
         // make sure things are getting wired up correctly; if this works in testing it
         // should also be valid in production.
         debug_assert_eq!(*op.destination_domain(), domain);
         let op_status = op.status();
         prepare_queue.push(op, Some(op_status)).await;
+        info!(%domain, "Pushed operation to prepare_queue");
     }
+    info!(%domain, "receive_task channel closed, exiting");
 }
 
 #[instrument(skip_all, fields(%domain))]
@@ -358,6 +361,7 @@ async fn prepare_classic_task(
     max_submit_queue_len: Option<u32>,
     metrics: MessageProcessorMetrics,
 ) {
+    info!(%domain, "prepare_classic_task started");
     loop {
         if apply_backpressure(&submit_queue, &max_submit_queue_len).await {
             // The submit queue is too long, so give some time before checking again
@@ -368,6 +372,8 @@ async fn prepare_classic_task(
         let Some(batch) = get_batch_or_wait(&mut prepare_queue, max_batch_size).await else {
             continue;
         };
+
+        info!(%domain, batch_size = batch.len(), "prepare_classic_task got batch from prepare_queue");
 
         process_batch(
             domain.clone(),
@@ -394,6 +400,7 @@ async fn prepare_lander_task(
     metrics: MessageProcessorMetrics,
     db: Arc<dyn HyperlaneDb>,
 ) {
+    info!(%domain, "prepare_lander_task started");
     loop {
         if apply_backpressure(&submit_queue, &max_submit_queue_len).await {
             // The submit queue is too long, so give some time before checking again
@@ -405,6 +412,8 @@ async fn prepare_lander_task(
             continue;
         };
 
+        info!(%domain, batch_size = batch.len(), "prepare_lander_task got batch from prepare_queue");
+
         let batch_to_process = prepare::filter_operations_for_preparation(
             entrypoint.clone() as Arc<dyn Entrypoint + Send + Sync>,
             &submit_queue,
@@ -413,6 +422,8 @@ async fn prepare_lander_task(
             batch,
         )
         .await;
+
+        info!(%domain, batch_to_process_size = batch_to_process.len(), "prepare_lander_task filtered batch");
 
         process_batch(
             domain.clone(),
@@ -462,14 +473,21 @@ async fn process_batch(
     confirm_queue: &OpQueue,
     metrics: &MessageProcessorMetrics,
 ) {
+    info!(%domain, batch_size = batch.len(), "process_batch starting");
+    if batch.is_empty() {
+        info!(%domain, "process_batch: batch is empty, returning");
+        return;
+    }
     let mut task_prep_futures = vec![];
     let op_refs = batch.iter_mut().map(|op| op.as_mut()).collect::<Vec<_>>();
     for op in op_refs {
-        trace!(?op, "Preparing operation");
+        info!(%domain, op_id = ?op.id(), "Preparing operation");
         debug_assert_eq!(*op.destination_domain(), domain);
         task_prep_futures.push(op.prepare());
     }
+    info!(%domain, num_futures = task_prep_futures.len(), "process_batch: waiting for prepare futures");
     let res = join_all(task_prep_futures).await;
+    info!(%domain, num_results = res.len(), "process_batch: prepare futures completed");
     let not_ready_count = res
         .iter()
         .filter(|r| {
@@ -485,7 +503,7 @@ async fn process_batch(
         let app_context = op.app_context();
         match prepare_result {
             PendingOperationResult::Success => {
-                debug!(?op, "Operation prepared");
+                info!(%domain, op_id = ?op.id(), "Operation prepared successfully, pushing to submit_queue");
 
                 metrics.inc_prepared(app_context);
                 // TODO: push multiple messages at once
@@ -494,20 +512,23 @@ async fn process_batch(
                     .await;
             }
             PendingOperationResult::NotReady => {
+                info!(%domain, op_id = ?op.id(), "Operation not ready, pushing back to prepare_queue");
                 prepare_queue.push(op, None).await;
             }
             PendingOperationResult::Reprepare(reason) => {
+                info!(%domain, op_id = ?op.id(), ?reason, "Operation needs reprepare, pushing back to prepare_queue");
                 metrics.inc_failed(app_context);
                 prepare_queue
                     .push(op, Some(PendingOperationStatus::Retry(reason)))
                     .await;
             }
             PendingOperationResult::Drop => {
+                info!(%domain, op_id = ?op.id(), "Operation dropped");
                 metrics.inc_dropped(app_context);
                 op.decrement_metric_if_exists();
             }
             PendingOperationResult::Confirm(reason) => {
-                debug!(?op, "Pushing operation to confirm queue");
+                info!(%domain, op_id = ?op.id(), ?reason, "Pushing operation to confirm queue");
                 confirm_queue
                     .push(op, Some(PendingOperationStatus::Confirm(reason)))
                     .await;

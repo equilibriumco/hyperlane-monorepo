@@ -17,7 +17,7 @@ use hyperlane_base::{
 use hyperlane_core::{HyperlaneDomain, HyperlaneMessage, QueueOperation};
 use prometheus::IntGauge;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace};
 
 use super::{blacklist::AddressBlacklist, metadata::AppContextClassifier, pending_message::*};
 use crate::{db_loader::DbLoaderExt, settings::matching_list::MatchingList};
@@ -292,10 +292,12 @@ impl DbLoaderExt for MessageDbLoader {
         // nonce.
         // Scan until we find next nonce without delivery confirmation.
         if let Some(msg) = self.try_get_unprocessed_message().await? {
-            trace!(
-                ?msg,
+            info!(
+                nonce = msg.nonce,
+                origin = msg.origin,
+                destination = msg.destination,
                 cursor = ?self.nonce_iterator,
-                "db_loader working on message"
+                "db_loader found unprocessed message"
             );
             let destination = msg.destination;
 
@@ -324,7 +326,7 @@ impl DbLoaderExt for MessageDbLoader {
 
             // Skip if the message is intended for a destination we do not service
             if !self.send_channels.contains_key(&destination) {
-                debug!(?msg, "Message destined for unknown domain, skipping");
+                info!(nonce = msg.nonce, destination, "Message destined for unknown domain, skipping");
                 return Ok(());
             }
 
@@ -332,14 +334,15 @@ impl DbLoaderExt for MessageDbLoader {
             let destination_msg_ctx = if let Some(ctx) = self.destination_ctxs.get(&destination) {
                 ctx
             } else {
-                debug!(
-                    ?msg,
+                info!(
+                    nonce = msg.nonce,
+                    destination,
                     "Message destined for unknown message context, skipping",
                 );
                 return Ok(());
             };
 
-            debug!(%msg, "Sending message to submitter");
+            info!(nonce = msg.nonce, destination, "Sending message to submitter");
 
             let app_context_classifier =
                 AppContextClassifier::new(self.metric_app_contexts.clone());
