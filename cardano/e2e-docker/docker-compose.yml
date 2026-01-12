@@ -14,6 +14,12 @@ services:
       AGENT_TYPE: validator
       RUST_LOG: ${RUST_LOG:-info}
 
+      # AWS S3 credentials for checkpoint storage
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+
       # Validator signing key (ECDSA secp256k1)
       VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY}
 
@@ -32,13 +38,14 @@ services:
       CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
       CARDANO_PROCESSED_MSG_POLICY_ID: ${CARDANO_PROCESSED_MSG_POLICY_ID}
       CARDANO_REGISTRY_POLICY_ID: ${CARDANO_REGISTRY_POLICY_ID}
-      CARDANO_ISM_POLICY_ID: ${CARDANO_ISM_POLICY_ID}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
       CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
       CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
     volumes:
       - validator-cardano-data:/data
-      # Shared checkpoint directory - validator writes, relayer reads
-      - checkpoints-cardano:/shared/checkpoints
+      - ./config:/app/config-templates:ro
     ports:
       - "9090:9090"  # Metrics
     restart: unless-stopped
@@ -75,8 +82,10 @@ services:
       CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
       CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
       CARDANO_PROCESSED_MSG_POLICY_ID: ${CARDANO_PROCESSED_MSG_POLICY_ID}
+      CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR: ${CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR}
       CARDANO_REGISTRY_POLICY_ID: ${CARDANO_REGISTRY_POLICY_ID}
-      CARDANO_ISM_POLICY_ID: ${CARDANO_ISM_POLICY_ID}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
       CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
       CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
       CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
@@ -95,8 +104,7 @@ services:
       FUJI_INDEX_FROM: ${FUJI_INDEX_FROM:-48764210}
     volumes:
       - relayer-data:/data
-      # Mount Cardano checkpoint directories (read-only)
-      - checkpoints-cardano:/shared/checkpoints:ro
+      - ./config:/app/config-templates:ro
     ports:
       - "9091:9090"  # Metrics (internal 9090)
     depends_on:
@@ -114,6 +122,4 @@ volumes:
   validator-cardano-data:
     driver: local
   relayer-data:
-    driver: local
-  checkpoints-cardano:
     driver: local

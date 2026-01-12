@@ -7,8 +7,10 @@
   },
 
   "checkpointSyncer": {
-    "type": "localStorage",
-    "path": "/shared/checkpoints"
+    "type": "s3",
+    "bucket": "${AWS_S3_BUCKET}",
+    "region": "${AWS_REGION}",
+    "folder": "cardano-preview"
   },
 
   "interval": 10,
@@ -46,13 +48,14 @@
         "processedMessagesNftPolicyId": "${CARDANO_PROCESSED_MSG_POLICY_ID}",
         "registryPolicyId": "${CARDANO_REGISTRY_POLICY_ID}",
         "registryAssetNameHex": "5265676973747279205374617465",
-        "ismPolicyId": "${CARDANO_ISM_POLICY_ID}",
-        "ismScriptHash": "${CARDANO_ISM_POLICY_ID}",
+        "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
+        "ismAssetNameHex": "49534d205374617465",
+        "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",
         "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
         "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}"
       },
       "index": {
-        "from": 0,
+        "from": ${CARDANO_INDEX_FROM},
         "chunk": 100
       }
     }

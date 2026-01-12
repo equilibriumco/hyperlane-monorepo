@@ -1,57 +1,29 @@
 [
   {
     "script_name": "mailbox",
-    "script_hash": "b034d68bdbc8b9e9a3c6352f1450105ed2a43b74d47c8369b7176fe9",
-    "tx_hash": "c4b6aebf94fded3b2364f787cf46ea048091f860f662792838b5de8aa3c76949",
+    "script_hash": "686669f99855ed71675b7cad724332297d1c374021f3fb5f5f1600f6",
+    "tx_hash": "6cc4169fa4a4f1159e61f0e84364cce7ec4201cdeec456df48a469141299b950",
     "output_index": 0,
-    "lovelace": 16000000
+    "lovelace": 17000000
   },
   {
     "script_name": "multisig_ism",
     "script_hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
-    "tx_hash": "94fa9fbe1e64db7cbe911360eaaf937efa844f38489b9169d4e539d458167489",
+    "tx_hash": "926983506127079e3083b11dfff7a0ff2b5be4f14bdc69c11f45dbf27a74beba",
     "output_index": 0,
     "lovelace": 13000000
   },
   {
     "script_name": "registry",
     "script_hash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
-    "tx_hash": "209a90d7d2c49922a2c21b8a522d8f6e6ada101c3382df3c0e8fd2cf2b0711e0",
+    "tx_hash": "deca5100d7dae85c4042ed3f7fd018431da5104fb4d58ec019e515d712281ba9",
     "output_index": 0,
     "lovelace": 16000000
   },
   {
-    "script_name": "mailbox",
-    "script_hash": "642cec2c23b2313beadd46b652b816ad51371c6f94af3474acc86d90",
-    "tx_hash": "63d8a35700636cfc487fa4c8ab38415b6826e5fe97ae6fb4f3aacda8bf7a9792",
-    "output_index": 0,
-    "lovelace": 18000000
-  },
-  {
     "script_name": "mailbox_applied",
-    "script_hash": "a1d95abf5b0950363b65e0f726adec069ce4bc5aec753c9812b7b6d5",
-    "tx_hash": "107113bfad67e348b487e02a4bc3f7b436ae725cc7030cc230f597309968c006",
-    "output_index": 0,
-    "lovelace": 18000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "6e6d4cc5f9e17d5cac318e131957de17bba584d98999df6e2cbd5a36",
-    "tx_hash": "6c24ec5895ac3417d55991c972fddc034dbb101b80bc5f06a1eb351ad5e54a3a",
-    "output_index": 0,
-    "lovelace": 18000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "fce299aa67876b0488d8656d16277e2a7667bc62e7260d7a807586fd",
-    "tx_hash": "171c3e07a8290fd200f1d40c77df76a7054235bf9becf165d27d8fe73b95579c",
-    "output_index": 0,
-    "lovelace": 18000000
-  },
-  {
-    "script_name": "mailbox_applied",
-    "script_hash": "8686241854a51b260ce7c089375ceb2137dbf6dec3c8f5fa984f92aa",
-    "tx_hash": "350e18d6c046f45fb21f483bde17df38bb5de4d07b0de3b9b275618f7f715723",
+    "script_hash": "b119722e6e13b4ecb866db08cda1aae7b034c650efdf73f0b902c049",
+    "tx_hash": "9df88a7f4489cff15cbff0691afe12671315f4ad744943ed1d56ab05224f53e0",
     "output_index": 0,
     "lovelace": 17000000
   }

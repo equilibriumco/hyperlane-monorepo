@@ -620,8 +620,8 @@ fn encode_int_param(n: u32) -> Vec<u8> {
 }
 
 /// Build ValidatorAnnounceDatum CBOR
-/// Structure: Constr 0 [validator_address (32 bytes H256), mailbox_policy_id, mailbox_domain, storage_location]
-/// Note: Ethereum addresses (20 bytes) are left-padded with zeros to 32 bytes for Hyperlane compatibility
+/// Structure: Constr 0 [validator_address (20 bytes), mailbox_policy_id, mailbox_domain, storage_location]
+/// Note: Ethereum addresses are stored as 20 bytes (matching the Aiken contract expectation)
 fn build_validator_announce_datum(
     validator_address: &[u8],
     mailbox_policy_id: &str,
@@ -631,15 +631,17 @@ fn build_validator_announce_datum(
     let mut builder = CborBuilder::new();
     builder.start_constr(0);
 
-    // validator_address (32 bytes H256 - pad 20-byte Ethereum address with leading zeros)
-    let padded_address = if validator_address.len() == 20 {
-        let mut padded = vec![0u8; 12];
-        padded.extend_from_slice(validator_address);
-        padded
-    } else {
+    // validator_address (20 bytes - Ethereum address)
+    // The Aiken contract expects exactly 20 bytes
+    let eth_address = if validator_address.len() == 20 {
         validator_address.to_vec()
+    } else if validator_address.len() == 32 {
+        // Extract last 20 bytes if given a 32-byte H256
+        validator_address[12..32].to_vec()
+    } else {
+        return Err(anyhow!("Invalid validator address length: {}", validator_address.len()));
     };
-    builder.bytes_hex(&hex::encode(&padded_address))?;
+    builder.bytes_hex(&hex::encode(&eth_address))?;
 
     // mailbox_policy_id (28 bytes)
     builder.bytes_hex(mailbox_policy_id)?;
@@ -696,7 +698,14 @@ async fn find_existing_announcement(
     for utxo in utxos {
         if let Some(ref datum_val) = utxo.inline_datum {
             if let Some((addr, _)) = parse_announcement_datum(datum_val)? {
-                if addr == validator_address {
+                // The datum stores a 32-byte H256 (12 zero bytes + 20-byte Ethereum address)
+                // Extract the last 20 bytes to compare with the Ethereum address
+                let stored_eth_addr = if addr.len() == 32 {
+                    &addr[12..32]
+                } else {
+                    &addr[..]
+                };
+                if stored_eth_addr == validator_address {
                     return Ok(Some(utxo));
                 }
             }

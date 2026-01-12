@@ -347,10 +347,13 @@ async fn transfer(
 ) -> Result<()> {
     println!("{}", "Initiating token transfer...".cyan());
 
-    let recipient = recipient.strip_prefix("0x").unwrap_or(recipient);
-    if recipient.len() != 64 {
-        return Err(anyhow!("Recipient must be 32 bytes (64 hex chars)"));
+    // Automatically pad shorter addresses (e.g., 20-byte ETH, 28-byte Cardano) to 32 bytes
+    let recipient_hex = recipient.strip_prefix("0x").unwrap_or(recipient);
+    if recipient_hex.len() > 64 {
+        return Err(anyhow!("Recipient too long: {} chars (max 64)", recipient_hex.len()));
     }
+    // Left-pad with zeros to 64 hex chars (32 bytes)
+    let recipient = format!("{:0>64}", recipient_hex);
 
     println!("  Destination Domain: {}", domain);
     println!("  Recipient: 0x{}", recipient);

@@ -1124,6 +1124,154 @@ aiken blueprint apply \
 # because the parameter is now embedded in the bytecode
 ```
 
+---
+
+## Appendix: Agent Configuration Requirements
+
+When configuring the Hyperlane agents (validator and relayer) for Cardano, several critical fields must be set correctly to avoid runtime errors.
+
+### Required Relayer Configuration Fields
+
+The relayer config must include the following Cardano-specific fields:
+
+```json
+{
+  "chains": {
+    "cardanopreview": {
+      "connection": {
+        "processedMessagesNftScriptCbor": "<CBOR-encoded processed_message_nft script>",
+        "mailboxReferenceScriptUtxo": "<tx_hash>#<index>",
+        "ismReferenceScriptUtxo": "<tx_hash>#<index>",
+        ...
+      }
+    }
+  }
+}
+```
+
+#### Processed Messages NFT Script CBOR
+
+**Critical**: The `processedMessagesNftScriptCbor` field is **required** for the Fuji → Cardano direction. Without it, the relayer cannot mint the processed message NFT, and message processing will fail with a Plutus validation error.
+
+To get this value after deployment:
+
+```bash
+# The CBOR is in the applied script file
+cat deployments/$NETWORK/processed_message_nft_applied.plutus | jq -r '.cborHex'
+```
+
+Or from deployment_info.json if your CLI version exports it:
+
+```bash
+cat deployments/$NETWORK/deployment_info.json | jq -r '.processed_message_nft.cbor'
+```
+
+### Indexing Configuration
+
+**Critical**: The `CARDANO_INDEX_FROM` / `index.from` setting must be a **block height**, not a slot number.
+
+```bash
+# WRONG - This is a slot number (will cause indexing to skip messages)
+CARDANO_INDEX_FROM=101311900
+
+# CORRECT - This is a block height
+CARDANO_INDEX_FROM=3936000
+```
+
+To find the correct block height for a transaction:
+
+```bash
+# Get the block height (not slot) for a transaction
+curl -s -H "project_id: $BLOCKFROST_API_KEY" \
+  "https://cardano-preview.blockfrost.io/api/v0/txs/<tx_hash>" \
+  | jq '.block_height'
+```
+
+**Symptoms of incorrect INDEX_FROM**:
+- Validator logs show: "Current indexing snapshot's block height is less than or equal to the lowest block height, not indexing anything below"
+- Validator doesn't sign checkpoints for existing messages
+- Relayer shows "Operation not ready" indefinitely
+
+### Validator Announcement S3 URL Format
+
+The validator announces its storage location on-chain, and this URL must exactly match what the validator generates internally.
+
+**S3 URL format**: `s3://<bucket>/<region>/<folder>`
+
+Example:
+```
+s3://hyperlane-validator-signatures-cardanopreview/eu-north-1/cardano-preview
+```
+
+The validator config must include the folder:
+
+```json
+{
+  "checkpointSyncer": {
+    "type": "s3",
+    "bucket": "hyperlane-validator-signatures-cardanopreview",
+    "region": "eu-north-1",
+    "folder": "cardano-preview"
+  }
+}
+```
+
+To announce with the correct format:
+
+```bash
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  validator announce \
+  --storage-location "s3://your-bucket/your-region/your-folder"
+```
+
+**Symptoms of mismatched announcement**:
+- Validator logs show: "Validator has not announced signature storage location"
+- Validator keeps trying to re-announce but "Cannot announce validator without a signer"
+- Relayer shows "Unable to reach quorum" even though checkpoints exist in S3
+
+### Example Complete Relayer Config for Cardano
+
+```json
+{
+  "chains": {
+    "cardanopreview": {
+      "name": "cardanopreview",
+      "domainId": 2003,
+      "protocol": "cardano",
+      "chainId": 2003,
+      "connection": {
+        "type": "blockfrost",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "network": "preview",
+        "mailboxPolicyId": "<mailbox_state_nft_policy_id>",
+        "mailboxScriptHash": "<mailbox_script_hash>",
+        "mailboxReferenceScriptUtxo": "<tx_hash>#0",
+        "processedMessagesNftPolicyId": "<processed_msg_nft_policy_id>",
+        "processedMessagesNftScriptCbor": "<cbor_hex_from_applied_script>",
+        "processedMessagesScriptHash": "<mailbox_script_hash>",
+        "ismPolicyId": "<ism_state_nft_policy_id>",
+        "ismScriptHash": "<ism_script_hash>",
+        "ismReferenceScriptUtxo": "<tx_hash>#0",
+        "registryPolicyId": "<registry_state_nft_policy_id>",
+        "validatorAnnouncePolicyId": "<va_state_nft_policy_id>"
+      },
+      "index": {
+        "from": 3936000
+      },
+      "mailbox": "0x00000000<mailbox_state_nft_policy_id>",
+      "validatorAnnounce": "0x00000000<va_state_nft_policy_id>",
+      "merkleTreeHook": "0x00000000<mailbox_state_nft_policy_id>",
+      "interchainSecurityModule": "0x00000000<ism_script_hash>"
+    }
+  }
+}
+```
+
+---
+
 ### Troubleshooting Parameterization Issues
 
 **Error: "Parameter type mismatch"**

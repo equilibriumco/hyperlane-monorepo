@@ -116,15 +116,18 @@ async fn dispatch(
     println!("{}", "Dispatching Hyperlane message...".cyan());
 
     // Parse recipient address (32 bytes hex)
-    let recipient_hex = recipient.strip_prefix("0x").unwrap_or(recipient);
-    let recipient_bytes = hex::decode(recipient_hex)
-        .map_err(|e| anyhow!("Invalid recipient hex: {}", e))?;
-    if recipient_bytes.len() != 32 {
+    // Automatically pad shorter addresses (e.g., 20-byte ETH, 28-byte Cardano) to 32 bytes
+    let recipient_raw = recipient.strip_prefix("0x").unwrap_or(recipient);
+    // Validate hex
+    hex::decode(recipient_raw).map_err(|e| anyhow!("Invalid recipient hex: {}", e))?;
+    if recipient_raw.len() > 64 {
         return Err(anyhow!(
-            "Recipient must be 32 bytes (64 hex chars), got {}",
-            recipient_bytes.len()
+            "Recipient too long: {} hex chars (max 64)",
+            recipient_raw.len()
         ));
     }
+    // Left-pad with zeros to 64 hex chars (32 bytes, standard Hyperlane H256 format)
+    let recipient_hex = format!("{:0>64}", recipient_raw);
 
     // Parse body (string or hex with 0x prefix)
     let body_bytes = if body.starts_with("0x") {
@@ -214,7 +217,7 @@ async fn dispatch(
         mailbox_data.local_domain,
         &sender_hex,
         destination,
-        recipient_hex,
+        &recipient_hex,
         &body_hex,
     )?;
     println!("\n{}", "Message Details:".green());
@@ -237,7 +240,7 @@ async fn dispatch(
     )?;
 
     // Build Dispatch redeemer
-    let redeemer_cbor = build_mailbox_dispatch_redeemer(destination, recipient_hex, &body_hex)?;
+    let redeemer_cbor = build_mailbox_dispatch_redeemer(destination, &recipient_hex, &body_hex)?;
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
@@ -268,15 +271,23 @@ async fn dispatch(
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
         .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
 
-    // Find fee UTXO
+    // Find fee UTXO that sorts BEFORE the mailbox UTXO lexicographically.
+    // This is critical because Cardano sorts inputs lexicographically, and the
+    // mailbox script uses the first input's address as the "sender". We need
+    // the fee input (payer's wallet) to come first, not the mailbox script.
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 5_000_000 &&
             u.assets.is_empty() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.tx_hash < mailbox_utxo.tx_hash  // Must sort before mailbox
         })
-        .unwrap_or(collateral_utxo);
+        .ok_or_else(|| anyhow!(
+            "No suitable fee UTXO found that sorts before mailbox UTXO {}. \
+             The fee input must have a tx_hash that is lexicographically smaller \
+             than the mailbox tx_hash so that the payer becomes the message sender.",
+            mailbox_utxo.tx_hash
+        ))?;
 
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
     println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
@@ -349,6 +360,10 @@ async fn dispatch(
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
     // Build staging transaction
+    // Convert payer_pkh to [u8; 28] for disclosed_signer
+    let payer_pkh_bytes: [u8; 28] = payer_pkh.clone().try_into()
+        .map_err(|_| anyhow!("Invalid payer pkh length"))?;
+
     let mut staging = StagingTransaction::new()
         // Fee input first (so it becomes the sender)
         .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
@@ -356,6 +371,8 @@ async fn dispatch(
         .input(Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64))
         // Collateral
         .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        // Required signer (so Plutus script can verify sender authorization)
+        .disclosed_signer(Hash::new(payer_pkh_bytes))
         // Mailbox continuation output
         .output(mailbox_output)
         // Spend redeemer for mailbox input
@@ -503,13 +520,14 @@ fn update_merkle_tree(
     let mut size = new_count;
     let mut depth = 0usize;
 
+    // Standard Hyperlane merkle tree algorithm (matches Solidity/Rust implementations)
     while size > 0 {
         if size % 2 == 1 {
-            // Odd: this is a new node at this level
+            // Odd: store node at this level and stop
             branches[depth] = node.clone();
             break;
         } else {
-            // Even: combine with sibling
+            // Even: hash with sibling and continue up
             let sibling = &branches[depth];
             node = hash_pair(sibling, &node)?;
         }

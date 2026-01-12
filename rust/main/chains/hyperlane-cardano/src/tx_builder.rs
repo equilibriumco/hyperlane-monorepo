@@ -2265,8 +2265,8 @@ pub fn parse_multisig_metadata(
                                 // Compute Ethereum address for logging
                                 let address_hash = Keccak256::digest(uncompressed_bytes);
                                 let eth_address = &address_hash[12..];
-                                debug!("  Recovered validator {}: 0x{}", validator_signatures.len() - 1, hex::encode(eth_address));
-                                debug!("    Compressed pubkey: {}", hex::encode(&compressed_pubkey));
+                                info!("  Recovered validator {}: 0x{}", validator_signatures.len() - 1, hex::encode(eth_address));
+                                info!("    Compressed pubkey: {}", hex::encode(&compressed_pubkey));
                             }
                             Err(e) => {
                                 debug!("  Failed to recover public key: {:?}", e);

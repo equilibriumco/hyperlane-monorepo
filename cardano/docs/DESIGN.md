@@ -650,6 +650,58 @@ flowchart TB
 
 ## Known Limitations
 
+### Contract Upgradeability
+
+The Cardano contracts are **not upgradeable** after deployment. Any code change to a validator results in a different script hash, which means a different address. Since the state UTXO (containing the state NFT) is locked at the old address, it cannot be spent by the new validator.
+
+#### Why This Happens
+
+```
+Validator Code → Script Hash → Address
+     ↓ (any change)
+New Validator Code → Different Script Hash → Different Address
+
+State UTXO locked at: addr_test1w_OLD_HASH...
+New validator address: addr_test1w_NEW_HASH...
+→ Cannot spend old UTXO with new validator
+```
+
+#### What Is Preserved Across Deployments
+
+The design does preserve **replay protection** across mailbox deployments:
+
+| Component | Stability | Notes |
+|-----------|-----------|-------|
+| `mailbox_policy_id` (state NFT) | Fixed at init | Determined by seed UTXO |
+| `processed_messages_nft_policy` | Stable | Parameterized by `mailbox_policy_id` |
+| `mailbox_script_hash` | **Changes** | Hash of validator code |
+| Mailbox address | **Changes** | Derived from script hash |
+| Merkle tree state | **Lost** | Locked at old address |
+| Pending messages | **Orphaned** | Cannot be relayed |
+
+This means if a new mailbox is deployed with the **same seed UTXO** (same `mailbox_policy_id`), the processed message NFTs remain valid. However, this is not practically useful since:
+1. The merkle tree state cannot be migrated
+2. In-flight outbound messages cannot be relayed (wrong merkle root)
+3. In-flight inbound messages cannot be processed (wrong mailbox address)
+
+#### Implications
+
+1. **Thorough testing before mainnet is critical** - Any bugs discovered post-launch cannot be fixed via contract updates
+2. **New deployment = new identity** - All connected chains must be reconfigured with new addresses
+3. **Message continuity breaks** - Pending messages at time of redeployment are lost
+
+#### Potential Future Solutions
+
+To enable upgrades without breaking message continuity, the contracts would need:
+
+1. **Migration redeemer** - Allow owner to move state NFT to a new validator address
+2. **Proxy pattern** - Stable address that delegates to upgradeable logic
+3. **Governance mechanism** - Multi-sig approval for migrations
+
+These are not currently implemented.
+
+---
+
 ### UTXO Contention (Sequential Message Processing)
 
 Due to Cardano's eUTXO model, the current architecture has throughput limitations caused by UTXO contention.

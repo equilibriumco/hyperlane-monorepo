@@ -37,32 +37,39 @@ fn initial_branches(depth: Int) -> List<ByteArray> {
 
 /// Insert a leaf into the merkle tree
 /// Returns the new tree state
+///
+/// This implementation matches the standard Hyperlane merkle tree algorithm
+/// used in Solidity and Rust implementations (eth2 deposit contract style).
 pub fn insert(tree: MerkleTree, leaf: ByteArray) -> MerkleTree {
-  let new_branches = insert_leaf(tree.branches, leaf, tree.count, 0)
-  MerkleTree { branches: new_branches, count: tree.count + 1 }
+  let new_count = tree.count + 1
+  let new_branches = insert_leaf(tree.branches, leaf, new_count, 0)
+  MerkleTree { branches: new_branches, count: new_count }
 }
 
 /// Recursive helper to insert a leaf
+/// Matches the standard Hyperlane algorithm:
+/// - size = count (after increment)
+/// - if size & 1 == 1: store node at branch[level], return
+/// - else: node = hash(branch[level], node), continue up
+/// - size /= 2
 fn insert_leaf(
   branches: List<ByteArray>,
   node: ByteArray,
-  index: Int,
+  size: Int,
   level: Int,
 ) -> List<ByteArray> {
   when branches is {
     [] -> []
-    [branch, ..rest] -> {
-      // Check if this level needs to be updated
-      let bit = index / pow2(level) % 2
-      if bit == 0 {
-        // Left child: store the node as the new branch
+    [branch, ..rest] ->
+      if size % 2 == 1 {
+        // Odd: store node at this level and stop
         [node, ..rest]
       } else {
-        // Right child: hash with the stored left sibling and continue up
+        // Even: hash with sibling and continue up
         let parent = hash_pair(branch, node)
-        [zero_hash, ..insert_leaf(rest, parent, index, level + 1)]
+        // Keep the current branch unchanged, recurse with parent
+        [branch, ..insert_leaf(rest, parent, size / 2, level + 1)]
       }
-    }
   }
 }
 
