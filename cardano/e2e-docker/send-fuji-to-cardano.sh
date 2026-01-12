@@ -61,7 +61,7 @@ if [ -z "$CARDANO_RECIPIENT" ]; then
 fi
 
 # Check cast is available
-if ! command -v cast &> /dev/null; then
+if ! command -v cast &>/dev/null; then
     log_error "cast command not found. Please install Foundry: https://book.getfoundry.sh/getting-started/installation"
     exit 1
 fi
