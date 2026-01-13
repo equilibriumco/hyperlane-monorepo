@@ -1,6 +1,6 @@
 [← Epic 4: Advanced Features](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 4.2: NFT-Based O(1) Lookups
+# Task 4.1: NFT-Based O(1) Lookups
 **Status:** ⬜ Not Started
 **Complexity:** High
 **Depends On:** None

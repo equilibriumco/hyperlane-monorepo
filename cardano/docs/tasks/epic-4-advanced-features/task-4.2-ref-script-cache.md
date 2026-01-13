@@ -1,6 +1,6 @@
 [← Epic 4: Advanced Features](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 4.3: Reference Script Caching
+# Task 4.2: Reference Script Caching
 **Status:** ⬜ Not Started
 **Complexity:** Low
 **Depends On:** None

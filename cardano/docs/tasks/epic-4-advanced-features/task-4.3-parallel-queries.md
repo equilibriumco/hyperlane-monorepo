@@ -1,6 +1,6 @@
 [← Epic 4: Advanced Features](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 4.4: Parallel Queries
+# Task 4.3: Parallel Queries
 **Status:** ⬜ Not Started
 **Complexity:** Low
 **Depends On:** None

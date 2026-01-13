@@ -33,10 +33,11 @@ tasks/
 │   └── task-3.6-contract-enhancements.md
 ├── epic-4-advanced-features/
 │   ├── EPIC.md
-│   ├── task-4.1-per-recipient-ism.md
-│   ├── task-4.2-nft-lookups.md
-│   ├── task-4.3-ref-script-cache.md
-│   └── task-4.4-parallel-queries.md
+│   ├── task-4.1-nft-lookups.md
+│   ├── task-4.2-ref-script-cache.md
+│   ├── task-4.3-parallel-queries.md
+│   ├── task-4.4-nft-identity.md
+│   └── task-4.5-parallel-processing.md
 ├── epic-5-production-readiness/
 │   ├── EPIC.md
 │   ├── task-5.1-reorg-detection.md
@@ -105,16 +106,17 @@ IGP for gas payment handling
 </details>
 
 <details>
-<summary><strong>Epic 4: Advanced Features</strong> | 🟢 Medium | ⬜ Not Started | 4 tasks</summary>
+<summary><strong>Epic 4: Advanced Features</strong> | 🟡 High | ⬜ Not Started | 5 tasks</summary>
 
-Per-recipient ISM, performance optimizations
+Performance optimizations, upgradeability, and parallel processing (includes per-recipient ISM)
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 4.1 | [Per-Recipient ISM](./epic-4-advanced-features/task-4.1-per-recipient-ism.md) | ⬜ | Custom ISM per recipient |
-| 4.2 | [NFT Lookups](./epic-4-advanced-features/task-4.2-nft-lookups.md) | ⬜ | O(1) recipient lookups via NFT |
-| 4.3 | [Ref Script Cache](./epic-4-advanced-features/task-4.3-ref-script-cache.md) | ⬜ | Cache reference script UTXOs |
-| 4.4 | [Parallel Queries](./epic-4-advanced-features/task-4.4-parallel-queries.md) | ⬜ | Parallelize Blockfrost calls |
+| 4.1 | [NFT Lookups](./epic-4-advanced-features/task-4.1-nft-lookups.md) | ⬜ | O(1) recipient lookups via NFT |
+| 4.2 | [Ref Script Cache](./epic-4-advanced-features/task-4.2-ref-script-cache.md) | ⬜ | Cache reference script UTXOs |
+| 4.3 | [Parallel Queries](./epic-4-advanced-features/task-4.3-parallel-queries.md) | ⬜ | Parallelize Blockfrost calls |
+| 4.4 | [NFT-Based Identity](./epic-4-advanced-features/task-4.4-nft-identity.md) | ⬜ | Stable contract identity across upgrades |
+| 4.5 | [Parallel Processing](./epic-4-advanced-features/task-4.5-parallel-processing.md) | ⬜ | Reference inputs for scalability (includes per-recipient ISM) |
 
 [View Epic Details](./epic-4-advanced-features/EPIC.md)
 </details>
@@ -215,9 +217,10 @@ Final audit before mainnet
 |  +-------------+               +-------------+                      |
 |                                                                     |
 |  Epic 4: Advanced Features                                          |
-|  +---------------------------------------------+                    |
-|  | Task 4.1-4.4: ISM, NFT Lookups, Caching     |                    |
-|  +---------------------------------------------+                    |
+|  +-------------------------------------------------------------+    |
+|  | Task 4.1-4.3: NFT Lookups, Caching, Parallel Queries        |    |
+|  | Task 4.4-4.5: NFT-Based Identity, Parallel Processing       |    |
+|  +-------------------------------------------------------------+    |
 |                                                                     |
 +---------------------------------------------------------------------+
 
@@ -278,7 +281,7 @@ Final audit before mainnet
 1. **Outgoing messages** (Epic 1) - Cardano → Remote chains
 2. **Token transfers** (Epic 2) - Warp routes
 3. **Gas payments** (Epic 3) - IGP integration
-4. **Advanced features** (Epic 4) - Per-recipient ISM, performance
+4. **Advanced features** (Epic 4) - Per-recipient ISM, performance, upgradeability, parallel processing
 5. **Production ops** (Epic 5) - Monitoring, alerting
 6. **Security audit** (Epic 6) - Final gate before mainnet
 
