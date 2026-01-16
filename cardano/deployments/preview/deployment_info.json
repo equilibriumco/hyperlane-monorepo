@@ -35,7 +35,8 @@
     "stateNftPolicy": "5daa7197ffad1bcaaac61fdd0eeaf8231e9ad71f7b0b4f326b9e5e13",
     "referenceScriptUtxo": {
       "txHash": "926983506127079e3083b11dfff7a0ff2b5be4f14bdc69c11f45dbf27a74beba",
-      "outputIndex": 0
+      "outputIndex": 0,
+      "lovelace": 13000000
     },
     "initialized": true
   },
