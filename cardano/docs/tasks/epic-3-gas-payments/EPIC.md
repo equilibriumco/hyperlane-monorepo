@@ -28,7 +28,7 @@ Per the official Hyperlane documentation, the IGP must support:
 | Gas oracles per destination | ✅ Implemented | `GasOracleConfig` per domain |
 | `GasPayment` event emission | ✅ Adapted | Redeemer serves as event on Cardano |
 | Post-dispatch hook integration | ❌ Missing | For automatic gas payment at dispatch |
-| Relayer gas payment indexing | ⬜ Pending | Task 3.1 |
+| Relayer gas payment indexing | ⬜ Pending | Task 3.2 |
 
 ## Current State
 
@@ -51,31 +51,45 @@ Per the official Hyperlane documentation, the IGP must support:
 
 | # | Task | Status | Depends On | Description |
 |---|------|--------|------------|-------------|
-| 3.1 | [RPC Endpoint](./task-3.1-rpc-endpoint.md) | ⬜ | - | Implement gas payment indexing and quote endpoint |
-| 3.2 | [CLI Commands](./task-3.2-cli-commands.md) | ⬜ | - | pay-for-gas, quote, claim, set-oracle, show |
-| 3.3 | [Relayer Integration](./task-3.3-relayer-integration.md) | ⬜ | 3.1 | Relayer queries and enforces gas payments |
-| 3.4 | [E2E Testing](./task-3.4-e2e-testing.md) | ⬜ | 3.1-3.3 | Test full payment flow |
-| 3.5 | [Post-Dispatch Hook](./task-3.5-post-dispatch-hook.md) | ⬜ | 3.1-3.2 | Automatic gas payment at dispatch time |
-| 3.6 | [Contract Enhancements](./task-3.6-contract-enhancements.md) | ⬜ | - | Refund handling, per-destination defaults |
+| 3.0 | [Init IGP](./task-3.0-init-igp.md) | ⬜ | - | **PREREQUISITE**: Initialize IGP contract on testnet |
+| 3.1 | [CLI Commands](./task-3.1-cli-commands.md) | ⬜ | 3.0 | pay-for-gas, quote, claim, set-oracle, show |
+| 3.2 | [RPC Endpoint](./task-3.2-rpc-endpoint.md) | ⬜ | 3.0 | Implement gas payment indexing and quote endpoint |
+| 3.3 | [Contract Enhancements](./task-3.3-contract-enhancements.md) | ⬜ | - | Refund handling, per-destination defaults |
+| 3.4 | [Relayer Integration](./task-3.4-relayer-integration.md) | ⬜ | 3.2 | Relayer queries and enforces gas payments |
+| 3.5 | [Post-Dispatch Hook](./task-3.5-post-dispatch-hook.md) | ⬜ | 3.1, 3.2, 3.3 | Automatic gas payment at dispatch time |
+| 3.6 | [E2E Testing](./task-3.6-e2e-testing.md) | ⬜ | 3.1-3.5 | Test full payment flow |
 
 ## Task Dependency Graph
 
 ```
-Task 3.6 (Contract)     Task 3.1 (RPC)      Task 3.2 (CLI)
-    │                       │                    │
-    └───────────┬───────────┘                    │
-                │                                │
-                ▼                                │
-    Task 3.3 (Relayer Integration)               │
-                │                                │
-                ├────────────────────────────────┘
-                │
-                ▼
-    Task 3.5 (Post-Dispatch Hook)
-                │
-                ▼
-        Task 3.4 (E2E Testing)
+                    Task 3.0 (Init IGP)
+                           │
+           ┌───────────────┼───────────────┐
+           │               │               │
+           ▼               ▼               ▼
+    Task 3.3         Task 3.1        Task 3.2
+    (Contract)       (CLI)           (RPC)
+           │               │               │
+           └───────┬───────┴───────┬───────┘
+                   │               │
+                   ▼               ▼
+           Task 3.5          Task 3.4
+           (Post-Dispatch)   (Relayer)
+                   │               │
+                   └───────┬───────┘
+                           │
+                           ▼
+                   Task 3.6 (E2E Testing)
 ```
+
+**Implementation order (matches task numbers):**
+1. **Task 3.0** - Init IGP (prerequisite for testing all others)
+2. **Task 3.1** - CLI Commands (enables manual testing)
+3. **Task 3.2** - RPC Endpoint (verify with payments from CLI)
+4. **Task 3.3** - Contract Enhancements (can be done in parallel with 3.1/3.2)
+5. **Task 3.4** - Relayer Integration
+6. **Task 3.5** - Post-Dispatch Hook
+7. **Task 3.6** - E2E Testing
 
 ## Technical Architecture
 

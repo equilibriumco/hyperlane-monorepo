@@ -1,9 +1,9 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 3.1: RPC Endpoint for Gas Payments
+# Task 3.2: RPC Endpoint for Gas Payments
 **Status:** ⬜ Not Started
 **Complexity:** Medium
-**Depends On:** None
+**Depends On:** [Task 3.0](./task-3.0-init-igp.md)
 
 ## Objective
 

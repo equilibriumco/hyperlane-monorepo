@@ -3,7 +3,7 @@
 # Task 3.5: Post-Dispatch Hook Integration
 **Status:** ⬜ Not Started
 **Complexity:** High
-**Depends On:** [Task 3.1](./task-3.1-rpc-endpoint.md), [Task 3.2](./task-3.2-cli-commands.md), [Task 3.6](./task-3.6-contract-enhancements.md)
+**Depends On:** [Task 3.1](./task-3.1-cli-commands.md), [Task 3.2](./task-3.2-rpc-endpoint.md), [Task 3.3](./task-3.3-contract-enhancements.md)
 
 ## Objective
 

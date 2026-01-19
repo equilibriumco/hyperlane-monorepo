@@ -1,6 +1,6 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 3.6: IGP Contract Enhancements
+# Task 3.3: IGP Contract Enhancements
 **Status:** ⬜ Not Started
 **Complexity:** Medium
 **Depends On:** None (but should be done early as it affects other tasks)

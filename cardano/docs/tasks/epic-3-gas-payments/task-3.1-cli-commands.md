@@ -1,9 +1,9 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 3.2: IGP CLI Commands
+# Task 3.1: IGP CLI Commands
 **Status:** ⬜ Not Started
 **Complexity:** Medium
-**Depends On:** None
+**Depends On:** [Task 3.0](./task-3.0-init-igp.md)
 
 ## Objective
 

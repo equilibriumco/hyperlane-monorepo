@@ -1,9 +1,9 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 3.3: Relayer Integration
+# Task 3.4: Relayer Integration
 **Status:** ⬜ Not Started
 **Complexity:** Medium
-**Depends On:** [Task 3.1](./task-3.1-rpc-endpoint.md)
+**Depends On:** [Task 3.2](./task-3.2-rpc-endpoint.md)
 
 ## Objective
 

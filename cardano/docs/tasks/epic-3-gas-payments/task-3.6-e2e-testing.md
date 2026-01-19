@@ -1,9 +1,9 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
-# Task 3.4: IGP End-to-End Testing
+# Task 3.6: IGP End-to-End Testing
 **Status:** ⬜ Not Started
 **Complexity:** Medium
-**Depends On:** Tasks 3.1-3.3, 3.5, 3.6
+**Depends On:** Tasks 3.1-3.5
 
 ## Objective
 
