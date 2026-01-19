@@ -570,6 +570,71 @@ pub fn build_deferred_recipient_datum(
     Ok(builder.build())
 }
 
+/// Build IGP (Interchain Gas Paymaster) datum CBOR
+///
+/// Structure from types.ak:
+/// ```
+/// IgpDatum {
+///   owner: VerificationKeyHash,           // Who can configure oracles
+///   beneficiary: ByteArray,               // Who receives claimed fees
+///   gas_oracles: List<(Domain, GasOracleConfig)>,  // Price config per destination
+///   default_gas_limit: Int,               // Default gas if not specified
+/// }
+///
+/// GasOracleConfig {
+///   gas_price: Int,                       // Destination chain gas price
+///   token_exchange_rate: Int,             // ADA to destination token rate
+/// }
+/// ```
+///
+/// CBOR encoding:
+/// Constr 0 [
+///   owner: ByteArray (28 bytes),
+///   beneficiary: ByteArray (28 bytes),
+///   gas_oracles: List<[Int, Constr 0 [Int, Int]]>,  // tuples as plain arrays
+///   default_gas_limit: Int
+/// ]
+pub fn build_igp_datum(
+    owner_pkh: &str,                      // 28 bytes hex (verification key hash)
+    beneficiary: &str,                    // 28 bytes hex (verification key hash)
+    gas_oracles: &[(u32, u64, u64)],      // (domain, gas_price, exchange_rate)
+    default_gas_limit: u64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr(0);
+
+    // owner: VerificationKeyHash (28 bytes)
+    builder.bytes_hex(owner_pkh)?;
+
+    // beneficiary: ByteArray (28 bytes)
+    builder.bytes_hex(beneficiary)?;
+
+    // gas_oracles: List<(Domain, GasOracleConfig)>
+    // In Plutus/Aiken, tuples are encoded as plain CBOR arrays, NOT as Constr 0
+    // GasOracleConfig is Constr 0 [gas_price, token_exchange_rate]
+    builder.start_list();
+    for (domain, gas_price, exchange_rate) in gas_oracles {
+        // Tuple is a plain array [domain, GasOracleConfig]
+        builder.start_list();
+        builder.uint(*domain as u64);
+        // GasOracleConfig is a record type -> Constr 0 [gas_price, token_exchange_rate]
+        builder.start_constr(0);
+        builder.uint(*gas_price);
+        builder.uint(*exchange_rate);
+        builder.end_constr();
+        builder.end_list();
+    }
+    builder.end_list();
+
+    // default_gas_limit: Int
+    builder.uint(default_gas_limit);
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
 // =============================================================================
 // CBOR Decoder for Plutus Data
 // =============================================================================
@@ -887,5 +952,108 @@ mod tests {
         let datum = decode_plutus_datum("d8799f182aff").unwrap();
         assert_eq!(datum["constructor"], 0);
         assert_eq!(datum["fields"][0]["int"], 42);
+    }
+
+    #[test]
+    fn test_build_igp_datum_no_oracles() {
+        // 28-byte test hashes (56 hex chars)
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+
+        let result = build_igp_datum(owner, beneficiary, &[], 200000).unwrap();
+
+        // Decode and verify structure
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        assert_eq!(decoded["constructor"], 0);
+
+        let fields = decoded["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 4);
+
+        // Check owner
+        assert_eq!(fields[0]["bytes"].as_str().unwrap(), owner);
+        // Check beneficiary
+        assert_eq!(fields[1]["bytes"].as_str().unwrap(), beneficiary);
+        // Check gas_oracles is empty list
+        assert!(fields[2]["list"].as_array().unwrap().is_empty());
+        // Check default_gas_limit
+        assert_eq!(fields[3]["int"], 200000);
+    }
+
+    #[test]
+    fn test_build_igp_datum_with_one_oracle() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let oracles = vec![(43113u32, 25000000000u64, 1000000u64)];
+
+        let result = build_igp_datum(owner, beneficiary, &oracles, 200000).unwrap();
+
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        let fields = decoded["fields"].as_array().unwrap();
+
+        // Check gas_oracles has one entry
+        let oracles_list = fields[2]["list"].as_array().unwrap();
+        assert_eq!(oracles_list.len(), 1);
+
+        // First oracle entry is a tuple [domain, GasOracleConfig]
+        let oracle_tuple = oracles_list[0]["list"].as_array().unwrap();
+        assert_eq!(oracle_tuple[0]["int"], 43113);
+
+        // GasOracleConfig is Constr 0 [gas_price, exchange_rate]
+        let config = &oracle_tuple[1];
+        assert_eq!(config["constructor"], 0);
+        let config_fields = config["fields"].as_array().unwrap();
+        assert_eq!(config_fields[0]["int"], 25000000000u64);
+        assert_eq!(config_fields[1]["int"], 1000000);
+    }
+
+    #[test]
+    fn test_build_igp_datum_with_multiple_oracles() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let oracles = vec![
+            (43113u32, 25000000000u64, 1000000u64),   // Fuji
+            (11155111u32, 30000000000u64, 1200000u64), // Sepolia
+        ];
+
+        let result = build_igp_datum(owner, beneficiary, &oracles, 150000).unwrap();
+
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        let fields = decoded["fields"].as_array().unwrap();
+
+        // Check gas_oracles has two entries
+        let oracles_list = fields[2]["list"].as_array().unwrap();
+        assert_eq!(oracles_list.len(), 2);
+
+        // Verify first oracle (Fuji)
+        let fuji = oracles_list[0]["list"].as_array().unwrap();
+        assert_eq!(fuji[0]["int"], 43113);
+
+        // Verify second oracle (Sepolia)
+        let sepolia = oracles_list[1]["list"].as_array().unwrap();
+        assert_eq!(sepolia[0]["int"], 11155111);
+
+        // Check default_gas_limit
+        assert_eq!(fields[3]["int"], 150000);
+    }
+
+    #[test]
+    fn test_build_igp_datum_invalid_owner_length() {
+        // Invalid owner (too short - only 20 bytes)
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009d";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+
+        let result = build_igp_datum(owner, beneficiary, &[], 200000);
+        // Should still succeed since bytes_hex doesn't validate length
+        // The validation happens at a higher level
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_igp_datum_invalid_hex() {
+        let owner = "not_valid_hex_string_at_all_gggg";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+
+        let result = build_igp_datum(owner, beneficiary, &[], 200000);
+        assert!(result.is_err());
     }
 }

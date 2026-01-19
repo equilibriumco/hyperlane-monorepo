@@ -1,7 +1,7 @@
 [← Epic 3: Gas Payments](./EPIC.md) | [Epics Overview](../README.md)
 
 # Task 3.0: Initialize IGP Contract
-**Status:** ⬜ Not Started
+**Status:** ✅ Completed
 **Complexity:** Low
 **Depends On:** None (PREREQUISITE for all other Epic 3 tasks)
 
@@ -248,27 +248,27 @@ Submitting transaction...
 
 ### Verification Checklist
 
-- [ ] Reference script deployed successfully
-- [ ] `deployment_info.json` has `igp.referenceScriptUtxo` set
-- [ ] Init transaction submitted successfully
-- [ ] State UTXO visible on CardanoScan at IGP address
-- [ ] State NFT present in UTXO
-- [ ] Datum correctly formed (can decode with Blockfrost)
-- [ ] `deployment_info.json` has:
+- [x] Reference script deployed successfully
+- [x] `deployment_info.json` has `igp.referenceScriptUtxo` set
+- [x] Init transaction submitted successfully
+- [x] State UTXO visible on CardanoScan at IGP address
+- [x] State NFT present in UTXO
+- [x] Datum correctly formed (can decode with Blockfrost)
+- [x] `deployment_info.json` has:
   - `igp.initialized = true`
   - `igp.stateNftPolicy` set
   - `igp.stateUtxo` set
   - `igp.referenceScriptUtxo` set
-- [ ] `init status` shows IGP as initialized
+- [x] `init status` shows IGP as initialized
 
 ## Definition of Done
 
-- [ ] `build_igp_datum()` implemented and tested
-- [ ] `init igp` command added to CLI
-- [ ] Dry-run mode works correctly
-- [ ] Successfully initialized on Preview testnet
-- [ ] `deployment_info.json` updated correctly
-- [ ] Documentation updated
+- [x] `build_igp_datum()` implemented and tested
+- [x] `init igp` command added to CLI
+- [x] Dry-run mode works correctly
+- [x] Successfully initialized on Preview testnet
+- [x] `deployment_info.json` updated correctly
+- [x] Documentation updated
 
 ## Acceptance Criteria
 
@@ -277,3 +277,24 @@ Submitting transaction...
 3. Datum matches expected structure
 4. Gas oracles correctly encoded
 5. Deployment info persisted for other tasks to use
+
+## Completion Notes
+
+**Completed:** 2025-01-19
+
+### Deployment Details (Preview Testnet)
+
+| Item | Value |
+|------|-------|
+| IGP Address | `addr_test1wpqlvpjt4xvfmtuwltkq0yekqs342tfdevh3dxgj2j3fqtg5pzvu0` |
+| State NFT Policy | `0412bff6c732f13b2412b72a7dd58faac8fea7b76d38fdba2987bfe2` |
+| State UTXO | `173ba82ad21dcddd2880f48db4da221dec0982a77fe288c56e54290a2cc0b140#0` |
+| Reference Script UTXO | `f585118df2ab8a4616f078348b010c5932727cda37d60125160cfa1a29364b9a#0` |
+| Init TX | [173ba82ad21dcddd2880f48db4da221dec0982a77fe288c56e54290a2cc0b140](https://preview.cardanoscan.io/transaction/173ba82ad21dcddd2880f48db4da221dec0982a77fe288c56e54290a2cc0b140) |
+
+### Implementation Summary
+
+1. **`build_igp_datum()`** added to `cardano/cli/src/utils/cbor.rs` with 5 unit tests
+2. **`Igp` variant** added to `InitCommands` enum in `cardano/cli/src/commands/init.rs`
+3. **`init_igp()`** function implemented with full transaction building flow
+4. **`parse_oracle_config()`** helper added with 9 unit tests

@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::{build_deferred_recipient_datum, build_generic_recipient_datum, build_ism_datum, build_mailbox_datum};
+use crate::utils::cbor::{build_deferred_recipient_datum, build_generic_recipient_datum, build_igp_datum, build_ism_datum, build_mailbox_datum};
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{apply_validator_param, apply_validator_params, encode_output_reference, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
@@ -139,6 +139,29 @@ enum InitCommands {
         dry_run: bool,
     },
 
+    /// Initialize the IGP (Interchain Gas Paymaster) contract
+    Igp {
+        /// Beneficiary address for claimed fees (defaults to signer's pkh)
+        #[arg(long)]
+        beneficiary: Option<String>,
+
+        /// Default gas limit for messages
+        #[arg(long, default_value = "200000")]
+        default_gas_limit: u64,
+
+        /// Gas oracle config: "domain:gas_price:exchange_rate" (repeatable)
+        #[arg(long = "oracle")]
+        oracles: Vec<String>,
+
+        /// UTXO to use for minting state NFT (tx_hash#index)
+        #[arg(long)]
+        utxo: Option<String>,
+
+        /// Dry run - show what would be done without submitting
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Initialize all core contracts at once
     All {
         /// Local domain ID for Cardano
@@ -208,6 +231,13 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             recipient_script,
             dry_run,
         } => init_recipient(ctx, mailbox_hash, custom_ism, deferred, custom_contracts, custom_module, custom_validator, utxo, output_lovelace, ref_script_lovelace, nft_script, recipient_script, dry_run).await,
+        InitCommands::Igp {
+            beneficiary,
+            default_gas_limit,
+            oracles,
+            utxo,
+            dry_run,
+        } => init_igp(ctx, beneficiary, default_gas_limit, oracles, utxo, dry_run).await,
         InitCommands::All {
             domain,
             origin_domains,
@@ -821,6 +851,219 @@ async fn init_registry_internal(
     Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))
 }
 
+async fn init_igp(
+    ctx: &CliContext,
+    beneficiary: Option<String>,
+    default_gas_limit: u64,
+    oracles: Vec<String>,
+    utxo: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Initializing IGP contract...".cyan());
+
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let owner_pkh = keypair.verification_key_hash_hex();
+
+    // Determine beneficiary - use provided or default to owner
+    let beneficiary_pkh = match beneficiary {
+        Some(ref b) => {
+            // If it's a bech32 address, extract the pkh; otherwise assume it's already a pkh hex
+            if b.starts_with("addr") {
+                // For simplicity, we'll just require the pkh directly for now
+                return Err(anyhow!("Please provide beneficiary as a 28-byte hex public key hash, not a bech32 address"));
+            }
+            if b.len() != 56 {
+                return Err(anyhow!("Beneficiary must be a 28-byte hex public key hash (56 hex chars)"));
+            }
+            b.clone()
+        }
+        None => owner_pkh.clone(),
+    };
+
+    // Parse oracle configurations
+    let gas_oracles: Vec<(u32, u64, u64)> = oracles
+        .iter()
+        .map(|s| parse_oracle_config(s))
+        .collect::<Result<Vec<_>>>()?;
+
+    println!("  Owner: {}", owner_pkh);
+    println!("  Beneficiary: {}", beneficiary_pkh);
+    println!("  Default Gas Limit: {}", default_gas_limit);
+    println!("  Gas Oracles: {} configured", gas_oracles.len());
+    for (domain, gas_price, exchange_rate) in &gas_oracles {
+        println!("    - Domain {}: gas_price={}, exchange_rate={}", domain, gas_price, exchange_rate);
+    }
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+    let address = keypair.address_bech32(ctx.pallas_network());
+
+    // Get UTXOs
+    let utxos = client.get_utxos(&address).await?;
+    println!("  Found {} UTXOs at wallet", utxos.len());
+
+    // Find input UTXO
+    let input_utxo = match &utxo {
+        Some(u) => {
+            let utxo_ref = crate::utils::types::UtxoRef::parse(u)
+                .ok_or_else(|| anyhow!("Invalid UTXO format. Use tx_hash#index"))?;
+            utxos
+                .iter()
+                .find(|u| u.tx_hash == utxo_ref.tx_hash && u.output_index == utxo_ref.output_index)
+                .cloned()
+                .ok_or_else(|| anyhow!("UTXO not found"))?
+        }
+        None => {
+            utxos
+                .iter()
+                .find(|u| u.lovelace >= 10_000_000 && u.assets.is_empty())
+                .cloned()
+                .ok_or_else(|| anyhow!("No suitable UTXO found (need >= 10 ADA without assets)"))?
+        }
+    };
+
+    // Find collateral UTXO
+    let collateral_utxo = utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && !(u.tx_hash == input_utxo.tx_hash && u.output_index == input_utxo.output_index)
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO found (need a second UTXO with >= 5 ADA)"))?;
+
+    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
+    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+
+    // Encode output reference for state NFT parameter
+    let output_ref_cbor = encode_output_reference(&input_utxo.tx_hash, input_utxo.output_index)?;
+    let output_ref_hex = hex::encode(&output_ref_cbor);
+
+    // Apply parameter to state_nft minting policy
+    println!("\n{}", "Applying state_nft parameter...".cyan());
+    let applied = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
+    println!("  State NFT Policy ID: {}", applied.policy_id.green());
+
+    // Get IGP script address from deployment_info.json
+    let deployment = ctx.load_deployment_info()
+        .with_context(|| "Run 'deploy extract' first")?;
+    let igp_addr = deployment
+        .igp
+        .as_ref()
+        .map(|i| i.address.clone())
+        .ok_or_else(|| anyhow!("IGP address not found in deployment info"))?;
+    println!("  IGP Address: {}", igp_addr);
+
+    // Build IGP datum
+    let datum_cbor = build_igp_datum(&owner_pkh, &beneficiary_pkh, &gas_oracles, default_gas_limit)?;
+    println!("  Datum CBOR: {}...", hex::encode(&datum_cbor[..32.min(datum_cbor.len())]));
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        println!("\nTransaction would:");
+        println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
+        println!("  - Mint state NFT with policy {}", applied.policy_id);
+        println!("  - Create output at {} with 5 ADA + NFT + datum", igp_addr);
+        return Ok(());
+    }
+
+    // Build and submit transaction
+    println!("\n{}", "Building transaction...".cyan());
+    let mint_script_cbor = hex::decode(&applied.compiled_code)
+        .with_context(|| "Invalid script CBOR")?;
+
+    // State NFT asset name for IGP
+    let igp_asset_name = "IGP State";
+
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let built_tx = tx_builder
+        .build_init_tx(
+            &keypair,
+            &input_utxo,
+            &collateral_utxo,
+            &mint_script_cbor,
+            &igp_addr,
+            &datum_cbor,
+            5_000_000, // 5 ADA output
+            Some(igp_asset_name),
+        )
+        .await?;
+
+    println!("  TX Hash: {}", hex::encode(&built_tx.tx_hash.0));
+
+    // Sign transaction
+    println!("{}", "Signing transaction...".cyan());
+    let signed_tx = tx_builder.sign_tx(built_tx, &keypair)?;
+    println!("  Signed TX size: {} bytes", signed_tx.len());
+
+    // Submit transaction
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client.submit_tx(&signed_tx).await?;
+    println!("\n{}", "✓ Transaction submitted!".green().bold());
+    println!("  TX Hash: {}", tx_hash);
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+
+    // State UTXO reference (first output is the state UTXO)
+    let state_utxo_ref = format!("{}#0", tx_hash);
+
+    // Update deployment info with complete initialization details
+    let mut deployment = deployment;
+    if let Some(ref mut igp) = deployment.igp {
+        // IGP is not parameterized, so no applied_parameters
+
+        // Record state NFT info
+        igp.state_nft = Some(StateNftInfo {
+            policy_id: applied.policy_id.clone(),
+            asset_name_hex: hex::encode(igp_asset_name.as_bytes()),
+            asset_name: igp_asset_name.to_string(),
+            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+        });
+
+        // Record initialization details
+        igp.init_tx_hash = Some(tx_hash.clone());
+        igp.state_utxo = Some(state_utxo_ref.clone());
+        igp.initialized = true;
+
+        // Legacy fields
+        igp.utxo = Some(state_utxo_ref);
+        igp.state_nft_policy = Some(applied.policy_id.clone());
+    }
+    ctx.save_deployment_info(&deployment)?;
+    println!("\n{}", "✓ Deployment info updated".green());
+    println!("  IGP State NFT Policy: {}", applied.policy_id);
+    println!("  IGP State UTXO: {}#0", tx_hash);
+    println!("  IGP Initialized: true");
+
+    Ok(())
+}
+
+/// Parse oracle config string "domain:gas_price:exchange_rate"
+fn parse_oracle_config(s: &str) -> Result<(u32, u64, u64)> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return Err(anyhow!(
+            "Invalid oracle format: '{}'. Expected 'domain:gas_price:exchange_rate'",
+            s
+        ));
+    }
+
+    let domain: u32 = parts[0]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid domain in oracle config: '{}'", parts[0]))?;
+    let gas_price: u64 = parts[1]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid gas_price in oracle config: '{}'", parts[1]))?;
+    let exchange_rate: u64 = parts[2]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid exchange_rate in oracle config: '{}'", parts[2]))?;
+
+    Ok((domain, gas_price, exchange_rate))
+}
+
 async fn init_recipient(
     ctx: &CliContext,
     mailbox_hash: Option<String>,
@@ -1337,6 +1580,7 @@ async fn show_status(ctx: &CliContext) -> Result<()> {
         ("Mailbox", &deployment.mailbox),
         ("ISM", &deployment.ism),
         ("Registry", &deployment.registry),
+        ("IGP", &deployment.igp),
     ] {
         if let Some(script) = script_opt {
             let utxos = client.get_utxos(&script.address).await?;
@@ -1513,4 +1757,68 @@ fn parse_threshold_map(s: &str) -> Result<Vec<(u32, u32)>> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_oracle_config_valid() {
+        let result = parse_oracle_config("43113:25000000000:1000000").unwrap();
+        assert_eq!(result, (43113, 25000000000, 1000000));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_with_whitespace() {
+        let result = parse_oracle_config(" 43113 : 25000000000 : 1000000 ").unwrap();
+        assert_eq!(result, (43113, 25000000000, 1000000));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_large_values() {
+        // Test with large u64 values
+        let result = parse_oracle_config("11155111:30000000000:1200000").unwrap();
+        assert_eq!(result, (11155111, 30000000000, 1200000));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_too_few_parts() {
+        let result = parse_oracle_config("43113:25000000000");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Expected 'domain:gas_price:exchange_rate'"));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_too_many_parts() {
+        let result = parse_oracle_config("43113:25000000000:1000000:extra");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_oracle_config_invalid_domain() {
+        let result = parse_oracle_config("fuji:25000000000:1000000");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid domain"));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_invalid_gas_price() {
+        let result = parse_oracle_config("43113:not_a_number:1000000");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid gas_price"));
+    }
+
+    #[test]
+    fn test_parse_oracle_config_negative_value() {
+        // Negative values can't parse as u64
+        let result = parse_oracle_config("43113:-100:1000000");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_oracle_config_empty_string() {
+        let result = parse_oracle_config("");
+        assert!(result.is_err());
+    }
 }

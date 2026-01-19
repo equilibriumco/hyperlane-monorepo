@@ -26,5 +26,12 @@
     "tx_hash": "9df88a7f4489cff15cbff0691afe12671315f4ad744943ed1d56ab05224f53e0",
     "output_index": 0,
     "lovelace": 17000000
+  },
+  {
+    "script_name": "igp",
+    "script_hash": "41f6064ba9989daf8efaec0793360423552d2dcb2f16991254a2902d",
+    "tx_hash": "f585118df2ab8a4616f078348b010c5932727cda37d60125160cfa1a29364b9a",
+    "output_index": 0,
+    "lovelace": 12000000
   }
 ]
