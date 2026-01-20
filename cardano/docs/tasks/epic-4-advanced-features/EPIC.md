@@ -26,6 +26,7 @@ Implement advanced features including performance optimizations, contract upgrad
 | 4.3 | [Parallel Queries](./task-4.3-parallel-queries.md) | ⬜ | - | Parallelize Blockfrost calls |
 | 4.4 | [NFT-Based Contract Identity](./task-4.4-nft-identity.md) | ⬜ | - | Stable identity across upgrades |
 | 4.5 | [Parallel Inbound Processing](./task-4.5-parallel-processing.md) | ⬜ | 4.4 | Reference inputs for scalability (includes per-recipient ISM) |
+| 4.6 | [IGP Refund Support](./task-4.6-igp-refund.md) | ⬜ | 3.1 | Refund unused gas payments to users |
 
 ## Task Details
 

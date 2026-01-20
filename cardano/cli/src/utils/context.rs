@@ -72,6 +72,14 @@ impl CliContext {
         }
     }
 
+    /// Get network ID for transaction building (0 = testnet, 1 = mainnet)
+    pub fn network_id(&self) -> u8 {
+        match self.network {
+            CardanoNetwork::Mainnet => 1,
+            CardanoNetwork::Preprod | CardanoNetwork::Preview => 0,
+        }
+    }
+
     /// Require an API key (error if not set)
     pub fn require_api_key(&self) -> Result<&str> {
         self.api_key

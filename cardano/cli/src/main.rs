@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use commands::{config, deferred, deploy, init, ism, mailbox, query, registry, tx, utxo, validator, warp};
+use commands::{config, deferred, deploy, igp, init, ism, mailbox, query, registry, tx, utxo, validator, warp};
 
 /// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
 #[derive(Parser)]
@@ -53,6 +53,9 @@ enum Commands {
 
     /// Initialize contracts with state NFTs and initial datums
     Init(init::InitArgs),
+
+    /// Manage Interchain Gas Paymaster (IGP)
+    Igp(igp::IgpArgs),
 
     /// Manage Interchain Security Module (ISM) validators
     Ism(ism::IsmArgs),
@@ -135,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Deploy(args) => deploy::execute(&ctx, args).await,
         Commands::Init(args) => init::execute(&ctx, args).await,
+        Commands::Igp(args) => igp::execute(&ctx, args).await,
         Commands::Ism(args) => ism::execute(&ctx, args).await,
         Commands::Mailbox(args) => mailbox::execute(&ctx, args).await,
         Commands::Registry(args) => registry::execute(&ctx, args).await,

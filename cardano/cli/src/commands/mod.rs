@@ -3,6 +3,7 @@
 pub mod config;
 pub mod deferred;
 pub mod deploy;
+pub mod igp;
 pub mod init;
 pub mod ism;
 pub mod mailbox;
