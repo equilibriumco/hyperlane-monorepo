@@ -1,7 +1,8 @@
 [← Epic 2: Token Bridge](./EPIC.md) | [Epics Overview](../README.md)
 
 # Task 2.5: Transfer Testing
-**Status:** ⬜ Not Started
+
+**Status:** 🟡 In Progress
 **Complexity:** High
 **Depends On:** Epic 1, [Task 2.4](./task-2.4-remote-enrollment.md)
 
@@ -21,6 +22,7 @@ Test end-to-end token transfers in both directions.
 ### 1. Cardano → Remote (Collateral)
 
 Steps:
+
 1. Lock tokens and send to Fuji using `warp transfer` command
 2. Verify tokens locked in Cardano vault
 3. Verify message dispatched via mailbox
@@ -30,6 +32,7 @@ Steps:
 ### 2. Remote → Cardano (Collateral)
 
 Steps:
+
 1. On Fuji: burn synthetic and send to Cardano
 2. Wait for message delivery to Cardano warp route
 3. Verify collateral released from vault
