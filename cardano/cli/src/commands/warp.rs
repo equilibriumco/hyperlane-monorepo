@@ -45,9 +45,10 @@ enum WarpCommands {
         #[arg(long)]
         token_asset: Option<String>,
 
-        /// Local token decimals (Cardano side, e.g., 6 for ADA)
+        /// Local token decimals (Cardano side). Required for collateral/synthetic.
+        /// Ignored for native type (ADA is always 6 decimals).
         #[arg(long)]
-        decimals: u8,
+        decimals: Option<u8>,
 
         /// Remote token decimals (wire format, e.g., 18 for EVM chains)
         #[arg(long)]
@@ -185,11 +186,17 @@ async fn deploy(
     token_type: TokenType,
     token_policy: Option<String>,
     token_asset: Option<String>,
-    decimals: u8,
+    decimals: Option<u8>,
     remote_decimals: u8,
     dry_run: bool,
 ) -> Result<()> {
     println!("{}", "Deploying warp route...".cyan());
+
+    // For Native (ADA), decimals is always 6. For others, it's required.
+    let decimals = match token_type {
+        TokenType::Native => 6,
+        _ => decimals.ok_or_else(|| anyhow!("--decimals required for collateral/synthetic type"))?,
+    };
 
     let type_str = match token_type {
         TokenType::Native => "Native (ADA)",
