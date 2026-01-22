@@ -5,7 +5,7 @@ use cardano/address.{Address, Credential, Script}
 use cardano/assets.{lovelace_of, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use types.{
-  AssetName, Domain, HyperlaneAddress, PolicyId, ScriptHash, UtxoLocator,
+  AssetName, Domain, HyperlaneAddress, PolicyId, ScriptHash,
   WarpRouteDatum, WarpRouteRedeemer, WarpTransferBody,
   TransferRemote, ReceiveTransfer, EnrollRemoteRoute,
   Collateral, Synthetic, Native,
@@ -16,23 +16,23 @@ use utils.{assoc_find, find_input, is_signed_by}
 /// Enables token bridging between Cardano and other Hyperlane-connected chains
 ///
 /// **Supported Token Types:**
-/// - Collateral: Lock native Cardano tokens in a vault, release on receive
+/// - Collateral: Lock native Cardano tokens in warp route UTXO, release on receive
 /// - Synthetic: Mint synthetic tokens on receive, burn on send
-/// - Native: Lock ADA in a vault (for bridging ADA)
+/// - Native: Lock ADA in warp route UTXO (for bridging ADA)
 ///
 /// **Token Flow:**
 /// Outbound (Cardano → Other):
 /// 1. User calls TransferRemote with destination, recipient, amount
-/// 2. Tokens are locked (collateral/native) or burned (synthetic)
+/// 2. Tokens are locked in warp route UTXO (collateral/native) or burned (synthetic)
 /// 3. Message is dispatched via Mailbox
 /// 4. Relayer delivers message to destination chain warp route
 ///
 /// Inbound (Other → Cardano):
 /// 1. Relayer processes message from origin warp route
 /// 2. Calls ReceiveTransfer with origin, sender, body
-/// 3. Tokens are released (collateral/native) or minted (synthetic)
+/// 3. Tokens are released from warp route UTXO (collateral/native) or minted (synthetic)
 /// 4. Recipient receives tokens
-validator warp_route(mailbox_policy_id: PolicyId) {
+validator warp_route(mailbox_policy_id: PolicyId, _state_nft_policy_id: PolicyId) {
   spend(
     datum: Option<WarpRouteDatum>,
     redeemer: WarpRouteRedeemer,
@@ -102,22 +102,23 @@ fn validate_transfer_remote(
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
   // 6. Based on token type, validate the token movement
+  // For Native/Collateral: tokens are locked in the warp route UTXO itself
   let token_valid =
     when datum.config.token_type is {
-      Collateral { policy_id, asset_name, vault_locator } ->
+      Collateral { policy_id, asset_name } ->
         validate_collateral_lock(
-          vault_locator,
+          own_input.output,
+          continuation,
           policy_id,
           asset_name,
           amount,
-          tx,
         )
 
       Synthetic { minting_policy } ->
         validate_synthetic_burn(minting_policy, amount, tx)
 
-      Native { vault_locator } ->
-        validate_native_lock(vault_locator, amount, tx)
+      Native ->
+        validate_native_lock(own_input.output, continuation, amount)
     }
   expect token_valid
 
@@ -152,50 +153,68 @@ fn validate_receive_transfer(
   // 2. Verify mailbox is calling us (mailbox UTXO spent in same tx)
   expect mailbox_is_caller(mailbox_policy_id, tx)
 
-  // 3. Decode the transfer body
-  expect Some(transfer) = decode_warp_transfer_body(body)
-  expect transfer.amount > 0
+  // 3. Decode the EVM TokenMessage body (wire format)
+  // This parses: recipient (32 bytes) || amount (32 bytes uint256)
+  expect Some(wire_transfer) = decode_evm_token_message(body)
+  expect wire_transfer.amount > 0
 
-  // 4. Find own input
+  // 4. Convert wire amount (remote_decimals) to local amount (local_decimals)
+  // Example: 1e18 wire (18 decimals) -> 1e6 local (6 decimals ADA)
+  let local_amount = convert_decimals(
+    wire_transfer.amount,
+    datum.config.remote_decimals,
+    datum.config.decimals,
+  )
+  expect local_amount > 0
+
+  // 5. Find own input
   expect Some(own_input) = find_input(tx, own_ref)
   let own_address = own_input.output.address
 
-  // 5. Find continuation output
+  // 6. Find continuation output
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
-  // 6. Based on token type, validate token release/mint
+  // 7. Based on token type, validate token release/mint with LOCAL amount
+  // For Native/Collateral: tokens are released from the warp route UTXO itself
   let token_valid =
     when datum.config.token_type is {
-      Collateral { policy_id, asset_name, vault_locator } ->
+      Collateral { policy_id, asset_name } ->
         validate_collateral_release(
-          vault_locator,
+          own_input.output,
+          continuation,
           policy_id,
           asset_name,
-          transfer.recipient,
-          transfer.amount,
+          wire_transfer.recipient,
+          local_amount,
           tx,
         )
 
       Synthetic { minting_policy } ->
         validate_synthetic_mint(
           minting_policy,
-          transfer.recipient,
-          transfer.amount,
+          wire_transfer.recipient,
+          local_amount,
           tx,
         )
 
-      Native { vault_locator } ->
-        validate_native_release(vault_locator, transfer.recipient, transfer.amount, tx)
+      Native ->
+        validate_native_release(
+          own_input.output,
+          continuation,
+          wire_transfer.recipient,
+          local_amount,
+          tx,
+        )
     }
   expect token_valid
 
-  // 7. Verify datum updated (decrement total_bridged)
+  // 8. Verify datum updated (decrement total_bridged by LOCAL amount)
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: WarpRouteDatum = cont_datum_data
   expect cont_datum.config == datum.config
   expect cont_datum.owner == datum.owner
-  expect cont_datum.total_bridged == datum.total_bridged - transfer.amount
+  expect cont_datum.total_bridged == datum.total_bridged - local_amount
 
   True
 }
@@ -243,44 +262,37 @@ fn validate_enroll_remote_route(
 }
 
 // ============================================================================
-// Collateral Token Helpers (Lock native tokens in vault)
+// Collateral Token Helpers (Lock native tokens in warp route UTXO)
 // ============================================================================
 
-/// Validate that tokens are locked in the vault
+/// Validate that tokens are locked in the warp route UTXO
 fn validate_collateral_lock(
-  vault_locator: UtxoLocator,
+  own_input: Output,
+  own_output: Output,
   policy_id: PolicyId,
   asset_name: AssetName,
   amount: Int,
-  tx: Transaction,
 ) -> Bool {
-  // Find vault input and output by the NFT locator
-  expect Some(vault_in) = find_input_by_nft(tx, vault_locator)
-  expect Some(vault_out) = find_output_by_nft(tx, vault_locator)
-
-  // Vault should receive `amount` more tokens
-  let input_tokens = quantity_of(vault_in.output.value, policy_id, asset_name)
-  let output_tokens = quantity_of(vault_out.value, policy_id, asset_name)
+  // Warp route UTXO should receive `amount` more tokens
+  let input_tokens = quantity_of(own_input.value, policy_id, asset_name)
+  let output_tokens = quantity_of(own_output.value, policy_id, asset_name)
 
   output_tokens >= input_tokens + amount
 }
 
-/// Validate that tokens are released from the vault
+/// Validate that tokens are released from the warp route UTXO
 fn validate_collateral_release(
-  vault_locator: UtxoLocator,
+  own_input: Output,
+  own_output: Output,
   policy_id: PolicyId,
   asset_name: AssetName,
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
 ) -> Bool {
-  // Find vault input and output
-  expect Some(vault_in) = find_input_by_nft(tx, vault_locator)
-  expect Some(vault_out) = find_output_by_nft(tx, vault_locator)
-
-  // Vault should release `amount` tokens
-  let input_tokens = quantity_of(vault_in.output.value, policy_id, asset_name)
-  let output_tokens = quantity_of(vault_out.value, policy_id, asset_name)
+  // Warp route UTXO should release `amount` tokens
+  let input_tokens = quantity_of(own_input.value, policy_id, asset_name)
+  let output_tokens = quantity_of(own_output.value, policy_id, asset_name)
   expect input_tokens - output_tokens == amount
 
   // Recipient should receive the tokens
@@ -324,40 +336,29 @@ fn validate_synthetic_mint(
 }
 
 // ============================================================================
-// Native ADA Helpers
+// Native ADA Helpers (Lock/release ADA in warp route UTXO)
 // ============================================================================
 
-/// Validate that ADA is locked in the vault
-fn validate_native_lock(
-  vault_locator: UtxoLocator,
-  amount: Int,
-  tx: Transaction,
-) -> Bool {
-  // Find vault input and output
-  expect Some(vault_in) = find_input_by_nft(tx, vault_locator)
-  expect Some(vault_out) = find_output_by_nft(tx, vault_locator)
-
-  // Vault should receive `amount` more lovelace
-  let input_ada = lovelace_of(vault_in.output.value)
-  let output_ada = lovelace_of(vault_out.value)
+/// Validate that ADA is locked in the warp route UTXO
+fn validate_native_lock(own_input: Output, own_output: Output, amount: Int) -> Bool {
+  // Warp route UTXO should receive `amount` more lovelace
+  let input_ada = lovelace_of(own_input.value)
+  let output_ada = lovelace_of(own_output.value)
 
   output_ada >= input_ada + amount
 }
 
-/// Validate that ADA is released from the vault
+/// Validate that ADA is released from the warp route UTXO
 fn validate_native_release(
-  vault_locator: UtxoLocator,
+  own_input: Output,
+  own_output: Output,
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
 ) -> Bool {
-  // Find vault input and output
-  expect Some(vault_in) = find_input_by_nft(tx, vault_locator)
-  expect Some(vault_out) = find_output_by_nft(tx, vault_locator)
-
-  // Vault should release `amount` lovelace
-  let input_ada = lovelace_of(vault_in.output.value)
-  let output_ada = lovelace_of(vault_out.value)
+  // Warp route UTXO should release `amount` lovelace
+  let input_ada = lovelace_of(own_input.value)
+  let output_ada = lovelace_of(own_output.value)
   expect input_ada - output_ada >= amount
 
   // Recipient should receive the ADA
@@ -386,29 +387,6 @@ fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
 fn mailbox_dispatch_called(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
   // Same check - if mailbox UTXO is spent, dispatch is happening
   mailbox_is_caller(mailbox_policy_id, tx)
-}
-
-/// Find an input by NFT locator
-fn find_input_by_nft(
-  tx: Transaction,
-  locator: UtxoLocator,
-) -> Option<transaction.Input> {
-  list.find(
-    tx.inputs,
-    fn(input) {
-      quantity_of(input.output.value, locator.policy_id, locator.asset_name) > 0
-    },
-  )
-}
-
-/// Find an output by NFT locator
-fn find_output_by_nft(tx: Transaction, locator: UtxoLocator) -> Option<Output> {
-  list.find(
-    tx.outputs,
-    fn(output) {
-      quantity_of(output.value, locator.policy_id, locator.asset_name) > 0
-    },
-  )
 }
 
 /// Check if recipient receives tokens
@@ -457,21 +435,52 @@ fn address_matches_bytes(addr: Address, recipient_bytes: ByteArray) -> Bool {
   }
 }
 
-/// Decode warp transfer body
-/// Format: recipient (variable) || amount (8 bytes big-endian)
-fn decode_warp_transfer_body(body: ByteArray) -> Option<WarpTransferBody> {
+/// Decode EVM TokenMessage body (wire format from other chains)
+/// EVM TokenMessage format (from TokenMessage.sol):
+/// - bytes 0-31: recipient (bytes32) - Cardano credential padded with 4 leading zeros
+/// - bytes 32-63: amount (uint256, big-endian) - wire format amount (remote_decimals)
+/// - bytes 64+: metadata (optional, ignored)
+fn decode_evm_token_message(body: ByteArray) -> Option<WarpTransferBody> {
   let len = bytearray.length(body)
-  if len < 8 {
+  // Minimum 64 bytes: 32 recipient + 32 amount
+  if len < 64 {
     None
   } else {
-    // Last 8 bytes are the amount
-    let amount_bytes = bytearray.slice(body, len - 8, len - 1)
+    // Extract recipient: bytes 0-31 (32 bytes)
+    // EVM pads 28-byte Cardano credentials with 4 leading zeros
+    // We extract the last 28 bytes: bytes 4-31
+    let recipient = bytearray.slice(body, 4, 31)
+
+    // Extract amount: bytes 32-63 (32 bytes uint256)
+    // We only use the last 8 bytes since Cardano amounts fit in u64
+    let amount_bytes = bytearray.slice(body, 56, 63)
     let amount = bytes_to_int(amount_bytes)
 
-    // Everything before is the recipient
-    let recipient = bytearray.slice(body, 0, len - 9)
-
     Some(WarpTransferBody { recipient, amount })
+  }
+}
+
+/// Convert wire format amount (remote_decimals) to local amount (local_decimals)
+/// Formula: local_amount = wire_amount / 10^(remote_decimals - local_decimals)
+/// If local_decimals >= remote_decimals, no conversion needed (multiply instead)
+fn convert_decimals(wire_amount: Int, remote_decimals: Int, local_decimals: Int) -> Int {
+  if local_decimals >= remote_decimals {
+    // Upsample: multiply by 10^(local_decimals - remote_decimals)
+    let multiplier = pow10(local_decimals - remote_decimals)
+    wire_amount * multiplier
+  } else {
+    // Downsample: divide by 10^(remote_decimals - local_decimals)
+    let divisor = pow10(remote_decimals - local_decimals)
+    wire_amount / divisor
+  }
+}
+
+/// Compute 10^n for decimal scaling
+fn pow10(n: Int) -> Int {
+  if n <= 0 {
+    1
+  } else {
+    10 * pow10(n - 1)
   }
 }
 
@@ -481,10 +490,10 @@ fn bytes_to_int(bytes: ByteArray) -> Int {
 }
 
 /// Get minted amount for a policy (negative means burn)
-fn get_minted_amount(_tx: Transaction, _policy_id: PolicyId) -> Int {
-  // TODO: Implement actual minting amount calculation from tx.mint
-  // This is a placeholder - actual implementation would sum tokens under this policy
-  0
+/// Sums all token quantities under the given policy from tx.mint
+fn get_minted_amount(tx: Transaction, policy_id: PolicyId) -> Int {
+  let policy_mints = tokens(tx.mint, policy_id)
+  dict.foldl(policy_mints, 0, fn(_asset_name, quantity, acc) { acc + quantity })
 }
 
 /// Upsert a route in the routes list

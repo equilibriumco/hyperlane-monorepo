@@ -427,24 +427,22 @@ pub type IgpRedeemer {
 
 /// Warp token type
 pub type WarpTokenType {
-  /// Lock tokens in vault, release on receive
-  Collateral {
-    policy_id: PolicyId,
-    asset_name: AssetName,
-    vault_locator: UtxoLocator,
-  }
+  /// Lock tokens in warp route UTXO, release on receive
+  Collateral { policy_id: PolicyId, asset_name: AssetName }
   /// Mint synthetic tokens on receive, burn on send
   Synthetic { minting_policy: ScriptHash }
-  /// Native ADA
-  Native { vault_locator: UtxoLocator }
+  /// Native ADA (locked in warp route UTXO)
+  Native
 }
 
 /// Warp route configuration
 pub type WarpRouteConfig {
   /// Token type being bridged
   token_type: WarpTokenType,
-  /// Decimal places for token
+  /// Decimal places for local token on Cardano
   decimals: Int,
+  /// Decimal places for remote token (wire format, typically 18 for EVM)
+  remote_decimals: Int,
   /// Remote routes (other chains): List of (domain, route_address)
   remote_routes: List<(Domain, HyperlaneAddress)>,
 }

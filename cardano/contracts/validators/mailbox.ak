@@ -94,7 +94,7 @@ fn validate_dispatch(
       version: 3,
       nonce: datum.outbound_nonce,
       origin: datum.local_domain,
-      sender: get_sender_address(tx),
+      sender: get_sender_address(tx, own_ref),
       destination,
       recipient,
       body,
@@ -225,9 +225,38 @@ fn validate_continuation(
 }
 
 /// Get the sender address from the transaction
-/// Returns the first input's address as a 32-byte Hyperlane address
-fn get_sender_address(tx: Transaction) -> HyperlaneAddress {
-  expect Some(first_input) = list.head(tx.inputs)
+/// Returns the first script input's address that is NOT the mailbox, as a 32-byte Hyperlane address.
+/// This ensures that for TokenRouter/WarpRoute dispatches, the sender is the warp_route, not the mailbox.
+fn get_sender_address(tx: Transaction, mailbox_ref: OutputReference) -> HyperlaneAddress {
+  // Find the first script input that is NOT the mailbox
+  // tx.inputs are already sorted in canonical order (by TxId, then output_index)
+  let sender_input =
+    list.find(
+      tx.inputs,
+      fn(input) {
+        // Skip the mailbox input - it's always present but not the "sender" for TokenRouter messages
+        if input.output_reference == mailbox_ref {
+          False
+        } else {
+          // Only consider script addresses (Script credential)
+          when input.output.address.payment_credential is {
+            Script(_) -> True
+            _ -> False
+          }
+        }
+      },
+    )
+
+  // Fall back to first input if no other script input found (e.g., simple dispatch from payment key)
+  let first_input =
+    when sender_input is {
+      Some(input) -> input
+      None -> {
+        expect Some(fallback) = list.head(tx.inputs)
+        fallback
+      }
+    }
+
   address_to_hyperlane(first_input.output.address)
 }
 
