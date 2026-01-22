@@ -1300,6 +1300,45 @@ pub fn build_warp_route_native_datum_with_routes(
     Ok(builder.build())
 }
 
+/// Build a WarpRoute TransferRemote redeemer
+///
+/// Structure:
+/// ```
+/// TransferRemote { destination: Domain, recipient: HyperlaneAddress, amount: Int }
+/// ```
+/// TransferRemote is constructor 0 in WarpRouteRedeemer
+pub fn build_transfer_remote_redeemer(
+    destination: u32,
+    recipient_hex: &str, // 32 bytes (64 hex chars)
+    amount: i64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // TransferRemote is constructor 0
+    builder.start_constr(0);
+    builder.uint(destination as u64);
+    builder.bytes_hex(recipient_hex)?;
+    builder.int(amount);
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a Synthetic token burn redeemer
+///
+/// The synthetic_token validator ignores the redeemer (uses `_redeemer: Data`)
+/// and just checks that the warp route is being spent in the same transaction.
+/// We use a simple unit value for the redeemer.
+pub fn build_synthetic_burn_redeemer(_amount: i64) -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+
+    // Use a simple unit constructor (Constr 0 [])
+    builder.start_constr(0);
+    builder.end_constr();
+
+    builder.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
