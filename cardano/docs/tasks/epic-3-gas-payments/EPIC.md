@@ -29,7 +29,7 @@ Per the official Hyperlane documentation, the IGP must support:
 | `GasPayment` event emission | ✅ Adapted | Redeemer serves as event on Cardano |
 | Refund address support | ⬜ Deferred | Planned for [Task 4.6](../epic-4-advanced-features/task-4.6-igp-refund.md) |
 | Post-dispatch hook integration | ❌ Missing | For automatic gas payment at dispatch |
-| Relayer gas payment indexing | ⬜ Pending | Task 3.2 |
+| Relayer gas payment indexing | ✅ Implemented | Task 3.2 |
 
 ## Current State
 
@@ -37,14 +37,14 @@ Per the official Hyperlane documentation, the IGP must support:
 - On-chain IGP contract (`contracts/validators/igp.ak`)
 - IGP initialized on Preview testnet (Task 3.0 ✅)
 - CLI commands: show, quote, set-oracle, pay-for-gas, claim (Task 3.1 ✅)
-- Basic Rust struct (`rust/main/chains/hyperlane-cardano/src/interchain_gas.rs`)
+- Gas payment indexing via `fetch_logs_in_range` (Task 3.2 ✅)
+- `parse_pay_for_gas_redeemer` and `calculate_igp_payment` functions
 - `InterchainGasPaymaster` trait implementation (partial)
 - Gas calculation logic
 - Owner-only oracle configuration
 
 ### Missing
 - Refund address handling (deferred to [Task 4.6](../epic-4-advanced-features/task-4.6-igp-refund.md))
-- RPC endpoint for gas payment indexing (Task 3.2)
 - Post-dispatch hook integration (Task 3.5)
 - End-to-end testing (Task 3.6)
 
@@ -54,7 +54,7 @@ Per the official Hyperlane documentation, the IGP must support:
 |---|------|--------|------------|-------------|
 | 3.0 | [Init IGP](./task-3.0-init-igp.md) | ✅ | - | **PREREQUISITE**: Initialize IGP contract on testnet |
 | 3.1 | [CLI Commands](./task-3.1-cli-commands.md) | ✅ | 3.0 | pay-for-gas, quote, claim, set-oracle, show |
-| 3.2 | [RPC Endpoint](./task-3.2-rpc-endpoint.md) | ⬜ | 3.0 | Implement gas payment indexing and quote endpoint |
+| 3.2 | [RPC Endpoint](./task-3.2-rpc-endpoint.md) | ✅ | 3.0 | Implement gas payment indexing and quote endpoint |
 | 3.3 | [Contract Enhancements](./task-3.3-contract-enhancements.md) | ⏸️ | - | Refund handling moved to [Task 4.6](../epic-4-advanced-features/task-4.6-igp-refund.md) |
 | 3.4 | [Relayer Integration](./task-3.4-relayer-integration.md) | ⬜ | 3.2 | Relayer queries and enforces gas payments |
 | 3.5 | [Post-Dispatch Hook](./task-3.5-post-dispatch-hook.md) | ⬜ | 3.1, 3.2 | Automatic gas payment at dispatch time |
@@ -170,7 +170,7 @@ Unlike EVM which has explicit events, Cardano uses transaction redeemers as the 
 - [x] IGP deployed and configured on testnet (Task 3.0)
 - [x] CLI commands for all IGP operations work (Task 3.1)
 - [x] `quoteGasPayment` CLI command implemented (Task 3.1)
-- [ ] Gas payments indexed correctly from chain (Task 3.2)
+- [x] Gas payments indexed correctly from chain (Task 3.2)
 - [ ] Relayer queries and enforces Cardano IGP (Task 3.4)
 - [ ] Post-dispatch hook enables automatic payment (Task 3.5)
 - [ ] E2E test: quote → pay → deliver → claim (Task 3.6)
