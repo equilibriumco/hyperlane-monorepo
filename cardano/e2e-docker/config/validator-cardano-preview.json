@@ -57,6 +57,10 @@
       "index": {
         "from": ${CARDANO_INDEX_FROM},
         "chunk": 100
+      },
+      "signer": {
+        "type": "hexKey",
+        "key": "${CARDANO_SIGNER_KEY}"
       }
     }
   },
