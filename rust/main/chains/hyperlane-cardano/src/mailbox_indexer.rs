@@ -98,7 +98,15 @@ impl CardanoMailboxIndexer {
     }
 
     /// Extract the sender address from transaction inputs
-    /// The sender is the first input's address, converted to a Hyperlane address
+    /// The sender is the first spent script input's address (in canonical order) that is NOT the mailbox,
+    /// converted to a Hyperlane address.
+    ///
+    /// IMPORTANT: Cardano's on-chain tx.inputs only includes SPENT inputs (not reference or collateral),
+    /// and they are sorted in canonical order (by TxId, then output_index).
+    ///
+    /// For TokenRouter/WarpRoute messages, the sender should be the warp_route script, not the mailbox.
+    /// Since UTXO ordering is determined by (tx_hash, output_index) and we can't control which comes first,
+    /// we skip the mailbox when identifying the sender.
     ///
     /// The on-chain Aiken contract computes sender as:
     /// - For payment key credential: 0x00000000 || payment_key_hash (4 + 28 = 32 bytes)
@@ -107,8 +115,43 @@ impl CardanoMailboxIndexer {
         &self,
         tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
     ) -> H256 {
-        // Get the first input's address
-        if let Some(first_input) = tx_utxos.inputs.first() {
+        // Get the mailbox address to filter it out
+        let mailbox_address = self.get_mailbox_address().ok();
+
+        // Filter to only spent inputs (exclude reference and collateral inputs)
+        // Reference inputs appear in tx.reference_inputs on-chain, not tx.inputs
+        // Collateral inputs are only used on script failure, not in tx.inputs
+        let mut spent_inputs: Vec<_> = tx_utxos
+            .inputs
+            .iter()
+            .filter(|input| !input.collateral && !input.reference)
+            .collect();
+
+        // Sort canonically: by tx_hash (lexicographic), then by output_index
+        // This matches the Cardano ledger's canonical ordering for tx.inputs
+        spent_inputs.sort_by(|a, b| match a.tx_hash.cmp(&b.tx_hash) {
+            std::cmp::Ordering::Equal => a.output_index.cmp(&b.output_index),
+            other => other,
+        });
+
+        // Get the first spent script input's address (in canonical order), skipping the mailbox
+        // This ensures that for warp route dispatches, the warp_route is the sender, not the mailbox
+        let sender_input = spent_inputs.iter().find(|input| {
+            // Skip the mailbox input - it's always present but not the "sender" for TokenRouter messages
+            if let Some(ref mailbox_addr) = mailbox_address {
+                if &input.address == mailbox_addr {
+                    return false;
+                }
+            }
+            // Only consider script addresses (starting with "addr_test1w" or "addr1w" for mainnet)
+            // These indicate script credentials (type 1,3,5,7 in address header)
+            input.address.starts_with("addr_test1w") || input.address.starts_with("addr1w")
+        });
+
+        // Fall back to first input if no other script input found (e.g., simple dispatch from EOA)
+        let first_input = sender_input.or_else(|| spent_inputs.first());
+
+        if let Some(first_input) = first_input {
             if first_input.address.starts_with("addr") {
                 // Decode the bech32 address to get raw bytes
                 if let Ok((_, data_5bit, _)) = bech32::decode(&first_input.address) {
@@ -138,7 +181,9 @@ impl CardanoMailboxIndexer {
                             sender_bytes[4..32].copy_from_slice(credential);
 
                             info!(
-                                "Extracted sender from address {}: 0x{}",
+                                "Extracted sender from first spent input (canonical): tx_hash={}, output_index={}, address={}, sender=0x{}",
+                                first_input.tx_hash,
+                                first_input.output_index,
                                 first_input.address,
                                 hex::encode(&sender_bytes)
                             );

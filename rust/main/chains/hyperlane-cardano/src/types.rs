@@ -462,7 +462,10 @@ pub enum WarpTokenType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WarpRouteConfig {
     pub token_type: WarpTokenType,
+    /// Local token decimals (e.g., 6 for ADA)
     pub decimals: u8,
+    /// Remote/wire format decimals (e.g., 18 for EVM chains)
+    pub remote_decimals: u8,
     /// Remote routes: (domain, route_address)
     pub remote_routes: Vec<(Domain, HyperlaneAddress)>,
 }
@@ -522,24 +525,6 @@ impl WarpTransferBody {
         let amount = u64::from_be_bytes(amount_bytes);
         Some(Self { recipient, amount })
     }
-}
-
-/// Vault datum (matches Aiken VaultDatum)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultDatum {
-    pub warp_route_hash: ScriptHash,
-    pub owner: [u8; 28],
-    /// Token being locked (None for ADA vault)
-    pub token: Option<(String, String)>, // (policy_id, asset_name)
-    pub total_locked: i64,
-}
-
-/// Vault redeemer (matches Aiken VaultRedeemer)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VaultRedeemer {
-    Lock { amount: u64 },
-    Release { amount: u64, recipient: Vec<u8> },
-    EmergencyWithdraw { amount: u64 },
 }
 
 #[cfg(test)]

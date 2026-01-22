@@ -297,11 +297,23 @@ impl HyperlaneTxBuilder {
 
         // 5. Find additional inputs required by recipient
         let mut additional_utxos = Vec::new();
+        info!(
+            "Looking for {} additional inputs from registration",
+            registration.additional_inputs.len()
+        );
         for input in &registration.additional_inputs {
+            info!(
+                "Finding additional input: name={}, policy_id={}, asset_name={}, must_be_spent={}",
+                input.name, input.locator.policy_id, input.locator.asset_name, input.must_be_spent
+            );
             let utxo = self
                 .provider
                 .find_utxo_by_nft(&input.locator.policy_id, &input.locator.asset_name)
                 .await?;
+            info!(
+                "Found additional input UTXO: {}#{}, reference_script_hash={:?}",
+                utxo.tx_hash, utxo.output_index, utxo.reference_script_hash
+            );
             additional_utxos.push((utxo, input.must_be_spent));
         }
 
@@ -313,15 +325,46 @@ impl HyperlaneTxBuilder {
         };
         let mailbox_redeemer_cbor = encode_mailbox_redeemer(&mailbox_redeemer)?;
 
-        // SECURITY: Pass the full message and message_id to recipient
-        // The recipient MUST verify: keccak256(encode_message(message)) == message_id
-        // This ensures the data is cryptographically linked to what the ISM validated
-        let recipient_redeemer: HyperlaneRecipientRedeemer<()> =
-            HyperlaneRecipientRedeemer::HandleMessage {
-                message: msg.clone(),
-                message_id,
-            };
-        let recipient_redeemer_cbor = encode_recipient_redeemer(&recipient_redeemer)?;
+        // Build recipient redeemer based on recipient type
+        // TokenReceiver (warp routes) use WarpRouteRedeemer::ReceiveTransfer
+        // Generic/Deferred use HyperlaneRecipientRedeemer::HandleMessage
+        let recipient_redeemer_cbor = match &registration.recipient_type {
+            crate::types::RecipientType::TokenReceiver { .. } => {
+                info!("TokenReceiver recipient - using WarpRouteRedeemer::ReceiveTransfer");
+
+                // Log the original EVM TokenMessage for debugging
+                let token_msg = parse_evm_token_message(&msg.body)?;
+                info!(
+                    "EVM TokenMessage: recipient={}, wire_amount={}",
+                    hex::encode(&token_msg.recipient),
+                    token_msg.amount
+                );
+
+                // SECURITY: Pass the ORIGINAL message body to the warp route
+                // The on-chain contract will:
+                // 1. Parse the EVM format (32 bytes recipient + 32 bytes amount)
+                // 2. Extract the 28-byte Cardano credential
+                // 3. Convert wire amount to local amount using remote_decimals/decimals
+                // This ensures the amount conversion is validated on-chain
+                let warp_redeemer = crate::types::WarpRouteRedeemer::ReceiveTransfer {
+                    origin: msg.origin,
+                    sender: msg.sender,
+                    body: msg.body.clone(), // Original EVM format body
+                };
+                encode_warp_route_redeemer(&warp_redeemer)?
+            }
+            _ => {
+                // SECURITY: Pass the full message and message_id to recipient
+                // The recipient MUST verify: keccak256(encode_message(message)) == message_id
+                // This ensures the data is cryptographically linked to what the ISM validated
+                let recipient_redeemer: HyperlaneRecipientRedeemer<()> =
+                    HyperlaneRecipientRedeemer::HandleMessage {
+                        message: msg.clone(),
+                        message_id,
+                    };
+                encode_recipient_redeemer(&recipient_redeemer)?
+            }
+        };
 
         // 7. Build recipient continuation datum based on recipient type
         // For Deferred, we also need to build the stored message datum and NFT mint redeemer
@@ -356,8 +399,34 @@ impl HyperlaneTxBuilder {
                     Some(nft_redeemer_cbor),
                 )
             }
-            _ => {
-                // Generic, TokenReceiver - use existing logic
+            crate::types::RecipientType::TokenReceiver { .. } => {
+                // TokenReceiver (warp routes) need special continuation datum handling
+                // Parse EVM TokenMessage and convert amount for the WarpRouteDatum update
+                let token_msg = parse_evm_token_message(&msg.body)?;
+                let decimals = extract_warp_route_decimals(&recipient_utxo)?;
+
+                // Convert wire amount to local amount using both decimal values
+                // This MUST match the on-chain conversion for the contract to validate
+                let local_amount = convert_wire_to_local_amount(
+                    token_msg.amount,
+                    decimals.remote_decimals,
+                    decimals.local_decimals,
+                );
+                info!(
+                    "Decimal conversion: {} (wire {} dec) -> {} (local {} dec)",
+                    token_msg.amount,
+                    decimals.remote_decimals,
+                    local_amount,
+                    decimals.local_decimals
+                );
+
+                // Build warp route continuation datum with updated total_bridged
+                let continuation_datum =
+                    build_warp_route_continuation_datum(&recipient_utxo, local_amount)?;
+                (continuation_datum, None, None)
+            }
+            crate::types::RecipientType::Generic => {
+                // Generic recipients use the standard recipient continuation datum
                 let continuation_datum =
                     build_recipient_continuation_datum(&recipient_utxo, &msg.body)?;
                 (continuation_datum, None, None)
@@ -425,6 +494,51 @@ impl HyperlaneTxBuilder {
             ism_redeemer_cbor.len()
         );
 
+        // 11. Handle TokenReceiver - extract release amount, recipient, and token type
+        // Funds are released directly from the warp_route UTXO (no separate vault)
+        let (token_release_amount, token_release_recipient, warp_token_type) = if matches!(
+            &registration.recipient_type,
+            crate::types::RecipientType::TokenReceiver { .. }
+        ) {
+            info!("TokenReceiver - preparing release from warp route UTXO");
+
+            // Parse EVM TokenMessage format: recipient (32 bytes) || amount (32 bytes uint256)
+            let token_msg = parse_evm_token_message(&msg.body)?;
+
+            // Convert from wire format to local token decimals
+            let decimals = extract_warp_route_decimals(&recipient_utxo)?;
+            let local_amount = convert_wire_to_local_amount(
+                token_msg.amount,
+                decimals.remote_decimals,
+                decimals.local_decimals,
+            );
+
+            // Extract 28-byte Cardano credential hash from bytes32 recipient
+            info!(
+                "TokenMessage recipient (32 bytes): {}",
+                hex::encode(&token_msg.recipient)
+            );
+            let cardano_credential = extract_cardano_credential_from_bytes32(&token_msg.recipient);
+            info!(
+                "Extracted credential (28 bytes): {}",
+                hex::encode(&cardano_credential)
+            );
+
+            // Extract token type from warp route datum
+            let token_type = extract_warp_route_token_type(&recipient_utxo)?;
+            info!("Token release: wire_amount={}, local_amount={} (remote={}, local={}), credential={}, token_type={:?}",
+                    token_msg.amount, local_amount, decimals.remote_decimals, decimals.local_decimals,
+                    hex::encode(&cardano_credential), token_type);
+
+            (
+                Some(local_amount),
+                Some(cardano_credential.to_vec()),
+                Some(token_type),
+            )
+        } else {
+            (None, None, None)
+        };
+
         Ok(ProcessTxComponents {
             mailbox_utxo,
             mailbox_redeemer_cbor,
@@ -443,6 +557,9 @@ impl HyperlaneTxBuilder {
             stored_message_datum_cbor,
             message_nft_redeemer_cbor,
             message_nft_ref_script_utxo,
+            token_release_amount,
+            token_release_recipient,
+            warp_token_type,
         })
     }
 
@@ -504,9 +621,69 @@ impl HyperlaneTxBuilder {
         let payer_address = payer.address_bech32(self.network_to_pallas());
         debug!("Payer address: {}", payer_address);
 
+        // Calculate additional funds needed when warp route doesn't have enough lovelace.
+        // This applies to:
+        // - Synthetic: need MIN_UTXO_LOVELACE for recipient output (minted tokens go there)
+        // - Native with small amounts: release amount < MIN_UTXO_LOVELACE but output needs MIN_UTXO_LOVELACE
+        // - Collateral: need MIN_UTXO_LOVELACE for the token release output
+        let payer_extra = match &components.warp_token_type {
+            Some(WarpTokenTypeInfo::Synthetic { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                let extra = if original_lovelace > MIN_UTXO_LOVELACE * 2 {
+                    0 // Warp route has enough (4+ ADA)
+                } else if original_lovelace > MIN_UTXO_LOVELACE {
+                    // Warp route has some but not full amount (2-4 ADA)
+                    MIN_UTXO_LOVELACE
+                        .saturating_sub(original_lovelace.saturating_sub(MIN_UTXO_LOVELACE))
+                } else {
+                    MIN_UTXO_LOVELACE // Warp route at minimum, payer covers full cost
+                };
+                info!(
+                    "Synthetic route: warp_route_lovelace={}, payer covers extra={} lovelace",
+                    original_lovelace, extra
+                );
+                extra
+            }
+            Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                let release_amount = components.token_release_amount.unwrap();
+                // The release output needs amount.max(MIN_UTXO_LOVELACE)
+                let release_needed = release_amount.max(MIN_UTXO_LOVELACE);
+                // The warp route continuation needs MIN_UTXO_LOVELACE
+                let total_needed = release_needed + MIN_UTXO_LOVELACE;
+                let extra = total_needed.saturating_sub(original_lovelace);
+                if extra > 0 {
+                    info!(
+                        "Native route shortfall: warp_route_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, payer covers extra={} lovelace",
+                        original_lovelace, release_needed, MIN_UTXO_LOVELACE, total_needed, extra
+                    );
+                }
+                extra
+            }
+            Some(WarpTokenTypeInfo::Collateral { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                // Collateral releases need MIN_UTXO_LOVELACE for the token output
+                let total_needed = MIN_UTXO_LOVELACE * 2; // continuation + release output
+                let extra = total_needed.saturating_sub(original_lovelace);
+                if extra > 0 {
+                    info!(
+                        "Collateral route shortfall: warp_route_lovelace={}, payer covers extra={} lovelace",
+                        original_lovelace, extra
+                    );
+                }
+                extra
+            }
+            _ => 0,
+        };
+
         // Find payer UTXOs for fee payment (coin selection)
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
-        let (selected_utxos, total_input) = self.select_utxos_for_fee(&payer_utxos)?;
+        let (selected_utxos, total_input) =
+            self.select_utxos_for_fee_with_extra(&payer_utxos, payer_extra)?;
         debug!(
             "Selected {} UTXOs with {} lovelace for fees",
             selected_utxos.len(),
@@ -526,11 +703,23 @@ impl HyperlaneTxBuilder {
         tx = tx.input(recipient_input);
 
         // Add additional inputs if they must be spent
+        info!(
+            "Processing {} additional inputs for transaction",
+            components.additional_utxos.len()
+        );
         for (utxo, must_spend) in &components.additional_utxos {
             let input = utxo_to_input(utxo)?;
             if *must_spend {
+                info!(
+                    "Adding additional input as SPENT: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
                 tx = tx.input(input);
             } else {
+                info!(
+                    "Adding additional input as REFERENCE (provides script): {}#{}, ref_script_hash={:?}",
+                    utxo.tx_hash, utxo.output_index, utxo.reference_script_hash
+                );
                 tx = tx.reference_input(input);
             }
         }
@@ -639,12 +828,112 @@ impl HyperlaneTxBuilder {
             create_continuation_output(&components.mailbox_utxo, &self.conf.mailbox_policy_id)?;
         tx = tx.output(mailbox_output);
 
-        // 2. Recipient continuation output (same address, same value, UPDATED datum)
-        let recipient_output = create_recipient_continuation_output(
+        // 2. Recipient continuation output (same address, UPDATED datum)
+        // For TokenReceiver (warp routes), reduce tokens based on token type:
+        // - Native: reduce lovelace
+        // - Collateral: reduce collateral token quantity
+        // - Synthetic: no reduction (tokens minted elsewhere)
+        let recipient_output = create_warp_route_continuation_output(
             &components.recipient_utxo,
             &components.recipient_continuation_datum_cbor,
+            components.token_release_amount,
+            components.warp_token_type.as_ref(),
         )?;
         tx = tx.output(recipient_output);
+
+        // 2a. For TokenReceiver (warp routes): Create release output to recipient
+        // The release output contains ADA (for Native) or tokens (for Collateral)
+        // For Synthetic routes, tokens are minted directly - no release output needed
+        if let (Some(release_amount), Some(ref recipient_bytes), Some(ref token_type)) = (
+            components.token_release_amount,
+            &components.token_release_recipient,
+            &components.warp_token_type,
+        ) {
+            // Skip release output for Synthetic (tokens minted by minting policy)
+            if !matches!(token_type, WarpTokenTypeInfo::Synthetic { .. }) {
+                let release_output =
+                    create_token_release_output(recipient_bytes, release_amount, token_type)?;
+                tx = tx.output(release_output);
+                info!(
+                    "Added release output: amount={} to recipient {}, token_type={:?}",
+                    release_amount,
+                    hex::encode(recipient_bytes),
+                    token_type
+                );
+            } else if let WarpTokenTypeInfo::Synthetic { minting_policy } = token_type {
+                // Synthetic route: Mint tokens directly to recipient
+                info!(
+                    "Synthetic route - minting {} tokens to recipient (len={}, bytes={})",
+                    release_amount,
+                    recipient_bytes.len(),
+                    hex::encode(recipient_bytes)
+                );
+
+                // Parse minting policy ID
+                let minting_policy_bytes: Hash<28> = parse_policy_id(minting_policy)?;
+
+                // Asset name is empty for synthetic tokens (as per warp_route.ak: recipient_receives_tokens(..., "", amount))
+                let asset_name: Vec<u8> = Vec::new();
+
+                // Mint the synthetic tokens
+                tx = tx
+                    .mint_asset(
+                        minting_policy_bytes,
+                        asset_name.clone(),
+                        release_amount as i64,
+                    )
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!("Failed to mint synthetic tokens: {:?}", e))
+                    })?;
+                info!(
+                    "Minting {} synthetic tokens with policy {}",
+                    release_amount, minting_policy
+                );
+
+                // Create recipient output with minted tokens + MIN_UTXO_LOVELACE
+                // Parse recipient credential (28 bytes) to derive address
+                let pallas_network = match self.conf.network {
+                    CardanoNetwork::Mainnet => Network::Mainnet,
+                    CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
+                };
+                let recipient_address = credential_to_address(recipient_bytes, pallas_network)?;
+                info!(
+                    "Recipient address: {}",
+                    recipient_address.to_bech32().unwrap_or_default()
+                );
+
+                let mut recipient_output = Output::new(recipient_address, MIN_UTXO_LOVELACE);
+                recipient_output = recipient_output
+                    .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!(
+                            "Failed to add synthetic tokens to output: {:?}",
+                            e
+                        ))
+                    })?;
+                tx = tx.output(recipient_output);
+
+                // Add mint redeemer for synthetic token (Mint = Constr 0 [])
+                // The synthetic_token minting policy uses MintMessage (constructor 0) for minting
+                let mint_redeemer_cbor = encode_constructor_0_redeemer();
+                let ex_units_mint = ExUnits {
+                    mem: DEFAULT_MEM_UNITS,
+                    steps: DEFAULT_STEP_UNITS,
+                };
+                tx = tx.add_mint_redeemer(
+                    minting_policy_bytes,
+                    mint_redeemer_cbor,
+                    Some(ex_units_mint),
+                );
+
+                debug!(
+                    "Added synthetic mint: amount={}, policy={}, recipient={}",
+                    release_amount,
+                    minting_policy,
+                    hex::encode(recipient_bytes)
+                );
+            }
+        }
 
         // 2b. Deferred-specific: Create message UTXO and mint message NFT
         // This is the UTXO that stores the message on-chain for later processing by a bot
@@ -814,8 +1103,71 @@ impl HyperlaneTxBuilder {
         } else {
             0
         };
-        let change_amount =
-            total_input.saturating_sub(fee + processed_marker_cost + message_utxo_cost);
+
+        // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
+        // to fund both the continuation output AND the recipient output, payer covers the difference.
+        // This applies to:
+        // - Synthetic: need MIN_UTXO_LOVELACE for recipient (minted tokens go there)
+        // - Native: need amount.max(MIN_UTXO_LOVELACE) for recipient + MIN_UTXO_LOVELACE for continuation
+        // - Collateral: need MIN_UTXO_LOVELACE for recipient (tokens) + MIN_UTXO_LOVELACE for continuation
+        let recipient_shortfall = match &components.warp_token_type {
+            Some(WarpTokenTypeInfo::Synthetic { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                let warp_contribution = if original_lovelace > MIN_UTXO_LOVELACE * 2 {
+                    MIN_UTXO_LOVELACE
+                } else if original_lovelace > MIN_UTXO_LOVELACE {
+                    original_lovelace.saturating_sub(MIN_UTXO_LOVELACE)
+                } else {
+                    0
+                };
+                let shortfall = MIN_UTXO_LOVELACE.saturating_sub(warp_contribution);
+                debug!(
+                    "Synthetic recipient shortfall: warp_lovelace={}, warp_contribution={}, shortfall={}",
+                    original_lovelace, warp_contribution, shortfall
+                );
+                shortfall
+            }
+            Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                let release_amount = components.token_release_amount.unwrap();
+                // Release output needs amount.max(MIN_UTXO_LOVELACE), continuation needs MIN_UTXO_LOVELACE
+                let release_needed = release_amount.max(MIN_UTXO_LOVELACE);
+                let total_needed = release_needed + MIN_UTXO_LOVELACE;
+                let shortfall = total_needed.saturating_sub(original_lovelace);
+                if shortfall > 0 {
+                    debug!(
+                        "Native recipient shortfall: warp_lovelace={}, release_needed={}, total_needed={}, shortfall={}",
+                        original_lovelace, release_needed, total_needed, shortfall
+                    );
+                }
+                shortfall
+            }
+            Some(WarpTokenTypeInfo::Collateral { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                let original_lovelace = components.recipient_utxo.lovelace();
+                // Both continuation and recipient outputs need MIN_UTXO_LOVELACE
+                let total_needed = MIN_UTXO_LOVELACE * 2;
+                let shortfall = total_needed.saturating_sub(original_lovelace);
+                if shortfall > 0 {
+                    debug!(
+                        "Collateral recipient shortfall: warp_lovelace={}, shortfall={}",
+                        original_lovelace, shortfall
+                    );
+                }
+                shortfall
+            }
+            _ => 0,
+        };
+
+        debug!(
+            "Change calculation: total_input={}, fee={}, processed_marker={}, message_utxo={}, recipient_shortfall={}",
+            total_input, fee, processed_marker_cost, message_utxo_cost, recipient_shortfall
+        );
+        let change_amount = total_input
+            .saturating_sub(fee + processed_marker_cost + message_utxo_cost + recipient_shortfall);
 
         if change_amount >= MIN_UTXO_LOVELACE {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
@@ -981,14 +1333,26 @@ impl HyperlaneTxBuilder {
 
     /// Select UTXOs for fee payment using simple greedy algorithm
     fn select_utxos_for_fee(&self, utxos: &[Utxo]) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
+        self.select_utxos_for_fee_with_extra(utxos, 0)
+    }
+
+    fn select_utxos_for_fee_with_extra(
+        &self,
+        utxos: &[Utxo],
+        extra: u64,
+    ) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
         // Sort UTXOs by lovelace amount (largest first) for efficient selection
         let mut sorted: Vec<_> = utxos.iter().collect();
         sorted.sort_by(|a, b| b.lovelace().cmp(&a.lovelace()));
 
         let mut selected = Vec::new();
         let mut total: u64 = 0;
-        // Need enough for fee + min UTXO for change
-        let needed = ESTIMATED_FEE_LOVELACE + MIN_UTXO_LOVELACE;
+        // Need enough for fee + min UTXO for change + extra (e.g., synthetic recipient shortfall)
+        let needed = ESTIMATED_FEE_LOVELACE + MIN_UTXO_LOVELACE + extra;
+        debug!(
+            "UTXO selection: need {} lovelace (fee={}, min_utxo={}, extra={})",
+            needed, ESTIMATED_FEE_LOVELACE, MIN_UTXO_LOVELACE, extra
+        );
 
         for utxo in sorted {
             // Skip UTXOs with tokens (keep it simple, use pure ADA UTXOs)
@@ -1286,6 +1650,14 @@ pub struct ProcessTxComponents {
     /// Deferred-specific: Reference script UTXO for stored_message_nft minting policy
     /// Discovered via the same policy ID as reference_script_locator but with asset name "msg_ref"
     pub message_nft_ref_script_utxo: Option<Utxo>,
+    /// TokenReceiver (warp routes): Transfer amount in local decimals
+    /// Funds are released from the warp_route UTXO directly
+    pub token_release_amount: Option<u64>,
+    /// TokenReceiver (warp routes): Transfer recipient (28-byte credential)
+    pub token_release_recipient: Option<Vec<u8>>,
+    /// TokenReceiver (warp routes): Token type for release handling
+    /// Native releases ADA, Collateral releases native tokens
+    pub warp_token_type: Option<WarpTokenTypeInfo>,
 }
 
 // ============================================================================
@@ -1351,6 +1723,56 @@ fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
     Ok(Input::new(tx_hash, output_index))
 }
 
+/// Convert a 28-byte credential (verification key hash or script hash) to a Cardano address
+/// The credential is used as the payment credential with no staking credential
+fn credential_to_address(
+    credential_bytes: &[u8],
+    network: Network,
+) -> Result<Address, TxBuilderError> {
+    if credential_bytes.len() != 28 {
+        return Err(TxBuilderError::Encoding(format!(
+            "Credential must be 28 bytes, got {}",
+            credential_bytes.len()
+        )));
+    }
+
+    // Create a payment-only address (Type 6 address: payment key hash, no staking)
+    // The credential could be either a pubkey hash or script hash
+    // For recipients from EVM TokenMessage, it's typically a pubkey hash (0x00 prefix)
+    // or a script hash (0x01 prefix)
+    // Cardano addresses format: [header_byte] [28-byte payment credential] [optional 28-byte staking credential]
+    // Header byte for Type 6 (enterprise address): 0110_XXXX where XXXX = network tag
+    // Network 0 = testnet (0110_0000 = 0x60), Network 1 = mainnet (0110_0001 = 0x61)
+    let header_byte = match network {
+        Network::Testnet => 0x60, // Type 6, testnet
+        Network::Mainnet => 0x61, // Type 6, mainnet
+        _ => 0x60,                // Default to testnet
+    };
+
+    let mut address_bytes = Vec::with_capacity(29);
+    address_bytes.push(header_byte);
+    address_bytes.extend_from_slice(credential_bytes);
+
+    Address::from_bytes(&address_bytes).map_err(|e| {
+        TxBuilderError::InvalidAddress(format!("Failed to create address from credential: {:?}", e))
+    })
+}
+
+/// Encode a Constr 0 [] redeemer (used for MintMessage/Mint in minting policies)
+fn encode_constructor_0_redeemer() -> Vec<u8> {
+    // Constr 0 [] is encoded as CBOR tag 121 (0xd87980)
+    // Tag 121 = constructor 0 with empty array
+    let redeemer = PlutusData::Constr(Constr {
+        tag: 121, // Constructor 0
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![]),
+    });
+
+    let mut encoded = Vec::new();
+    minicbor::encode(&redeemer, &mut encoded).expect("Failed to encode constructor 0 redeemer");
+    encoded
+}
+
 /// Create a continuation output for a script UTXO
 /// This preserves the address, value, and inline datum from the original UTXO
 fn create_continuation_output(utxo: &Utxo, _policy_id: &str) -> Result<Output, TxBuilderError> {
@@ -1390,37 +1812,97 @@ fn create_continuation_output(utxo: &Utxo, _policy_id: &str) -> Result<Output, T
     Ok(output)
 }
 
-/// Create a recipient continuation output with UPDATED datum
-/// This preserves the address, value, and native assets but uses the new datum
-fn create_recipient_continuation_output(
+/// Create a warp route continuation output with UPDATED datum
+/// Handles token release based on token type:
+/// - Native: Reduce lovelace by release_amount
+/// - Collateral: Reduce collateral token quantity by release_amount
+/// - Synthetic: No change (tokens are minted elsewhere)
+fn create_warp_route_continuation_output(
     utxo: &Utxo,
     new_datum_cbor: &[u8],
+    release_amount: Option<u64>,
+    token_type: Option<&WarpTokenTypeInfo>,
 ) -> Result<Output, TxBuilderError> {
     let address = parse_address(&utxo.address)?;
-    let lovelace = utxo.lovelace();
+    let original_lovelace = utxo.lovelace();
 
-    let mut output = Output::new(address, lovelace.max(MIN_UTXO_LOVELACE));
+    // Adjust lovelace based on token type:
+    // - Native: reduce lovelace by the release amount (tokens are ADA)
+    // - Collateral: reduce lovelace by MIN_UTXO_LOVELACE to fund the release output
+    // - Synthetic: reduce lovelace by MIN_UTXO_LOVELACE to fund the recipient output (minted tokens go there)
+    let final_lovelace = match (&token_type, release_amount) {
+        (Some(WarpTokenTypeInfo::Native), Some(amount)) => {
+            // Native: release amount IS the ADA being sent
+            // The release output uses amount.max(MIN_UTXO_LOVELACE), so we must subtract that
+            let release_lovelace = amount.max(MIN_UTXO_LOVELACE);
+            original_lovelace
+                .saturating_sub(release_lovelace)
+                .max(MIN_UTXO_LOVELACE)
+        }
+        (Some(WarpTokenTypeInfo::Collateral { .. }), Some(_)) => {
+            // Collateral: need to fund the release output with MIN_UTXO_LOVELACE
+            original_lovelace
+                .saturating_sub(MIN_UTXO_LOVELACE)
+                .max(MIN_UTXO_LOVELACE)
+        }
+        (Some(WarpTokenTypeInfo::Synthetic { .. }), Some(_)) => {
+            // Synthetic: need to fund the recipient output with MIN_UTXO_LOVELACE
+            // The minted tokens go to a new output which requires MIN_UTXO_LOVELACE
+            original_lovelace
+                .saturating_sub(MIN_UTXO_LOVELACE)
+                .max(MIN_UTXO_LOVELACE)
+        }
+        _ => original_lovelace.max(MIN_UTXO_LOVELACE),
+    };
+
+    let mut output = Output::new(address, final_lovelace);
 
     // Use the NEW datum (updated state)
     output = output.set_inline_datum(new_datum_cbor.to_vec());
 
-    // Add any native assets from the original UTXO (preserve the state NFT)
+    // Add native assets from the original UTXO
+    // For Collateral type, reduce the collateral token quantity by release_amount
     for value in &utxo.value {
         if value.unit != "lovelace" && value.unit.len() >= 56 {
             let policy_hex = &value.unit[..56];
             let asset_name_hex = &value.unit[56..];
 
             let policy_hash = parse_policy_id(policy_hex)?;
-            let asset_name = hex::decode(asset_name_hex)
+            let asset_name_bytes = hex::decode(asset_name_hex)
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
-            let quantity: u64 = value
+            let original_quantity: u64 = value
                 .quantity
                 .parse()
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
 
-            output = output
-                .add_asset(policy_hash, asset_name, quantity)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
+            // Check if this is the collateral token to be released
+            let final_quantity = match (&token_type, release_amount) {
+                (
+                    Some(WarpTokenTypeInfo::Collateral {
+                        policy_id,
+                        asset_name,
+                    }),
+                    Some(amount),
+                ) => {
+                    // Check if this asset matches the collateral token
+                    if policy_hex == policy_id && asset_name_hex == asset_name {
+                        // Reduce quantity by release amount
+                        original_quantity.saturating_sub(amount)
+                    } else {
+                        original_quantity
+                    }
+                }
+                _ => original_quantity,
+            };
+
+            // Only add the asset if quantity is > 0
+            if final_quantity > 0 {
+                output = output
+                    .add_asset(policy_hash, asset_name_bytes, final_quantity)
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e))
+                    })?;
+            }
         }
     }
 
@@ -1463,6 +1945,107 @@ fn create_ism_continuation_output(utxo: &Utxo) -> Result<Output, TxBuilderError>
     }
 
     Ok(output)
+}
+
+/// Create a release output to send ADA to the recipient
+/// The recipient_bytes should contain the Cardano address hash (28 bytes)
+#[allow(dead_code)] // May be useful for future token release patterns
+fn create_release_output(recipient_bytes: &[u8], amount: u64) -> Result<Output, TxBuilderError> {
+    // The recipient_bytes contain the raw address bytes
+    // For Cardano Preview testnet, we need to construct a proper address
+    // Format: network_tag (1 byte) || payment_credential_hash (28 bytes)
+    // Network tag 0x00 = mainnet pubkey, 0x60 = testnet pubkey (Enterprise address)
+    // For script addresses: 0x70 = testnet script
+
+    if recipient_bytes.len() != 28 {
+        return Err(TxBuilderError::InvalidAddress(format!(
+            "Recipient credential must be exactly 28 bytes, got {} bytes",
+            recipient_bytes.len()
+        )));
+    }
+
+    // Use the 28-byte credential hash directly (pubkey hash for enterprise address)
+    let credential_hash = recipient_bytes;
+
+    // Build enterprise address for testnet (no staking part)
+    // Type 6 (0110 in binary) = enterprise address with key hash payment credential
+    let network_tag: u8 = 0x60; // Testnet enterprise address with key hash
+    let mut address_bytes = vec![network_tag];
+    address_bytes.extend_from_slice(credential_hash);
+
+    // Convert to bech32 address
+    // Use bech32 crate v0.9 API
+    use bech32::{ToBase32, Variant};
+    let bech32_addr = bech32::encode("addr_test", address_bytes.to_base32(), Variant::Bech32)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {}", e)))?;
+
+    let address = parse_address(&bech32_addr)?;
+
+    // Ensure we meet minimum UTXO requirement
+    let lovelace = amount.max(MIN_UTXO_LOVELACE);
+
+    Ok(Output::new(address, lovelace))
+}
+
+/// Create a release output based on the warp route token type
+/// - Native: Release ADA to recipient
+/// - Collateral: Release native tokens to recipient (with minimum ADA for UTXO)
+/// - Synthetic: No release output (tokens are minted elsewhere, not released)
+fn create_token_release_output(
+    recipient_bytes: &[u8],
+    amount: u64,
+    token_type: &WarpTokenTypeInfo,
+) -> Result<Output, TxBuilderError> {
+    if recipient_bytes.len() != 28 {
+        return Err(TxBuilderError::InvalidAddress(format!(
+            "Recipient credential must be exactly 28 bytes, got {} bytes",
+            recipient_bytes.len()
+        )));
+    }
+
+    // Build enterprise address for testnet
+    let network_tag: u8 = 0x60; // Testnet enterprise address with key hash
+    let mut address_bytes = vec![network_tag];
+    address_bytes.extend_from_slice(recipient_bytes);
+
+    use bech32::{ToBase32, Variant};
+    let bech32_addr = bech32::encode("addr_test", address_bytes.to_base32(), Variant::Bech32)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {}", e)))?;
+    let address = parse_address(&bech32_addr)?;
+
+    match token_type {
+        WarpTokenTypeInfo::Native => {
+            // Native: Send ADA to recipient
+            let lovelace = amount.max(MIN_UTXO_LOVELACE);
+            Ok(Output::new(address, lovelace))
+        }
+        WarpTokenTypeInfo::Collateral {
+            policy_id,
+            asset_name,
+        } => {
+            // Collateral: Send native tokens to recipient with minimum ADA for UTXO
+            let policy_hash = parse_policy_id(policy_id)?;
+            let asset_name_bytes = hex::decode(asset_name).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid collateral asset name: {}", e))
+            })?;
+
+            let mut output = Output::new(address, MIN_UTXO_LOVELACE);
+            output = output
+                .add_asset(policy_hash, asset_name_bytes, amount)
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!("Failed to add collateral token: {:?}", e))
+                })?;
+            Ok(output)
+        }
+        WarpTokenTypeInfo::Synthetic { .. } => {
+            // Synthetic: No release output - tokens are minted directly to recipient by the minting policy
+            // Return a minimal output that won't be added (caller should check)
+            Err(TxBuilderError::TxBuild(
+                "Synthetic warp routes don't create release outputs - tokens are minted directly"
+                    .to_string(),
+            ))
+        }
+    }
 }
 
 /// Build the updated recipient datum for the continuation output
@@ -1572,6 +2155,291 @@ fn build_generic_recipient_datum_plutus(
     })
 }
 
+/// Warp route token type extracted from datum
+#[derive(Debug, Clone)]
+pub enum WarpTokenTypeInfo {
+    /// Native ADA - release lovelace
+    Native,
+    /// Collateral tokens - release specific native tokens
+    Collateral {
+        policy_id: String,
+        asset_name: String,
+    },
+    /// Synthetic tokens - no release (tokens are minted on the other side)
+    Synthetic { minting_policy: String },
+}
+
+/// Warp route decimal configuration
+#[derive(Debug, Clone, Copy)]
+struct WarpRouteDecimals {
+    /// Local token decimals (Cardano side)
+    local_decimals: u8,
+    /// Remote token decimals (wire format, typically 18 for EVM)
+    remote_decimals: u8,
+}
+
+/// Extract decimals and remote_decimals from warp route datum config
+/// The warp route datum structure is: Constr 0 [config, owner, total_bridged]
+/// where config is: Constr (token_type) [decimals, remote_decimals, remote_routes_list]
+fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimals, TxBuilderError> {
+    let datum_str = recipient_utxo.inline_datum.as_ref().ok_or_else(|| {
+        TxBuilderError::MissingInput("Warp route UTXO has no inline datum".to_string())
+    })?;
+    let datum_cbor = json_datum_to_cbor(datum_str)?;
+
+    use pallas_codec::minicbor;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
+        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
+    })?;
+
+    // Extract config from datum fields[0]
+    let config = if let PlutusData::Constr(constr) = decoded {
+        constr
+            .fields
+            .clone()
+            .to_vec()
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                TxBuilderError::Encoding("Warp route datum has no config field".to_string())
+            })?
+    } else {
+        return Err(TxBuilderError::Encoding(
+            "Warp route datum is not a Constr".to_string(),
+        ));
+    };
+
+    // WarpRouteConfig structure:
+    // - fields[0] = token_type (WarpTokenType Constr)
+    // - fields[1] = decimals (local)
+    // - fields[2] = remote_decimals
+    // - fields[3] = remote_routes
+    if let PlutusData::Constr(config_constr) = config {
+        let config_fields = config_constr.fields.clone().to_vec();
+        if config_fields.len() < 3 {
+            return Err(TxBuilderError::Encoding(format!(
+                "Warp route config has insufficient fields: expected at least 3, got {}",
+                config_fields.len()
+            )));
+        }
+
+        let local_decimals_i64 = extract_int(&config_fields[1]).ok_or_else(|| {
+            TxBuilderError::Encoding(
+                "Failed to extract decimals from warp route config (fields[1])".to_string(),
+            )
+        })?;
+        if local_decimals_i64 < 0 || local_decimals_i64 > 18 {
+            return Err(TxBuilderError::Encoding(format!(
+                "Invalid decimals value: {}",
+                local_decimals_i64
+            )));
+        }
+
+        let remote_decimals_i64 = extract_int(&config_fields[2]).ok_or_else(|| {
+            TxBuilderError::Encoding(
+                "Failed to extract remote_decimals from warp route config (fields[2])".to_string(),
+            )
+        })?;
+        if remote_decimals_i64 < 0 || remote_decimals_i64 > 18 {
+            return Err(TxBuilderError::Encoding(format!(
+                "Invalid remote_decimals value: {}",
+                remote_decimals_i64
+            )));
+        }
+
+        Ok(WarpRouteDecimals {
+            local_decimals: local_decimals_i64 as u8,
+            remote_decimals: remote_decimals_i64 as u8,
+        })
+    } else {
+        Err(TxBuilderError::Encoding(
+            "Warp route config is not a Constr".to_string(),
+        ))
+    }
+}
+
+/// Extract the warp route token type from the datum
+/// The token_type is config.fields[0] and is a Constr with:
+/// - tag 121 (constructor 0) = Collateral { policy_id, asset_name }
+/// - tag 122 (constructor 1) = Synthetic { minting_policy }
+/// - tag 123 (constructor 2) = Native
+fn extract_warp_route_token_type(
+    recipient_utxo: &Utxo,
+) -> Result<WarpTokenTypeInfo, TxBuilderError> {
+    let datum_str = recipient_utxo.inline_datum.as_ref().ok_or_else(|| {
+        TxBuilderError::MissingInput("Warp route UTXO has no inline datum".to_string())
+    })?;
+    let datum_cbor = json_datum_to_cbor(datum_str)?;
+
+    use pallas_codec::minicbor;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
+        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
+    })?;
+
+    // Extract config from datum fields[0]
+    let config = if let PlutusData::Constr(constr) = decoded {
+        constr
+            .fields
+            .clone()
+            .to_vec()
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                TxBuilderError::Encoding("Warp route datum has no config field".to_string())
+            })?
+    } else {
+        return Err(TxBuilderError::Encoding(
+            "Warp route datum is not a Constr".to_string(),
+        ));
+    };
+
+    // Extract token_type from config.fields[0]
+    if let PlutusData::Constr(config_constr) = config {
+        let config_fields = config_constr.fields.clone().to_vec();
+        if config_fields.is_empty() {
+            return Err(TxBuilderError::Encoding(
+                "Warp route config has no fields".to_string(),
+            ));
+        }
+
+        let token_type = &config_fields[0];
+        if let PlutusData::Constr(tt_constr) = token_type {
+            match tt_constr.tag {
+                121 => {
+                    // Constructor 0 = Collateral { policy_id, asset_name }
+                    let tt_fields = tt_constr.fields.clone().to_vec();
+                    if tt_fields.len() < 2 {
+                        return Err(TxBuilderError::Encoding(
+                            "Collateral type has insufficient fields".to_string(),
+                        ));
+                    }
+                    let policy_id =
+                        extract_bytes(&tt_fields[0])
+                            .map(hex::encode)
+                            .ok_or_else(|| {
+                                TxBuilderError::Encoding(
+                                    "Failed to extract Collateral policy_id".to_string(),
+                                )
+                            })?;
+                    let asset_name =
+                        extract_bytes(&tt_fields[1])
+                            .map(hex::encode)
+                            .ok_or_else(|| {
+                                TxBuilderError::Encoding(
+                                    "Failed to extract Collateral asset_name".to_string(),
+                                )
+                            })?;
+                    Ok(WarpTokenTypeInfo::Collateral {
+                        policy_id,
+                        asset_name,
+                    })
+                }
+                122 => {
+                    // Constructor 1 = Synthetic { minting_policy }
+                    let tt_fields = tt_constr.fields.clone().to_vec();
+                    if tt_fields.is_empty() {
+                        return Err(TxBuilderError::Encoding(
+                            "Synthetic type has no minting_policy".to_string(),
+                        ));
+                    }
+                    let minting_policy =
+                        extract_bytes(&tt_fields[0])
+                            .map(hex::encode)
+                            .ok_or_else(|| {
+                                TxBuilderError::Encoding(
+                                    "Failed to extract Synthetic minting_policy".to_string(),
+                                )
+                            })?;
+                    Ok(WarpTokenTypeInfo::Synthetic { minting_policy })
+                }
+                123 => {
+                    // Constructor 2 = Native
+                    Ok(WarpTokenTypeInfo::Native)
+                }
+                _ => Err(TxBuilderError::Encoding(format!(
+                    "Unknown token_type constructor tag: {}",
+                    tt_constr.tag
+                ))),
+            }
+        } else {
+            Err(TxBuilderError::Encoding(
+                "Token type is not a Constr".to_string(),
+            ))
+        }
+    } else {
+        Err(TxBuilderError::Encoding(
+            "Warp route config is not a Constr".to_string(),
+        ))
+    }
+}
+
+/// Build warp route continuation datum with updated total_bridged
+/// The warp route datum structure is: Constr 0 [config, owner, total_bridged]
+/// where config is: Constr (token_type) [decimals, remote_routes_list]
+/// For ReceiveTransfer: total_bridged = old_total_bridged - transfer_amount
+fn build_warp_route_continuation_datum(
+    recipient_utxo: &Utxo,
+    transfer_amount: u64,
+) -> Result<Vec<u8>, TxBuilderError> {
+    // Parse the existing warp route datum
+    let datum_str = recipient_utxo.inline_datum.as_ref().ok_or_else(|| {
+        TxBuilderError::MissingInput("Warp route UTXO has no inline datum".to_string())
+    })?;
+
+    let datum_cbor = json_datum_to_cbor(datum_str)?;
+
+    use pallas_codec::minicbor;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
+        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
+    })?;
+
+    // Extract fields from the existing datum
+    // Structure: Constr 0 [config, owner, total_bridged]
+    let (config_field, owner, old_total_bridged) = if let PlutusData::Constr(constr) = decoded {
+        let fields: Vec<_> = constr.fields.clone().to_vec();
+        if fields.len() < 3 {
+            return Err(TxBuilderError::Encoding(
+                "Warp route datum has insufficient fields".to_string(),
+            ));
+        }
+
+        // Config is a complex nested structure - preserve it as-is
+        let config = fields[0].clone();
+
+        let owner_bytes = extract_bytes(&fields[1]).ok_or_else(|| {
+            TxBuilderError::Encoding("Failed to extract owner from warp route datum".to_string())
+        })?;
+
+        let total_bridged = extract_int(&fields[2]).unwrap_or(0);
+
+        (config, owner_bytes, total_bridged)
+    } else {
+        return Err(TxBuilderError::Encoding(
+            "Warp route datum is not a Constr".to_string(),
+        ));
+    };
+
+    // Calculate new total_bridged (subtract transfer amount for receive)
+    let new_total_bridged = old_total_bridged - (transfer_amount as i64);
+    debug!(
+        "Warp route total_bridged: {} -> {} (received {})",
+        old_total_bridged, new_total_bridged, transfer_amount
+    );
+
+    // Build the new warp route datum with same config, owner, and updated total_bridged
+    let plutus_data = PlutusData::Constr(Constr {
+        tag: 121, // WarpRouteDatum = constructor 0
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            config_field, // Preserve config as-is
+            PlutusData::BoundedBytes(owner.into()),
+            PlutusData::BigInt(BigInt::Int(new_total_bridged.into())),
+        ]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
 /// Parse a recipient datum to extract the current state
 /// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_received: i64)
 fn parse_recipient_datum(
@@ -1672,6 +2540,15 @@ fn extract_int(data: &PlutusData) -> Option<i64> {
             }
             BigInt::BigNInt(_) => None, // Negative big int, skip for now
         }
+    } else {
+        None
+    }
+}
+
+/// Extract ByteArray from PlutusData
+fn extract_bytes(data: &PlutusData) -> Option<Vec<u8>> {
+    if let PlutusData::BoundedBytes(bytes) = data {
+        Some(bytes.to_vec())
     } else {
         None
     }
@@ -2316,6 +3193,131 @@ fn encode_ism_redeemer(
     encode_plutus_data(&plutus_data)
 }
 
+/// Encode warp route redeemer to CBOR
+/// WarpRouteRedeemer:
+/// - ReceiveTransfer(1) = [origin: Int, sender: ByteArray, body: ByteArray]
+/// - TransferRemote(0) = [destination: Int, recipient: ByteArray, amount: Int]
+/// - EnrollRemoteRoute(2) = [domain: Int, route: ByteArray]
+pub fn encode_warp_route_redeemer(
+    redeemer: &crate::types::WarpRouteRedeemer,
+) -> Result<Vec<u8>, TxBuilderError> {
+    let plutus_data = match redeemer {
+        crate::types::WarpRouteRedeemer::TransferRemote {
+            destination,
+            recipient,
+            amount,
+        } => {
+            PlutusData::Constr(Constr {
+                tag: 121, // Constructor 0
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BigInt(BigInt::Int((*destination as i64).into())),
+                    PlutusData::BoundedBytes(recipient.to_vec().into()),
+                    PlutusData::BigInt(BigInt::Int((*amount as i64).into())),
+                ]),
+            })
+        }
+        crate::types::WarpRouteRedeemer::ReceiveTransfer {
+            origin,
+            sender,
+            body,
+        } => {
+            PlutusData::Constr(Constr {
+                tag: 122, // Constructor 1
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BigInt(BigInt::Int((*origin as i64).into())),
+                    PlutusData::BoundedBytes(sender.to_vec().into()),
+                    PlutusData::BoundedBytes(body.clone().into()),
+                ]),
+            })
+        }
+        crate::types::WarpRouteRedeemer::EnrollRemoteRoute { domain, route } => {
+            PlutusData::Constr(Constr {
+                tag: 123, // Constructor 2
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
+                    PlutusData::BoundedBytes(route.to_vec().into()),
+                ]),
+            })
+        }
+    };
+
+    encode_plutus_data(&plutus_data)
+}
+
+/// Convert wire format amount to local token amount
+/// Formula: local_amount = wire_amount / 10^(remote_decimals - local_decimals)
+/// If local_decimals >= remote_decimals, multiply instead
+fn convert_wire_to_local_amount(wire_amount: u64, remote_decimals: u8, local_decimals: u8) -> u64 {
+    if local_decimals >= remote_decimals {
+        // Upsample: multiply by 10^(local_decimals - remote_decimals)
+        let multiplier = 10u64.pow((local_decimals - remote_decimals) as u32);
+        wire_amount.saturating_mul(multiplier)
+    } else {
+        // Downsample: divide by 10^(remote_decimals - local_decimals)
+        let divisor = 10u64.pow((remote_decimals - local_decimals) as u32);
+        wire_amount / divisor
+    }
+}
+
+/// Build a warp transfer body with the given recipient and amount
+/// Format: recipient (variable) || amount (8 bytes big-endian)
+#[allow(dead_code)]
+fn build_warp_transfer_body(recipient: &[u8], amount: u64) -> Vec<u8> {
+    let mut body = recipient.to_vec();
+    body.extend_from_slice(&amount.to_be_bytes());
+    body
+}
+
+/// Parsed EVM TokenMessage
+/// EVM warp routes use a fixed format: recipient (32 bytes) || amount (32 bytes uint256)
+#[derive(Debug)]
+struct EvmTokenMessage {
+    /// 32-byte recipient (bytes32 in Solidity)
+    recipient: [u8; 32],
+    /// Amount as u64 (extracted from uint256 - assumes amount fits in u64)
+    amount: u64,
+}
+
+/// Parse an EVM TokenMessage body
+/// EVM TokenMessage format (from TokenMessage.sol):
+/// - bytes 0-31: recipient (bytes32)
+/// - bytes 32-63: amount (uint256, big-endian)
+/// - bytes 64+: metadata (optional, ignored)
+fn parse_evm_token_message(body: &[u8]) -> Result<EvmTokenMessage, TxBuilderError> {
+    if body.len() < 64 {
+        return Err(TxBuilderError::Encoding(format!(
+            "EVM TokenMessage too short: {} bytes, expected at least 64",
+            body.len()
+        )));
+    }
+
+    // Extract recipient (first 32 bytes)
+    let recipient: [u8; 32] = body[0..32].try_into().map_err(|_| {
+        TxBuilderError::Encoding("Failed to extract recipient from TokenMessage".to_string())
+    })?;
+
+    // Extract amount (bytes 32-63, uint256 big-endian)
+    // Only use the last 8 bytes since we store as u64
+    let amount_bytes: [u8; 8] = body[56..64].try_into().map_err(|_| {
+        TxBuilderError::Encoding("Failed to extract amount from TokenMessage".to_string())
+    })?;
+    let amount = u64::from_be_bytes(amount_bytes);
+
+    Ok(EvmTokenMessage { recipient, amount })
+}
+
+/// Extract Cardano credential hash from a bytes32 recipient
+/// EVM bytes32 pads 28-byte Cardano hashes with 4 leading zeros:
+/// [0x00, 0x00, 0x00, 0x00, <28 bytes credential hash>]
+fn extract_cardano_credential_from_bytes32(recipient: &[u8; 32]) -> [u8; 28] {
+    let mut credential = [0u8; 28];
+    credential.copy_from_slice(&recipient[4..32]);
+    credential
+}
+
 /// Parse Hyperlane metadata and recover public keys from signatures
 ///
 /// Hyperlane metadata format for multisig ISM:
@@ -2695,6 +3697,86 @@ mod tests {
                 println!("Failed to build tx: {:?}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_convert_wire_to_local_18_to_6_decimals() {
+        // EVM (18 dec) -> Cardano ADA (6 dec): scale = 10^12
+        // 1 unit in wire format (1e18) = 1_000_000 local units
+        assert_eq!(
+            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 6),
+            1_000_000
+        );
+        // 1e12 wire = 1 local unit
+        assert_eq!(convert_wire_to_local_amount(1_000_000_000_000, 18, 6), 1);
+        // 5e18 wire = 5_000_000 local units
+        assert_eq!(
+            convert_wire_to_local_amount(5_000_000_000_000_000_000, 18, 6),
+            5_000_000
+        );
+    }
+
+    #[test]
+    fn test_convert_wire_to_local_18_to_8_decimals() {
+        // EVM (18 dec) -> 8 decimal token: scale = 10^10
+        // 1 unit in wire format (1e18) = 1e8 local units
+        assert_eq!(
+            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 8),
+            100_000_000
+        );
+        // 1e10 wire = 1 local unit
+        assert_eq!(convert_wire_to_local_amount(10_000_000_000, 18, 8), 1);
+    }
+
+    #[test]
+    fn test_convert_wire_to_local_same_decimals() {
+        // Same decimals: no conversion needed
+        assert_eq!(
+            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 18),
+            1_000_000_000_000_000_000
+        );
+        assert_eq!(convert_wire_to_local_amount(12345, 6, 6), 12345);
+        assert_eq!(convert_wire_to_local_amount(100, 8, 8), 100);
+    }
+
+    #[test]
+    fn test_convert_wire_to_local_18_to_0_decimals() {
+        // EVM (18 dec) -> 0 decimal token: scale = 10^18
+        // 1e18 wire = 1 local unit
+        assert_eq!(
+            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 0),
+            1
+        );
+        // 5e18 wire = 5 local units
+        assert_eq!(
+            convert_wire_to_local_amount(5_000_000_000_000_000_000, 18, 0),
+            5
+        );
+    }
+
+    #[test]
+    fn test_convert_wire_to_local_upsample() {
+        // 6 dec remote -> 18 dec local: multiply by 10^12
+        assert_eq!(
+            convert_wire_to_local_amount(1_000_000, 6, 18),
+            1_000_000_000_000_000_000
+        );
+        assert_eq!(convert_wire_to_local_amount(1, 6, 18), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn test_backward_compatibility() {
+        // Verify 18->6 decimals matches the old hardcoded 10^12 factor
+        let old_factor = 1_000_000_000_000u64;
+        let wire = 500_000_000_000_000_000u64;
+        assert_eq!(wire / old_factor, convert_wire_to_local_amount(wire, 18, 6));
+
+        // More test cases
+        let wire2 = 1_234_567_890_123_456_789u64;
+        assert_eq!(
+            wire2 / old_factor,
+            convert_wire_to_local_amount(wire2, 18, 6)
+        );
     }
 }
 

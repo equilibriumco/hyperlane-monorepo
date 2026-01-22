@@ -63,6 +63,12 @@ pub struct Utxo {
     pub inline_datum: Option<String>,
     pub data_hash: Option<String>,
     pub reference_script_hash: Option<String>,
+    /// Whether this is a collateral input (not included in tx.inputs on-chain)
+    #[serde(default)]
+    pub collateral: bool,
+    /// Whether this is a reference input (not included in tx.inputs on-chain)
+    #[serde(default)]
+    pub reference: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +191,8 @@ impl BlockfrostProvider {
                     inline_datum: u.inline_datum,
                     data_hash: u.data_hash,
                     reference_script_hash: u.reference_script_hash,
+                    collateral: false,
+                    reference: false,
                 });
             }
 
@@ -499,6 +507,8 @@ impl BlockfrostProvider {
                 inline_datum: i.inline_datum,
                 data_hash: i.data_hash,
                 reference_script_hash: i.reference_script_hash,
+                collateral: i.collateral,
+                reference: i.reference.unwrap_or(false),
             })
             .collect();
 
@@ -520,6 +530,8 @@ impl BlockfrostProvider {
                 inline_datum: o.inline_datum,
                 data_hash: o.data_hash,
                 reference_script_hash: o.reference_script_hash,
+                collateral: o.collateral,
+                reference: false, // Outputs are never reference inputs
             })
             .collect();
 
@@ -734,6 +746,8 @@ mod tests {
             inline_datum: None,
             data_hash: None,
             reference_script_hash: None,
+            collateral: false,
+            reference: false,
         };
 
         assert!(utxo.has_asset("abc123", "def456"));
