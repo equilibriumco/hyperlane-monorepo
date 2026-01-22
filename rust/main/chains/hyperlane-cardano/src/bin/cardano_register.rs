@@ -126,17 +126,24 @@ fn parse_script_hash(hex: &str) -> Result<ScriptHash, String> {
 fn parse_additional_input(s: &str) -> Result<AdditionalInput, String> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 4 {
-        return Err("Additional input must be in format 'name:policy_id:asset_name:must_spend'".to_string());
+        return Err(
+            "Additional input must be in format 'name:policy_id:asset_name:must_spend'".to_string(),
+        );
     }
 
     let name = parts[0].to_string();
     let policy_id = parts[1].to_string();
     let asset_name = parts[2].to_string();
-    let must_be_spent = parts[3].parse::<bool>().map_err(|_| "must_spend must be 'true' or 'false'")?;
+    let must_be_spent = parts[3]
+        .parse::<bool>()
+        .map_err(|_| "must_spend must be 'true' or 'false'")?;
 
     Ok(AdditionalInput {
         name,
-        locator: UtxoLocator { policy_id, asset_name },
+        locator: UtxoLocator {
+            policy_id,
+            asset_name,
+        },
         must_be_spent,
     })
 }
@@ -151,10 +158,16 @@ fn build_recipient_type(args: &Args) -> Result<RecipientType, String> {
                     asset_name: asset.clone(),
                 }),
                 (None, None) => None,
-                _ => return Err("Both --vault-policy and --vault-asset must be provided together".to_string()),
+                _ => {
+                    return Err(
+                        "Both --vault-policy and --vault-asset must be provided together"
+                            .to_string(),
+                    )
+                }
             };
 
-            let minting_policy = args.minting_policy
+            let minting_policy = args
+                .minting_policy
                 .as_ref()
                 .map(|h| parse_script_hash(h))
                 .transpose()?;
@@ -165,7 +178,8 @@ fn build_recipient_type(args: &Args) -> Result<RecipientType, String> {
             })
         }
         RecipientTypeArg::Deferred => {
-            let message_policy_hex = args.message_policy
+            let message_policy_hex = args
+                .message_policy
                 .as_ref()
                 .ok_or("--message-policy is required for Deferred")?;
 
@@ -181,8 +195,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Get API key from environment (will be used for actual submission)
-    let _api_key = env::var("BLOCKFROST_API_KEY")
-        .expect("Set BLOCKFROST_API_KEY environment variable");
+    let _api_key =
+        env::var("BLOCKFROST_API_KEY").expect("Set BLOCKFROST_API_KEY environment variable");
 
     // Parse script hash
     let script_hash = parse_script_hash(&args.script_hash)?;
@@ -194,13 +208,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recipient_type = build_recipient_type(&args)?;
 
     // Parse custom ISM
-    let custom_ism = args.custom_ism
+    let custom_ism = args
+        .custom_ism
         .as_ref()
         .map(|h| parse_script_hash(h))
         .transpose()?;
 
     // Parse additional inputs
-    let additional_inputs: Vec<AdditionalInput> = args.additional_input
+    let additional_inputs: Vec<AdditionalInput> = args
+        .additional_input
         .iter()
         .map(|s| parse_additional_input(s))
         .collect::<Result<Vec<_>, _>>()?;
@@ -248,11 +264,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !registration.additional_inputs.is_empty() {
         println!("Additional Inputs:");
         for input in &registration.additional_inputs {
-            println!("  - {} ({}/{}), must_spend={}",
-                input.name,
-                input.locator.policy_id,
-                input.locator.asset_name,
-                input.must_be_spent
+            println!(
+                "  - {} ({}/{}), must_spend={}",
+                input.name, input.locator.policy_id, input.locator.asset_name, input.must_be_spent
             );
         }
     }

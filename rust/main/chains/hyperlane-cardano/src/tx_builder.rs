@@ -4,7 +4,9 @@
 //! Hyperlane messages on Cardano using pallas primitives for CBOR encoding
 //! and pallas-txbuilder for transaction construction.
 
-use crate::blockfrost_provider::{BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo};
+use crate::blockfrost_provider::{
+    BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo,
+};
 use crate::cardano::Keypair;
 use crate::registry::RecipientRegistry;
 use crate::types::{
@@ -12,13 +14,17 @@ use crate::types::{
     ProcessedMessageDatum,
 };
 use crate::ConnectionConf;
-use hyperlane_core::{ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256};
+use hyperlane_core::{
+    ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256,
+};
 use pallas_addresses::{Address, Network};
 use pallas_codec::minicbor;
+use pallas_codec::utils::{KeyValuePairs, MaybeIndefArray};
 use pallas_crypto::hash::Hash;
 use pallas_primitives::conway::{BigInt, Constr, PlutusData};
-use pallas_codec::utils::{KeyValuePairs, MaybeIndefArray};
-use pallas_txbuilder::{BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+use pallas_txbuilder::{
+    BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
+};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
@@ -99,30 +105,48 @@ impl HyperlaneTxBuilder {
     /// Find the mailbox UTXO by NFT or fall back to script address lookup
     async fn find_mailbox_utxo(&self) -> Result<Utxo, TxBuilderError> {
         // First try to find by NFT (preferred method for production)
-        let nft_result = self.provider
-            .find_utxo_by_nft(&self.conf.mailbox_policy_id, &self.conf.mailbox_asset_name_hex)
+        let nft_result = self
+            .provider
+            .find_utxo_by_nft(
+                &self.conf.mailbox_policy_id,
+                &self.conf.mailbox_asset_name_hex,
+            )
             .await;
 
         match nft_result {
             Ok(utxo) => {
-                debug!("Found mailbox UTXO by NFT: {}#{}", utxo.tx_hash, utxo.output_index);
+                debug!(
+                    "Found mailbox UTXO by NFT: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
                 return Ok(utxo);
             }
             Err(e) => {
-                debug!("NFT lookup failed ({}), falling back to script address lookup", e);
+                debug!(
+                    "NFT lookup failed ({}), falling back to script address lookup",
+                    e
+                );
             }
         }
 
         // Fallback: Find UTXOs at the mailbox script address using the actual script hash
-        let script_address = self.provider.script_hash_to_address(&self.conf.mailbox_script_hash)?;
-        debug!("Looking up mailbox UTXOs at script address: {}", script_address);
+        let script_address = self
+            .provider
+            .script_hash_to_address(&self.conf.mailbox_script_hash)?;
+        debug!(
+            "Looking up mailbox UTXOs at script address: {}",
+            script_address
+        );
 
         let utxos = self.provider.get_utxos_at_address(&script_address).await?;
 
         // Find the first UTXO with an inline datum (the mailbox state UTXO)
         for utxo in utxos {
             if utxo.inline_datum.is_some() {
-                debug!("Found mailbox UTXO by script address: {}#{}", utxo.tx_hash, utxo.output_index);
+                debug!(
+                    "Found mailbox UTXO by script address: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
                 return Ok(utxo);
             }
         }
@@ -146,7 +170,10 @@ impl HyperlaneTxBuilder {
         message: &HyperlaneMessage,
         metadata: &[u8],
     ) -> Result<ProcessTxComponents, TxBuilderError> {
-        info!("Building process transaction for message nonce {}", message.nonce);
+        info!(
+            "Building process transaction for message nonce {}",
+            message.nonce
+        );
 
         // Convert to our Message type
         let msg = Message::from_hyperlane_message(message);
@@ -154,14 +181,25 @@ impl HyperlaneTxBuilder {
 
         // 1. Find mailbox UTXO (try NFT first, then fall back to script address)
         let mailbox_utxo = self.find_mailbox_utxo().await?;
-        info!("Found mailbox UTXO: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+        info!(
+            "Found mailbox UTXO: {}#{}",
+            mailbox_utxo.tx_hash, mailbox_utxo.output_index
+        );
 
         // 2. Get recipient registration from registry
-        let recipient_script_hash = hyperlane_address_to_script_hash(&msg.recipient)
-            .ok_or_else(|| TxBuilderError::InvalidRecipient("Not a script recipient".to_string()))?;
-        info!("Looking up recipient registration for script hash: {}", hex::encode(&recipient_script_hash));
+        let recipient_script_hash =
+            hyperlane_address_to_script_hash(&msg.recipient).ok_or_else(|| {
+                TxBuilderError::InvalidRecipient("Not a script recipient".to_string())
+            })?;
+        info!(
+            "Looking up recipient registration for script hash: {}",
+            hex::encode(&recipient_script_hash)
+        );
 
-        let registration = self.registry.get_registration(&recipient_script_hash).await?;
+        let registration = self
+            .registry
+            .get_registration(&recipient_script_hash)
+            .await?;
         info!("Registration found for script_hash={}: state_locator.policy_id={}, state_locator.asset_name={}, recipient_type={:?}",
               hex::encode(&recipient_script_hash),
               registration.state_locator.policy_id,
@@ -182,28 +220,36 @@ impl HyperlaneTxBuilder {
         );
 
         // 3b. Find recipient reference script UTXO (if separate from state UTXO)
-        let recipient_ref_script_utxo = if let Some(ref ref_locator) = registration.reference_script_locator {
-            let ref_utxo = self
-                .provider
-                .find_utxo_by_nft(&ref_locator.policy_id, &ref_locator.asset_name)
-                .await?;
-            info!(
-                "Found recipient reference script UTXO: {}#{}",
-                ref_utxo.tx_hash, ref_utxo.output_index
-            );
-            Some(ref_utxo)
-        } else {
-            debug!("No separate reference script UTXO, script embedded in state UTXO");
-            None
-        };
+        let recipient_ref_script_utxo =
+            if let Some(ref ref_locator) = registration.reference_script_locator {
+                let ref_utxo = self
+                    .provider
+                    .find_utxo_by_nft(&ref_locator.policy_id, &ref_locator.asset_name)
+                    .await?;
+                info!(
+                    "Found recipient reference script UTXO: {}#{}",
+                    ref_utxo.tx_hash, ref_utxo.output_index
+                );
+                Some(ref_utxo)
+            } else {
+                debug!("No separate reference script UTXO, script embedded in state UTXO");
+                None
+            };
 
         // 3c. For deferred recipients, find the stored_message_nft reference script UTXO
         // The CLI deploys this with asset name "msg_ref" (hex: 6d73675f726566) at the same policy ID
-        let message_nft_ref_script_utxo = if matches!(registration.recipient_type, crate::types::RecipientType::Deferred { .. }) {
+        let message_nft_ref_script_utxo = if matches!(
+            registration.recipient_type,
+            crate::types::RecipientType::Deferred { .. }
+        ) {
             if let Some(ref ref_locator) = registration.reference_script_locator {
                 // Look up using the same policy ID but with "msg_ref" asset name
                 let msg_ref_asset_name = "6d73675f726566".to_string(); // "msg_ref" in hex
-                match self.provider.find_utxo_by_nft(&ref_locator.policy_id, &msg_ref_asset_name).await {
+                match self
+                    .provider
+                    .find_utxo_by_nft(&ref_locator.policy_id, &msg_ref_asset_name)
+                    .await
+                {
                     Ok(msg_ref_utxo) => {
                         info!(
                             "Found message NFT reference script UTXO: {}#{}",
@@ -222,7 +268,9 @@ impl HyperlaneTxBuilder {
                     }
                 }
             } else {
-                debug!("No reference_script_locator for deferred recipient, cannot look up msg_ref");
+                debug!(
+                    "No reference_script_locator for deferred recipient, cannot look up msg_ref"
+                );
                 None
             }
         } else {
@@ -233,13 +281,19 @@ impl HyperlaneTxBuilder {
         // For custom ISM, use empty asset name; for default ISM, use config asset name
         let (ism_policy_id, ism_asset_name) = match &registration.custom_ism {
             Some(ism) => (hex::encode(ism), String::new()),
-            None => (self.conf.ism_policy_id.clone(), self.conf.ism_asset_name_hex.clone()),
+            None => (
+                self.conf.ism_policy_id.clone(),
+                self.conf.ism_asset_name_hex.clone(),
+            ),
         };
         let ism_utxo = self
             .provider
             .find_utxo_by_nft(&ism_policy_id, &ism_asset_name)
             .await?;
-        debug!("Found ISM UTXO: {}#{}", ism_utxo.tx_hash, ism_utxo.output_index);
+        debug!(
+            "Found ISM UTXO: {}#{}",
+            ism_utxo.tx_hash, ism_utxo.output_index
+        );
 
         // 5. Find additional inputs required by recipient
         let mut additional_utxos = Vec::new();
@@ -271,36 +325,44 @@ impl HyperlaneTxBuilder {
 
         // 7. Build recipient continuation datum based on recipient type
         // For Deferred, we also need to build the stored message datum and NFT mint redeemer
-        let (recipient_continuation_datum_cbor, stored_message_datum_cbor, message_nft_redeemer_cbor) =
-            match &registration.recipient_type {
-                crate::types::RecipientType::Deferred { .. } => {
-                    info!("Processing Deferred recipient - will store message for later processing");
+        let (
+            recipient_continuation_datum_cbor,
+            stored_message_datum_cbor,
+            message_nft_redeemer_cbor,
+        ) = match &registration.recipient_type {
+            crate::types::RecipientType::Deferred { .. } => {
+                info!("Processing Deferred recipient - will store message for later processing");
 
-                    // Build Deferred recipient continuation datum (increments messages_stored counter)
-                    let continuation_datum = build_deferred_continuation_datum(&recipient_utxo)?;
+                // Build Deferred recipient continuation datum (increments messages_stored counter)
+                let continuation_datum = build_deferred_continuation_datum(&recipient_utxo)?;
 
-                    // Build StoredMessageDatum for the message UTXO
-                    let stored_msg_datum = crate::types::StoredMessageDatum {
-                        origin: msg.origin,
-                        sender: msg.sender,
-                        body: msg.body.clone(),
-                        message_id,
-                        nonce: msg.nonce,
-                    };
-                    let stored_msg_datum_cbor = encode_stored_message_datum(&stored_msg_datum)?;
+                // Build StoredMessageDatum for the message UTXO
+                let stored_msg_datum = crate::types::StoredMessageDatum {
+                    origin: msg.origin,
+                    sender: msg.sender,
+                    body: msg.body.clone(),
+                    message_id,
+                    nonce: msg.nonce,
+                };
+                let stored_msg_datum_cbor = encode_stored_message_datum(&stored_msg_datum)?;
 
-                    // Build message NFT mint redeemer
-                    let nft_redeemer = crate::types::MessageNftRedeemer::MintMessage;
-                    let nft_redeemer_cbor = encode_message_nft_redeemer(&nft_redeemer)?;
+                // Build message NFT mint redeemer
+                let nft_redeemer = crate::types::MessageNftRedeemer::MintMessage;
+                let nft_redeemer_cbor = encode_message_nft_redeemer(&nft_redeemer)?;
 
-                    (continuation_datum, Some(stored_msg_datum_cbor), Some(nft_redeemer_cbor))
-                }
-                _ => {
-                    // Generic, TokenReceiver - use existing logic
-                    let continuation_datum = build_recipient_continuation_datum(&recipient_utxo, &msg.body)?;
-                    (continuation_datum, None, None)
-                }
-            };
+                (
+                    continuation_datum,
+                    Some(stored_msg_datum_cbor),
+                    Some(nft_redeemer_cbor),
+                )
+            }
+            _ => {
+                // Generic, TokenReceiver - use existing logic
+                let continuation_datum =
+                    build_recipient_continuation_datum(&recipient_utxo, &msg.body)?;
+                (continuation_datum, None, None)
+            }
+        };
 
         // 8. Encode processed message marker datum
         let processed_datum = ProcessedMessageDatum { message_id };
@@ -358,7 +420,10 @@ impl HyperlaneTxBuilder {
             validator_signatures: parsed_metadata.validator_signatures,
         };
         let ism_redeemer_cbor = encode_ism_redeemer(&ism_redeemer)?;
-        debug!("Encoded ISM Verify redeemer ({} bytes)", ism_redeemer_cbor.len());
+        debug!(
+            "Encoded ISM Verify redeemer ({} bytes)",
+            ism_redeemer_cbor.len()
+        );
 
         Ok(ProcessTxComponents {
             mailbox_utxo,
@@ -393,7 +458,10 @@ impl HyperlaneTxBuilder {
         payer: &Keypair,
     ) -> Result<TxOutcome, TxBuilderError> {
         // 1. Build transaction components
-        info!("Building process transaction components for message nonce {}", message.nonce);
+        info!(
+            "Building process transaction components for message nonce {}",
+            message.nonce
+        );
         let components = self.build_process_tx(message, metadata).await?;
 
         // 2. Build the complete transaction
@@ -470,7 +538,10 @@ impl HyperlaneTxBuilder {
         // Add ISM UTXO as spent input (for signature verification)
         let ism_input = utxo_to_input(&components.ism_utxo)?;
         tx = tx.input(ism_input);
-        debug!("Added ISM input for verification: {}#{}", components.ism_utxo.tx_hash, components.ism_utxo.output_index);
+        debug!(
+            "Added ISM input for verification: {}#{}",
+            components.ism_utxo.tx_hash, components.ism_utxo.output_index
+        );
 
         // Add recipient reference script UTXO as reference input (if present)
         // This allows the relayer to call arbitrary recipient scripts without
@@ -506,9 +577,14 @@ impl HyperlaneTxBuilder {
         if let Some(collateral_utxo) = selected_utxos.first() {
             let collateral_input = utxo_to_input(collateral_utxo)?;
             tx = tx.collateral_input(collateral_input);
-            debug!("Added collateral input: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+            debug!(
+                "Added collateral input: {}#{}",
+                collateral_utxo.tx_hash, collateral_utxo.output_index
+            );
         } else {
-            return Err(TxBuilderError::MissingInput("No UTXOs available for collateral".to_string()));
+            return Err(TxBuilderError::MissingInput(
+                "No UTXOs available for collateral".to_string(),
+            ));
         }
 
         // Add spend redeemers with execution units
@@ -551,15 +627,16 @@ impl HyperlaneTxBuilder {
             components.ism_redeemer_cbor.clone(),
             Some(ex_units_ism),
         );
-        debug!("Added ISM Verify redeemer ({} bytes)", components.ism_redeemer_cbor.len());
+        debug!(
+            "Added ISM Verify redeemer ({} bytes)",
+            components.ism_redeemer_cbor.len()
+        );
 
         // Create outputs
 
         // 1. Mailbox continuation output (same address, same datum, same value)
-        let mailbox_output = create_continuation_output(
-            &components.mailbox_utxo,
-            &self.conf.mailbox_policy_id,
-        )?;
+        let mailbox_output =
+            create_continuation_output(&components.mailbox_utxo, &self.conf.mailbox_policy_id)?;
         tx = tx.output(mailbox_output);
 
         // 2. Recipient continuation output (same address, same value, UPDATED datum)
@@ -571,7 +648,8 @@ impl HyperlaneTxBuilder {
 
         // 2b. Deferred-specific: Create message UTXO and mint message NFT
         // This is the UTXO that stores the message on-chain for later processing by a bot
-        if let crate::types::RecipientType::Deferred { message_policy } = &components.recipient_type {
+        if let crate::types::RecipientType::Deferred { message_policy } = &components.recipient_type
+        {
             info!("Creating Deferred message UTXO with message NFT");
 
             // Get message NFT policy bytes
@@ -581,13 +659,23 @@ impl HyperlaneTxBuilder {
             let asset_name: Vec<u8> = components.message_id.to_vec();
 
             // Mint the message NFT (proves message is legitimate)
-            tx = tx.mint_asset(message_nft_policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to mint message NFT: {:?}", e)))?;
+            tx = tx
+                .mint_asset(message_nft_policy_bytes, asset_name.clone(), 1)
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!("Failed to mint message NFT: {:?}", e))
+                })?;
 
             // Create message UTXO at recipient address with StoredMessageDatum and the NFT
             let recipient_address = parse_address(&components.recipient_utxo.address)?;
-            let stored_datum_cbor = components.stored_message_datum_cbor.as_ref()
-                .ok_or_else(|| TxBuilderError::MissingInput("Deferred missing stored_message_datum_cbor".to_string()))?;
+            let stored_datum_cbor =
+                components
+                    .stored_message_datum_cbor
+                    .as_ref()
+                    .ok_or_else(|| {
+                        TxBuilderError::MissingInput(
+                            "Deferred missing stored_message_datum_cbor".to_string(),
+                        )
+                    })?;
 
             let mut message_utxo_output = Output::new(recipient_address, MIN_UTXO_LOVELACE)
                 .set_inline_datum(stored_datum_cbor.clone());
@@ -595,18 +683,31 @@ impl HyperlaneTxBuilder {
             // Add the message NFT to this output
             message_utxo_output = message_utxo_output
                 .add_asset(message_nft_policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {:?}", e)))?;
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {:?}", e))
+                })?;
 
             tx = tx.output(message_utxo_output);
 
             // Add mint redeemer for message NFT (MintMessage = Constr 0 [])
-            let mint_redeemer_cbor = components.message_nft_redeemer_cbor.as_ref()
-                .ok_or_else(|| TxBuilderError::MissingInput("Deferred missing message_nft_redeemer_cbor".to_string()))?;
+            let mint_redeemer_cbor =
+                components
+                    .message_nft_redeemer_cbor
+                    .as_ref()
+                    .ok_or_else(|| {
+                        TxBuilderError::MissingInput(
+                            "Deferred missing message_nft_redeemer_cbor".to_string(),
+                        )
+                    })?;
             let ex_units_mint = ExUnits {
                 mem: DEFAULT_MEM_UNITS,
                 steps: DEFAULT_STEP_UNITS,
             };
-            tx = tx.add_mint_redeemer(message_nft_policy_bytes, mint_redeemer_cbor.clone(), Some(ex_units_mint));
+            tx = tx.add_mint_redeemer(
+                message_nft_policy_bytes,
+                mint_redeemer_cbor.clone(),
+                Some(ex_units_mint),
+            );
 
             // Note: The message NFT minting policy script needs to be added as a reference script
             // This should be configured in ConnectionConf with message_nft_reference_script_utxo
@@ -643,23 +744,35 @@ impl HyperlaneTxBuilder {
             // Parse policy ID as bytes
             let policy_bytes: Hash<28> = Hash::new(
                 hex::decode(policy_id)
-                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid NFT policy ID hex: {}", e)))?
+                    .map_err(|e| {
+                        TxBuilderError::Encoding(format!("Invalid NFT policy ID hex: {}", e))
+                    })?
                     .try_into()
-                    .map_err(|_| TxBuilderError::Encoding("NFT policy ID must be 28 bytes".to_string()))?
+                    .map_err(|_| {
+                        TxBuilderError::Encoding("NFT policy ID must be 28 bytes".to_string())
+                    })?,
             );
 
             // Asset name is the 32-byte message_id
             let asset_name: Vec<u8> = components.message_id.to_vec();
 
             // Add mint asset (policy_id, asset_name, amount=1)
-            tx = tx.mint_asset(policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add mint asset: {:?}", e)))?;
+            tx = tx
+                .mint_asset(policy_bytes, asset_name.clone(), 1)
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!("Failed to add mint asset: {:?}", e))
+                })?;
 
             // Add the minted NFT to the processed marker output
             // This is where the minted NFT will live
             processed_marker_output = processed_marker_output
                 .add_asset(policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add NFT to processed marker output: {:?}", e)))?;
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!(
+                        "Failed to add NFT to processed marker output: {:?}",
+                        e
+                    ))
+                })?;
 
             // Add mint redeemer (empty data since minting policy just checks mailbox is spent)
             let mint_redeemer_data = vec![0xd8, 0x79, 0x9f, 0xff]; // Constr 0 []
@@ -670,15 +783,22 @@ impl HyperlaneTxBuilder {
             tx = tx.add_mint_redeemer(policy_bytes, mint_redeemer_data, Some(ex_units_mint));
 
             // Add minting policy script to witness set
-            let script_bytes = hex::decode(script_cbor)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid NFT script CBOR hex: {}", e)))?;
+            let script_bytes = hex::decode(script_cbor).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid NFT script CBOR hex: {}", e))
+            })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
 
-            debug!("Added NFT minting for message_id: {}", hex::encode(&components.message_id));
+            debug!(
+                "Added NFT minting for message_id: {}",
+                hex::encode(&components.message_id)
+            );
         }
 
         tx = tx.output(processed_marker_output);
-        debug!("Added processed message marker output for message_id: {}", hex::encode(&components.message_id));
+        debug!(
+            "Added processed message marker output for message_id: {}",
+            hex::encode(&components.message_id)
+        );
 
         // 5. Change output back to payer
         // The payer's input funds: fee + processed marker output + (optional) message UTXO
@@ -686,18 +806,19 @@ impl HyperlaneTxBuilder {
         let fee = ESTIMATED_FEE_LOVELACE;
         let processed_marker_cost = MIN_UTXO_LOVELACE;
         // For Deferred, we also create a message UTXO which needs MIN_UTXO_LOVELACE
-        let message_utxo_cost = if matches!(&components.recipient_type, crate::types::RecipientType::Deferred { .. }) {
+        let message_utxo_cost = if matches!(
+            &components.recipient_type,
+            crate::types::RecipientType::Deferred { .. }
+        ) {
             MIN_UTXO_LOVELACE
         } else {
             0
         };
-        let change_amount = total_input.saturating_sub(fee + processed_marker_cost + message_utxo_cost);
+        let change_amount =
+            total_input.saturating_sub(fee + processed_marker_cost + message_utxo_cost);
 
         if change_amount >= MIN_UTXO_LOVELACE {
-            let change_output = Output::new(
-                parse_address(&payer_address)?,
-                change_amount,
-            );
+            let change_output = Output::new(parse_address(&payer_address)?, change_amount);
             tx = tx.output(change_output);
         }
 
@@ -723,13 +844,15 @@ impl HyperlaneTxBuilder {
             debug!("Added mailbox reference script UTXO: {}", ref_utxo_str);
         } else if let Some(ref script_cbor_hex) = self.conf.mailbox_script_cbor {
             // Fall back to inline script witness (deprecated)
-            let script_bytes = hex::decode(script_cbor_hex)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid mailbox script CBOR hex: {}", e)))?;
+            let script_bytes = hex::decode(script_cbor_hex).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid mailbox script CBOR hex: {}", e))
+            })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
             debug!("Added mailbox script to witness set (deprecated - use reference scripts)");
         } else {
             return Err(TxBuilderError::ScriptNotFound(
-                "Neither mailbox_reference_script_utxo nor mailbox_script_cbor configured".to_string()
+                "Neither mailbox_reference_script_utxo nor mailbox_script_cbor configured"
+                    .to_string(),
             ));
         }
 
@@ -742,13 +865,14 @@ impl HyperlaneTxBuilder {
             debug!("Added ISM reference script UTXO: {}", ref_utxo_str);
         } else if let Some(ref script_cbor_hex) = self.conf.ism_script_cbor {
             // Fall back to inline script witness (deprecated)
-            let script_bytes = hex::decode(script_cbor_hex)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid ISM script CBOR hex: {}", e)))?;
+            let script_bytes = hex::decode(script_cbor_hex).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid ISM script CBOR hex: {}", e))
+            })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
             debug!("Added ISM script to witness set (deprecated - use reference scripts)");
         } else {
             return Err(TxBuilderError::ScriptNotFound(
-                "Neither ism_reference_script_utxo nor ism_script_cbor configured".to_string()
+                "Neither ism_reference_script_utxo nor ism_script_cbor configured".to_string(),
             ));
         }
 
@@ -759,8 +883,9 @@ impl HyperlaneTxBuilder {
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
         // Build the transaction
-        let built = tx.build_conway_raw()
-            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e)))?;
+        let built = tx.build_conway_raw().map_err(|e| {
+            TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e))
+        })?;
 
         Ok(built)
     }
@@ -782,7 +907,8 @@ impl HyperlaneTxBuilder {
         let public_key = payer.pallas_public_key();
 
         // Add the signature to the built transaction
-        let signed = built.add_signature(public_key.clone(), signature)
+        let signed = built
+            .add_signature(public_key.clone(), signature)
             .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add signature: {:?}", e)))?;
 
         // Return the serialized signed transaction
@@ -802,7 +928,10 @@ impl HyperlaneTxBuilder {
                 info!("  - Inputs: {}", tx.transaction_body.inputs.len());
                 info!("  - Outputs: {}", tx.transaction_body.outputs.len());
                 info!("  - Fee: {}", tx.transaction_body.fee);
-                info!("  - Has vkey witnesses: {}", tx.transaction_witness_set.vkeywitness.is_some());
+                info!(
+                    "  - Has vkey witnesses: {}",
+                    tx.transaction_witness_set.vkeywitness.is_some()
+                );
                 if let Some(ref redeemers) = tx.transaction_witness_set.redeemer {
                     info!("  - Has redeemers: true");
                     let redeemer_cbor = redeemers.encode_fragment().unwrap();
@@ -818,21 +947,30 @@ impl HyperlaneTxBuilder {
             Err(e) => {
                 tracing::error!("Transaction validation failed: {:?}", e);
                 tracing::error!("Transaction CBOR (full): {}", hex::encode(signed_tx));
-                return Err(TxBuilderError::TxBuild(format!("Invalid transaction CBOR: {:?}", e)));
+                return Err(TxBuilderError::TxBuild(format!(
+                    "Invalid transaction CBOR: {:?}",
+                    e
+                )));
             }
         }
 
         // Print full transaction CBOR hex for analysis
         let full_hex = hex::encode(signed_tx);
-        info!("Submitting transaction CBOR ({} bytes): {}", signed_tx.len(), full_hex);
+        info!(
+            "Submitting transaction CBOR ({} bytes): {}",
+            signed_tx.len(),
+            full_hex
+        );
 
         // Analyze CBOR structure
         if !signed_tx.is_empty() {
             let first_byte = signed_tx[0];
             let major_type = first_byte >> 5;
             let additional_info = first_byte & 0x1f;
-            info!("CBOR first byte: 0x{:02x} (major type: {}, additional info: {})",
-                   first_byte, major_type, additional_info);
+            info!(
+                "CBOR first byte: 0x{:02x} (major type: {}, additional info: {})",
+                first_byte, major_type, additional_info
+            );
         }
 
         self.provider
@@ -894,7 +1032,9 @@ impl HyperlaneTxBuilder {
     ) -> Result<Output, TxBuilderError> {
         // The processed messages are stored at the processed_messages_script address
         // This must match the parameter applied to the mailbox validator
-        let script_address = self.provider.script_hash_to_address(&self.conf.processed_messages_script_hash)?;
+        let script_address = self
+            .provider
+            .script_hash_to_address(&self.conf.processed_messages_script_hash)?;
 
         // Just create a simple output with inline datum, no NFT needed
         let output = Output::new(parse_address(&script_address)?, MIN_UTXO_LOVELACE)
@@ -931,27 +1071,27 @@ impl HyperlaneTxBuilder {
         );
 
         // 1. Find ISM UTXO (ism_policy_id is actually the script hash)
-        let ism_utxos = self
-            .provider
-            .get_script_utxos(ism_policy_id)
-            .await?;
+        let ism_utxos = self.provider.get_script_utxos(ism_policy_id).await?;
 
         let ism_utxo = ism_utxos.into_iter().next().ok_or_else(|| {
             TxBuilderError::UtxoNotFound(format!("ISM UTXO not found at script {}", ism_policy_id))
         })?;
-        info!("Found ISM UTXO: {}#{}", ism_utxo.tx_hash, ism_utxo.output_index);
+        info!(
+            "Found ISM UTXO: {}#{}",
+            ism_utxo.tx_hash, ism_utxo.output_index
+        );
 
         // 2. Parse current ISM datum from inline datum CBOR
-        let current_datum_hex = ism_utxo
-            .inline_datum
-            .as_ref()
-            .ok_or_else(|| TxBuilderError::UtxoNotFound("ISM UTXO has no inline datum".to_string()))?;
+        let current_datum_hex = ism_utxo.inline_datum.as_ref().ok_or_else(|| {
+            TxBuilderError::UtxoNotFound("ISM UTXO has no inline datum".to_string())
+        })?;
 
         // Decode CBOR hex to PlutusData
         let datum_bytes = hex::decode(current_datum_hex)
             .map_err(|e| TxBuilderError::Encoding(format!("Invalid datum hex: {}", e)))?;
-        let current_datum_plutus: PlutusData = minicbor::decode(&datum_bytes)
-            .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {:?}", e)))?;
+        let current_datum_plutus: PlutusData = minicbor::decode(&datum_bytes).map_err(|e| {
+            TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {:?}", e))
+        })?;
 
         // Debug: print raw structure
         info!("Raw decoded datum: {:?}", current_datum_plutus);
@@ -971,12 +1111,20 @@ impl HyperlaneTxBuilder {
         // Parse as MultisigIsmDatum to extract owner
         match &current_datum_plutus {
             PlutusData::Constr(constr) => {
-                info!("Datum is Constr(tag={}) with {} fields", constr.tag, constr.fields.len());
+                info!(
+                    "Datum is Constr(tag={}) with {} fields",
+                    constr.tag,
+                    constr.fields.len()
+                );
                 for (i, field) in constr.fields.iter().enumerate() {
                     match field {
-                        PlutusData::Array(arr) => info!("  Field {}: Array with {} elements", i, arr.len()),
+                        PlutusData::Array(arr) => {
+                            info!("  Field {}: Array with {} elements", i, arr.len())
+                        }
                         PlutusData::Constr(c) => info!("  Field {}: Constr(tag={})", i, c.tag),
-                        PlutusData::BoundedBytes(b) => info!("  Field {}: BoundedBytes({} bytes)", i, b.len()),
+                        PlutusData::BoundedBytes(b) => {
+                            info!("  Field {}: BoundedBytes({} bytes)", i, b.len())
+                        }
                         _ => info!("  Field {}: {:?}", i, field),
                     }
                 }
@@ -1010,11 +1158,14 @@ impl HyperlaneTxBuilder {
         // Note: Validators are Ethereum addresses (20 bytes)
         let redeemer = crate::types::MultisigIsmRedeemer::SetValidators {
             domain,
-            validators: validators.iter().map(|v| {
-                let mut arr = [0u8; 20];
-                arr.copy_from_slice(&v[..20.min(v.len())]);
-                crate::types::EthAddress(arr)
-            }).collect(),
+            validators: validators
+                .iter()
+                .map(|v| {
+                    let mut arr = [0u8; 20];
+                    arr.copy_from_slice(&v[..20.min(v.len())]);
+                    crate::types::EthAddress(arr)
+                })
+                .collect(),
         };
         let redeemer_cbor = encode_ism_redeemer(&redeemer)?;
 
@@ -1023,7 +1174,11 @@ impl HyperlaneTxBuilder {
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
         let (selected_utxos, total_input) = self.select_utxos_for_fee(&payer_utxos)?;
 
-        info!("Selected {} payer UTXOs with {} lovelace", selected_utxos.len(), total_input);
+        info!(
+            "Selected {} payer UTXOs with {} lovelace",
+            selected_utxos.len(),
+            total_input
+        );
 
         // 7. Build transaction
         let mut tx = StagingTransaction::new();
@@ -1078,8 +1233,9 @@ impl HyperlaneTxBuilder {
         let plutus_v3_cost_model: Vec<i64> = get_plutus_v3_cost_model();
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
-        let built_tx = tx.build_conway_raw()
-            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e)))?;
+        let built_tx = tx.build_conway_raw().map_err(|e| {
+            TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e))
+        })?;
 
         let signed_tx = self.sign_transaction(built_tx, payer)?;
         let tx_hash = self.submit_transaction(&signed_tx).await?;
@@ -1088,7 +1244,6 @@ impl HyperlaneTxBuilder {
         Ok(tx_hash)
     }
 }
-
 
 /// Components needed to build a Process transaction
 #[derive(Debug)]
@@ -1180,9 +1335,9 @@ fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
     }
 
     let tx_hash_hex = parts[0];
-    let output_index: u64 = parts[1]
-        .parse()
-        .map_err(|e| TxBuilderError::Encoding(format!("Invalid output index '{}': {}", parts[1], e)))?;
+    let output_index: u64 = parts[1].parse().map_err(|e| {
+        TxBuilderError::Encoding(format!("Invalid output index '{}': {}", parts[1], e))
+    })?;
 
     let tx_hash_bytes = hex::decode(tx_hash_hex)
         .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {}", e)))?;
@@ -1221,10 +1376,13 @@ fn create_continuation_output(utxo: &Utxo, _policy_id: &str) -> Result<Output, T
             let policy_hash = parse_policy_id(policy_hex)?;
             let asset_name = hex::decode(asset_name_hex)
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
-            let quantity: u64 = value.quantity.parse()
+            let quantity: u64 = value
+                .quantity
+                .parse()
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
 
-            output = output.add_asset(policy_hash, asset_name, quantity)
+            output = output
+                .add_asset(policy_hash, asset_name, quantity)
                 .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
         }
     }
@@ -1255,10 +1413,13 @@ fn create_recipient_continuation_output(
             let policy_hash = parse_policy_id(policy_hex)?;
             let asset_name = hex::decode(asset_name_hex)
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
-            let quantity: u64 = value.quantity.parse()
+            let quantity: u64 = value
+                .quantity
+                .parse()
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
 
-            output = output.add_asset(policy_hash, asset_name, quantity)
+            output = output
+                .add_asset(policy_hash, asset_name, quantity)
                 .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
         }
     }
@@ -1290,10 +1451,13 @@ fn create_ism_continuation_output(utxo: &Utxo) -> Result<Output, TxBuilderError>
             let asset_name = hex::decode(asset_name_hex)
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
 
-            let quantity: u64 = value.quantity.parse()
+            let quantity: u64 = value
+                .quantity
+                .parse()
                 .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
 
-            output = output.add_asset(policy_hash, asset_name, quantity)
+            output = output
+                .add_asset(policy_hash, asset_name, quantity)
                 .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
         }
     }
@@ -1316,12 +1480,13 @@ fn build_recipient_continuation_datum(
     message_body: &[u8],
 ) -> Result<Vec<u8>, TxBuilderError> {
     // Parse the existing datum to extract current state
-    let (ism_opt, old_nonce, old_messages_received) = if let Some(datum_str) = &recipient_utxo.inline_datum {
-        parse_recipient_datum(datum_str)?
-    } else {
-        // Default values if no datum
-        (None, None, 0)
-    };
+    let (ism_opt, old_nonce, old_messages_received) =
+        if let Some(datum_str) = &recipient_utxo.inline_datum {
+            parse_recipient_datum(datum_str)?
+        } else {
+            // Default values if no datum
+            (None, None, 0)
+        };
 
     // Compute new values
     let new_messages_received = old_messages_received + 1;
@@ -1354,9 +1519,7 @@ fn build_generic_recipient_datum_plutus(
         Some(hash) => PlutusData::Constr(Constr {
             tag: 121, // Some = constructor 0
             any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![
-                PlutusData::BoundedBytes(hash.to_vec().into())
-            ]),
+            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(hash.to_vec().into())]),
         }),
         None => PlutusData::Constr(Constr {
             tag: 122, // None = constructor 1
@@ -1369,9 +1532,7 @@ fn build_generic_recipient_datum_plutus(
         Some(n) => PlutusData::Constr(Constr {
             tag: 121, // Some = constructor 0
             any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![
-                PlutusData::BigInt(BigInt::Int(n.into()))
-            ]),
+            fields: MaybeIndefArray::Def(vec![PlutusData::BigInt(BigInt::Int(n.into()))]),
         }),
         None => PlutusData::Constr(Constr {
             tag: 122, // None = constructor 1
@@ -1385,9 +1546,7 @@ fn build_generic_recipient_datum_plutus(
         Some(msg) => PlutusData::Constr(Constr {
             tag: 121, // Some = constructor 0
             any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![
-                PlutusData::BoundedBytes(msg.to_vec().into())
-            ]),
+            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(msg.to_vec().into())]),
         }),
         None => PlutusData::Constr(Constr {
             tag: 122, // None = constructor 1
@@ -1409,17 +1568,15 @@ fn build_generic_recipient_datum_plutus(
     PlutusData::Constr(Constr {
         tag: 121,
         any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![
-            ism_field,
-            nonce_field,
-            inner_field,
-        ]),
+        fields: MaybeIndefArray::Def(vec![ism_field, nonce_field, inner_field]),
     })
 }
 
 /// Parse a recipient datum to extract the current state
 /// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_received: i64)
-fn parse_recipient_datum(datum_str: &str) -> Result<(Option<Vec<u8>>, Option<i64>, i64), TxBuilderError> {
+fn parse_recipient_datum(
+    datum_str: &str,
+) -> Result<(Option<Vec<u8>>, Option<i64>, i64), TxBuilderError> {
     // Try to parse as CBOR hex first
     let datum_cbor = json_datum_to_cbor(datum_str)?;
 
@@ -1467,7 +1624,8 @@ fn parse_recipient_datum(datum_str: &str) -> Result<(Option<Vec<u8>>, Option<i64
 /// Extract Option<ByteArray> from PlutusData
 fn extract_option_bytes(data: &PlutusData) -> Option<Vec<u8>> {
     if let PlutusData::Constr(constr) = data {
-        if constr.tag == 121 { // Some
+        if constr.tag == 121 {
+            // Some
             let fields: Vec<_> = constr.fields.clone().to_vec();
             if !fields.is_empty() {
                 if let PlutusData::BoundedBytes(bytes) = &fields[0] {
@@ -1482,7 +1640,8 @@ fn extract_option_bytes(data: &PlutusData) -> Option<Vec<u8>> {
 /// Extract Option<Int> from PlutusData
 fn extract_option_int(data: &PlutusData) -> Option<i64> {
     if let PlutusData::Constr(constr) = data {
-        if constr.tag == 121 { // Some
+        if constr.tag == 121 {
+            // Some
             let fields: Vec<_> = constr.fields.clone().to_vec();
             if !fields.is_empty() {
                 return extract_int(&fields[0]);
@@ -1552,7 +1711,8 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
     match json {
         // Integer
         Value::Number(n) => {
-            let i = n.as_i64()
+            let i = n
+                .as_i64()
                 .ok_or_else(|| TxBuilderError::Encoding("Number too large".to_string()))?;
             Ok(PlutusData::BigInt(BigInt::Int(i.into())))
         }
@@ -1573,10 +1733,12 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
         // Object with "constructor" and "fields" (Constr type)
         Value::Object(obj) => {
             if let (Some(constructor), Some(fields)) = (obj.get("constructor"), obj.get("fields")) {
-                let tag = constructor.as_u64()
+                let tag = constructor
+                    .as_u64()
                     .ok_or_else(|| TxBuilderError::Encoding("Invalid constructor".to_string()))?;
 
-                let fields_vec = fields.as_array()
+                let fields_vec = fields
+                    .as_array()
                     .ok_or_else(|| TxBuilderError::Encoding("Fields must be array".to_string()))?;
 
                 let mut parsed_fields = Vec::new();
@@ -1598,19 +1760,22 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
                 }))
             } else if let Some(bytes) = obj.get("bytes") {
                 // Blockfrost format: {"bytes": "hex_string"}
-                let hex_str = bytes.as_str()
+                let hex_str = bytes
+                    .as_str()
                     .ok_or_else(|| TxBuilderError::Encoding("bytes must be string".to_string()))?;
                 let bytes = hex::decode(hex_str)
                     .map_err(|e| TxBuilderError::Encoding(format!("Invalid hex: {}", e)))?;
                 Ok(PlutusData::BoundedBytes(bytes.into()))
             } else if let Some(int_val) = obj.get("int") {
                 // Blockfrost format: {"int": number}
-                let i = int_val.as_i64()
+                let i = int_val
+                    .as_i64()
                     .ok_or_else(|| TxBuilderError::Encoding("int must be number".to_string()))?;
                 Ok(PlutusData::BigInt(BigInt::Int(i.into())))
             } else if let Some(list) = obj.get("list") {
                 // Blockfrost format: {"list": [...]}
-                let items = list.as_array()
+                let items = list
+                    .as_array()
                     .ok_or_else(|| TxBuilderError::Encoding("list must be array".to_string()))?;
                 let mut parsed_items = Vec::new();
                 for item in items {
@@ -1619,19 +1784,24 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
                 Ok(PlutusData::Array(MaybeIndefArray::Def(parsed_items)))
             } else if let Some(map) = obj.get("map") {
                 // Blockfrost format: {"map": [{"k": ..., "v": ...}, ...]}
-                let entries = map.as_array()
+                let entries = map
+                    .as_array()
                     .ok_or_else(|| TxBuilderError::Encoding("map must be array".to_string()))?;
                 let mut parsed_map = Vec::new();
                 for entry in entries {
-                    let k = entry.get("k")
-                        .ok_or_else(|| TxBuilderError::Encoding("map entry missing k".to_string()))?;
-                    let v = entry.get("v")
-                        .ok_or_else(|| TxBuilderError::Encoding("map entry missing v".to_string()))?;
+                    let k = entry.get("k").ok_or_else(|| {
+                        TxBuilderError::Encoding("map entry missing k".to_string())
+                    })?;
+                    let v = entry.get("v").ok_or_else(|| {
+                        TxBuilderError::Encoding("map entry missing v".to_string())
+                    })?;
                     parsed_map.push((json_to_plutus_data(k)?, json_to_plutus_data(v)?));
                 }
                 Ok(PlutusData::Map(KeyValuePairs::from(parsed_map)))
             } else {
-                Err(TxBuilderError::Encoding("Unknown JSON object format".to_string()))
+                Err(TxBuilderError::Encoding(
+                    "Unknown JSON object format".to_string(),
+                ))
             }
         }
 
@@ -1695,7 +1865,9 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             PlutusData::Constr(Constr {
                 tag: 123, // Constructor 2 alternative encoding
                 any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(new_ism.to_vec().into())]),
+                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
+                    new_ism.to_vec().into(),
+                )]),
             })
         }
         MailboxRedeemer::TransferOwnership { new_owner } => {
@@ -1703,7 +1875,9 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             PlutusData::Constr(Constr {
                 tag: 124, // Constructor 3 alternative encoding
                 any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(new_owner.to_vec().into())]),
+                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
+                    new_owner.to_vec().into(),
+                )]),
             })
         }
     };
@@ -1716,7 +1890,10 @@ pub fn encode_recipient_redeemer<T>(
     redeemer: &HyperlaneRecipientRedeemer<T>,
 ) -> Result<Vec<u8>, TxBuilderError> {
     let plutus_data = match redeemer {
-        HyperlaneRecipientRedeemer::HandleMessage { message, message_id } => {
+        HyperlaneRecipientRedeemer::HandleMessage {
+            message,
+            message_id,
+        } => {
             // Constructor 0: HandleMessage { message: Message, message_id: ByteArray }
             //
             // Message is Constructor 0 with fields:
@@ -1765,7 +1942,9 @@ pub fn encode_processed_message_datum(
     let plutus_data = PlutusData::Constr(Constr {
         tag: 121, // Constructor 0
         any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(datum.message_id.to_vec().into())]),
+        fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
+            datum.message_id.to_vec().into(),
+        )]),
     });
 
     encode_plutus_data(&plutus_data)
@@ -1817,9 +1996,7 @@ pub fn encode_message_nft_redeemer(
 /// Build Deferred continuation datum with updated counters
 /// Structure: HyperlaneRecipientDatum { ism: Option, last_processed_nonce: Option, inner: DeferredInner }
 /// DeferredInner: { messages_stored: Int, messages_processed: Int }
-fn build_deferred_continuation_datum(
-    recipient_utxo: &Utxo,
-) -> Result<Vec<u8>, TxBuilderError> {
+fn build_deferred_continuation_datum(recipient_utxo: &Utxo) -> Result<Vec<u8>, TxBuilderError> {
     // Parse the existing datum to extract current state
     let (ism_opt, old_nonce, messages_stored, messages_processed) =
         if let Some(datum_str) = &recipient_utxo.inline_datum {
@@ -1834,7 +2011,7 @@ fn build_deferred_continuation_datum(
 
     let plutus_data = build_deferred_datum_plutus(
         ism_opt.as_deref(),
-        old_nonce,  // Keep the same nonce - validator expects it unchanged
+        old_nonce, // Keep the same nonce - validator expects it unchanged
         new_messages_stored,
         messages_processed,
     );
@@ -1854,9 +2031,7 @@ fn build_deferred_datum_plutus(
         Some(hash) => PlutusData::Constr(Constr {
             tag: 121, // Some = constructor 0
             any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![
-                PlutusData::BoundedBytes(hash.to_vec().into())
-            ]),
+            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(hash.to_vec().into())]),
         }),
         None => PlutusData::Constr(Constr {
             tag: 122, // None = constructor 1
@@ -1869,9 +2044,7 @@ fn build_deferred_datum_plutus(
         Some(n) => PlutusData::Constr(Constr {
             tag: 121, // Some = constructor 0
             any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![
-                PlutusData::BigInt(BigInt::Int(n.into()))
-            ]),
+            fields: MaybeIndefArray::Def(vec![PlutusData::BigInt(BigInt::Int(n.into()))]),
         }),
         None => PlutusData::Constr(Constr {
             tag: 122, // None = constructor 1
@@ -1894,17 +2067,15 @@ fn build_deferred_datum_plutus(
     PlutusData::Constr(Constr {
         tag: 121,
         any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![
-            ism_field,
-            nonce_field,
-            inner_field,
-        ]),
+        fields: MaybeIndefArray::Def(vec![ism_field, nonce_field, inner_field]),
     })
 }
 
 /// Parse a Deferred datum to extract the current state
 /// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_stored: i64, messages_processed: i64)
-fn parse_deferred_datum(datum_str: &str) -> Result<(Option<Vec<u8>>, Option<i64>, i64, i64), TxBuilderError> {
+fn parse_deferred_datum(
+    datum_str: &str,
+) -> Result<(Option<Vec<u8>>, Option<i64>, i64, i64), TxBuilderError> {
     let datum_cbor = json_datum_to_cbor(datum_str)?;
 
     use pallas_codec::minicbor;
@@ -1920,22 +2091,23 @@ fn parse_deferred_datum(datum_str: &str) -> Result<(Option<Vec<u8>>, Option<i64>
             let nonce = extract_option_int(&fields[1]);
 
             // Extract inner.messages_stored and inner.messages_processed
-            let (messages_stored, messages_processed) = if let PlutusData::Constr(inner) = &fields[2] {
-                let inner_fields: Vec<_> = inner.fields.clone().to_vec();
-                let stored = if inner_fields.len() > 0 {
-                    extract_int(&inner_fields[0]).unwrap_or(0)
+            let (messages_stored, messages_processed) =
+                if let PlutusData::Constr(inner) = &fields[2] {
+                    let inner_fields: Vec<_> = inner.fields.clone().to_vec();
+                    let stored = if inner_fields.len() > 0 {
+                        extract_int(&inner_fields[0]).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let processed = if inner_fields.len() > 1 {
+                        extract_int(&inner_fields[1]).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    (stored, processed)
                 } else {
-                    0
+                    (0, 0)
                 };
-                let processed = if inner_fields.len() > 1 {
-                    extract_int(&inner_fields[1]).unwrap_or(0)
-                } else {
-                    0
-                };
-                (stored, processed)
-            } else {
-                (0, 0)
-            };
 
             return Ok((ism, nonce, messages_stored, messages_processed));
         }
@@ -1988,12 +2160,18 @@ fn extract_ism_owner(datum: &PlutusData) -> Result<[u8; 28], TxBuilderError> {
                 }
             };
 
-            let bytes: [u8; 28] = owner_bytes
-                .try_into()
-                .map_err(|_| TxBuilderError::Encoding(format!("Owner must be 28 bytes, got {}", owner_bytes.len())))?;
+            let bytes: [u8; 28] = owner_bytes.try_into().map_err(|_| {
+                TxBuilderError::Encoding(format!(
+                    "Owner must be 28 bytes, got {}",
+                    owner_bytes.len()
+                ))
+            })?;
             Ok(bytes)
         }
-        _ => Err(TxBuilderError::Encoding(format!("Invalid ISM datum structure: expected Constr with 3 fields, got {:?}", datum))),
+        _ => Err(TxBuilderError::Encoding(format!(
+            "Invalid ISM datum structure: expected Constr with 3 fields, got {:?}",
+            datum
+        ))),
     }
 }
 
@@ -2012,10 +2190,7 @@ fn build_ism_datum(
     use serde_json::json;
 
     // Convert validator bytes to hex strings
-    let validator_hex_list: Vec<String> = validators
-        .into_iter()
-        .map(|v| hex::encode(&v))
-        .collect();
+    let validator_hex_list: Vec<String> = validators.into_iter().map(|v| hex::encode(&v)).collect();
 
     // Build validators list JSON: [{"constructor": 0, "fields": [{"int": domain}, {"list": [{"bytes": "hex"}]}]}]
     let validators_json = json!({
@@ -2060,9 +2235,14 @@ fn build_ism_datum(
 }
 
 /// Encode ISM redeemer to CBOR
-fn encode_ism_redeemer(redeemer: &crate::types::MultisigIsmRedeemer) -> Result<Vec<u8>, TxBuilderError> {
+fn encode_ism_redeemer(
+    redeemer: &crate::types::MultisigIsmRedeemer,
+) -> Result<Vec<u8>, TxBuilderError> {
     let plutus_data = match redeemer {
-        crate::types::MultisigIsmRedeemer::Verify { checkpoint, validator_signatures } => {
+        crate::types::MultisigIsmRedeemer::Verify {
+            checkpoint,
+            validator_signatures,
+        } => {
             // Constr(0, [checkpoint, [validator_signature, ...]])
             // checkpoint: Constr(0, [origin, merkle_root, origin_merkle_tree_hook, merkle_index, message_id])
             // validator_signature: Constr(0, [recovered_pubkey, signature])
@@ -2231,7 +2411,8 @@ pub fn parse_multisig_metadata(
                     Ok(rec_id) => {
                         // Recover public key using the ORIGINAL signature
                         // The same public key verifies both (r, s) and (r, n-s)
-                        match VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id) {
+                        match VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id)
+                        {
                             Ok(recovered_key) => {
                                 // Get compressed key (33 bytes: 0x02/0x03 + x-coordinate)
                                 // Per CIP-49, verifyEcdsaSecp256k1Signature expects this format
@@ -2265,7 +2446,11 @@ pub fn parse_multisig_metadata(
                                 // Compute Ethereum address for logging
                                 let address_hash = Keccak256::digest(uncompressed_bytes);
                                 let eth_address = &address_hash[12..];
-                                info!("  Recovered validator {}: 0x{}", validator_signatures.len() - 1, hex::encode(eth_address));
+                                info!(
+                                    "  Recovered validator {}: 0x{}",
+                                    validator_signatures.len() - 1,
+                                    hex::encode(eth_address)
+                                );
                                 info!("    Compressed pubkey: {}", hex::encode(&compressed_pubkey));
                             }
                             Err(e) => {
@@ -2286,7 +2471,10 @@ pub fn parse_multisig_metadata(
         offset += 65;
     }
 
-    debug!("  Recovered {} validator signatures", validator_signatures.len());
+    debug!(
+        "  Recovered {} validator signatures",
+        validator_signatures.len()
+    );
 
     Ok(MultisigMetadata {
         merkle_root,
@@ -2319,16 +2507,16 @@ fn get_plutus_v3_cost_model() -> Vec<i64> {
         33852, 32, 68246, 32, 72362, 32, 7243, 32, 7391, 32, 11546, 32, 85848, 123203, 7305, -900,
         1716, 549, 57, 85848, 0, 1, 90434, 519, 0, 1, 74433, 32, 85848, 123203, 7305, -900, 1716,
         549, 57, 85848, 0, 1, 1, 85848, 123203, 7305, -900, 1716, 549, 57, 85848, 0, 1, 955506,
-        213312, 0, 2, 270652, 22588, 4, 1457325, 64566, 4, 20467, 1, 4, 0, 141992, 32, 100788,
-        420, 1, 1, 81663, 32, 59498, 32, 20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32,
-        43053543, 10, 53384111, 14333, 10, 43574283, 26308, 10, 16000, 100, 16000, 100, 962335,
-        18, 2780678, 6, 442008, 1, 52538055, 3756, 18, 267929, 18, 76433006, 8868, 18, 52948122,
-        18, 1995836, 36, 3227919, 12, 901022, 1, 166917843, 4307, 36, 284546, 36, 158221314,
-        26549, 36, 74698472, 36, 333849714, 1, 254006273, 72, 2174038, 72, 2261318, 64571, 4,
-        207616, 8310, 4, 1293828, 28716, 63, 0, 1, 1006041, 43623, 251, 0, 1, 100181, 726, 719,
-        0, 1, 100181, 726, 719, 0, 1, 100181, 726, 719, 0, 1, 107878, 680, 0, 1, 95336, 1,
-        281145, 18848, 0, 1, 180194, 159, 1, 1, 158519, 8942, 0, 1, 159378, 8813, 0, 1, 107490,
-        3298, 1, 106057, 655, 1, 1964219, 24520, 3,
+        213312, 0, 2, 270652, 22588, 4, 1457325, 64566, 4, 20467, 1, 4, 0, 141992, 32, 100788, 420,
+        1, 1, 81663, 32, 59498, 32, 20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32,
+        43053543, 10, 53384111, 14333, 10, 43574283, 26308, 10, 16000, 100, 16000, 100, 962335, 18,
+        2780678, 6, 442008, 1, 52538055, 3756, 18, 267929, 18, 76433006, 8868, 18, 52948122, 18,
+        1995836, 36, 3227919, 12, 901022, 1, 166917843, 4307, 36, 284546, 36, 158221314, 26549, 36,
+        74698472, 36, 333849714, 1, 254006273, 72, 2174038, 72, 2261318, 64571, 4, 207616, 8310, 4,
+        1293828, 28716, 63, 0, 1, 1006041, 43623, 251, 0, 1, 100181, 726, 719, 0, 1, 100181, 726,
+        719, 0, 1, 100181, 726, 719, 0, 1, 107878, 680, 0, 1, 95336, 1, 281145, 18848, 0, 1,
+        180194, 159, 1, 1, 158519, 8942, 0, 1, 159378, 8813, 0, 1, 107490, 3298, 1, 106057, 655, 1,
+        1964219, 24520, 3,
     ]
 }
 
@@ -2415,7 +2603,10 @@ mod tests {
 
         // Verify the first byte after array header is the tag (should be 0 for Spend)
         // Expected: 84 00 00 <plutus_data> 82 <mem> <steps>
-        println!("First bytes: {:02x} {:02x} {:02x}", encoded[0], encoded[1], encoded[2]);
+        println!(
+            "First bytes: {:02x} {:02x} {:02x}",
+            encoded[0], encoded[1], encoded[2]
+        );
 
         // Now test encoding as Redeemers::List
         let redeemers = Redeemers::List(vec![redeemer]);
@@ -2425,11 +2616,11 @@ mod tests {
 
     #[test]
     fn test_full_tx_build_with_redeemer() {
-        use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
         use pallas_addresses::{Address, Network};
-        use pallas_primitives::Fragment;
-        use pallas_primitives::conway::Tx;
         use pallas_crypto::hash::Hash;
+        use pallas_primitives::conway::Tx;
+        use pallas_primitives::Fragment;
+        use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
 
         // Create a staging transaction with a redeemer
         let mut tx = StagingTransaction::new();
@@ -2476,10 +2667,15 @@ mod tests {
 
         match built {
             Ok(built_tx) => {
-                println!("Built tx CBOR ({} bytes): {}", built_tx.tx_bytes.0.len(), hex::encode(&built_tx.tx_bytes.0));
+                println!(
+                    "Built tx CBOR ({} bytes): {}",
+                    built_tx.tx_bytes.0.len(),
+                    hex::encode(&built_tx.tx_bytes.0)
+                );
 
                 // Now decode and check the redeemer structure
-                let decoded_tx: Tx = Tx::decode_fragment(&built_tx.tx_bytes.0).expect("Should decode");
+                let decoded_tx: Tx =
+                    Tx::decode_fragment(&built_tx.tx_bytes.0).expect("Should decode");
 
                 // Check the witness set redeemers
                 if let Some(ref redeemers) = decoded_tx.transaction_witness_set.redeemer {
@@ -2487,7 +2683,10 @@ mod tests {
 
                     // Re-encode just the redeemers to see what they look like
                     let redeemers_cbor = redeemers.encode_fragment().unwrap();
-                    println!("Redeemers CBOR from witness set: {}", hex::encode(&redeemers_cbor));
+                    println!(
+                        "Redeemers CBOR from witness set: {}",
+                        hex::encode(&redeemers_cbor)
+                    );
                 } else {
                     println!("No redeemers in witness set!");
                 }
@@ -2502,8 +2701,11 @@ mod tests {
 #[cfg(test)]
 mod signature_verification_tests {
     use super::*;
+    use k256::ecdsa::{
+        signature::hazmat::PrehashVerifier, signature::Verifier, RecoveryId, Signature,
+        VerifyingKey,
+    };
     use sha3::{Digest, Keccak256};
-    use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier, RecoveryId, signature::hazmat::PrehashVerifier};
 
     /// Test signature verification with recovery to identify the actual signer
     /// This test recovers the correct public keys from real Fuji signatures
@@ -2511,13 +2713,21 @@ mod signature_verification_tests {
     fn test_fuji_signature_with_recovery() {
         // Test data from relayer logs
         let origin: u32 = 43113;
-        let merkle_root = hex::decode("efa004d027c79c3d7faf7821111493144243a32f8616af99ceff8238000010ec").unwrap();
-        let origin_merkle_tree_hook = hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612").unwrap();
+        let merkle_root =
+            hex::decode("efa004d027c79c3d7faf7821111493144243a32f8616af99ceff8238000010ec")
+                .unwrap();
+        let origin_merkle_tree_hook =
+            hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612")
+                .unwrap();
         let merkle_index: u32 = 146986598;
-        let message_id = hex::decode("0ce4b05a9d25d2556f74ddaa1ac84841341623376c9e5cd073f52b1b54dcddbf").unwrap();
+        let message_id =
+            hex::decode("0ce4b05a9d25d2556f74ddaa1ac84841341623376c9e5cd073f52b1b54dcddbf")
+                .unwrap();
 
         // Validator 0 public key (compressed) - THIS IS WHAT WE HAVE
-        let validator_pubkey = hex::decode("03225f0eceb966fca4afec433f93cb38d3b0cbb44b066a4a83618fc23d2ccd5c17").unwrap();
+        let validator_pubkey =
+            hex::decode("03225f0eceb966fca4afec433f93cb38d3b0cbb44b066a4a83618fc23d2ccd5c17")
+                .unwrap();
 
         // Signature 0 (65 bytes: r || s || v)
         let sig_bytes = hex::decode("d88d35b30b437c9d069dc3e97263d8b06367ae53840fdb1d0f8009e61ded9cad1ca7cb64f16f21a08634065f7de2cc92d651fa5bd04603e675ad72fffe39b4761b").unwrap();
@@ -2539,14 +2749,20 @@ mod signature_verification_tests {
         checkpoint_hasher.update(&merkle_index.to_be_bytes());
         checkpoint_hasher.update(&message_id);
         let checkpoint_digest: [u8; 32] = checkpoint_hasher.finalize().into();
-        println!("checkpoint_digest (signing_hash): {}", hex::encode(&checkpoint_digest));
+        println!(
+            "checkpoint_digest (signing_hash): {}",
+            hex::encode(&checkpoint_digest)
+        );
 
         // Step 3: eth_signed_message = keccak256("\x19Ethereum Signed Message:\n32" || checkpoint_digest)
         let mut eth_hasher = Keccak256::new();
         eth_hasher.update(b"\x19Ethereum Signed Message:\n32");
         eth_hasher.update(&checkpoint_digest);
         let eth_signed_message: [u8; 32] = eth_hasher.finalize().into();
-        println!("eth_signed_message (final hash to sign): {}", hex::encode(&eth_signed_message));
+        println!(
+            "eth_signed_message (final hash to sign): {}",
+            hex::encode(&eth_signed_message)
+        );
 
         println!("\n=== Recovery test ===");
 
@@ -2567,8 +2783,14 @@ mod signature_verification_tests {
         match VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id) {
             Ok(recovered_key) => {
                 let recovered_compressed = recovered_key.to_sec1_bytes();
-                println!("Recovered public key (compressed): {}", hex::encode(&recovered_compressed));
-                println!("Expected public key (compressed):  {}", hex::encode(&validator_pubkey));
+                println!(
+                    "Recovered public key (compressed): {}",
+                    hex::encode(&recovered_compressed)
+                );
+                println!(
+                    "Expected public key (compressed):  {}",
+                    hex::encode(&validator_pubkey)
+                );
 
                 // Compute Ethereum address from public key
                 let uncompressed = recovered_key.to_encoded_point(false);
@@ -2589,7 +2811,7 @@ mod signature_verification_tests {
                     Ok(_) => println!("✓ Signature verifies with recovered key"),
                     Err(e) => println!("✗ Signature verification failed: {}", e),
                 }
-            },
+            }
             Err(e) => {
                 println!("Recovery failed: {:?}", e);
 
@@ -2598,9 +2820,12 @@ mod signature_verification_tests {
                 match VerifyingKey::recover_from_prehash(&checkpoint_digest, &sig, rec_id) {
                     Ok(recovered_key) => {
                         let recovered_compressed = recovered_key.to_sec1_bytes();
-                        println!("Recovered public key (without EIP-191): {}", hex::encode(&recovered_compressed));
+                        println!(
+                            "Recovered public key (without EIP-191): {}",
+                            hex::encode(&recovered_compressed)
+                        );
                         println!("Expected public key: {}", hex::encode(&validator_pubkey));
-                    },
+                    }
                     Err(e) => println!("Recovery without EIP-191 also failed: {:?}", e),
                 }
             }
@@ -2609,7 +2834,8 @@ mod signature_verification_tests {
         println!("\n=== Direct verification ===");
 
         // Parse the expected public key
-        let verifying_key = VerifyingKey::from_sec1_bytes(&validator_pubkey).expect("Invalid public key");
+        let verifying_key =
+            VerifyingKey::from_sec1_bytes(&validator_pubkey).expect("Invalid public key");
 
         // Verify with EIP-191 hash
         let result1 = verifying_key.verify_prehash(&eth_signed_message, &sig);
@@ -2634,10 +2860,16 @@ mod signature_verification_tests {
     fn test_recover_all_fuji_validator_keys() {
         // Test data from relayer logs
         let origin: u32 = 43113;
-        let merkle_root = hex::decode("efa004d027c79c3d7faf7821111493144243a32f8616af99ceff8238000010ec").unwrap();
-        let origin_merkle_tree_hook = hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612").unwrap();
+        let merkle_root =
+            hex::decode("efa004d027c79c3d7faf7821111493144243a32f8616af99ceff8238000010ec")
+                .unwrap();
+        let origin_merkle_tree_hook =
+            hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612")
+                .unwrap();
         let merkle_index: u32 = 146986598;
-        let message_id = hex::decode("0ce4b05a9d25d2556f74ddaa1ac84841341623376c9e5cd073f52b1b54dcddbf").unwrap();
+        let message_id =
+            hex::decode("0ce4b05a9d25d2556f74ddaa1ac84841341623376c9e5cd073f52b1b54dcddbf")
+                .unwrap();
 
         // All signatures from Fuji validators (65 bytes each: r || s || v)
         let signatures = vec![
@@ -2687,12 +2919,18 @@ mod signature_verification_tests {
             match VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id) {
                 Ok(recovered_key) => {
                     let compressed = recovered_key.to_sec1_bytes();
-                    println!("Compressed public key (33 bytes): {}", hex::encode(&compressed));
+                    println!(
+                        "Compressed public key (33 bytes): {}",
+                        hex::encode(&compressed)
+                    );
 
                     // Get uncompressed key (64 bytes without 0x04 prefix)
                     let uncompressed = recovered_key.to_encoded_point(false);
                     let public_key_bytes = &uncompressed.as_bytes()[1..]; // Skip 0x04 prefix
-                    println!("Uncompressed public key (64 bytes): {}", hex::encode(public_key_bytes));
+                    println!(
+                        "Uncompressed public key (64 bytes): {}",
+                        hex::encode(public_key_bytes)
+                    );
 
                     // Compute Ethereum address
                     let address_hash = Keccak256::digest(public_key_bytes);
@@ -2706,7 +2944,7 @@ mod signature_verification_tests {
                     }
 
                     recovered_keys.push(hex::encode(public_key_bytes));
-                },
+                }
                 Err(e) => {
                     println!("✗ Recovery failed: {:?}", e);
                 }
@@ -2729,10 +2967,24 @@ mod signature_verification_tests {
     #[test]
     fn test_latest_metadata_signature_recovery() {
         // Latest metadata from logs
-        let metadata: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247, 97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130, 20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7, 101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49, 176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90, 110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107, 171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168, 176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88, 31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189, 245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22, 251, 193, 73, 86, 27];
+        let metadata: Vec<u8> = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247,
+            97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130,
+            20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7,
+            101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49,
+            176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90,
+            110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107,
+            171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168,
+            176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88,
+            31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189,
+            245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
+            251, 193, 73, 86, 27,
+        ];
 
         // Message ID from logs
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
 
         // Origin domain (fuji = 43113)
         let origin: u32 = 43113;
@@ -2752,11 +3004,18 @@ mod signature_verification_tests {
         let signatures_data = &metadata[68..];
 
         println!("=== Parsed Metadata ===");
-        println!("origin_merkle_tree_hook: {}", hex::encode(origin_merkle_tree_hook));
+        println!(
+            "origin_merkle_tree_hook: {}",
+            hex::encode(origin_merkle_tree_hook)
+        );
         println!("root_index (merkle_index): {}", root_index);
         println!("merkle_root: {}", hex::encode(merkle_root));
         println!("message_id: {}", hex::encode(&message_id));
-        println!("signatures_data length: {} (expecting {} signatures)", signatures_data.len(), signatures_data.len() / 65);
+        println!(
+            "signatures_data length: {} (expecting {} signatures)",
+            signatures_data.len(),
+            signatures_data.len() / 65
+        );
 
         // Step 1: domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
         let mut domain_hasher = Keccak256::new();
@@ -2856,11 +3115,16 @@ mod signature_verification_tests {
         }
 
         // Assert that at least threshold (2) addresses match
-        let matching_count = recovered_addresses.iter()
+        let matching_count = recovered_addresses
+            .iter()
             .filter(|addr| trusted_addresses.contains(&addr.as_str()))
             .count();
 
-        println!("\nMatching addresses: {} / {}", matching_count, recovered_addresses.len());
+        println!(
+            "\nMatching addresses: {} / {}",
+            matching_count,
+            recovered_addresses.len()
+        );
 
         // This test is informational - show results
         if matching_count < 2 {
@@ -2877,9 +3141,23 @@ mod signature_verification_tests {
     #[test]
     fn test_normalization_effect_on_recovery() {
         // Latest metadata from logs
-        let metadata: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247, 97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130, 20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7, 101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49, 176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90, 110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107, 171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168, 176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88, 31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189, 245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22, 251, 193, 73, 86, 27];
+        let metadata: Vec<u8> = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247,
+            97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130,
+            20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7,
+            101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49,
+            176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90,
+            110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107,
+            171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168,
+            176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88,
+            31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189,
+            245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
+            251, 193, 73, 86, 27,
+        ];
 
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
         let origin: u32 = 43113;
 
         // Parse metadata
@@ -2926,8 +3204,9 @@ mod signature_verification_tests {
         println!("  Is high-s: {}", is_high_s);
 
         // Recovery with original signature
-        let recovered_key_original = VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id)
-            .expect("Recovery failed");
+        let recovered_key_original =
+            VerifyingKey::recover_from_prehash(&eth_signed_message, &sig, rec_id)
+                .expect("Recovery failed");
 
         let original_uncompressed = recovered_key_original.to_encoded_point(false);
         let original_pubkey = &original_uncompressed.as_bytes()[1..];
@@ -2945,7 +3224,10 @@ mod signature_verification_tests {
             println!("  s: {}", hex::encode(&normalized_bytes[32..64]));
 
             // Try recovery with normalized signature - SAME recovery ID
-            println!("\nRecovery with NORMALIZED signature (same v={}):", recovery_id);
+            println!(
+                "\nRecovery with NORMALIZED signature (same v={}):",
+                recovery_id
+            );
             match VerifyingKey::recover_from_prehash(&eth_signed_message, &normalized_sig, rec_id) {
                 Ok(recovered_key_normalized) => {
                     let normalized_uncompressed = recovered_key_normalized.to_encoded_point(false);
@@ -2967,9 +3249,16 @@ mod signature_verification_tests {
 
             // Try recovery with normalized signature - FLIPPED recovery ID
             let flipped_id = if recovery_id == 0 { 1 } else { 0 };
-            println!("\nRecovery with NORMALIZED signature (flipped v={}):", flipped_id);
+            println!(
+                "\nRecovery with NORMALIZED signature (flipped v={}):",
+                flipped_id
+            );
             let flipped_rec_id = RecoveryId::try_from(flipped_id).unwrap();
-            match VerifyingKey::recover_from_prehash(&eth_signed_message, &normalized_sig, flipped_rec_id) {
+            match VerifyingKey::recover_from_prehash(
+                &eth_signed_message,
+                &normalized_sig,
+                flipped_rec_id,
+            ) {
                 Ok(recovered_key_flipped) => {
                     let flipped_uncompressed = recovered_key_flipped.to_encoded_point(false);
                     let flipped_pubkey = &flipped_uncompressed.as_bytes()[1..];
@@ -3013,18 +3302,32 @@ mod signature_verification_tests {
     #[test]
     fn test_high_s_signature_recovery() {
         // secp256k1 curve order n/2 for comparison
-        let n_half = hex::decode("7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0").unwrap();
+        let n_half =
+            hex::decode("7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0")
+                .unwrap();
 
         println!("=== High-S Signature Analysis ===\n");
         println!("n/2: {}", hex::encode(&n_half));
 
         // Use the metadata from logs
-        let metadata: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247, 97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130, 20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7, 101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49, 176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90, 110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107, 171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168, 176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88, 31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189, 245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22, 251, 193, 73, 86, 27];
+        let metadata: Vec<u8> = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247,
+            97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130,
+            20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7,
+            101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49,
+            176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90,
+            110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107,
+            171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168,
+            176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88,
+            31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189,
+            245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
+            251, 193, 73, 86, 27,
+        ];
         let signatures_data = &metadata[68..];
 
         // Check both signatures
         for i in 0..2 {
-            let sig_bytes = &signatures_data[i*65..(i+1)*65];
+            let sig_bytes = &signatures_data[i * 65..(i + 1) * 65];
             let s = &sig_bytes[32..64];
 
             println!("\nSignature {}:", i);
@@ -3050,7 +3353,9 @@ mod signature_verification_tests {
         let rec_id = RecoveryId::try_from(recovery_id).expect("Invalid recovery id");
 
         // Compute the message hash
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
         let origin: u32 = 43113;
         let origin_merkle_tree_hook = &metadata[0..32];
         let root_index = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
@@ -3080,7 +3385,10 @@ mod signature_verification_tests {
         let uncompressed = key_original.to_encoded_point(false);
         let pubkey_bytes = &uncompressed.as_bytes()[1..];
         let addr_original = &Keccak256::digest(pubkey_bytes)[12..];
-        println!("Address from ORIGINAL sig: 0x{}", hex::encode(addr_original));
+        println!(
+            "Address from ORIGINAL sig: 0x{}",
+            hex::encode(addr_original)
+        );
 
         // Test with normalized signature
         let normalized_sig = sig.normalize_s().unwrap_or(sig);
@@ -3092,13 +3400,18 @@ mod signature_verification_tests {
                     let uncompressed_norm = key_norm.to_encoded_point(false);
                     let pubkey_norm = &uncompressed_norm.as_bytes()[1..];
                     let addr_norm = &Keccak256::digest(pubkey_norm)[12..];
-                    println!("Address from NORMALIZED sig (same v): 0x{}", hex::encode(addr_norm));
+                    println!(
+                        "Address from NORMALIZED sig (same v): 0x{}",
+                        hex::encode(addr_norm)
+                    );
 
                     if addr_original == addr_norm {
                         println!("  ✓ SAME address - normalization doesn't affect recovery here");
                     } else {
                         println!("  ✗ DIFFERENT address - THIS IS THE BUG!");
-                        println!("  When we normalize s but keep the same v, we get wrong address!");
+                        println!(
+                            "  When we normalize s but keep the same v, we get wrong address!"
+                        );
                     }
                 }
                 Err(e) => println!("Recovery failed: {:?}", e),
@@ -3108,12 +3421,19 @@ mod signature_verification_tests {
             let flipped_v = if recovery_id == 0 { 1 } else { 0 };
             let flipped_rec_id = RecoveryId::try_from(flipped_v).expect("Invalid recovery id");
 
-            match VerifyingKey::recover_from_prehash(&eth_signed_message, &normalized_sig, flipped_rec_id) {
+            match VerifyingKey::recover_from_prehash(
+                &eth_signed_message,
+                &normalized_sig,
+                flipped_rec_id,
+            ) {
                 Ok(key_flipped) => {
                     let uncompressed_flipped = key_flipped.to_encoded_point(false);
                     let pubkey_flipped = &uncompressed_flipped.as_bytes()[1..];
                     let addr_flipped = &Keccak256::digest(pubkey_flipped)[12..];
-                    println!("Address from NORMALIZED sig (flipped v): 0x{}", hex::encode(addr_flipped));
+                    println!(
+                        "Address from NORMALIZED sig (flipped v): 0x{}",
+                        hex::encode(addr_flipped)
+                    );
 
                     if addr_original == addr_flipped {
                         println!("  ✓ SAME address with flipped v!");
@@ -3129,21 +3449,33 @@ mod signature_verification_tests {
 
         // Verify that the original pubkey can verify BOTH signatures
         println!("\n--- Verification Test ---");
-        println!("Original sig verifies: {:?}", key_original.verify_prehash(&eth_signed_message, &sig));
-        println!("Normalized sig verifies: {:?}", key_original.verify_prehash(&eth_signed_message, &normalized_sig));
+        println!(
+            "Original sig verifies: {:?}",
+            key_original.verify_prehash(&eth_signed_message, &sig)
+        );
+        println!(
+            "Normalized sig verifies: {:?}",
+            key_original.verify_prehash(&eth_signed_message, &normalized_sig)
+        );
     }
 
     /// Verify our checkpoint hash matches hyperlane-core's implementation
     #[test]
     fn test_checkpoint_hash_matches_hyperlane_core() {
-        use hyperlane_core::{Signable, H256, CheckpointWithMessageId, Checkpoint};
+        use hyperlane_core::{Checkpoint, CheckpointWithMessageId, Signable, H256};
 
         // From logs
         let origin: u32 = 43113;
-        let merkle_root = hex::decode("b31d9e7a7382143f8e4ab5a3a07a50568751ca79277b3f0d040765ce000010ef").unwrap();
-        let origin_merkle_tree_hook = hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612").unwrap();
+        let merkle_root =
+            hex::decode("b31d9e7a7382143f8e4ab5a3a07a50568751ca79277b3f0d040765ce000010ef")
+                .unwrap();
+        let origin_merkle_tree_hook =
+            hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612")
+                .unwrap();
         let merkle_index: u32 = 96740914;
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
 
         // Create hyperlane-core's checkpoint type
         let checkpoint = CheckpointWithMessageId {
@@ -3174,8 +3506,14 @@ mod signature_verification_tests {
         let our_signing_hash: [u8; 32] = checkpoint_hasher.finalize().into();
 
         println!("=== Checkpoint Hash Comparison ===");
-        println!("hyperlane-core signing_hash: {}", hex::encode(core_signing_hash.as_bytes()));
-        println!("Our signing_hash:            {}", hex::encode(&our_signing_hash));
+        println!(
+            "hyperlane-core signing_hash: {}",
+            hex::encode(core_signing_hash.as_bytes())
+        );
+        println!(
+            "Our signing_hash:            {}",
+            hex::encode(&our_signing_hash)
+        );
 
         assert_eq!(
             core_signing_hash.as_bytes(),
@@ -3192,8 +3530,14 @@ mod signature_verification_tests {
         eth_hasher.update(&our_signing_hash);
         let our_eth_hash: [u8; 32] = eth_hasher.finalize().into();
 
-        println!("\nhyperlane-core eth_signed_message_hash: {}", hex::encode(core_eth_hash.as_bytes()));
-        println!("Our eth_signed_message_hash:            {}", hex::encode(&our_eth_hash));
+        println!(
+            "\nhyperlane-core eth_signed_message_hash: {}",
+            hex::encode(core_eth_hash.as_bytes())
+        );
+        println!(
+            "Our eth_signed_message_hash:            {}",
+            hex::encode(&our_eth_hash)
+        );
 
         assert_eq!(
             core_eth_hash.as_bytes(),
@@ -3207,9 +3551,23 @@ mod signature_verification_tests {
     #[test]
     fn test_find_correct_recovery_id() {
         // Latest metadata from logs
-        let metadata: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247, 97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130, 20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7, 101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49, 176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90, 110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107, 171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168, 176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88, 31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189, 245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22, 251, 193, 73, 86, 27];
+        let metadata: Vec<u8> = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247,
+            97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130,
+            20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7,
+            101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49,
+            176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90,
+            110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107,
+            171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168,
+            176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88,
+            31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189,
+            245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
+            251, 193, 73, 86, 27,
+        ];
 
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
         let origin: u32 = 43113;
 
         // Official Fuji validators from docs
@@ -3295,9 +3653,23 @@ mod signature_verification_tests {
     #[test]
     fn test_metadata_format_comparison() {
         // Latest metadata from logs
-        let metadata: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247, 97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130, 20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7, 101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49, 176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90, 110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107, 171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168, 176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88, 31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189, 245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22, 251, 193, 73, 86, 27];
+        let metadata: Vec<u8> = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 246, 172, 61, 175, 99, 16, 54, 32, 187, 247,
+            97, 54, 234, 26, 255, 67, 194, 246, 18, 5, 196, 38, 50, 179, 29, 158, 122, 115, 130,
+            20, 63, 142, 74, 181, 163, 160, 122, 80, 86, 135, 81, 202, 121, 39, 123, 63, 13, 4, 7,
+            101, 206, 0, 0, 16, 239, 213, 152, 62, 114, 113, 105, 226, 4, 8, 242, 145, 177, 49,
+            176, 151, 194, 62, 169, 173, 9, 17, 126, 199, 58, 165, 26, 177, 189, 206, 40, 62, 90,
+            110, 124, 97, 28, 95, 184, 110, 220, 56, 56, 148, 10, 120, 115, 100, 103, 81, 34, 107,
+            171, 211, 28, 155, 21, 58, 146, 197, 130, 54, 244, 33, 15, 27, 172, 193, 162, 254, 168,
+            176, 252, 96, 124, 232, 195, 224, 217, 34, 167, 239, 188, 125, 220, 101, 199, 174, 88,
+            31, 231, 83, 199, 75, 36, 229, 212, 178, 112, 214, 60, 13, 246, 186, 201, 100, 189,
+            245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
+            251, 193, 73, 86, 27,
+        ];
 
-        let message_id = hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729").unwrap();
+        let message_id =
+            hex::decode("a6e55f83b2f995471c99bca10a9ed8e606c706fcf46ce57791d377943363a729")
+                .unwrap();
         let origin: u32 = 43113;
 
         // Official Fuji validators
@@ -3344,7 +3716,7 @@ mod signature_verification_tests {
         // Try recovering addresses with Format 1 hash
         println!("\nRecovered addresses with Format 1 hash:");
         for i in 0..2 {
-            let sig_bytes = &signatures_1[i*65..(i+1)*65];
+            let sig_bytes = &signatures_1[i * 65..(i + 1) * 65];
             let v = sig_bytes[64];
             let recovery_id = if v >= 27 { v - 27 } else { v };
             let sig = Signature::from_slice(&sig_bytes[..64]).unwrap();
@@ -3400,7 +3772,7 @@ mod signature_verification_tests {
         // Try recovering addresses with Format 2 hash
         println!("\nRecovered addresses with Format 2 hash:");
         for i in 0..2 {
-            let sig_bytes = &signatures_2[i*65..(i+1)*65];
+            let sig_bytes = &signatures_2[i * 65..(i + 1) * 65];
             let v = sig_bytes[64];
             let recovery_id = if v >= 27 { v - 27 } else { v };
             let sig = Signature::from_slice(&sig_bytes[..64]).unwrap();
@@ -3430,19 +3802,22 @@ mod signature_verification_tests {
     /// This hash must match what Aiken computes in compute_checkpoint_hash
     #[test]
     fn test_checkpoint_signing_hash_for_aiken() {
-        use hyperlane_core::{CheckpointWithMessageId, Checkpoint, Signable, H256};
+        use hyperlane_core::{Checkpoint, CheckpointWithMessageId, Signable, H256};
 
         // Data from relayer logs for message 7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51
         let merkle_tree_hook_address = H256::from_slice(
-            &hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612").unwrap()
+            &hex::decode("0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612")
+                .unwrap(),
         );
         let mailbox_domain: u32 = 43113; // Fuji
         let root = H256::from_slice(
-            &hex::decode("78943434b7600830cf53756b5da5d7bdbed2761edfc997b0e75c9ec95f4f30fb").unwrap()
+            &hex::decode("78943434b7600830cf53756b5da5d7bdbed2761edfc997b0e75c9ec95f4f30fb")
+                .unwrap(),
         );
         let index: u32 = 4336;
         let message_id = H256::from_slice(
-            &hex::decode("7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51").unwrap()
+            &hex::decode("7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51")
+                .unwrap(),
         );
 
         // Build the checkpoint using hyperlane-core types
@@ -3462,17 +3837,29 @@ mod signature_verification_tests {
         let eth_signed_message_hash = checkpoint.eth_signed_message_hash();
 
         println!("=== CheckpointWithMessageId Data ===");
-        println!("merkle_tree_hook_address: {}", hex::encode(merkle_tree_hook_address.as_bytes()));
+        println!(
+            "merkle_tree_hook_address: {}",
+            hex::encode(merkle_tree_hook_address.as_bytes())
+        );
         println!("mailbox_domain: {}", mailbox_domain);
         println!("root: {}", hex::encode(root.as_bytes()));
         println!("index: {}", index);
         println!("message_id: {}", hex::encode(message_id.as_bytes()));
         println!();
         println!("=== Hashes ===");
-        println!("signing_hash (checkpoint_digest, before EIP-191): {}", hex::encode(signing_hash.as_bytes()));
-        println!("eth_signed_message_hash (with EIP-191, what validators sign): {}", hex::encode(eth_signed_message_hash.as_bytes()));
+        println!(
+            "signing_hash (checkpoint_digest, before EIP-191): {}",
+            hex::encode(signing_hash.as_bytes())
+        );
+        println!(
+            "eth_signed_message_hash (with EIP-191, what validators sign): {}",
+            hex::encode(eth_signed_message_hash.as_bytes())
+        );
         println!();
-        println!("The Aiken compute_checkpoint_hash should produce: {}", hex::encode(eth_signed_message_hash.as_bytes()));
+        println!(
+            "The Aiken compute_checkpoint_hash should produce: {}",
+            hex::encode(eth_signed_message_hash.as_bytes())
+        );
 
         // Now also print the intermediate steps for Aiken debugging
         println!();
@@ -3483,10 +3870,17 @@ mod signature_verification_tests {
         domain_hash_input.extend_from_slice(&mailbox_domain.to_be_bytes());
         domain_hash_input.extend_from_slice(merkle_tree_hook_address.as_bytes());
         domain_hash_input.extend_from_slice(b"HYPERLANE");
-        println!("domain_hash_input ({} bytes): {}", domain_hash_input.len(), hex::encode(&domain_hash_input));
+        println!(
+            "domain_hash_input ({} bytes): {}",
+            domain_hash_input.len(),
+            hex::encode(&domain_hash_input)
+        );
 
         let domain_hash: [u8; 32] = Keccak256::digest(&domain_hash_input).into();
-        println!("domain_hash (keccak256 of above): {}", hex::encode(&domain_hash));
+        println!(
+            "domain_hash (keccak256 of above): {}",
+            hex::encode(&domain_hash)
+        );
 
         // checkpoint_input = domain_hash || root || index || message_id
         let mut checkpoint_input = Vec::new();
@@ -3494,18 +3888,32 @@ mod signature_verification_tests {
         checkpoint_input.extend_from_slice(root.as_bytes());
         checkpoint_input.extend_from_slice(&index.to_be_bytes());
         checkpoint_input.extend_from_slice(message_id.as_bytes());
-        println!("checkpoint_input ({} bytes): {}", checkpoint_input.len(), hex::encode(&checkpoint_input));
+        println!(
+            "checkpoint_input ({} bytes): {}",
+            checkpoint_input.len(),
+            hex::encode(&checkpoint_input)
+        );
 
         let checkpoint_digest: [u8; 32] = Keccak256::digest(&checkpoint_input).into();
-        println!("checkpoint_digest (keccak256 of above): {}", hex::encode(&checkpoint_digest));
+        println!(
+            "checkpoint_digest (keccak256 of above): {}",
+            hex::encode(&checkpoint_digest)
+        );
 
         // EIP-191: prefix || checkpoint_digest
         let mut eip191_input = Vec::new();
         eip191_input.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
         eip191_input.extend_from_slice(&checkpoint_digest);
-        println!("eip191_input ({} bytes): {}", eip191_input.len(), hex::encode(&eip191_input));
+        println!(
+            "eip191_input ({} bytes): {}",
+            eip191_input.len(),
+            hex::encode(&eip191_input)
+        );
 
         let eth_signed: [u8; 32] = Keccak256::digest(&eip191_input).into();
-        println!("eth_signed (keccak256 of above): {}", hex::encode(&eth_signed));
+        println!(
+            "eth_signed (keccak256 of above): {}",
+            hex::encode(&eth_signed)
+        );
     }
 }

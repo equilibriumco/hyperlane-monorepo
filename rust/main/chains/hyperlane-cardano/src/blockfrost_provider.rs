@@ -342,13 +342,19 @@ impl BlockfrostProvider {
                 // The datum should end with the 32-byte message_id
                 // Format: d8798158200000...0000 (prefix + 32 bytes = 68 hex chars total)
                 if datum_hex.len() >= 64 && datum_hex.ends_with(&message_id_hex) {
-                    debug!("Found processed message marker for message_id: {}", message_id_hex);
+                    debug!(
+                        "Found processed message marker for message_id: {}",
+                        message_id_hex
+                    );
                     return Ok(true);
                 }
             }
         }
 
-        debug!("No processed message marker found for message_id: {}", message_id_hex);
+        debug!(
+            "No processed message marker found for message_id: {}",
+            message_id_hex
+        );
         Ok(false)
     }
 
@@ -374,7 +380,10 @@ impl BlockfrostProvider {
             return Ok(true);
         }
 
-        debug!("No processed message NFT found for message_id: {}", asset_name);
+        debug!(
+            "No processed message NFT found for message_id: {}",
+            asset_name
+        );
         Ok(false)
     }
 
@@ -418,7 +427,10 @@ impl BlockfrostProvider {
                     }
                     // Handle 429 rate limit - return what we have if possible
                     if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!("Rate limited while fetching transactions, continuing with {} txs", result.len());
+                        tracing::warn!(
+                            "Rate limited while fetching transactions, continuing with {} txs",
+                            result.len()
+                        );
                         break;
                     }
                     return Err(e.into());
@@ -582,7 +594,10 @@ impl BlockfrostProvider {
                     }
                     // Handle 429 rate limit - return what we have
                     if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!("Rate limited while fetching block txs, returning {} txs", all_txs.len());
+                        tracing::warn!(
+                            "Rate limited while fetching block txs, returning {} txs",
+                            all_txs.len()
+                        );
                         break;
                     }
                     return Err(e.into());
@@ -620,7 +635,10 @@ impl BlockfrostProvider {
     }
 
     /// Get script address from hash
-    pub fn script_hash_to_address(&self, script_hash: &str) -> Result<String, BlockfrostProviderError> {
+    pub fn script_hash_to_address(
+        &self,
+        script_hash: &str,
+    ) -> Result<String, BlockfrostProviderError> {
         script_hash_to_address(script_hash, self.network)
     }
 }
@@ -670,7 +688,9 @@ fn script_hash_to_address(
     script_hash: &str,
     network: CardanoNetwork,
 ) -> Result<String, BlockfrostProviderError> {
-    use pallas_addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart};
+    use pallas_addresses::{
+        Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+    };
 
     let hash_bytes = hex::decode(script_hash)
         .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))?;

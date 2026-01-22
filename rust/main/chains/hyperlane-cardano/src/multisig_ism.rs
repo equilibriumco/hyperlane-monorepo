@@ -39,13 +39,17 @@ impl CardanoMultisigIsm {
 
         // Asset name is configured from deployment info (e.g., "49534d205374617465" for "ISM State")
         let ism_asset_name = &self.conf.ism_asset_name_hex;
-        let nft_result = self.provider
+        let nft_result = self
+            .provider
             .find_utxo_by_nft(&self.conf.ism_policy_id, ism_asset_name)
             .await;
 
         match nft_result {
             Ok(utxo) => {
-                info!("Found ISM UTXO by NFT: {}#{}", utxo.tx_hash, utxo.output_index);
+                info!(
+                    "Found ISM UTXO by NFT: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
                 return Ok(utxo);
             }
             Err(e) => {
@@ -58,7 +62,8 @@ impl CardanoMultisigIsm {
         }
 
         // Fallback: Find UTXOs at the ISM script address
-        let script_address = self.provider
+        let script_address = self
+            .provider
             .script_hash_to_address(&self.conf.ism_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
@@ -69,7 +74,8 @@ impl CardanoMultisigIsm {
 
         info!("Looking up ISM UTXOs at script address: {}", script_address);
 
-        let utxos = self.provider
+        let utxos = self
+            .provider
             .get_utxos_at_address(&script_address)
             .await
             .map_err(|e| {
@@ -115,15 +121,18 @@ impl CardanoMultisigIsm {
         // Strip quotes if present and decode from CBOR
         let hex_str = inline_datum.trim_matches('"');
 
-        tracing::debug!("Parsing ISM datum from CBOR hex: {}...", &hex_str[..hex_str.len().min(40)]);
+        tracing::debug!(
+            "Parsing ISM datum from CBOR hex: {}...",
+            &hex_str[..hex_str.len().min(40)]
+        );
 
         self.parse_ism_datum_from_cbor(hex_str)
     }
 
     /// Parse ISM datum from raw CBOR hex string
     fn parse_ism_datum_from_cbor(&self, hex_str: &str) -> ChainResult<MultisigIsmDatum> {
-        use pallas_primitives::conway::PlutusData;
         use pallas_codec::minicbor;
+        use pallas_primitives::conway::PlutusData;
 
         let cbor_bytes = hex::decode(hex_str).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
@@ -218,15 +227,13 @@ impl CardanoMultisigIsm {
 
             // Parse domain (BigInt)
             let domain = match &fields[0] {
-                PlutusData::BigInt(bi) => {
-                    match bi {
-                        pallas_primitives::conway::BigInt::Int(i) => {
-                            let val: i128 = (*i).into();
-                            val as u32
-                        }
-                        _ => continue,
+                PlutusData::BigInt(bi) => match bi {
+                    pallas_primitives::conway::BigInt::Int(i) => {
+                        let val: i128 = (*i).into();
+                        val as u32
                     }
-                }
+                    _ => continue,
+                },
                 _ => continue,
             };
 
@@ -331,29 +338,25 @@ impl CardanoMultisigIsm {
 
             // Parse domain
             let domain = match &fields[0] {
-                PlutusData::BigInt(bi) => {
-                    match bi {
-                        pallas_primitives::conway::BigInt::Int(i) => {
-                            let val: i128 = (*i).into();
-                            val as u32
-                        }
-                        _ => continue,
+                PlutusData::BigInt(bi) => match bi {
+                    pallas_primitives::conway::BigInt::Int(i) => {
+                        let val: i128 = (*i).into();
+                        val as u32
                     }
-                }
+                    _ => continue,
+                },
                 _ => continue,
             };
 
             // Parse threshold
             let threshold = match &fields[1] {
-                PlutusData::BigInt(bi) => {
-                    match bi {
-                        pallas_primitives::conway::BigInt::Int(i) => {
-                            let val: i128 = (*i).into();
-                            val as u32
-                        }
-                        _ => continue,
+                PlutusData::BigInt(bi) => match bi {
+                    pallas_primitives::conway::BigInt::Int(i) => {
+                        let val: i128 = (*i).into();
+                        val as u32
                     }
-                }
+                    _ => continue,
+                },
                 _ => continue,
             };
 
@@ -436,7 +439,9 @@ impl CardanoMultisigIsm {
                             if pk_bytes.len() == 33 {
                                 // 33-byte compressed secp256k1 public key
                                 // Derive Ethereum address: keccak256(uncompressed_pubkey)[12..32]
-                                if let Some(eth_addr) = self.compressed_pubkey_to_eth_address(&pk_bytes) {
+                                if let Some(eth_addr) =
+                                    self.compressed_pubkey_to_eth_address(&pk_bytes)
+                                {
                                     eth_addresses.push(eth_addr);
                                 }
                             } else if pk_bytes.len() == 20 {
@@ -492,15 +497,13 @@ impl CardanoMultisigIsm {
             .get(2)
             .and_then(|f| f.get("bytes"))
             .and_then(|b| b.as_str())
-            .ok_or_else(|| {
-                ChainCommunicationError::from_other_str("Invalid owner in ISM datum")
-            })?;
+            .ok_or_else(|| ChainCommunicationError::from_other_str("Invalid owner in ISM datum"))?;
         let owner_bytes = hex::decode(owner_hex).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {}", e))
         })?;
-        let owner: [u8; 28] = owner_bytes.try_into().map_err(|_| {
-            ChainCommunicationError::from_other_str("Invalid owner length")
-        })?;
+        let owner: [u8; 28] = owner_bytes
+            .try_into()
+            .map_err(|_| ChainCommunicationError::from_other_str("Invalid owner length"))?;
 
         Ok(MultisigIsmDatum {
             validators,

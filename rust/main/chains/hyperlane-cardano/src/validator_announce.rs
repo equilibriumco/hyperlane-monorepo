@@ -103,7 +103,11 @@ impl CardanoValidatorAnnounce {
                 return None;
             }
         };
-        debug!("Validator raw bytes: {} bytes = {}", validator_raw.len(), hex::encode(&validator_raw));
+        debug!(
+            "Validator raw bytes: {} bytes = {}",
+            validator_raw.len(),
+            hex::encode(&validator_raw)
+        );
 
         let validator_bytes = match Self::normalize_validator_bytes(validator_raw) {
             Some(v) => v,
@@ -133,8 +137,11 @@ impl CardanoValidatorAnnounce {
             }
         };
 
-        debug!("Successfully parsed announcement: validator={}, storage={}",
-               hex::encode(&validator_bytes), storage_location);
+        debug!(
+            "Successfully parsed announcement: validator={}, storage={}",
+            hex::encode(&validator_bytes),
+            storage_location
+        );
         Some((validator_bytes, storage_location))
     }
 
@@ -205,11 +212,7 @@ impl ValidatorAnnounce for CardanoValidatorAnnounce {
         debug!("Validator announce address: {}", va_address);
 
         // Query all UTXOs at the validator announce address
-        let utxos = match self
-            .provider
-            .get_utxos_at_address(&va_address)
-            .await
-        {
+        let utxos = match self.provider.get_utxos_at_address(&va_address).await {
             Ok(u) => u,
             Err(e) => {
                 warn!("Could not fetch UTXOs at validator announce address: {}", e);
@@ -217,10 +220,7 @@ impl ValidatorAnnounce for CardanoValidatorAnnounce {
             }
         };
 
-        info!(
-            "Found {} UTXOs at validator announce address",
-            utxos.len()
-        );
+        info!("Found {} UTXOs at validator announce address", utxos.len());
 
         // Build a map of validator -> storage locations
         let mut announcements: std::collections::HashMap<H256, Vec<String>> =
@@ -229,7 +229,8 @@ impl ValidatorAnnounce for CardanoValidatorAnnounce {
         for utxo in utxos {
             // Parse inline datum - try JSON first, then CBOR
             if let Some(inline_datum) = &utxo.inline_datum {
-                let parsed = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum) {
+                let parsed = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum)
+                {
                     // JSON format (legacy or from some data providers)
                     self.parse_announcement_datum_json(&datum_json)
                 } else {

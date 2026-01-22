@@ -103,7 +103,10 @@ impl CardanoMailboxIndexer {
     /// The on-chain Aiken contract computes sender as:
     /// - For payment key credential: 0x00000000 || payment_key_hash (4 + 28 = 32 bytes)
     /// - For script credential: 0x02000000 || script_hash (4 + 28 = 32 bytes)
-    fn extract_sender_from_tx(&self, tx_utxos: &crate::blockfrost_provider::TransactionUtxos) -> H256 {
+    fn extract_sender_from_tx(
+        &self,
+        tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
+    ) -> H256 {
         // Get the first input's address
         if let Some(first_input) = tx_utxos.inputs.first() {
             if first_input.address.starts_with("addr") {
@@ -172,12 +175,10 @@ impl CardanoMailboxIndexer {
 
         // Extract the tagged value (Constr 0 = tag 121)
         let fields = match &value {
-            CborValue::Tag(121, inner) => {
-                match inner.as_ref() {
-                    CborValue::Array(arr) => arr,
-                    _ => return None,
-                }
-            }
+            CborValue::Tag(121, inner) => match inner.as_ref() {
+                CborValue::Array(arr) => arr,
+                _ => return None,
+            },
             _ => return None,
         };
 
@@ -196,13 +197,17 @@ impl CardanoMailboxIndexer {
     }
 
     /// Extract the nonce from transaction outputs (the new mailbox datum after dispatch)
-    fn extract_nonce_from_outputs(&self, tx_utxos: &crate::blockfrost_provider::TransactionUtxos) -> u32 {
+    fn extract_nonce_from_outputs(
+        &self,
+        tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
+    ) -> u32 {
         // Look for the mailbox output and extract the nonce from its datum
         // The nonce in the output is already incremented, so subtract 1 to get the message nonce
         for output in &tx_utxos.outputs {
             if let Some(inline_datum) = &output.inline_datum {
                 // Try JSON format first, then CBOR
-                let nonce = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum) {
+                let nonce = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum)
+                {
                     self.parse_mailbox_nonce_json(&datum_json)
                 } else {
                     self.parse_mailbox_nonce_cbor(inline_datum)
@@ -280,19 +285,23 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    info!(
-                        "Could not get redeemers for tx {}: {}",
-                        tx_info.tx_hash, e
-                    );
+                    info!("Could not get redeemers for tx {}: {}", tx_info.tx_hash, e);
                     continue;
                 }
             };
 
-            info!("Found {} redeemers for tx {}", redeemers.len(), tx_info.tx_hash);
+            info!(
+                "Found {} redeemers for tx {}",
+                redeemers.len(),
+                tx_info.tx_hash
+            );
 
             // Find redeemers that are for spending (not minting)
             for redeemer in redeemers {
-                info!("Redeemer purpose: {}, data_hash: {}", redeemer.purpose, redeemer.redeemer_data_hash);
+                info!(
+                    "Redeemer purpose: {}, data_hash: {}",
+                    redeemer.purpose, redeemer.redeemer_data_hash
+                );
                 if redeemer.purpose != "spend" && redeemer.purpose != "Spend" {
                     info!("Skipping non-spend redeemer");
                     continue;
@@ -317,17 +326,10 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 info!("Got redeemer datum: {:?}", redeemer_datum);
 
                 // Get transaction UTXOs to extract sender
-                let tx_utxos = match self
-                    .provider
-                    .get_transaction_utxos(&tx_info.tx_hash)
-                    .await
-                {
+                let tx_utxos = match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
                     Ok(u) => u,
                     Err(e) => {
-                        info!(
-                            "Could not get UTXOs for tx {}: {}",
-                            tx_info.tx_hash, e
-                        );
+                        info!("Could not get UTXOs for tx {}: {}", tx_info.tx_hash, e);
                         continue;
                     }
                 };
@@ -339,11 +341,15 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 let nonce = self.extract_nonce_from_outputs(&tx_utxos);
                 info!("Extracted sender: {:?}, nonce: {}", sender, nonce);
 
-                if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, sender, nonce) {
+                if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, sender, nonce)
+                {
                     let message_id = message.id();
                     // Use the From trait conversion which automatically sets sequence from message.nonce
                     let indexed: Indexed<HyperlaneMessage> = message.into();
-                    info!("Created indexed message with nonce: {}, sequence: {:?}", nonce, indexed.sequence);
+                    info!(
+                        "Created indexed message with nonce: {}, sequence: {:?}",
+                        nonce, indexed.sequence
+                    );
 
                     let log_meta = LogMeta {
                         address: H256::zero(), // Cardano doesn't have contract addresses like EVM
@@ -354,8 +360,10 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                         ),
                         transaction_id: H512::from_slice(&{
                             let mut bytes = [0u8; 64];
-                            let tx_bytes = hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                            bytes[..tx_bytes.len().min(64)].copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
+                            let tx_bytes =
+                                hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
+                            bytes[..tx_bytes.len().min(64)]
+                                .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
                             bytes
                         }),
                         transaction_index: tx_info.tx_index as u64,
@@ -420,7 +428,11 @@ impl Indexer<H256> for CardanoMailboxIndexer {
         // Get transactions that created processed message markers
         let transactions = self
             .provider
-            .get_address_transactions(&processed_script_address, Some(from as u64), Some(to as u64))
+            .get_address_transactions(
+                &processed_script_address,
+                Some(from as u64),
+                Some(to as u64),
+            )
             .await
             .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
 
@@ -428,11 +440,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
 
         for tx_info in transactions {
             // Get transaction UTXOs to find outputs with processed message datums
-            let tx_utxos = match self
-                .provider
-                .get_transaction_utxos(&tx_info.tx_hash)
-                .await
-            {
+            let tx_utxos = match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
                 Ok(u) => u,
                 Err(e) => {
                     debug!("Could not get UTXOs for tx {}: {}", tx_info.tx_hash, e);
@@ -457,8 +465,8 @@ impl Indexer<H256> for CardanoMailboxIndexer {
                                 ),
                                 transaction_id: H512::from_slice(&{
                                     let mut bytes = [0u8; 64];
-                                    let tx_bytes =
-                                        hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
+                                    let tx_bytes = hex::decode(&tx_info.tx_hash)
+                                        .unwrap_or_else(|_| vec![0u8; 32]);
                                     bytes[..tx_bytes.len().min(64)]
                                         .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
                                     bytes

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use hyperlane_core::{
-    BlockInfo, ChainInfo, ChainResult, HyperlaneChain, HyperlaneDomain, HyperlaneProvider,
-    TxnInfo, H256, H512, U256,
+    BlockInfo, ChainInfo, ChainResult, HyperlaneChain, HyperlaneDomain, HyperlaneProvider, TxnInfo,
+    H256, H512, U256,
 };
 use std::sync::Arc;
 
@@ -42,11 +42,10 @@ impl HyperlaneChain for CardanoProvider {
 impl HyperlaneProvider for CardanoProvider {
     async fn get_block_by_height(&self, height: u64) -> ChainResult<BlockInfo> {
         // Get the current finalized block to check if height is valid
-        let finalized = self
-            .provider
-            .get_latest_block()
-            .await
-            .map_err(|e| hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string()))?;
+        let finalized =
+            self.provider.get_latest_block().await.map_err(|e| {
+                hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string())
+            })?;
 
         if height > finalized {
             return Err(hyperlane_core::ChainCommunicationError::from_other_str(
@@ -111,11 +110,10 @@ impl HyperlaneProvider for CardanoProvider {
 
     async fn get_chain_metrics(&self) -> ChainResult<Option<ChainInfo>> {
         // Get the current finalized block number as a basic health metric
-        let latest_block_number = self
-            .provider
-            .get_latest_block()
-            .await
-            .map_err(|e| hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string()))?;
+        let latest_block_number =
+            self.provider.get_latest_block().await.map_err(|e| {
+                hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string())
+            })?;
 
         Ok(Some(ChainInfo {
             latest_block: BlockInfo {

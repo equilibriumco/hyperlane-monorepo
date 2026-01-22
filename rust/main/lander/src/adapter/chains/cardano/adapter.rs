@@ -254,7 +254,10 @@ impl AdaptsChain for CardanoAdapter {
         match self.get_tx_hash_status(tx_hash).await {
             Ok(TransactionStatus::Finalized) => {
                 // Transaction is already on-chain, no need to resubmit
-                tracing::info!(?tx_hash, "Transaction already confirmed on-chain, skipping resubmission");
+                tracing::info!(
+                    ?tx_hash,
+                    "Transaction already confirmed on-chain, skipping resubmission"
+                );
                 false
             }
             Err(LanderError::TxHashNotFound(_)) => {
@@ -276,12 +279,18 @@ impl AdaptsChain for CardanoAdapter {
                     }
                 }
                 // Enough time has passed, allow resubmission
-                tracing::info!(?tx_hash, "Transaction not found on-chain after timeout, allowing resubmission");
+                tracing::info!(
+                    ?tx_hash,
+                    "Transaction not found on-chain after timeout, allowing resubmission"
+                );
                 true
             }
             Err(e) => {
                 // Network error - don't resubmit, just wait
-                tracing::warn!(?e, "Error checking transaction status, skipping resubmission");
+                tracing::warn!(
+                    ?e,
+                    "Error checking transaction status, skipping resubmission"
+                );
                 false
             }
             _ => {
@@ -307,7 +316,9 @@ impl AdaptsChain for CardanoAdapter {
         let message_id = message.id();
 
         // Prefer NFT lookup (O(1)) if processedMessagesNftPolicyId is configured
-        let delivered = if let Some(ref nft_policy_id) = self.connection_conf.processed_messages_nft_policy_id {
+        let delivered = if let Some(ref nft_policy_id) =
+            self.connection_conf.processed_messages_nft_policy_id
+        {
             self.provider
                 .is_message_delivered_by_nft(nft_policy_id, &message_id.0)
                 .await
@@ -315,7 +326,10 @@ impl AdaptsChain for CardanoAdapter {
         } else {
             // Fallback: Scan UTXOs at processed_messages_script address (O(n))
             self.provider
-                .is_message_delivered(&self.connection_conf.processed_messages_script_hash, &message_id.0)
+                .is_message_delivered(
+                    &self.connection_conf.processed_messages_script_hash,
+                    &message_id.0,
+                )
                 .await
                 .unwrap_or(false)
         };

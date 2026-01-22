@@ -238,4 +238,3 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         })
     }
 }
-

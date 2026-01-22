@@ -36,7 +36,7 @@ impl UtxoRef {
 /// UTXO locator using NFT marker
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoLocator {
-    pub policy_id: String, // hex-encoded
+    pub policy_id: String,  // hex-encoded
     pub asset_name: String, // hex-encoded
 }
 
@@ -453,13 +453,9 @@ pub enum WarpTokenType {
         vault_locator: UtxoLocator,
     },
     /// Mint synthetic tokens
-    Synthetic {
-        minting_policy: ScriptHash,
-    },
+    Synthetic { minting_policy: ScriptHash },
     /// Native ADA
-    Native {
-        vault_locator: UtxoLocator,
-    },
+    Native { vault_locator: UtxoLocator },
 }
 
 /// Warp route configuration (matches Aiken WarpRouteConfig)

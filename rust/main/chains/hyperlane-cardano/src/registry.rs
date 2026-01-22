@@ -66,8 +66,10 @@ impl RecipientRegistry {
         let mut by_script_hash = HashMap::new();
         for reg in &datum.registrations {
             let hash_hex = hex::encode(&reg.script_hash);
-            info!("Registry: parsed registration script_hash={}, recipient_type={:?}",
-                  hash_hex, reg.recipient_type);
+            info!(
+                "Registry: parsed registration script_hash={}, recipient_type={:?}",
+                hash_hex, reg.recipient_type
+            );
             by_script_hash.insert(hash_hex, reg.clone());
         }
 
@@ -79,7 +81,10 @@ impl RecipientRegistry {
         };
 
         *self.cache.write().await = Some(cache);
-        info!("Registry cache refreshed with {} registrations", num_registrations);
+        info!(
+            "Registry cache refreshed with {} registrations",
+            num_registrations
+        );
         Ok(())
     }
 
@@ -171,7 +176,10 @@ impl RecipientRegistry {
     }
 
     /// Parse registry datum from raw CBOR hex string
-    fn parse_registry_datum_from_cbor(&self, hex_str: &str) -> Result<RegistryDatum, RegistryError> {
+    fn parse_registry_datum_from_cbor(
+        &self,
+        hex_str: &str,
+    ) -> Result<RegistryDatum, RegistryError> {
         use pallas_codec::minicbor;
         use pallas_primitives::conway::PlutusData;
 
@@ -287,13 +295,19 @@ impl RecipientRegistry {
             PlutusData::BoundedBytes(bytes) => {
                 let bytes: &[u8] = bytes.as_ref();
                 if bytes.len() != 28 {
-                    return Err(RegistryError::InvalidDatum("Invalid script_hash length".to_string()));
+                    return Err(RegistryError::InvalidDatum(
+                        "Invalid script_hash length".to_string(),
+                    ));
                 }
                 let mut hash = [0u8; 28];
                 hash.copy_from_slice(bytes);
                 hash
             }
-            _ => return Err(RegistryError::InvalidDatum("Invalid script_hash".to_string())),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Invalid script_hash".to_string(),
+                ))
+            }
         };
 
         // Owner (field 1) - VerificationKeyHash
@@ -301,7 +315,9 @@ impl RecipientRegistry {
             PlutusData::BoundedBytes(bytes) => {
                 let bytes: &[u8] = bytes.as_ref();
                 if bytes.len() != 28 {
-                    return Err(RegistryError::InvalidDatum("Invalid owner length".to_string()));
+                    return Err(RegistryError::InvalidDatum(
+                        "Invalid owner length".to_string(),
+                    ));
                 }
                 let mut hash = [0u8; 28];
                 hash.copy_from_slice(bytes);
@@ -378,11 +394,17 @@ impl RecipientRegistry {
 
         let (tag, fields) = match data {
             PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
-            _ => return Err(RegistryError::InvalidDatum("Invalid UtxoLocator".to_string())),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Invalid UtxoLocator".to_string(),
+                ))
+            }
         };
 
         if tag != 121 || fields.len() < 2 {
-            return Err(RegistryError::InvalidDatum("Invalid UtxoLocator structure".to_string()));
+            return Err(RegistryError::InvalidDatum(
+                "Invalid UtxoLocator structure".to_string(),
+            ));
         }
 
         let policy_id = match &fields[0] {
@@ -398,7 +420,11 @@ impl RecipientRegistry {
                 let slice: &[u8] = bytes.as_ref();
                 hex::encode(slice)
             }
-            _ => return Err(RegistryError::InvalidDatum("Invalid asset_name".to_string())),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Invalid asset_name".to_string(),
+                ))
+            }
         };
 
         Ok(UtxoLocator {
@@ -416,11 +442,17 @@ impl RecipientRegistry {
 
         let (tag, fields) = match data {
             PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
-            _ => return Err(RegistryError::InvalidDatum("Invalid AdditionalInput".to_string())),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Invalid AdditionalInput".to_string(),
+                ))
+            }
         };
 
         if tag != 121 || fields.len() < 3 {
-            return Err(RegistryError::InvalidDatum("Invalid AdditionalInput structure".to_string()));
+            return Err(RegistryError::InvalidDatum(
+                "Invalid AdditionalInput structure".to_string(),
+            ));
         }
 
         // name (field 0) - bytes decoded as UTF-8 string
@@ -429,7 +461,11 @@ impl RecipientRegistry {
                 let slice: &[u8] = bytes.as_ref();
                 String::from_utf8_lossy(slice).to_string()
             }
-            _ => return Err(RegistryError::InvalidDatum("Invalid input name".to_string())),
+            _ => {
+                return Err(RegistryError::InvalidDatum(
+                    "Invalid input name".to_string(),
+                ))
+            }
         };
 
         let locator = self.parse_utxo_locator_from_plutus(&fields[1])?;
@@ -481,19 +517,27 @@ impl RecipientRegistry {
             123 => {
                 // Deferred - Constr 2 [message_policy]
                 if fields.is_empty() {
-                    return Err(RegistryError::InvalidDatum("Deferred missing message_policy".to_string()));
+                    return Err(RegistryError::InvalidDatum(
+                        "Deferred missing message_policy".to_string(),
+                    ));
                 }
                 let message_policy = match &fields[0] {
                     PlutusData::BoundedBytes(bytes) => {
                         let bytes: &[u8] = bytes.as_ref();
                         if bytes.len() != 28 {
-                            return Err(RegistryError::InvalidDatum("Invalid message_policy length".to_string()));
+                            return Err(RegistryError::InvalidDatum(
+                                "Invalid message_policy length".to_string(),
+                            ));
                         }
                         let mut hash = [0u8; 28];
                         hash.copy_from_slice(bytes);
                         hash
                     }
-                    _ => return Err(RegistryError::InvalidDatum("Invalid message_policy".to_string())),
+                    _ => {
+                        return Err(RegistryError::InvalidDatum(
+                            "Invalid message_policy".to_string(),
+                        ))
+                    }
                 };
                 Ok(RecipientType::Deferred { message_policy })
             }
@@ -571,7 +615,9 @@ impl RecipientRegistry {
                 owner.copy_from_slice(bytes);
                 Ok(owner)
             }
-            _ => Err(RegistryError::InvalidDatum("Owner field is not bytes".to_string())),
+            _ => Err(RegistryError::InvalidDatum(
+                "Owner field is not bytes".to_string(),
+            )),
         }
     }
 
@@ -673,8 +719,8 @@ impl RecipientRegistry {
             .and_then(|b| b.as_str())
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid owner".to_string()))?;
 
-        let owner_bytes = hex::decode(owner_hex)
-            .map_err(|e| RegistryError::Deserialization(e.to_string()))?;
+        let owner_bytes =
+            hex::decode(owner_hex).map_err(|e| RegistryError::Deserialization(e.to_string()))?;
 
         let owner: [u8; 28] = owner_bytes
             .try_into()
@@ -687,11 +733,10 @@ impl RecipientRegistry {
             })?)?;
 
         // Field 3: Reference script locator (Option<UtxoLocator>)
-        let reference_script_locator = self.parse_optional_locator_json(
-            fields
-                .get(3)
-                .ok_or_else(|| RegistryError::InvalidDatum("Missing reference_script_locator".to_string()))?,
-        )?;
+        let reference_script_locator =
+            self.parse_optional_locator_json(fields.get(3).ok_or_else(|| {
+                RegistryError::InvalidDatum("Missing reference_script_locator".to_string())
+            })?)?;
 
         // Field 4: Additional inputs
         let empty_inputs = vec![];

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use hyperlane_core::{
     ChainResult, Checkpoint, CheckpointAtBlock, ContractLocator, HyperlaneChain, HyperlaneContract,
-    HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Indexed, Indexer, IncrementalMerkleAtBlock,
-    LogMeta, MerkleTreeHook, MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256,
+    HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, IncrementalMerkleAtBlock, Indexed,
+    Indexer, LogMeta, MerkleTreeHook, MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256,
 };
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeInclusive;
@@ -150,8 +150,9 @@ impl Indexer<MerkleTreeInsertion> for CardanoMerkleTreeHookIndexer {
         let messages: Vec<(Indexed<HyperlaneMessage>, LogMeta)> =
             <CardanoMailboxIndexer as Indexer<HyperlaneMessage>>::fetch_logs_in_range(
                 &self.mailbox_indexer,
-                range
-            ).await?;
+                range,
+            )
+            .await?;
 
         // Convert HyperlaneMessage to MerkleTreeInsertion
         // Use the From trait which automatically sets the sequence from message.nonce
@@ -171,8 +172,9 @@ impl Indexer<MerkleTreeInsertion> for CardanoMerkleTreeHookIndexer {
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
         <CardanoMailboxIndexer as Indexer<HyperlaneMessage>>::get_finalized_block_number(
-            &self.mailbox_indexer
-        ).await
+            &self.mailbox_indexer,
+        )
+        .await
     }
 }
 

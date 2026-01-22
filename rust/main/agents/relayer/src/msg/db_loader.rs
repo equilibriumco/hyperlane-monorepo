@@ -98,7 +98,12 @@ impl ForwardBackwardIterator {
             if highest_nonce >= current_nonce {
                 // Check if there's actually a message at the current nonce
                 // If not, we need to find where the messages actually start
-                if db.retrieve_message_by_nonce(current_nonce).ok().flatten().is_none() {
+                if db
+                    .retrieve_message_by_nonce(current_nonce)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
                     // No message at current nonce, jump to highest known nonce
                     // The iterator will then work backwards and forwards from there
                     debug!(
@@ -326,7 +331,10 @@ impl DbLoaderExt for MessageDbLoader {
 
             // Skip if the message is intended for a destination we do not service
             if !self.send_channels.contains_key(&destination) {
-                info!(nonce = msg.nonce, destination, "Message destined for unknown domain, skipping");
+                info!(
+                    nonce = msg.nonce,
+                    destination, "Message destined for unknown domain, skipping"
+                );
                 return Ok(());
             }
 
@@ -336,13 +344,15 @@ impl DbLoaderExt for MessageDbLoader {
             } else {
                 info!(
                     nonce = msg.nonce,
-                    destination,
-                    "Message destined for unknown message context, skipping",
+                    destination, "Message destined for unknown message context, skipping",
                 );
                 return Ok(());
             };
 
-            info!(nonce = msg.nonce, destination, "Sending message to submitter");
+            info!(
+                nonce = msg.nonce,
+                destination, "Sending message to submitter"
+            );
 
             let app_context_classifier =
                 AppContextClassifier::new(self.metric_app_contexts.clone());

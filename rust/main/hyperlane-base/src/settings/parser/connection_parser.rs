@@ -13,8 +13,8 @@ use h_eth::TransactionOverrides;
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
 
-use hyperlane_starknet as h_starknet;
 use hyperlane_cardano as h_cardano;
+use hyperlane_starknet as h_starknet;
 
 use crate::settings::envs::*;
 use crate::settings::ChainConnectionConf;
@@ -818,9 +818,7 @@ pub fn build_connection_conf(
         HyperlaneDomainProtocol::Aleo => {
             build_aleo_connection_conf(rpcs, chain, err, operation_batch)
         }
-        HyperlaneDomainProtocol::Cardano => {
-            build_cardano_connection_conf(rpcs, chain, err)
-        }
+        HyperlaneDomainProtocol::Cardano => build_cardano_connection_conf(rpcs, chain, err),
         #[allow(unreachable_patterns)]
         _ => unreachable!("Unsupported protocol chains are pre-filtered"),
     }
@@ -831,10 +829,8 @@ pub fn build_connection_conf(
 pub fn is_protocol_supported(protocol: HyperlaneDomainProtocol) -> bool {
     use HyperlaneDomainProtocol::*;
     match protocol {
-        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron | Cardano => {
-            true
-        }
-        // Aleo is feature-gated - only supported when the "aleo" feature is enabled
+        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron
+        | Cardano => true,
         Aleo => cfg!(feature = "aleo"),
     }
 }
@@ -892,7 +888,10 @@ pub fn build_cardano_connection_conf(
         _ => {
             local_err.push(
                 (&chain.cwp).add("network"),
-                eyre!("Invalid network: {}. Expected 'mainnet', 'preprod', or 'preview'", network_str),
+                eyre!(
+                    "Invalid network: {}. Expected 'mainnet', 'preprod', or 'preview'",
+                    network_str
+                ),
             );
             h_cardano::CardanoNetwork::Mainnet // Default, will error anyway
         }

@@ -9,8 +9,8 @@ use hyperlane_core::accumulator::incremental::IncrementalMerkle;
 use hyperlane_core::accumulator::TREE_DEPTH;
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber, HyperlaneChain,
-    HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox,
-    ReorgPeriod, TxCostEstimate, TxOutcome, H256, U256,
+    HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox, ReorgPeriod,
+    TxCostEstimate, TxOutcome, H256, U256,
 };
 use serde_json::Value;
 use std::fmt::{Debug, Formatter};
@@ -79,13 +79,17 @@ impl CardanoMailbox {
         // First try to find by NFT (preferred method for production)
         // Asset name is configured from deployment info (e.g., "4d61696c626f78205374617465" for "Mailbox State")
         let mailbox_asset_name = &self.conf.mailbox_asset_name_hex;
-        let nft_result = self.provider
+        let nft_result = self
+            .provider
             .find_utxo_by_nft(&self.conf.mailbox_policy_id, mailbox_asset_name)
             .await;
 
         match nft_result {
             Ok(utxo) => {
-                info!("Found mailbox UTXO by NFT: {}#{}", utxo.tx_hash, utxo.output_index);
+                info!(
+                    "Found mailbox UTXO by NFT: {}#{}",
+                    utxo.tx_hash, utxo.output_index
+                );
                 return Ok(utxo);
             }
             Err(e) => {
@@ -98,7 +102,8 @@ impl CardanoMailbox {
         }
 
         // Fallback: Find UTXOs at the mailbox script address using the actual script hash
-        let script_address = self.provider
+        let script_address = self
+            .provider
             .script_hash_to_address(&self.conf.mailbox_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
@@ -107,9 +112,13 @@ impl CardanoMailbox {
                 ))
             })?;
 
-        info!("Looking up mailbox UTXOs at script address: {}", script_address);
+        info!(
+            "Looking up mailbox UTXOs at script address: {}",
+            script_address
+        );
 
-        let utxos = self.provider
+        let utxos = self
+            .provider
             .get_utxos_at_address(&script_address)
             .await
             .map_err(|e| {
@@ -158,16 +167,9 @@ impl CardanoMailbox {
         })?;
 
         debug!("Fetching datum JSON via data_hash: {}", data_hash);
-        let datum_json_str = self
-            .provider
-            .get_datum(data_hash)
-            .await
-            .map_err(|e| {
-                ChainCommunicationError::from_other_str(&format!(
-                    "Failed to fetch datum JSON: {}",
-                    e
-                ))
-            })?;
+        let datum_json_str = self.provider.get_datum(data_hash).await.map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!("Failed to fetch datum JSON: {}", e))
+        })?;
 
         let datum_json: Value = serde_json::from_str(&datum_json_str).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
@@ -177,9 +179,7 @@ impl CardanoMailbox {
         })?;
 
         // Blockfrost wraps the datum in a `json_value` field
-        let inner_json = datum_json
-            .get("json_value")
-            .unwrap_or(&datum_json);
+        let inner_json = datum_json.get("json_value").unwrap_or(&datum_json);
 
         self.parse_mailbox_datum_json(inner_json)
     }
@@ -219,14 +219,11 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid default_ism in mailbox datum")
             })?;
         let default_ism_bytes = hex::decode(default_ism_hex).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!(
-                "Failed to decode default_ism: {}",
-                e
-            ))
+            ChainCommunicationError::from_other_str(&format!("Failed to decode default_ism: {}", e))
         })?;
-        let default_ism: [u8; 28] = default_ism_bytes.try_into().map_err(|_| {
-            ChainCommunicationError::from_other_str("Invalid default_ism length")
-        })?;
+        let default_ism: [u8; 28] = default_ism_bytes
+            .try_into()
+            .map_err(|_| ChainCommunicationError::from_other_str("Invalid default_ism length"))?;
 
         // Parse owner (field 2) - 28-byte verification key hash
         let owner_hex = fields
@@ -239,9 +236,9 @@ impl CardanoMailbox {
         let owner_bytes = hex::decode(owner_hex).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {}", e))
         })?;
-        let owner: [u8; 28] = owner_bytes.try_into().map_err(|_| {
-            ChainCommunicationError::from_other_str("Invalid owner length")
-        })?;
+        let owner: [u8; 28] = owner_bytes
+            .try_into()
+            .map_err(|_| ChainCommunicationError::from_other_str("Invalid owner length"))?;
 
         // Parse outbound_nonce (field 3)
         let outbound_nonce = fields
@@ -298,12 +295,15 @@ impl CardanoMailbox {
 
         let mut branches = Vec::with_capacity(branches_list.len());
         for (i, branch_item) in branches_list.iter().enumerate() {
-            let branch_hex = branch_item.get("bytes").and_then(|b| b.as_str()).ok_or_else(|| {
-                ChainCommunicationError::from_other_str(&format!(
-                    "Invalid merkle_tree: invalid branch at index {}",
-                    i
-                ))
-            })?;
+            let branch_hex = branch_item
+                .get("bytes")
+                .and_then(|b| b.as_str())
+                .ok_or_else(|| {
+                    ChainCommunicationError::from_other_str(&format!(
+                        "Invalid merkle_tree: invalid branch at index {}",
+                        i
+                    ))
+                })?;
             let branch_bytes = hex::decode(branch_hex).map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
                     "Failed to decode branch {}: {}",
@@ -343,10 +343,7 @@ impl CardanoMailbox {
         &self,
         lag: Option<NonZeroU64>,
     ) -> ChainResult<(IncrementalMerkle, u32)> {
-        assert!(
-            lag.is_none(),
-            "Cardano always returns the finalized result"
-        );
+        assert!(lag.is_none(), "Cardano always returns the finalized result");
 
         // Find the mailbox UTXO and parse its datum
         let utxo = self.find_mailbox_utxo().await?;
