@@ -265,21 +265,23 @@ async fn dispatch(
         return Err(anyhow!("No UTXOs found for payer address"));
     }
 
-    // Find collateral UTXO (pure ADA, no tokens)
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
 
     // Find fee UTXO that sorts BEFORE the mailbox UTXO lexicographically.
     // This is critical because Cardano sorts inputs lexicographically, and the
     // mailbox script uses the first input's address as the "sender". We need
     // the fee input (payer's wallet) to come first, not the mailbox script.
+    // Must also not have a reference script attached.
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 5_000_000 &&
             u.assets.is_empty() &&
+            u.reference_script.is_none() &&
             u.tx_hash < mailbox_utxo.tx_hash  // Must sort before mailbox
         })
         .ok_or_else(|| anyhow!(
@@ -685,24 +687,26 @@ async fn set_default_ism(
         return Err(anyhow!("No UTXOs found for payer address"));
     }
 
-    // Find collateral UTXO (pure ADA, no tokens)
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
 
-    // Find fee UTXO
+    // Find fee UTXO (must not have reference script)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 10_000_000 &&
             u.assets.is_empty() &&
+            u.reference_script.is_none() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             payer_utxos.iter().find(|u| {
                 u.lovelace >= 5_000_000 &&
                 u.assets.is_empty() &&
+                u.reference_script.is_none() &&
                 (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
             })
         })

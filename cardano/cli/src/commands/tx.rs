@@ -297,12 +297,12 @@ async fn build_payment(
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    // Find suitable UTXO
+    // Find suitable UTXO (must not have reference script)
     let utxos = client.get_utxos(&from).await?;
     let suitable = utxos
         .iter()
-        .find(|u| u.lovelace >= amount + 2_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} lovelace)", amount + 2_000_000))?;
+        .find(|u| u.lovelace >= amount + 2_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} lovelace without assets or reference scripts)", amount + 2_000_000))?;
 
     println!("  Input UTXO: {}#{}", suitable.tx_hash, suitable.output_index);
 

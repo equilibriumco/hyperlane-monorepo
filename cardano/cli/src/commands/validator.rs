@@ -298,18 +298,19 @@ async fn announce_validator(
         return Err(anyhow!("No UTXOs found for payer address"));
     }
 
-    // Find collateral UTXO (pure ADA, no tokens)
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
 
-    // Find fee UTXO
+    // Find fee UTXO (must not have reference script)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 5_000_000 &&
             u.assets.is_empty() &&
+            u.reference_script.is_none() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
         })
         .unwrap_or(collateral_utxo);
@@ -790,12 +791,12 @@ async fn create_seed_utxo(
 ) -> Result<SeedCreationResult> {
     let payer_address = keypair.address_bech32(ctx.pallas_network());
 
-    // Get payer UTXOs
+    // Get payer UTXOs (must not have reference script)
     let payer_utxos = client.get_utxos(&payer_address).await?;
     let fee_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable UTXO for seed transaction"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable UTXO for seed transaction (need 5+ ADA without tokens or reference scripts)"))?;
 
     // Parse addresses
     let script_addr = pallas_addresses::Address::from_bech32(script_address)

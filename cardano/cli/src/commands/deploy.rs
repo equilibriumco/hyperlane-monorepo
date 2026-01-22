@@ -421,11 +421,11 @@ async fn deploy_reference_script_internal(
         .collect();
     println!("  Found {} UTXOs at wallet (excluding {} spent)", utxos.len(), exclude_utxos.len());
 
-    // Find suitable UTXOs
+    // Find suitable UTXOs (must not have reference scripts)
     let input_utxo = utxos
         .iter()
-        .find(|u| u.lovelace >= lovelace + 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets)", (lovelace + 5_000_000) / 1_000_000))?;
+        .find(|u| u.lovelace >= lovelace + 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets or reference scripts)", (lovelace + 5_000_000) / 1_000_000))?;
 
     println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
 

@@ -339,13 +339,13 @@ async fn register(
         return Err(anyhow!("No UTXOs found at payer address {}", payer_address));
     }
 
-    // Find suitable input and collateral
+    // Find suitable input and collateral (must not have reference scripts)
     let input_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"))?;
 
     let collateral_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.tx_hash != input_utxo.tx_hash)
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none() && u.tx_hash != input_utxo.tx_hash)
         .unwrap_or(input_utxo);
 
     println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
@@ -587,13 +587,14 @@ async fn remove(
     let payer_address = payer.address_bech32(network);
     let payer_utxos = client.get_utxos(&payer_address).await?;
 
+    // Find suitable UTXOs (must not have reference scripts)
     let input_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"))?;
 
     let collateral_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.tx_hash != input_utxo.tx_hash)
-        .ok_or_else(|| anyhow!("Need a separate collateral UTXO"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none() && u.tx_hash != input_utxo.tx_hash)
+        .ok_or_else(|| anyhow!("Need a separate collateral UTXO (without tokens or reference scripts)"))?;
 
     println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);

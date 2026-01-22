@@ -116,7 +116,8 @@ async fn list(ctx: &CliContext, collateral: bool, min_lovelace: Option<u64>) -> 
     let filtered: Vec<_> = utxos
         .iter()
         .filter(|u| {
-            if collateral && !u.assets.is_empty() {
+            // For collateral, exclude UTXOs with assets or reference scripts
+            if collateral && (!u.assets.is_empty() || u.reference_script.is_some()) {
                 return false;
             }
             if let Some(min) = min_lovelace {
@@ -251,10 +252,10 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
 
     let utxos = client.get_utxos(&address).await?;
 
-    // Filter to pure ADA UTXOs (no assets, no datums)
+    // Filter to pure ADA UTXOs (no assets, no datums, no reference scripts)
     let pure_ada: Vec<_> = utxos
         .iter()
-        .filter(|u| u.assets.is_empty() && u.inline_datum.is_none())
+        .filter(|u| u.assets.is_empty() && u.inline_datum.is_none() && u.reference_script.is_none())
         .take(max as usize)
         .collect();
 
@@ -305,7 +306,8 @@ async fn find(
         if u.lovelace < min_lovelace {
             return false;
         }
-        if no_assets && !u.assets.is_empty() {
+        // When no_assets is requested, also exclude UTXOs with reference scripts
+        if no_assets && (!u.assets.is_empty() || u.reference_script.is_some()) {
             return false;
         }
         if with_datum && u.inline_datum.is_none() {

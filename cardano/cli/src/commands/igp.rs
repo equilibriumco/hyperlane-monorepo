@@ -96,15 +96,15 @@ impl IgpTxContext {
         Ok(hex::decode(&state_nft_asset.asset_name).unwrap_or_default())
     }
 
-    /// Find collateral UTXO from payer's UTXOs
+    /// Find collateral UTXO from payer's UTXOs (must not have reference script)
     fn find_collateral_utxo<'a>(&self, utxos: &'a [Utxo]) -> Result<&'a Utxo> {
         utxos
             .iter()
-            .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-            .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))
+            .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+            .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))
     }
 
-    /// Find fee/payment UTXO distinct from collateral
+    /// Find fee/payment UTXO distinct from collateral (must not have reference script)
     fn find_fee_utxo<'a>(
         &self,
         utxos: &'a [Utxo],
@@ -116,6 +116,7 @@ impl IgpTxContext {
             .find(|u| {
                 u.lovelace >= min_lovelace
                     && u.assets.is_empty()
+                    && u.reference_script.is_none()
                     && (u.tx_hash != collateral.tx_hash || u.output_index != collateral.output_index)
             })
             .unwrap_or(collateral)
@@ -761,12 +762,13 @@ async fn pay_for_gas(
         .find(|u| {
             u.lovelace >= required_input
                 && u.assets.is_empty()
+                && u.reference_script.is_none()
                 && (u.tx_hash != collateral_utxo.tx_hash
                     || u.output_index != collateral_utxo.output_index)
         })
         .ok_or_else(|| {
             anyhow!(
-                "No suitable payment UTXO (need {} lovelace + fees)",
+                "No suitable payment UTXO (need {} lovelace + fees, without reference scripts)",
                 required_lovelace
             )
         })?;

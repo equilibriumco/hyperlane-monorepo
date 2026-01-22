@@ -299,18 +299,19 @@ async fn set_validators(
         return Err(anyhow!("No UTXOs found for payer address"));
     }
 
-    // Find collateral UTXO (pure ADA, no tokens)
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
 
-    // Find fee UTXO (pure ADA, no tokens, different from collateral if possible)
+    // Find fee UTXO (pure ADA, no tokens, no reference script, different from collateral if possible)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 10_000_000 &&
             u.assets.is_empty() &&
+            u.reference_script.is_none() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
@@ -318,6 +319,7 @@ async fn set_validators(
             payer_utxos.iter().find(|u| {
                 u.lovelace >= 5_000_000 &&
                 u.assets.is_empty() &&
+                u.reference_script.is_none() &&
                 (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
             })
         })
@@ -562,24 +564,26 @@ async fn set_threshold(
         return Err(anyhow!("No UTXOs found for payer address"));
     }
 
-    // Find collateral UTXO (pure ADA, no tokens)
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens)"))?;
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
 
-    // Find fee UTXO (pure ADA, no tokens, different from collateral if possible)
+    // Find fee UTXO (pure ADA, no tokens, no reference script, different from collateral if possible)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
             u.lovelace >= 10_000_000 &&
             u.assets.is_empty() &&
+            u.reference_script.is_none() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             payer_utxos.iter().find(|u| {
                 u.lovelace >= 5_000_000 &&
                 u.assets.is_empty() &&
+                u.reference_script.is_none() &&
                 (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
             })
         })

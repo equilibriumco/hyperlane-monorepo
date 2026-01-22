@@ -517,7 +517,7 @@ async fn process_message(
     println!("  Messages Stored: {}", messages_stored);
     println!("  Messages Processed: {}", messages_processed);
 
-    // 3. Find fee UTXOs
+    // 3. Find fee UTXOs (must not have reference scripts)
     let fee_utxos = client.get_utxos(&payer_address).await?;
     if fee_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found at payer address for fees"));
@@ -525,8 +525,8 @@ async fn process_message(
 
     let fee_utxo = fee_utxos
         .iter()
-        .find(|u| u.assets.is_empty() && u.lovelace >= 5_000_000)
-        .ok_or_else(|| anyhow!("No suitable fee UTXO found (need >= 5 ADA)"))?;
+        .find(|u| u.assets.is_empty() && u.lovelace >= 5_000_000 && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable fee UTXO found (need >= 5 ADA without tokens or reference scripts)"))?;
 
     println!("\n{}", "Fee UTXO:".green());
     println!("  {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
