@@ -5,7 +5,10 @@ use clap::{Args, Subcommand, ValueEnum};
 use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::{build_warp_route_collateral_datum, build_warp_route_native_datum};
+use crate::utils::cbor::{
+    build_warp_route_collateral_datum, build_warp_route_native_datum,
+    build_warp_route_synthetic_datum,
+};
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
 use crate::utils::plutus::{
@@ -64,6 +67,8 @@ enum TokenType {
     Native,
     /// Collateral (lock existing tokens)
     Collateral,
+    /// Synthetic (mint new tokens)
+    Synthetic,
 }
 
 pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
@@ -104,6 +109,7 @@ async fn deploy(
     let type_str = match token_type {
         TokenType::Native => "Native (ADA)",
         TokenType::Collateral => "Collateral (Lock existing tokens)",
+        TokenType::Synthetic => "Synthetic (Mint new tokens)",
     };
 
     println!("  Token Type: {}", type_str);
@@ -118,6 +124,9 @@ async fn deploy(
             deploy_collateral_route(ctx, &policy, &asset, decimals, remote_decimals, dry_run).await
         }
         TokenType::Native => deploy_native_route(ctx, decimals, remote_decimals, dry_run).await,
+        TokenType::Synthetic => {
+            deploy_synthetic_route(ctx, decimals, remote_decimals, dry_run).await
+        }
     }
 }
 
@@ -593,6 +602,293 @@ fn print_deployment_summary(
     println!("2. Transfer tokens:");
     println!("   hyperlane-cardano warp transfer --domain <DOMAIN> --recipient <ADDRESS> --amount <AMOUNT>");
     println!();
+}
+
+/// Deploy a Synthetic warp route (mints synthetic tokens)
+///
+/// Note: Synthetic routes have unique logic for computing the minting policy,
+/// so they don't use the shared prepare_warp_deployment/finalize_warp_deployment helpers.
+async fn deploy_synthetic_route(
+    ctx: &CliContext,
+    decimals: u8,
+    remote_decimals: u8,
+    dry_run: bool,
+) -> Result<()> {
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!("{}", "Deploying Synthetic Warp Route".cyan().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+
+    println!("\n{}", "Configuration:".green());
+    println!("  Decimals: {}", decimals);
+
+    // Load deployment info to get mailbox_policy_id
+    let deployment = ctx.load_deployment_info()?;
+    let mailbox_policy_id = deployment
+        .mailbox
+        .as_ref()
+        .and_then(|m| m.state_nft_policy.as_ref())
+        .ok_or_else(|| anyhow!("Mailbox not deployed. Run 'hyperlane-cardano init' first"))?;
+
+    // Load API and signing key
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let owner_pkh = keypair.verification_key_hash_hex();
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+
+    println!("\n{}", "Step 1: Finding UTXOs...".cyan());
+    println!("  Owner: {}", payer_address);
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+    let utxos = client.get_utxos(&payer_address).await?;
+    println!("  Found {} UTXOs", utxos.len());
+
+    // We need two UTXOs for warp route deployment
+    let min_ada = 25_000_000u64; // 25 ADA per UTXO to cover deployment costs
+    let suitable_utxos: Vec<_> = utxos
+        .iter()
+        .filter(|u| u.lovelace >= min_ada && u.assets.is_empty())
+        .collect();
+
+    if suitable_utxos.len() < 2 {
+        return Err(anyhow!(
+            "Need at least 2 UTXOs with >= 25 ADA each. Found {}. \
+            Please fund the wallet with more ADA or split a larger UTXO.",
+            suitable_utxos.len()
+        ));
+    }
+
+    let warp_input = suitable_utxos[0];
+    let warp_collateral = suitable_utxos[1];
+
+    println!(
+        "  Warp Route Input: {}#{}",
+        warp_input.tx_hash, warp_input.output_index
+    );
+
+    // Step 2: Compute state_nft policy (needed for unique warp_route script hash)
+    println!("\n{}", "Step 2: Computing script hashes...".cyan());
+    println!("  Mailbox Policy ID: {}", mailbox_policy_id);
+
+    // Generate state_nft policy from the UTXO we'll consume
+    let warp_nft_output_ref =
+        encode_output_reference(&warp_input.tx_hash, warp_input.output_index)?;
+    let warp_nft_applied = apply_validator_param(
+        &ctx.contracts_dir,
+        "state_nft",
+        "state_nft",
+        &hex::encode(&warp_nft_output_ref),
+    )?;
+    let warp_nft_policy = &warp_nft_applied.policy_id;
+    println!("  State NFT Policy: {}", warp_nft_policy.green());
+
+    // Compute warp_route script hash with both params (mailbox + state_nft for uniqueness)
+    let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
+    let state_nft_param_cbor = encode_script_hash_param(warp_nft_policy)?;
+    let warp_route_applied = apply_validator_params(
+        &ctx.contracts_dir,
+        "warp_route",
+        "warp_route",
+        &[
+            &hex::encode(&mailbox_param_cbor),
+            &hex::encode(&state_nft_param_cbor),
+        ],
+    )?;
+    let warp_route_hash = &warp_route_applied.policy_id;
+    let warp_route_script = hex::decode(&warp_route_applied.compiled_code)
+        .with_context(|| "Invalid warp route script CBOR")?;
+    println!("  Warp Route Script Hash: {}", warp_route_hash.green());
+    println!(
+        "  Warp Route Script Size: {} bytes",
+        warp_route_script.len()
+    );
+
+    // Compute synthetic_token policy (parameterized by warp_route_hash)
+    let warp_route_param_cbor = encode_script_hash_param(warp_route_hash)?;
+    let synthetic_token_applied = apply_validator_param(
+        &ctx.contracts_dir,
+        "synthetic_token",
+        "synthetic_token",
+        &hex::encode(&warp_route_param_cbor),
+    )?;
+    let synthetic_policy_id = &synthetic_token_applied.policy_id;
+    println!("  Synthetic Token Policy: {}", synthetic_policy_id.green());
+
+    // Step 3: Prepare warp route deployment
+    println!("\n{}", "Step 3: Preparing warp route deployment...".cyan());
+
+    // Build warp route datum for synthetic type
+    let warp_datum = build_warp_route_synthetic_datum(
+        synthetic_policy_id,
+        decimals as u32,
+        remote_decimals as u32,
+        &owner_pkh,
+    )?;
+    println!("  Warp Route Datum CBOR: {} bytes", warp_datum.len());
+
+    // Calculate warp route script address
+    let warp_address = ctx.script_address(warp_route_hash)?;
+    println!("  Warp Route Address: {}", warp_address);
+
+    if dry_run {
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("{}", "[Dry run - not submitting transactions]".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("\nDeployment would create:");
+        println!(
+            "  1. Warp Route State UTXO at {} with NFT {}",
+            warp_address, warp_nft_policy
+        );
+        println!("  2. Warp Route Reference Script UTXO with \"ref\" NFT");
+        println!("  Synthetic Token Policy: {}", synthetic_policy_id);
+        return Ok(());
+    }
+
+    // Step 4: Deploy warp route with two-UTXO pattern (state + reference script)
+    println!(
+        "\n{}",
+        "Step 4: Deploying warp route with reference script...".cyan()
+    );
+
+    let warp_nft_script = hex::decode(&warp_nft_applied.compiled_code)
+        .with_context(|| "Invalid warp NFT script CBOR")?;
+
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let warp_tx = tx_builder
+        .build_init_recipient_two_utxo_tx(
+            &keypair,
+            warp_input,
+            warp_collateral,
+            &warp_nft_script,   // state_nft minting policy
+            &warp_route_script, // warp_route validator to attach as reference script
+            &warp_address,      // warp_route script address
+            &warp_datum,        // initial datum
+            5_000_000,          // ADA for state UTXO
+            18_000_000,         // ADA for reference script UTXO (larger due to script)
+        )
+        .await?;
+
+    println!("  TX Hash: {}", hex::encode(&warp_tx.tx_hash.0));
+
+    let warp_signed = tx_builder.sign_tx(warp_tx, &keypair)?;
+    println!("  Submitting warp route transaction...");
+    let warp_tx_hash = client.submit_tx(&warp_signed).await?;
+    println!("  ✓ Warp route deployed: {}", warp_tx_hash.green());
+    println!("  ✓ Warp route reference script UTXO created");
+
+    println!("\n{}", "Waiting for confirmation...".cyan());
+    client.wait_for_tx(&warp_tx_hash, 120).await?;
+    println!("  ✓ Warp route confirmed");
+
+    // Save deployment info to synthetic_warp_route.json
+    // Reference script UTXO is at output index 1 (state is at 0)
+    let warp_ref_script_utxo = format!("{}#1", warp_tx_hash);
+
+    let warp_info_path = ctx
+        .network_deployments_dir()
+        .join("synthetic_warp_route.json");
+    let warp_info = serde_json::json!({
+        "type": "synthetic",
+        "synthetic_policy": synthetic_policy_id,
+        "decimals": decimals,
+        "warp_route": {
+            "script_hash": warp_route_hash,
+            "nft_policy": warp_nft_policy,
+            "address": warp_address,
+            "tx_hash": warp_tx_hash,
+            "reference_script_utxo": warp_ref_script_utxo,
+        },
+        "owner": owner_pkh,
+    });
+    std::fs::write(&warp_info_path, serde_json::to_string_pretty(&warp_info)?)?;
+
+    // Also update deployment_info.json
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        use crate::utils::types::{ReferenceScriptUtxo, WarpRouteDeployment};
+
+        // Add to warp_routes list
+        let warp_deployment = WarpRouteDeployment {
+            warp_type: "synthetic".to_string(),
+            decimals: decimals as u32,
+            owner: owner_pkh.clone(),
+            script_hash: warp_route_hash.clone(),
+            address: warp_address.clone(),
+            nft_policy: warp_nft_policy.clone(),
+            init_tx_hash: Some(warp_tx_hash.clone()),
+            reference_script_utxo: Some(ReferenceScriptUtxo {
+                tx_hash: warp_tx_hash.clone(),
+                output_index: 1,
+                lovelace: 18_000_000,
+            }),
+            token_policy: None,
+            token_asset: None,
+            minting_policy: Some(synthetic_policy_id.clone()),
+            minting_ref_script_utxo: None, // Will be set by deploy-minting-ref command
+        };
+        deployment.warp_routes.push(warp_deployment);
+
+        if let Err(e) = ctx.save_deployment_info(&deployment) {
+            println!("  Warning: Failed to update deployment_info.json: {}", e);
+        }
+    }
+
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!(
+        "{}",
+        "Synthetic Warp Route Deployment Complete!".green().bold()
+    );
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!();
+    println!("{}", "Synthetic Token:".cyan());
+    println!("  Policy ID: {}", synthetic_policy_id);
+    println!("  Note: Tokens are minted when receiving transfers from other chains");
+    println!();
+    println!("{}", "Warp Route:".cyan());
+    println!("  Script Hash: {}", warp_route_hash);
+    println!("  NFT Policy: {}", warp_nft_policy);
+    println!("  Address: {}", warp_address);
+    println!("  TX: {}", warp_tx_hash);
+    println!("  State UTXO: {}#0", warp_tx_hash);
+    println!("  Reference Script UTXO: {}", warp_ref_script_utxo);
+    println!();
+    println!("{}", "Saved to:".cyan());
+    println!("  {:?}", warp_info_path);
+    println!();
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!("{}", "Next steps:".yellow());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!();
+    println!("1. Enroll remote routers:");
+    println!("   hyperlane-cardano warp enroll-router --domain <DOMAIN> --router <ADDRESS>");
+    println!();
+    println!("2. Receive tokens from other chains:");
+    println!("   Transfers from remote chains will mint synthetic tokens to recipients");
+    println!();
+
+    Ok(())
 }
 
 async fn show(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {

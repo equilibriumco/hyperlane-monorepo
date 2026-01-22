@@ -1088,6 +1088,47 @@ pub fn build_warp_route_native_datum(
     Ok(builder.build())
 }
 
+/// Build a WarpRoute datum for Synthetic type
+pub fn build_warp_route_synthetic_datum(
+    minting_policy: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Synthetic - Constr 1
+    builder.start_constr(1);
+    builder.bytes_hex(minting_policy)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: empty list
+    builder.start_list().end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(0);
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
 
 #[cfg(test)]
 mod tests {

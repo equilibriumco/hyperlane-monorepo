@@ -1,0 +1,13 @@
+{
+  "decimals": 18,
+  "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+  "synthetic_policy": "40dc81a86180a7f4371510fbe80ece04df19eb7e6b39cb6d3bcedaad",
+  "type": "synthetic",
+  "warp_route": {
+    "address": "addr_test1wqt8l95wzpkqn5n537y5f9mel335z0tr0f0td72j2ygg4qgprmzns",
+    "nft_policy": "4295e8a6052d732a5523e928c97e756ebb76d78a4d848abacf46e506",
+    "reference_script_utxo": "d38042a18e478ba71ac80515c3456adcbec35213c22c16e9ac8494fa0202043d#1",
+    "script_hash": "167f968e106c09d2748f89449779fc63413d637a5eb6f95251108a81",
+    "tx_hash": "d38042a18e478ba71ac80515c3456adcbec35213c22c16e9ac8494fa0202043d"
+  }
+}

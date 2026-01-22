@@ -191,7 +191,17 @@ pub async fn execute(ctx: &CliContext, args: RegistryArgs) -> Result<()> {
             state_asset,
             recipient_type,
             output,
-        } => generate_json(&script_hash, &owner, &state_policy, &state_asset, recipient_type, output).await,
+        } => {
+            generate_json(
+                &script_hash,
+                &owner,
+                &state_policy,
+                &state_asset,
+                recipient_type,
+                output,
+            )
+            .await
+        }
     }
 }
 
@@ -214,14 +224,30 @@ async fn register(
     let script_hash = validate_script_hash(script_hash)?;
     println!("  Script Hash: {}", script_hash);
     println!("  State Policy: {}", state_policy);
-    println!("  State Asset: {}", if state_asset.is_empty() { "(empty)" } else { state_asset });
+    println!(
+        "  State Asset: {}",
+        if state_asset.is_empty() {
+            "(empty)"
+        } else {
+            state_asset
+        }
+    );
 
     // Handle reference script locator
     if let (Some(ref_policy), Some(ref_asset)) = (&ref_script_policy, &ref_script_asset) {
         println!("  Ref Script Policy: {}", ref_policy);
-        println!("  Ref Script Asset: {}", if ref_asset.is_empty() { "(empty)" } else { ref_asset });
+        println!(
+            "  Ref Script Asset: {}",
+            if ref_asset.is_empty() {
+                "(empty)"
+            } else {
+                ref_asset
+            }
+        );
     } else if ref_script_policy.is_some() || ref_script_asset.is_some() {
-        return Err(anyhow!("Both --ref-script-policy and --ref-script-asset must be provided together"));
+        return Err(anyhow!(
+            "Both --ref-script-policy and --ref-script-asset must be provided together"
+        ));
     }
 
     let type_str = match recipient_type {
@@ -246,7 +272,8 @@ async fn register(
     }
 
     // Get signing key early to determine owner
-    let signing_key_path = ctx.signing_key_path()
+    let signing_key_path = ctx
+        .signing_key_path()
         .ok_or_else(|| anyhow!("Signing key required for registration. Use --signing-key"))?;
     let payer = Keypair::from_file(signing_key_path)?;
     let owner_pkh = hex::encode(payer.verification_key_hash());
@@ -261,6 +288,8 @@ async fn register(
         ref_script_policy_id: ref_script_policy.clone(),
         ref_script_asset_name: ref_script_asset.clone(),
         deferred_message_policy: message_policy.clone(),
+        minting_policy: None,
+        additional_inputs: vec![],
     };
 
     println!("\n{}", "Registration Data:".green());
@@ -275,7 +304,11 @@ async fn register(
     let api_key = ctx.require_api_key()?;
 
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-    let network = if ctx.network() == "mainnet" { Network::Mainnet } else { Network::Testnet };
+    let network = if ctx.network() == "mainnet" {
+        Network::Mainnet
+    } else {
+        Network::Testnet
+    };
     let tx_builder = HyperlaneTxBuilder::new(&client, network);
 
     // Get registry policy
@@ -287,7 +320,10 @@ async fn register(
         .find_utxo_by_asset(&policy_id, "")
         .await?
         .ok_or_else(|| anyhow!("Registry UTXO not found with policy {}", policy_id))?;
-    println!("  Found: {}#{}", registry_utxo.tx_hash, registry_utxo.output_index);
+    println!(
+        "  Found: {}#{}",
+        registry_utxo.tx_hash, registry_utxo.output_index
+    );
 
     // Parse existing registrations
     let existing_registrations = if let Some(datum) = &registry_utxo.inline_datum {
@@ -298,7 +334,10 @@ async fn register(
     println!("  Existing registrations: {}", existing_registrations.len());
 
     // Check if already registered
-    if existing_registrations.iter().any(|r| r.script_hash == script_hash) {
+    if existing_registrations
+        .iter()
+        .any(|r| r.script_hash == script_hash)
+    {
         return Err(anyhow!("Recipient {} is already registered", script_hash));
     }
 
@@ -315,6 +354,8 @@ async fn register(
             recipient_type: r.recipient_type.clone(),
             custom_ism: r.custom_ism.clone(),
             deferred_message_policy: r.deferred_message_policy.clone(),
+            minting_policy: None,
+            additional_inputs: vec![],
         })
         .collect();
 
@@ -328,6 +369,8 @@ async fn register(
         recipient_type: type_str.to_string(),
         custom_ism: custom_ism.clone(),
         deferred_message_policy: message_policy.clone(),
+        minting_policy: None,
+        additional_inputs: vec![],
     };
 
     // Get payer UTXOs
@@ -340,16 +383,33 @@ async fn register(
     }
 
     // Find suitable input and collateral (must not have reference scripts)
-    let input_utxo = payer_utxos.iter()
+    let input_utxo = payer_utxos
+        .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"
+            )
+        })?;
 
-    let collateral_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none() && u.tx_hash != input_utxo.tx_hash)
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.tx_hash != input_utxo.tx_hash
+        })
         .unwrap_or(input_utxo);
 
-    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!(
+        "  Input UTXO: {}#{}",
+        input_utxo.tx_hash, input_utxo.output_index
+    );
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
 
     // Load registry script from deployment directory
     println!("\n{}", "Loading registry script...".cyan());
@@ -360,9 +420,8 @@ async fn register(
             registry_script_path
         ));
     }
-    let registry_script_json: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&registry_script_path)?
-    )?;
+    let registry_script_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry_script_path)?)?;
     let registry_script_hex = registry_script_json
         .get("cborHex")
         .and_then(|v| v.as_str())
@@ -371,7 +430,8 @@ async fn register(
 
     // Check for reference script UTXO in deployment info
     let deployment = ctx.load_deployment_info()?;
-    let ref_script_utxo = deployment.registry
+    let ref_script_utxo = deployment
+        .registry
         .as_ref()
         .and_then(|r| r.reference_script_utxo.as_ref())
         .map(|r| format!("{}#{}", r.tx_hash, r.output_index));
@@ -437,10 +497,7 @@ async fn list(
             OutputFormat::Table => {
                 println!("\n{}", "Registered Recipients:".green());
                 println!("{}", "-".repeat(120));
-                println!(
-                    "{:<58} {:<58} {:<10}",
-                    "Script Hash", "Owner", "Type"
-                );
+                println!("{:<58} {:<58} {:<10}", "Script Hash", "Owner", "Type");
                 println!("{}", "-".repeat(120));
 
                 for reg in &registrations {
@@ -474,11 +531,7 @@ async fn list(
     Ok(())
 }
 
-async fn show(
-    ctx: &CliContext,
-    script_hash: &str,
-    registry_policy: Option<String>,
-) -> Result<()> {
+async fn show(ctx: &CliContext, script_hash: &str, registry_policy: Option<String>) -> Result<()> {
     println!("{}", "Looking up recipient...".cyan());
 
     let script_hash = validate_script_hash(script_hash)?;
@@ -531,7 +584,10 @@ async fn remove(
         .await?
         .ok_or_else(|| anyhow!("Registry UTXO not found"))?;
 
-    println!("  Found: {}#{}", registry_utxo.tx_hash, registry_utxo.output_index);
+    println!(
+        "  Found: {}#{}",
+        registry_utxo.tx_hash, registry_utxo.output_index
+    );
 
     // Parse existing registrations
     let existing_registrations = if let Some(datum) = &registry_utxo.inline_datum {
@@ -572,6 +628,8 @@ async fn remove(
             recipient_type: r.recipient_type.clone(),
             custom_ism: r.custom_ism.clone(),
             deferred_message_policy: r.deferred_message_policy.clone(),
+            minting_policy: None,
+            additional_inputs: vec![],
         })
         .collect();
 
@@ -588,16 +646,35 @@ async fn remove(
     let payer_utxos = client.get_utxos(&payer_address).await?;
 
     // Find suitable UTXOs (must not have reference scripts)
-    let input_utxo = payer_utxos.iter()
+    let input_utxo = payer_utxos
+        .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "Need a UTXO with at least 5 ADA for fees (without tokens or reference scripts)"
+            )
+        })?;
 
-    let collateral_utxo = payer_utxos.iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none() && u.tx_hash != input_utxo.tx_hash)
-        .ok_or_else(|| anyhow!("Need a separate collateral UTXO (without tokens or reference scripts)"))?;
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.tx_hash != input_utxo.tx_hash
+        })
+        .ok_or_else(|| {
+            anyhow!("Need a separate collateral UTXO (without tokens or reference scripts)")
+        })?;
 
-    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!(
+        "  Input UTXO: {}#{}",
+        input_utxo.tx_hash, input_utxo.output_index
+    );
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
 
     // Load registry script from deployment directory
     println!("\n{}", "Loading registry script...".cyan());
@@ -608,9 +685,8 @@ async fn remove(
             registry_script_path
         ));
     }
-    let registry_script_json: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&registry_script_path)?
-    )?;
+    let registry_script_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry_script_path)?)?;
     let registry_script_hex = registry_script_json
         .get("cborHex")
         .and_then(|v| v.as_str())
@@ -619,7 +695,8 @@ async fn remove(
 
     // Check for reference script UTXO in deployment info
     let deployment = ctx.load_deployment_info()?;
-    let ref_script_utxo = deployment.registry
+    let ref_script_utxo = deployment
+        .registry
         .as_ref()
         .and_then(|r| r.reference_script_utxo.as_ref())
         .map(|r| format!("{}#{}", r.tx_hash, r.output_index));
@@ -687,6 +764,8 @@ async fn generate_json(
         ref_script_policy_id: None,
         ref_script_asset_name: None,
         deferred_message_policy: None,
+        minting_policy: None,
+        additional_inputs: vec![],
     };
 
     let json = serde_json::to_string_pretty(&registration)?;
@@ -713,7 +792,9 @@ fn get_registry_policy(ctx: &CliContext, registry_policy: Option<String>) -> Res
         .registry
         .and_then(|r| r.state_nft_policy)
         .ok_or_else(|| {
-            anyhow!("Registry policy not found. Use --registry-policy or update deployment_info.json")
+            anyhow!(
+                "Registry policy not found. Use --registry-policy or update deployment_info.json"
+            )
         })
 }
 
@@ -740,7 +821,9 @@ fn parse_registrations_from_datum(datum: &serde_json::Value) -> Result<Vec<Recip
         return parse_registrations_from_cbor(hex_str);
     }
 
-    Err(anyhow!("Invalid datum structure: expected JSON object with 'fields' or CBOR hex string"))
+    Err(anyhow!(
+        "Invalid datum structure: expected JSON object with 'fields' or CBOR hex string"
+    ))
 }
 
 fn parse_registrations_from_cbor(hex_str: &str) -> Result<Vec<RecipientInfo>> {
@@ -749,8 +832,8 @@ fn parse_registrations_from_cbor(hex_str: &str) -> Result<Vec<RecipientInfo>> {
 
     let hex_str = hex_str.trim_matches('"');
     let cbor_bytes = hex::decode(hex_str)?;
-    let plutus_data: PlutusData = minicbor::decode(&cbor_bytes)
-        .map_err(|e| anyhow!("Failed to decode CBOR: {}", e))?;
+    let plutus_data: PlutusData =
+        minicbor::decode(&cbor_bytes).map_err(|e| anyhow!("Failed to decode CBOR: {}", e))?;
 
     // Registry datum: Constr 0 [registrations_list, owner]
     let (tag, fields) = match &plutus_data {
@@ -782,7 +865,9 @@ fn parse_registrations_from_cbor(hex_str: &str) -> Result<Vec<RecipientInfo>> {
     Ok(registrations)
 }
 
-fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) -> Result<RecipientInfo> {
+fn parse_registration_from_plutus(
+    data: &pallas_primitives::conway::PlutusData,
+) -> Result<RecipientInfo> {
     use pallas_primitives::conway::PlutusData;
 
     let (tag, fields) = match data {
@@ -793,7 +878,10 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
     // RecipientRegistration has 7 fields now:
     // script_hash, owner, state_locator, reference_script_locator, additional_inputs, recipient_type, custom_ism
     if tag != 121 || fields.len() < 7 {
-        return Err(anyhow!("Invalid registration structure, expected 7 fields, got {}", fields.len()));
+        return Err(anyhow!(
+            "Invalid registration structure, expected 7 fields, got {}",
+            fields.len()
+        ));
     }
 
     // Script hash (field 0)
@@ -837,11 +925,10 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
             122 => ("TokenReceiver".to_string(), None),
             123 => {
                 // Deferred { message_policy: ScriptHash }
-                let msg_policy = c.fields.first()
-                    .and_then(|f| match f {
-                        PlutusData::BoundedBytes(bytes) => Some(hex::encode(bytes.as_ref() as &[u8])),
-                        _ => None,
-                    });
+                let msg_policy = c.fields.first().and_then(|f| match f {
+                    PlutusData::BoundedBytes(bytes) => Some(hex::encode(bytes.as_ref() as &[u8])),
+                    _ => None,
+                });
                 ("Deferred".to_string(), msg_policy)
             }
             _ => ("Unknown".to_string(), None),
@@ -875,10 +962,14 @@ fn parse_registration_from_plutus(data: &pallas_primitives::conway::PlutusData) 
         ref_script_policy_id: ref_script_policy,
         ref_script_asset_name: ref_script_asset,
         deferred_message_policy,
+        minting_policy: None,
+        additional_inputs: vec![],
     })
 }
 
-fn parse_utxo_locator_from_plutus(data: &pallas_primitives::conway::PlutusData) -> Result<(String, String)> {
+fn parse_utxo_locator_from_plutus(
+    data: &pallas_primitives::conway::PlutusData,
+) -> Result<(String, String)> {
     use pallas_primitives::conway::PlutusData;
 
     let (tag, fields) = match data {
@@ -903,7 +994,9 @@ fn parse_utxo_locator_from_plutus(data: &pallas_primitives::conway::PlutusData) 
     Ok((policy_id, asset_name))
 }
 
-fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<Vec<RecipientInfo>> {
+fn parse_registrations_from_json_fields(
+    fields: &[serde_json::Value],
+) -> Result<Vec<RecipientInfo>> {
     let registrations_list = fields
         .get(0)
         .and_then(|v| v.get("list"))
@@ -997,7 +1090,8 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
                     1 => ("TokenReceiver".to_string(), None),
                     2 => {
                         // Deferred { message_policy: ScriptHash }
-                        let msg_policy = t.get("fields")
+                        let msg_policy = t
+                            .get("fields")
                             .and_then(|f| f.as_array())
                             .and_then(|a| a.get(0))
                             .and_then(|h| h.get("bytes"))
@@ -1011,21 +1105,19 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             .unwrap_or(("Unknown".to_string(), None));
 
         // Field 6: custom_ism
-        let custom_ism = entry_fields
-            .get(6)
-            .and_then(|i| {
-                if i.get("constructor") == Some(&serde_json::json!(0)) {
-                    // Some(ism)
-                    i.get("fields")
-                        .and_then(|f| f.as_array())
-                        .and_then(|a| a.get(0))
-                        .and_then(|h| h.get("bytes"))
-                        .and_then(|b| b.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            });
+        let custom_ism = entry_fields.get(6).and_then(|i| {
+            if i.get("constructor") == Some(&serde_json::json!(0)) {
+                // Some(ism)
+                i.get("fields")
+                    .and_then(|f| f.as_array())
+                    .and_then(|a| a.get(0))
+                    .and_then(|h| h.get("bytes"))
+                    .and_then(|b| b.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
 
         registrations.push(RecipientInfo {
             script_hash,
@@ -1037,6 +1129,8 @@ fn parse_registrations_from_json_fields(fields: &[serde_json::Value]) -> Result<
             ref_script_policy_id: ref_script_policy,
             ref_script_asset_name: ref_script_asset,
             deferred_message_policy,
+            minting_policy: None,
+            additional_inputs: vec![],
         });
     }
 
