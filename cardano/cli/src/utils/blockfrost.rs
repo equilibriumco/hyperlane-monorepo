@@ -70,7 +70,7 @@ impl BlockfrostClient {
             .with_context(|| "Failed to read response")
     }
 
-    /// Get UTXOs at an address
+    /// Get UTXOs at an address (handles pagination to fetch all UTXOs)
     pub async fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>> {
         #[derive(Deserialize)]
         struct BlockfrostUtxo {
@@ -89,17 +89,37 @@ impl BlockfrostClient {
             quantity: String,
         }
 
-        let endpoint = format!("/addresses/{}/utxos", address);
-        let utxos: Vec<BlockfrostUtxo> = match self.get(&endpoint).await {
-            Ok(u) => u,
-            Err(e) => {
-                // Empty address returns 404
-                if e.to_string().contains("404") {
-                    return Ok(vec![]);
+        // Fetch all pages of UTXOs (Blockfrost returns max 100 per page)
+        let mut all_utxos: Vec<BlockfrostUtxo> = Vec::new();
+        let mut page = 1;
+        loop {
+            let endpoint = format!("/addresses/{}/utxos?page={}&count=100", address, page);
+            let utxos: Vec<BlockfrostUtxo> = match self.get(&endpoint).await {
+                Ok(u) => u,
+                Err(e) => {
+                    // Empty address returns 404
+                    if e.to_string().contains("404") {
+                        break;
+                    }
+                    // If this is page 1, return the error; otherwise just stop paginating
+                    if page == 1 {
+                        return Err(e);
+                    }
+                    break;
                 }
-                return Err(e);
+            };
+
+            let count = utxos.len();
+            all_utxos.extend(utxos);
+
+            // If we got fewer than 100, we've reached the last page
+            if count < 100 {
+                break;
             }
-        };
+            page += 1;
+        }
+
+        let utxos = all_utxos;
 
         Ok(utxos
             .into_iter()

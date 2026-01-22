@@ -10,7 +10,10 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use commands::{config, deferred, deploy, igp, init, ism, mailbox, query, registry, tx, utxo, validator, warp};
+use commands::{
+    config, deferred, deploy, igp, init, ism, mailbox, query, registry, token, tx, utxo, validator,
+    warp,
+};
 
 /// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
 #[derive(Parser)]
@@ -22,7 +25,12 @@ struct Cli {
     command: Commands,
 
     /// Cardano network (mainnet, preprod, preview)
-    #[arg(long, global = true, default_value = "preview", env = "CARDANO_NETWORK")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "preview",
+        env = "CARDANO_NETWORK"
+    )]
     network: String,
 
     /// Blockfrost API key
@@ -68,6 +76,9 @@ enum Commands {
 
     /// Manage warp routes (token bridges)
     Warp(warp::WarpArgs),
+
+    /// Manage test tokens for development
+    Token(token::TokenArgs),
 
     /// Manage validator announcements
     Validator(validator::ValidatorArgs),
@@ -143,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mailbox(args) => mailbox::execute(&ctx, args).await,
         Commands::Registry(args) => registry::execute(&ctx, args).await,
         Commands::Warp(args) => warp::execute(&ctx, args).await,
+        Commands::Token(args) => token::execute(&ctx, args).await,
         Commands::Validator(args) => validator::execute(&ctx, args).await,
         Commands::Query(args) => query::execute(&ctx, args).await,
         Commands::Utxo(args) => utxo::execute(&ctx, args).await,

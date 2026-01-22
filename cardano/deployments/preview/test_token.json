@@ -1,0 +1,8 @@
+{
+  "amount": 1000000,
+  "asset_name": "WARPTEST",
+  "asset_name_hex": "5741525054455354",
+  "mint_tx_hash": "fc9c88d5d7de7cb997c993eaf727104e39c404bbff0d40604851b5088e1f6013",
+  "policy_id": "908d51752e4c76fe1404a92b1276b1c1093dae0c7f302c5442f0177e",
+  "seed_utxo": "dbdd64a8b5d146c470b33dc41994f9b79f39d92205aeb9c7de7ef8eb7090834c#1"
+}

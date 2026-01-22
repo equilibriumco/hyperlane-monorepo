@@ -138,7 +138,6 @@ async fn extract(
         ("igp", validators.igp.as_ref()),
         ("validator_announce", validators.validator_announce.as_ref()),
         ("warp_route", validators.warp_route.as_ref()),
-        ("vault", validators.vault.as_ref()),
     ];
 
     println!("\n{}", "Extracted validators:".green());
@@ -226,8 +225,11 @@ async fn extract(
         registry: Some(to_script_info(&validators.registry)),
         igp: validators.igp.as_ref().map(to_script_info),
         validator_announce: validators.validator_announce.as_ref().map(to_script_info),
+        warp_routes: Vec::new(),
+        // Legacy fields
         warp_route: validators.warp_route.as_ref().map(to_script_info),
-        vault: validators.vault.as_ref().map(to_script_info),
+        synthetic_warp_route: None,
+        native_warp_route: None,
     };
 
     let info_path = output_dir.join("deployment_info.json");
@@ -533,11 +535,6 @@ async fn deploy_reference_script_internal(
                     wr.reference_script_utxo = Some(ref_utxo);
                 }
             }
-            "vault" => {
-                if let Some(ref mut vault) = deployment.vault {
-                    vault.reference_script_utxo = Some(ref_utxo);
-                }
-            }
             _ => {
                 // Unknown script, skip updating deployment_info.json
             }
@@ -658,7 +655,6 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
         "igp" => "igp.igp.spend",
         "validator_announce" => "validator_announce.validator_announce.spend",
         "warp_route" => "warp_route.warp_route.spend",
-        "vault" => "vault.vault.spend",
         "generic_recipient" => "generic_recipient.generic_recipient.spend",
         _ => script_name, // Try as exact title
     };

@@ -144,6 +144,7 @@ impl CliContext {
         PlutusBlueprint::from_file(&self.plutus_json_path())
     }
 
+
     /// Get the CardanoScan URL for a transaction
     pub fn explorer_tx_url(&self, tx_hash: &str) -> String {
         match self.network {
@@ -161,5 +162,11 @@ impl CliContext {
     /// Get signing key path
     pub fn signing_key_path(&self) -> Option<&Path> {
         self.signing_key_path.as_deref()
+    }
+
+    /// Convert a script hash to a bech32 script address
+    pub fn script_address(&self, script_hash: &str) -> Result<String> {
+        use crate::utils::plutus::script_hash_to_address;
+        script_hash_to_address(script_hash, self.pallas_network())
     }
 }

@@ -233,14 +233,17 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let nft_asset_name = hex::decode(&state_nft.asset_name).unwrap_or_default();
 
         // Build registry output with updated datum and same NFT
-        let registry_output = Output::new(registry_addr.clone(), registry_utxo.lovelace)
+        // Add extra ADA to cover increased min-UTXO as datum grows with more registrations
+        let registry_ada_bump = 1_000_000u64; // 1 ADA buffer for datum growth
+        let registry_output_ada = registry_utxo.lovelace + registry_ada_bump;
+        let registry_output = Output::new(registry_addr.clone(), registry_output_ada)
             .set_inline_datum(new_datum)
             .add_asset(Hash::new(nft_policy), nft_asset_name, 1)
             .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
 
         // Fee estimate
         let fee_estimate = 1_000_000u64;
-        let change = input_utxo.lovelace.saturating_sub(fee_estimate);
+        let change = input_utxo.lovelace.saturating_sub(fee_estimate + registry_ada_bump);
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
@@ -686,6 +689,104 @@ impl<'a> HyperlaneTxBuilder<'a> {
         Ok(tx)
     }
 
+    /// Build a token minting transaction
+    ///
+    /// This mints fungible tokens using a one-shot minting policy and sends them
+    /// to the payer's address. Used for creating test tokens.
+    ///
+    /// # Arguments
+    /// * `payer` - The keypair that will pay for the transaction and receive the tokens
+    /// * `input_utxo` - The UTXO that will be consumed (must match the policy parameter)
+    /// * `collateral_utxo` - Collateral for Plutus script execution
+    /// * `mint_script_cbor` - The compiled test_token minting policy
+    /// * `asset_name` - Name for the token (e.g., "TEST")
+    /// * `amount` - Amount of tokens to mint
+    /// * `output_lovelace` - ADA to include with the tokens in the output
+    pub async fn build_mint_token_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        mint_script_cbor: &[u8],
+        asset_name: &str,
+        amount: u64,
+        output_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Calculate policy ID from script
+        let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Convert asset name to bytes
+        let asset_name_bytes: Vec<u8> = asset_name.as_bytes().to_vec();
+
+        // Parse tx hashes
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Build inputs
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+
+        // Build the token output - send minted tokens to payer
+        let token_output = Output::new(payer_addr.clone(), output_lovelace)
+            .add_asset(Hash::new(policy_id), asset_name_bytes.clone(), amount)
+            .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
+
+        // Build mint redeemer
+        let mint_redeemer = build_mint_redeemer();
+
+        // Fee estimate
+        let fee_estimate = 2_000_000u64;
+        let change = input_utxo.lovelace.saturating_sub(output_lovelace).saturating_sub(fee_estimate);
+
+        // Build staging transaction
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .collateral_input(collateral)
+            .output(token_output)
+            .mint_asset(Hash::new(policy_id), asset_name_bytes, amount as i64)
+            .map_err(|e| anyhow!("Failed to add mint: {:?}", e))?
+            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
+            .add_mint_redeemer(
+                Hash::new(policy_id),
+                mint_redeemer,
+                Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        // Add required signer
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+        let tx = staging.build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
     /// Build a deferred message processing transaction
     ///
     /// This transaction:
@@ -838,4 +939,5 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         Ok(tx)
     }
+
 }

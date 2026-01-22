@@ -9,6 +9,7 @@ pub mod ism;
 pub mod mailbox;
 pub mod query;
 pub mod registry;
+pub mod token;
 pub mod tx;
 pub mod utxo;
 pub mod validator;

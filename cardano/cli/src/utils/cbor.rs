@@ -263,8 +263,27 @@ pub fn build_registry_datum(
             }
         }
 
-        // additional_inputs (empty list for now)
-        builder.start_list().end_list();
+        // additional_inputs: List<AdditionalInput>
+        // AdditionalInput = { name: ByteArray, locator: UtxoLocator, must_be_spent: Bool }
+        builder.start_list();
+        for input in &reg.additional_inputs {
+            builder.start_constr(0);
+            // name (as bytes)
+            builder.bytes_hex(&hex::encode(input.name.as_bytes()))?;
+            // locator: UtxoLocator = { policy_id, asset_name }
+            builder.start_constr(0);
+            builder.bytes_hex(&input.policy_id)?;
+            builder.bytes_hex(&input.asset_name)?;
+            builder.end_constr();
+            // must_be_spent: Bool - Constr 1 [] for True, Constr 0 [] for False
+            if input.must_be_spent {
+                builder.start_constr(1).end_constr();
+            } else {
+                builder.start_constr(0).end_constr();
+            }
+            builder.end_constr();
+        }
+        builder.end_list();
 
         // recipient_type encoding:
         // - Generic = Constr 0 [] (empty)
@@ -276,10 +295,21 @@ pub fn build_registry_datum(
             }
             "tokenreceiver" | "token-receiver" | "token_receiver" => {
                 // TokenReceiver { vault_locator: Option<UtxoLocator>, minting_policy: Option<ScriptHash> }
-                // For now, encode both as None
                 builder.start_constr(1);
-                builder.start_constr(1).end_constr(); // vault_locator: None
-                builder.start_constr(1).end_constr(); // minting_policy: None
+                builder.start_constr(1).end_constr(); // vault_locator: None (for now)
+                // minting_policy: Option<ScriptHash>
+                match &reg.minting_policy {
+                    Some(policy) => {
+                        // Some = constructor 0
+                        builder.start_constr(0);
+                        builder.bytes_hex(policy)?;
+                        builder.end_constr();
+                    }
+                    None => {
+                        // None = constructor 1
+                        builder.start_constr(1).end_constr();
+                    }
+                }
                 builder.end_constr();
             }
             "deferred" => {
@@ -323,6 +353,15 @@ pub fn build_registry_datum(
     Ok(builder.build())
 }
 
+/// Additional input for warp routes and other complex recipients
+#[derive(Clone, Debug)]
+pub struct AdditionalInputData {
+    pub name: String,
+    pub policy_id: String,
+    pub asset_name: String,
+    pub must_be_spent: bool,
+}
+
 /// Registration data for building registry datums
 #[derive(Clone)]
 pub struct RegistrationData {
@@ -342,6 +381,10 @@ pub struct RegistrationData {
     /// For Deferred recipients: the message NFT minting policy
     /// Required when recipient_type is "Deferred"
     pub deferred_message_policy: Option<String>,
+    /// For TokenReceiver (synthetic warp routes): the token minting policy
+    pub minting_policy: Option<String>,
+    /// Additional inputs required for this recipient (e.g., vault for warp routes)
+    pub additional_inputs: Vec<AdditionalInputData>,
 }
 
 /// Build a mint redeemer (empty constructor 0)
@@ -392,8 +435,26 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
         }
     }
 
-    // additional_inputs (empty list)
-    builder.start_list().end_list();
+    // additional_inputs: List<AdditionalInput>
+    builder.start_list();
+    for input in &reg.additional_inputs {
+        builder.start_constr(0);
+        // name (as bytes)
+        builder.bytes_hex(&hex::encode(input.name.as_bytes()))?;
+        // locator: UtxoLocator = { policy_id, asset_name }
+        builder.start_constr(0);
+        builder.bytes_hex(&input.policy_id)?;
+        builder.bytes_hex(&input.asset_name)?;
+        builder.end_constr();
+        // must_be_spent: Bool - Constr 1 [] for True, Constr 0 [] for False
+        if input.must_be_spent {
+            builder.start_constr(1).end_constr();
+        } else {
+            builder.start_constr(0).end_constr();
+        }
+        builder.end_constr();
+    }
+    builder.end_list();
 
     // recipient_type encoding:
     // - Generic = Constr 0 [] (empty)
@@ -406,7 +467,19 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
         "tokenreceiver" | "token-receiver" | "token_receiver" => {
             builder.start_constr(1);
             builder.start_constr(1).end_constr(); // vault_locator: None
-            builder.start_constr(1).end_constr(); // minting_policy: None
+            // minting_policy: Option<ScriptHash>
+            match &reg.minting_policy {
+                Some(policy) => {
+                    // Some(policy) = Constr 0 [policy]
+                    builder.start_constr(0);
+                    builder.bytes_hex(policy)?;
+                    builder.end_constr();
+                }
+                None => {
+                    // None = Constr 1 []
+                    builder.start_constr(1).end_constr();
+                }
+            }
             builder.end_constr();
         }
         "deferred" => {
@@ -906,6 +979,115 @@ pub fn normalize_datum(datum: &Value) -> Result<Value> {
         Ok(datum.clone())
     }
 }
+
+// ============================================================================
+// Warp Route Datum Builder
+// ============================================================================
+
+/// Build a WarpRoute datum for Collateral type
+///
+/// Structure:
+/// ```
+/// WarpRouteDatum {
+///   config: WarpRouteConfig {
+///     token_type: WarpTokenType::Collateral {
+///       policy_id: PolicyId,
+///       asset_name: AssetName,
+///     },
+///     decimals: Int,
+///     remote_routes: List<(Domain, HyperlaneAddress)>,
+///   },
+///   owner: VerificationKeyHash,
+///   total_bridged: Int,
+/// }
+/// ```
+/// Tokens are held directly in the warp route UTXO.
+pub fn build_warp_route_collateral_datum(
+    token_policy: &str,
+    token_asset: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Collateral - Constr 0
+    builder.start_constr(0);
+    builder.bytes_hex(token_policy)?;
+    builder.bytes_hex(token_asset)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
+    builder.start_list().end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int - starts at 0
+    builder.int(0);
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Native (ADA) type
+///
+/// Native warp routes lock ADA directly in the warp route UTXO.
+/// WarpTokenType::Native is constructor 2 with no fields.
+pub fn build_warp_route_native_datum(
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Native - Constr 2 (no fields)
+    builder.start_constr(2);
+    builder.end_constr();
+
+    // decimals: Int (local token decimals, ADA has 6)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
+    builder.start_list().end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int - starts at 0
+    builder.int(0);
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
 
 #[cfg(test)]
 mod tests {

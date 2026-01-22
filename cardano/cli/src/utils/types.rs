@@ -102,7 +102,8 @@ pub struct ReferenceScriptUtxo {
     pub tx_hash: String,
     /// Output index
     pub output_index: u32,
-    /// Lovelace locked in the UTXO
+    /// Lovelace locked in the UTXO (optional for backwards compatibility)
+    #[serde(default)]
     pub lovelace: u64,
 }
 
@@ -162,6 +163,43 @@ impl ScriptInfo {
     }
 }
 
+/// Warp route deployment information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarpRouteDeployment {
+    /// Warp route type: "collateral", "synthetic", or "native"
+    pub warp_type: String,
+    /// Token decimals
+    pub decimals: u32,
+    /// Owner verification key hash
+    pub owner: String,
+    /// Warp route script hash
+    pub script_hash: String,
+    /// Warp route address
+    pub address: String,
+    /// Warp route state NFT policy
+    pub nft_policy: String,
+    /// Initialization transaction hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_tx_hash: Option<String>,
+    /// Reference script UTXO for warp route validator
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_script_utxo: Option<ReferenceScriptUtxo>,
+    /// Token policy (for collateral type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_policy: Option<String>,
+    /// Token asset name (for collateral type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_asset: Option<String>,
+    /// Minting policy (for synthetic type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minting_policy: Option<String>,
+    /// Reference script UTXO for synthetic minting policy
+    /// This is required for the relayer to mint synthetic tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minting_ref_script_utxo: Option<ReferenceScriptUtxo>,
+}
+
 /// Deployment information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentInfo {
@@ -178,10 +216,16 @@ pub struct DeploymentInfo {
     pub igp: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_announce: Option<ScriptInfo>,
+    /// List of deployed warp routes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warp_routes: Vec<WarpRouteDeployment>,
+    // Legacy fields for backwards compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warp_route: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub vault: Option<ScriptInfo>,
+    pub synthetic_warp_route: Option<ScriptInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_warp_route: Option<ScriptInfo>,
 }
 
 impl DeploymentInfo {
@@ -194,10 +238,22 @@ impl DeploymentInfo {
             registry: None,
             igp: None,
             validator_announce: None,
+            warp_routes: Vec::new(),
             warp_route: None,
-            vault: None,
+            synthetic_warp_route: None,
+            native_warp_route: None,
         }
     }
+}
+
+/// Additional input info for warp routes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdditionalInputInfo {
+    pub name: String,
+    pub policy_id: String,
+    pub asset_name: String,
+    pub must_be_spent: bool,
 }
 
 /// Registry recipient info
@@ -221,6 +277,12 @@ pub struct RecipientInfo {
     /// For Deferred recipients: the message NFT minting policy
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deferred_message_policy: Option<String>,
+    /// For TokenReceiver (synthetic warp routes): the token minting policy
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minting_policy: Option<String>,
+    /// Additional inputs (e.g., vault for warp routes)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_inputs: Vec<AdditionalInputInfo>,
 }
 
 /// Protocol parameters (subset we need)

@@ -1,0 +1,14 @@
+{
+  "decimals": 6,
+  "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+  "token_asset": "WARPTEST",
+  "token_policy": "908d51752e4c76fe1404a92b1276b1c1093dae0c7f302c5442f0177e",
+  "type": "collateral",
+  "warp_route": {
+    "address": "addr_test1wzmj72hwmhyaqgp598kdkra36egjjkf2nknzw4axhmn7gusqxexwj",
+    "nft_policy": "10fbd4467d87a0238481cf9b95408b4e339c8ca0b00a3b750d79328f",
+    "reference_script_utxo": "b43bc4ab6fb89a9d6b0f783be9530c3aac48bf75b8370ca5924a4f580a653a99#1",
+    "script_hash": "b72f2aeeddc9d0203429ecdb0fb1d65129592a9da62757a6bee7e472",
+    "tx_hash": "b43bc4ab6fb89a9d6b0f783be9530c3aac48bf75b8370ca5924a4f580a653a99"
+  }
+}
