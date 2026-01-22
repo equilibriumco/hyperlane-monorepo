@@ -179,6 +179,7 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
         } => deploy_minting_ref(ctx, &warp_policy, dry_run).await,
     }
 }
+
 async fn deploy(
     ctx: &CliContext,
     token_type: TokenType,
@@ -834,30 +835,6 @@ fn print_synthetic_deployment_summary(
     println!();
 }
 
-async fn show(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
-    println!("{}", "Warp Route Configuration".cyan());
-
-    let policy_id = get_warp_policy(ctx, warp_policy)?;
-    let api_key = ctx.require_api_key()?;
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-
-    let warp_utxo = client
-        .find_utxo_by_asset(&policy_id, "")
-        .await?
-        .ok_or_else(|| anyhow!("Warp route UTXO not found with policy {}", policy_id))?;
-
-    println!("\n{}", "Warp Route UTXO:".green());
-    println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
-    println!("  Address: {}", warp_utxo.address);
-    println!("  Lovelace: {}", warp_utxo.lovelace);
-
-    if let Some(datum) = &warp_utxo.inline_datum {
-        println!("\n{}", "Configuration:".green());
-        println!("{}", serde_json::to_string_pretty(datum)?);
-    }
-
-    Ok(())
-}
 async fn enroll_router(
     ctx: &CliContext,
     domain: u32,
@@ -1285,6 +1262,37 @@ fn parse_warp_datum(
     ))
 }
 
+async fn show(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
+    println!("{}", "Warp Route Configuration".cyan());
+
+    let policy_id = get_warp_policy(ctx, warp_policy)?;
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let warp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Warp route UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Warp Route UTXO:".green());
+    println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
+    println!("  Address: {}", warp_utxo.address);
+    println!("  Lovelace: {}", warp_utxo.lovelace);
+
+    if let Some(datum) = &warp_utxo.inline_datum {
+        // Decode CBOR if datum is a hex string (Blockfrost returns CBOR hex for inline datums)
+        let parsed_datum = if let Some(cbor_hex) = datum.as_str() {
+            decode_plutus_datum(cbor_hex)?
+        } else {
+            datum.clone()
+        };
+        println!("\n{}", "Configuration:".green());
+        println!("{}", serde_json::to_string_pretty(&parsed_datum)?);
+    }
+
+    Ok(())
+}
+
 async fn list_routers(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
     println!("{}", "Enrolled Remote Routers".cyan());
 
@@ -1361,334 +1369,6 @@ async fn list_routers(ctx: &CliContext, warp_policy: Option<String>) -> Result<(
     println!("\n{}", "No remote routers enrolled".yellow());
 
     Ok(())
-}
-
-// Helper functions
-
-fn get_warp_policy(ctx: &CliContext, warp_policy: Option<String>) -> Result<String> {
-    if let Some(p) = warp_policy {
-        return Ok(p);
-    }
-
-    let deployment = ctx.load_deployment_info()?;
-    deployment
-        .warp_route
-        .and_then(|w| w.state_nft_policy)
-        .ok_or_else(|| {
-            anyhow!("Warp policy not found. Use --warp-policy or update deployment_info.json")
-        })
-}
-
-/// Mailbox data needed for transfer operations
-struct MailboxDataForTransfer {
-    local_domain: u32,
-    default_ism: String,
-    owner: String,
-    outbound_nonce: u32,
-    merkle_branches: Vec<String>,
-    merkle_count: u32,
-}
-
-/// Merkle tree state after update
-struct MerkleTreeUpdate {
-    branches: Vec<String>,
-    count: u32,
-}
-
-/// Build warp message body: recipient (32 bytes) || amount (32 bytes, uint256 big-endian)
-///
-/// The EVM TokenMessage library expects:
-/// - recipient: bytes32 (32 bytes)
-/// - amount: uint256 (32 bytes, big-endian)
-fn build_warp_message_body(recipient_hex: &str, amount: u128) -> Result<String> {
-    // Validate recipient is 32 bytes (64 hex chars)
-    if recipient_hex.len() != 64 {
-        return Err(anyhow!("Recipient must be 32 bytes (64 hex chars)"));
-    }
-
-    // Amount as 32 bytes (uint256), big-endian, padded with leading zeros
-    // EVM expects uint256 which is 32 bytes
-    let mut amount_bytes = [0u8; 32];
-    amount_bytes[16..32].copy_from_slice(&amount.to_be_bytes());
-
-    // Concatenate recipient + amount (total 64 bytes)
-    Ok(format!("{}{}", recipient_hex, hex::encode(amount_bytes)))
-}
-
-/// Compute message ID (keccak256 of encoded message)
-fn compute_message_id_for_transfer(
-    version: u8,
-    nonce: u32,
-    origin: u32,
-    sender_hex: &str,
-    destination: u32,
-    recipient_hex: &str,
-    body_hex: &str,
-) -> Result<String> {
-    let mut message = Vec::new();
-
-    // Version (1 byte)
-    message.push(version);
-
-    // Nonce (4 bytes, big-endian)
-    message.extend_from_slice(&nonce.to_be_bytes());
-
-    // Origin (4 bytes, big-endian)
-    message.extend_from_slice(&origin.to_be_bytes());
-
-    // Sender (32 bytes)
-    let sender_bytes = hex::decode(sender_hex)?;
-    if sender_bytes.len() != 32 {
-        return Err(anyhow!("Sender must be 32 bytes"));
-    }
-    message.extend_from_slice(&sender_bytes);
-
-    // Destination (4 bytes, big-endian)
-    message.extend_from_slice(&destination.to_be_bytes());
-
-    // Recipient (32 bytes)
-    let recipient_bytes = hex::decode(recipient_hex)?;
-    if recipient_bytes.len() != 32 {
-        return Err(anyhow!("Recipient must be 32 bytes"));
-    }
-    message.extend_from_slice(&recipient_bytes);
-
-    // Body (variable)
-    let body_bytes = hex::decode(body_hex)?;
-    message.extend_from_slice(&body_bytes);
-
-    // Compute keccak256
-    let mut hasher = Keccak256::new();
-    hasher.update(&message);
-    let result = hasher.finalize();
-
-    Ok(hex::encode(result))
-}
-
-/// Update merkle tree with a new leaf (message hash)
-fn update_merkle_tree_for_transfer(
-    current_branches: &[String],
-    current_count: u32,
-    message_id: &str,
-) -> Result<MerkleTreeUpdate> {
-    let message_hash = hex::decode(message_id)?;
-    if message_hash.len() != 32 {
-        return Err(anyhow!("Message hash must be 32 bytes"));
-    }
-
-    // Zero hash for empty branches
-    let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-
-    // Ensure we have 32 branches (pad with zeros if needed)
-    let mut branches: Vec<String> = current_branches.to_vec();
-    while branches.len() < 32 {
-        branches.push(zero_hash.to_string());
-    }
-
-    // Insert the new leaf
-    let new_count = current_count + 1;
-    let mut node = message_id.to_string();
-    let mut size = new_count;
-    let mut depth = 0usize;
-
-    // Standard Hyperlane merkle tree algorithm
-    while size > 0 {
-        if size % 2 == 1 {
-            // Odd: store node at this level and stop
-            branches[depth] = node.clone();
-            break;
-        } else {
-            // Even: hash with sibling and continue up
-            let sibling = &branches[depth];
-            node = hash_pair(sibling, &node)?;
-        }
-        size /= 2;
-        depth += 1;
-    }
-
-    Ok(MerkleTreeUpdate {
-        branches,
-        count: new_count,
-    })
-}
-
-/// Hash two nodes together: keccak256(left || right)
-fn hash_pair(left: &str, right: &str) -> Result<String> {
-    let left_bytes = hex::decode(left)?;
-    let right_bytes = hex::decode(right)?;
-
-    let mut combined = Vec::new();
-    combined.extend_from_slice(&left_bytes);
-    combined.extend_from_slice(&right_bytes);
-
-    let mut hasher = Keccak256::new();
-    hasher.update(&combined);
-    let result = hasher.finalize();
-
-    Ok(hex::encode(result))
-}
-
-fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<MailboxDataForTransfer> {
-    // Check if datum is a hex string (raw CBOR)
-    if let Some(hex_str) = datum.as_str() {
-        return parse_mailbox_datum_from_cbor_for_transfer(hex_str);
-    }
-
-    // Otherwise try the JSON format
-    let fields = datum
-        .get("fields")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
-
-    if fields.len() < 5 {
-        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields.len()));
-    }
-
-    let local_domain = fields
-        .get(0)
-        .and_then(|f| f.get("int"))
-        .and_then(|i| i.as_u64())
-        .ok_or_else(|| anyhow!("Invalid local_domain"))? as u32;
-
-    let default_ism = fields
-        .get(1)
-        .and_then(|f| f.get("bytes"))
-        .and_then(|b| b.as_str())
-        .ok_or_else(|| anyhow!("Invalid default_ism"))?
-        .to_string();
-
-    let owner = fields
-        .get(2)
-        .and_then(|f| f.get("bytes"))
-        .and_then(|b| b.as_str())
-        .ok_or_else(|| anyhow!("Invalid owner"))?
-        .to_string();
-
-    let outbound_nonce = fields
-        .get(3)
-        .and_then(|f| f.get("int"))
-        .and_then(|i| i.as_u64())
-        .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
-
-    // Parse nested MerkleTreeState
-    let merkle_tree = fields
-        .get(4)
-        .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
-
-    let merkle_tree_fields = merkle_tree
-        .get("fields")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| anyhow!("Invalid merkle_tree structure"))?;
-
-    if merkle_tree_fields.len() < 2 {
-        return Err(anyhow!("MerkleTreeState must have 2 fields"));
-    }
-
-    let branches_list = merkle_tree_fields
-        .get(0)
-        .and_then(|f| f.get("list"))
-        .and_then(|l| l.as_array())
-        .ok_or_else(|| anyhow!("Invalid branches list"))?;
-
-    let merkle_branches: Vec<String> = branches_list
-        .iter()
-        .filter_map(|b| b.get("bytes").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect();
-
-    let merkle_count = merkle_tree_fields
-        .get(1)
-        .and_then(|f| f.get("int"))
-        .and_then(|i| i.as_u64())
-        .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
-
-    Ok(MailboxDataForTransfer {
-        local_domain,
-        default_ism,
-        owner,
-        outbound_nonce,
-        merkle_branches,
-        merkle_count,
-    })
-}
-
-/// Parse mailbox datum from raw CBOR hex
-fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDataForTransfer> {
-    let cbor_bytes = hex::decode(hex_str)?;
-    let datum: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
-        .map_err(|e| anyhow!("Failed to decode CBOR datum: {:?}", e))?;
-
-    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree]
-    let fields = match &datum {
-        PlutusData::Constr(c) if c.tag == 121 => &c.fields,
-        _ => return Err(anyhow!("Expected Constr 0 datum")),
-    };
-
-    let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 5 {
-        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields_vec.len()));
-    }
-
-    let local_domain = extract_u32_for_transfer(fields_vec[0])?;
-    let default_ism = extract_bytes_hex_for_transfer(fields_vec[1])?;
-    let owner = extract_bytes_hex_for_transfer(fields_vec[2])?;
-    let outbound_nonce = extract_u32_for_transfer(fields_vec[3])?;
-
-    // Parse nested MerkleTreeState
-    let merkle_tree_fields = match fields_vec[4] {
-        PlutusData::Constr(c) if c.tag == 121 => {
-            let f: Vec<&PlutusData> = c.fields.iter().collect();
-            if f.len() < 2 {
-                return Err(anyhow!("MerkleTreeState must have 2 fields"));
-            }
-            f
-        }
-        _ => return Err(anyhow!("Expected Constr 0 for MerkleTreeState")),
-    };
-
-    let merkle_branches = match merkle_tree_fields[0] {
-        PlutusData::Array(arr) => {
-            arr.iter()
-                .map(|item| extract_bytes_hex_for_transfer(item))
-                .collect::<Result<Vec<String>>>()?
-        }
-        _ => return Err(anyhow!("Expected array for merkle branches")),
-    };
-
-    let merkle_count = extract_u32_for_transfer(merkle_tree_fields[1])?;
-
-    Ok(MailboxDataForTransfer {
-        local_domain,
-        default_ism,
-        owner,
-        outbound_nonce,
-        merkle_branches,
-        merkle_count,
-    })
-}
-
-/// Extract u32 from PlutusData
-fn extract_u32_for_transfer(data: &PlutusData) -> Result<u32> {
-    match data {
-        PlutusData::BigInt(BigInt::Int(i)) => {
-            let inner = &i.0;
-            match i64::try_from(*inner) {
-                Ok(val) => Ok(val as u32),
-                Err(_) => Err(anyhow!("Integer too large for u32")),
-            }
-        }
-        _ => Err(anyhow!("Expected integer")),
-    }
-}
-
-/// Extract bytes as hex string from PlutusData
-fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
-    match data {
-        PlutusData::BoundedBytes(b) => {
-            let bytes: &[u8] = b.as_ref();
-            Ok(hex::encode(bytes))
-        }
-        _ => Err(anyhow!("Expected bytes")),
-    }
 }
 
 async fn transfer(
@@ -2296,6 +1976,339 @@ async fn transfer(
     Ok(())
 }
 
+// Helper functions
+
+fn get_warp_policy(ctx: &CliContext, warp_policy: Option<String>) -> Result<String> {
+    if let Some(p) = warp_policy {
+        return Ok(p);
+    }
+
+    let deployment = ctx.load_deployment_info()?;
+    deployment
+        .warp_route
+        .and_then(|w| w.state_nft_policy)
+        .ok_or_else(|| {
+            anyhow!("Warp policy not found. Use --warp-policy or update deployment_info.json")
+        })
+}
+
+// ============================================================================
+// Helper functions for warp transfer
+// ============================================================================
+
+/// Mailbox data needed for transfer
+struct MailboxDataForTransfer {
+    local_domain: u32,
+    default_ism: String,
+    owner: String,
+    outbound_nonce: u32,
+    merkle_branches: Vec<String>,
+    merkle_count: u32,
+}
+
+/// Merkle tree state after update
+struct MerkleTreeUpdate {
+    branches: Vec<String>,
+    count: u32,
+}
+
+/// Build warp message body: recipient (32 bytes) || amount (32 bytes, uint256 big-endian)
+///
+/// The EVM TokenMessage library expects:
+/// - recipient: bytes32 (32 bytes)
+/// - amount: uint256 (32 bytes, big-endian)
+fn build_warp_message_body(recipient_hex: &str, amount: u128) -> Result<String> {
+    // Validate recipient is 32 bytes (64 hex chars)
+    if recipient_hex.len() != 64 {
+        return Err(anyhow!("Recipient must be 32 bytes (64 hex chars)"));
+    }
+
+    // Amount as 32 bytes (uint256), big-endian, padded with leading zeros
+    // EVM expects uint256 which is 32 bytes
+    let mut amount_bytes = [0u8; 32];
+    amount_bytes[16..32].copy_from_slice(&amount.to_be_bytes());
+
+    // Concatenate recipient + amount (total 64 bytes)
+    Ok(format!("{}{}", recipient_hex, hex::encode(amount_bytes)))
+}
+
+/// Compute message ID (keccak256 of encoded message)
+fn compute_message_id_for_transfer(
+    version: u8,
+    nonce: u32,
+    origin: u32,
+    sender_hex: &str,
+    destination: u32,
+    recipient_hex: &str,
+    body_hex: &str,
+) -> Result<String> {
+    let mut message = Vec::new();
+
+    // Version (1 byte)
+    message.push(version);
+
+    // Nonce (4 bytes, big-endian)
+    message.extend_from_slice(&nonce.to_be_bytes());
+
+    // Origin (4 bytes, big-endian)
+    message.extend_from_slice(&origin.to_be_bytes());
+
+    // Sender (32 bytes)
+    let sender_bytes = hex::decode(sender_hex)?;
+    if sender_bytes.len() != 32 {
+        return Err(anyhow!("Sender must be 32 bytes"));
+    }
+    message.extend_from_slice(&sender_bytes);
+
+    // Destination (4 bytes, big-endian)
+    message.extend_from_slice(&destination.to_be_bytes());
+
+    // Recipient (32 bytes)
+    let recipient_bytes = hex::decode(recipient_hex)?;
+    if recipient_bytes.len() != 32 {
+        return Err(anyhow!("Recipient must be 32 bytes"));
+    }
+    message.extend_from_slice(&recipient_bytes);
+
+    // Body (variable)
+    let body_bytes = hex::decode(body_hex)?;
+    message.extend_from_slice(&body_bytes);
+
+    // Compute keccak256
+    let mut hasher = Keccak256::new();
+    hasher.update(&message);
+    let result = hasher.finalize();
+
+    Ok(hex::encode(result))
+}
+
+/// Update merkle tree with a new leaf (message hash)
+fn update_merkle_tree_for_transfer(
+    current_branches: &[String],
+    current_count: u32,
+    message_id: &str,
+) -> Result<MerkleTreeUpdate> {
+    let message_hash = hex::decode(message_id)?;
+    if message_hash.len() != 32 {
+        return Err(anyhow!("Message hash must be 32 bytes"));
+    }
+
+    // Zero hash for empty branches
+    let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    // Ensure we have 32 branches (pad with zeros if needed)
+    let mut branches: Vec<String> = current_branches.to_vec();
+    while branches.len() < 32 {
+        branches.push(zero_hash.to_string());
+    }
+
+    // Insert the new leaf
+    let new_count = current_count + 1;
+    let mut node = message_id.to_string();
+    let mut size = new_count;
+    let mut depth = 0usize;
+
+    // Standard Hyperlane merkle tree algorithm
+    while size > 0 {
+        if size % 2 == 1 {
+            // Odd: store node at this level and stop
+            branches[depth] = node.clone();
+            break;
+        } else {
+            // Even: hash with sibling and continue up
+            let sibling = &branches[depth];
+            node = hash_pair(sibling, &node)?;
+        }
+        size /= 2;
+        depth += 1;
+    }
+
+    Ok(MerkleTreeUpdate {
+        branches,
+        count: new_count,
+    })
+}
+
+/// Hash two nodes together: keccak256(left || right)
+fn hash_pair(left: &str, right: &str) -> Result<String> {
+    let left_bytes = hex::decode(left)?;
+    let right_bytes = hex::decode(right)?;
+
+    let mut combined = Vec::new();
+    combined.extend_from_slice(&left_bytes);
+    combined.extend_from_slice(&right_bytes);
+
+    let mut hasher = Keccak256::new();
+    hasher.update(&combined);
+    let result = hasher.finalize();
+
+    Ok(hex::encode(result))
+}
+
+/// Parse mailbox datum for transfer
+fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<MailboxDataForTransfer> {
+    // Check if datum is a hex string (raw CBOR)
+    if let Some(hex_str) = datum.as_str() {
+        return parse_mailbox_datum_from_cbor_for_transfer(hex_str);
+    }
+
+    // Otherwise try the JSON format
+    let fields = datum
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
+
+    if fields.len() < 5 {
+        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields.len()));
+    }
+
+    let local_domain = fields
+        .get(0)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid local_domain"))? as u32;
+
+    let default_ism = fields
+        .get(1)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid default_ism"))?
+        .to_string();
+
+    let owner = fields
+        .get(2)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid owner"))?
+        .to_string();
+
+    let outbound_nonce = fields
+        .get(3)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
+
+    // Parse nested MerkleTreeState
+    let merkle_tree = fields
+        .get(4)
+        .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
+
+    let merkle_tree_fields = merkle_tree
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid merkle_tree structure"))?;
+
+    if merkle_tree_fields.len() < 2 {
+        return Err(anyhow!("MerkleTreeState must have 2 fields"));
+    }
+
+    let branches_list = merkle_tree_fields
+        .get(0)
+        .and_then(|f| f.get("list"))
+        .and_then(|l| l.as_array())
+        .ok_or_else(|| anyhow!("Invalid branches list"))?;
+
+    let merkle_branches: Vec<String> = branches_list
+        .iter()
+        .filter_map(|b| b.get("bytes").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let merkle_count = merkle_tree_fields
+        .get(1)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
+
+    Ok(MailboxDataForTransfer {
+        local_domain,
+        default_ism,
+        owner,
+        outbound_nonce,
+        merkle_branches,
+        merkle_count,
+    })
+}
+
+/// Parse mailbox datum from raw CBOR hex
+fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDataForTransfer> {
+    let cbor_bytes = hex::decode(hex_str)?;
+    let datum: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
+        .map_err(|e| anyhow!("Failed to decode CBOR datum: {:?}", e))?;
+
+    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree]
+    let fields = match &datum {
+        PlutusData::Constr(c) if c.tag == 121 => &c.fields,
+        _ => return Err(anyhow!("Expected Constr 0 datum")),
+    };
+
+    let fields_vec: Vec<&PlutusData> = fields.iter().collect();
+    if fields_vec.len() < 5 {
+        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields_vec.len()));
+    }
+
+    let local_domain = extract_u32_for_transfer(fields_vec[0])?;
+    let default_ism = extract_bytes_hex_for_transfer(fields_vec[1])?;
+    let owner = extract_bytes_hex_for_transfer(fields_vec[2])?;
+    let outbound_nonce = extract_u32_for_transfer(fields_vec[3])?;
+
+    // Parse nested MerkleTreeState
+    let merkle_tree_fields = match fields_vec[4] {
+        PlutusData::Constr(c) if c.tag == 121 => {
+            let f: Vec<&PlutusData> = c.fields.iter().collect();
+            if f.len() < 2 {
+                return Err(anyhow!("MerkleTreeState must have 2 fields"));
+            }
+            f
+        }
+        _ => return Err(anyhow!("Expected Constr 0 for MerkleTreeState")),
+    };
+
+    let merkle_branches = match merkle_tree_fields[0] {
+        PlutusData::Array(arr) => {
+            arr.iter()
+                .map(|item| extract_bytes_hex_for_transfer(item))
+                .collect::<Result<Vec<String>>>()?
+        }
+        _ => return Err(anyhow!("Expected array for merkle branches")),
+    };
+
+    let merkle_count = extract_u32_for_transfer(merkle_tree_fields[1])?;
+
+    Ok(MailboxDataForTransfer {
+        local_domain,
+        default_ism,
+        owner,
+        outbound_nonce,
+        merkle_branches,
+        merkle_count,
+    })
+}
+
+/// Extract u32 from PlutusData
+fn extract_u32_for_transfer(data: &PlutusData) -> Result<u32> {
+    match data {
+        PlutusData::BigInt(BigInt::Int(i)) => {
+            let inner = &i.0;
+            match i64::try_from(*inner) {
+                Ok(val) => Ok(val as u32),
+                Err(_) => Err(anyhow!("Integer too large for u32")),
+            }
+        }
+        _ => Err(anyhow!("Expected integer")),
+    }
+}
+
+/// Extract bytes as hex string from PlutusData
+fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
+    match data {
+        PlutusData::BoundedBytes(b) => {
+            let bytes: &[u8] = b.as_ref();
+            Ok(hex::encode(bytes))
+        }
+        _ => Err(anyhow!("Expected bytes")),
+    }
+}
+
 /// Deploy the synthetic minting policy as a reference script UTXO
 ///
 /// This is required for the relayer to mint synthetic tokens when processing inbound transfers.
@@ -2303,6 +2316,7 @@ async fn transfer(
 /// 1. Find the synthetic warp route by its NFT policy
 /// 2. Extract the warp route script hash from its address
 /// 3. Apply the parameter to the synthetic_token minting policy
+/// 4. Deploy the resulting script as a reference script UTXO with a marker NFT
 async fn deploy_minting_ref(
     ctx: &CliContext,
     warp_policy: &str,
@@ -2445,7 +2459,7 @@ async fn deploy_minting_ref(
             minting_policy
         ));
     }
-    println!("  Computed minting policy matches datum");
+    println!("  ✓ Computed minting policy matches datum");
 
     let mint_script = hex::decode(&mint_policy_applied.compiled_code)
         .with_context(|| "Invalid minting policy script CBOR")?;
@@ -2590,12 +2604,12 @@ async fn deploy_minting_ref(
     // Submit the transaction
     println!("  Submitting transaction...");
     let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
-    println!("  Transaction submitted: {}", tx_hash.green());
+    println!("  ✓ Transaction submitted: {}", tx_hash.green());
 
     // Wait for confirmation
     println!("\n{}", "Waiting for confirmation...".cyan());
     client.wait_for_tx(&tx_hash, 120).await?;
-    println!("  Transaction confirmed");
+    println!("  ✓ Transaction confirmed");
 
     // Build reference script UTXO info
     let mint_ref_utxo = format!("{}#0", tx_hash);
@@ -2647,3 +2661,4 @@ async fn deploy_minting_ref(
 
     Ok(())
 }
+

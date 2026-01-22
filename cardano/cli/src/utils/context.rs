@@ -144,7 +144,14 @@ impl CliContext {
         PlutusBlueprint::from_file(&self.plutus_json_path())
     }
 
-    /// Load a script from the blueprint by module and validator name
+    /// Load a compiled script from the blueprint
+    ///
+    /// # Arguments
+    /// * `module` - The module name (e.g., "vault", "warp_route")
+    /// * `validator_name` - The validator name (e.g., "vault.spend", "warp_route")
+    ///
+    /// # Returns
+    /// The compiled script CBOR as a hex string
     pub fn load_script_from_blueprint(&self, module: &str, validator_name: &str) -> Result<String> {
         let blueprint = self.load_blueprint()?;
         let full_name = format!("{}.{}", module, validator_name);
