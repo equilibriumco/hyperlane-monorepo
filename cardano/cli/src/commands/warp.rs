@@ -6,8 +6,10 @@ use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
-    build_warp_route_collateral_datum, build_warp_route_native_datum,
-    build_warp_route_synthetic_datum,
+    build_enroll_remote_route_redeemer, build_warp_route_collateral_datum,
+    build_warp_route_collateral_datum_with_routes, build_warp_route_native_datum,
+    build_warp_route_native_datum_with_routes, build_warp_route_synthetic_datum,
+    build_warp_route_synthetic_datum_with_routes, decode_plutus_datum, RemoteRoute,
 };
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
@@ -53,8 +55,34 @@ enum WarpCommands {
         dry_run: bool,
     },
 
+    /// Enroll a remote router
+    EnrollRouter {
+        /// Destination domain ID
+        #[arg(long)]
+        domain: u32,
+
+        /// Remote router address (32 bytes hex)
+        #[arg(long)]
+        router: String,
+
+        /// Warp route policy ID
+        #[arg(long)]
+        warp_policy: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Show warp route configuration
     Show {
+        /// Warp route policy ID
+        #[arg(long)]
+        warp_policy: Option<String>,
+    },
+
+    /// List enrolled remote routers
+    Routers {
         /// Warp route policy ID
         #[arg(long)]
         warp_policy: Option<String>,
@@ -92,7 +120,14 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             )
             .await
         }
+        WarpCommands::EnrollRouter {
+            domain,
+            router,
+            warp_policy,
+            dry_run,
+        } => enroll_router(ctx, domain, &router, warp_policy, dry_run).await,
         WarpCommands::Show { warp_policy } => show(ctx, warp_policy).await,
+        WarpCommands::Routers { warp_policy } => list_routers(ctx, warp_policy).await,
     }
 }
 async fn deploy(
@@ -771,6 +806,510 @@ async fn show(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
         println!("\n{}", "Configuration:".green());
         println!("{}", serde_json::to_string_pretty(datum)?);
     }
+
+    Ok(())
+}
+async fn enroll_router(
+    ctx: &CliContext,
+    domain: u32,
+    router: &str,
+    warp_policy: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!("{}", "Enrolling Remote Router".cyan().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+
+    let router = router.strip_prefix("0x").unwrap_or(router);
+    if router.len() != 64 {
+        return Err(anyhow!("Router address must be 32 bytes (64 hex chars)"));
+    }
+
+    println!("\n{}", "Configuration:".green());
+    println!("  Domain: {}", domain);
+    println!("  Router: 0x{}", router);
+
+    let policy_id = get_warp_policy(ctx, warp_policy)?;
+    println!("  Warp Policy: {}", policy_id);
+
+    // Load API key and signing key
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let owner_pkh = keypair.verification_key_hash_hex();
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Find warp route UTXO
+    println!("\n{}", "Step 1: Finding warp route UTXO...".cyan());
+    let warp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Warp route UTXO not found with policy {}", policy_id))?;
+
+    println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
+    println!("  Address: {}", warp_utxo.address);
+    println!("  Lovelace: {}", warp_utxo.lovelace);
+
+    // Parse existing datum to extract current state
+    println!("\n{}", "Step 2: Parsing current datum...".cyan());
+    let datum = warp_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
+
+    // Extract current configuration from datum
+    let (token_type, decimals, remote_decimals, current_routes, current_owner, total_bridged) =
+        parse_warp_datum(datum)?;
+    println!("  Token Type: {:?}", token_type);
+    println!("  Decimals: {}", decimals);
+    println!("  Remote Decimals: {}", remote_decimals);
+    println!("  Current Routes: {}", current_routes.len());
+    println!("  Total Bridged: {}", total_bridged);
+
+    // Verify owner matches signer
+    if current_owner != owner_pkh {
+        return Err(anyhow!(
+            "Signing key does not match owner. Expected: {}, Got: {}",
+            current_owner,
+            owner_pkh
+        ));
+    }
+
+    // Check if route already enrolled
+    if current_routes.iter().any(|r| r.domain == domain) {
+        println!(
+            "\n{}",
+            "Warning: Domain already has an enrolled route. This will update it.".yellow()
+        );
+    }
+
+    // Build updated routes list
+    let mut new_routes: Vec<RemoteRoute> = current_routes
+        .into_iter()
+        .filter(|r| r.domain != domain) // Remove existing route for this domain
+        .collect();
+    new_routes.push(RemoteRoute {
+        domain,
+        router: router.to_string(),
+    });
+
+    // Build updated datum based on token type
+    println!("\n{}", "Step 3: Building updated datum...".cyan());
+    let new_datum = match &token_type {
+        WarpTokenTypeInfo::Collateral {
+            policy_id: tp,
+            asset_name,
+        } => build_warp_route_collateral_datum_with_routes(
+            tp,
+            asset_name,
+            decimals,
+            remote_decimals,
+            &new_routes,
+            &owner_pkh,
+            total_bridged,
+        )?,
+        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+            build_warp_route_synthetic_datum_with_routes(
+                minting_policy,
+                decimals,
+                remote_decimals,
+                &new_routes,
+                &owner_pkh,
+                total_bridged,
+            )?
+        }
+        WarpTokenTypeInfo::Native => build_warp_route_native_datum_with_routes(
+            decimals,
+            remote_decimals,
+            &new_routes,
+            &owner_pkh,
+            total_bridged,
+        )?,
+    };
+    println!("  New Datum CBOR: {} bytes", new_datum.len());
+
+    // Build redeemer
+    let redeemer = build_enroll_remote_route_redeemer(domain, router)?;
+    println!("  Redeemer CBOR: {} bytes", redeemer.len());
+
+    if dry_run {
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("{}", "[Dry run - not submitting transaction]".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("\nWould enroll route:");
+        println!("  Domain {} -> 0x{}", domain, router);
+        return Ok(());
+    }
+
+    // Find fee/collateral UTXOs
+    println!("\n{}", "Step 4: Finding fee UTXOs...".cyan());
+    let utxos = client.get_utxos(&payer_address).await?;
+    let suitable_utxos: Vec<_> = utxos
+        .iter()
+        .filter(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
+        .filter(|u| !(u.tx_hash == warp_utxo.tx_hash && u.output_index == warp_utxo.output_index))
+        .collect();
+
+    if suitable_utxos.len() < 2 {
+        return Err(anyhow!(
+            "Need at least 2 UTXOs with >= 5 ADA each (excluding warp UTXO). Found {}.",
+            suitable_utxos.len()
+        ));
+    }
+
+    let fee_input = suitable_utxos[0];
+    let collateral = suitable_utxos[1];
+    println!(
+        "  Fee Input: {}#{}",
+        fee_input.tx_hash, fee_input.output_index
+    );
+    println!(
+        "  Collateral: {}#{}",
+        collateral.tx_hash, collateral.output_index
+    );
+
+    // Build and submit transaction
+    println!("\n{}", "Step 5: Building transaction...".cyan());
+
+    // Get warp route script for the transaction
+    // The warp_route validator takes two params: mailbox_policy_id + state_nft_policy_id
+    let deployment = ctx.load_deployment_info()?;
+    let mailbox_policy_id = deployment
+        .mailbox
+        .as_ref()
+        .and_then(|m| m.state_nft_policy.as_ref())
+        .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+
+    // The policy_id we received is the state_nft_policy for this warp route
+    let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
+    let state_nft_param_cbor = encode_script_hash_param(&policy_id)?;
+    let warp_route_applied = apply_validator_params(
+        &ctx.contracts_dir,
+        "warp_route",
+        "warp_route",
+        &[
+            &hex::encode(&mailbox_param_cbor),
+            &hex::encode(&state_nft_param_cbor),
+        ],
+    )?;
+    let warp_script = hex::decode(&warp_route_applied.compiled_code)
+        .with_context(|| "Invalid warp route script CBOR")?;
+
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let tx = tx_builder
+        .build_enroll_route_tx(
+            &keypair,
+            fee_input,
+            collateral,
+            &warp_utxo,
+            &warp_script,
+            &new_datum,
+            &redeemer,
+        )
+        .await?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
+    println!("  Submitting transaction...");
+    let tx_hash = client.submit_tx(&signed_tx).await?;
+
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!("{}", "Remote Router Enrolled Successfully!".green().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!();
+    println!("  Domain: {}", domain);
+    println!("  Router: 0x{}", router);
+    println!("  TX: {}", tx_hash);
+    println!();
+
+    Ok(())
+}
+
+/// Parsed warp token type info
+#[derive(Debug)]
+enum WarpTokenTypeInfo {
+    Collateral {
+        policy_id: String,
+        asset_name: String,
+    },
+    Synthetic {
+        minting_policy: String,
+    },
+    Native,
+}
+
+/// Parse warp route datum from Blockfrost JSON format
+/// The datum may be either a CBOR hex string or a pre-parsed JSON object
+/// Returns (token_type, decimals, remote_decimals, remote_routes, owner, total_bridged)
+fn parse_warp_datum(
+    datum: &serde_json::Value,
+) -> Result<(WarpTokenTypeInfo, u32, u32, Vec<RemoteRoute>, String, i64)> {
+    // If the datum is a string, it's CBOR hex - decode it first
+    let parsed_datum = if let Some(cbor_hex) = datum.as_str() {
+        decode_plutus_datum(cbor_hex)?
+    } else {
+        datum.clone()
+    };
+
+    // WarpRouteDatum { config, owner, total_bridged }
+    let fields = parsed_datum
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| {
+            anyhow!(
+                "Invalid datum: missing fields. Datum: {}",
+                serde_json::to_string_pretty(&parsed_datum).unwrap_or_default()
+            )
+        })?;
+
+    if fields.len() < 3 {
+        return Err(anyhow!(
+            "Invalid datum: expected 3 fields, got {}",
+            fields.len()
+        ));
+    }
+
+    // Parse config (first field)
+    let config = &fields[0];
+    let config_fields = config
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid config: missing fields"))?;
+
+    if config_fields.len() < 4 {
+        return Err(anyhow!("Invalid config: expected 4 fields (token_type, decimals, remote_decimals, remote_routes), got {}", config_fields.len()));
+    }
+
+    // Parse token_type (first field of config)
+    let token_type_data = &config_fields[0];
+    let token_type_constructor = token_type_data
+        .get("constructor")
+        .and_then(|c| c.as_u64())
+        .ok_or_else(|| anyhow!("Invalid token_type: missing constructor"))?;
+
+    let token_type = match token_type_constructor {
+        0 => {
+            // Collateral { policy_id, asset_name }
+            let tt_fields = token_type_data
+                .get("fields")
+                .and_then(|f| f.as_array())
+                .ok_or_else(|| anyhow!("Invalid Collateral: missing fields"))?;
+
+            let policy_id = tt_fields
+                .get(0)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .ok_or_else(|| anyhow!("Invalid Collateral: missing policy_id"))?
+                .to_string();
+
+            let asset_name = tt_fields
+                .get(1)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            WarpTokenTypeInfo::Collateral {
+                policy_id,
+                asset_name,
+            }
+        }
+        1 => {
+            // Synthetic { minting_policy }
+            let tt_fields = token_type_data
+                .get("fields")
+                .and_then(|f| f.as_array())
+                .ok_or_else(|| anyhow!("Invalid Synthetic: missing fields"))?;
+
+            let minting_policy = tt_fields
+                .get(0)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .ok_or_else(|| anyhow!("Invalid Synthetic: missing minting_policy"))?
+                .to_string();
+
+            WarpTokenTypeInfo::Synthetic { minting_policy }
+        }
+        2 => {
+            // Native (no fields - ADA is held directly in warp route UTXO)
+            WarpTokenTypeInfo::Native
+        }
+        _ => {
+            return Err(anyhow!(
+                "Unknown token type constructor: {}",
+                token_type_constructor
+            ))
+        }
+    };
+
+    // Parse decimals (second field of config)
+    let decimals = config_fields
+        .get(1)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid decimals"))? as u32;
+
+    // Parse remote_decimals (third field of config)
+    let remote_decimals = config_fields
+        .get(2)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid remote_decimals"))? as u32;
+
+    // Parse remote_routes (fourth field of config)
+    let empty_routes: Vec<serde_json::Value> = vec![];
+    let routes_list = config_fields
+        .get(3)
+        .and_then(|f| f.get("list"))
+        .and_then(|l| l.as_array())
+        .unwrap_or(&empty_routes);
+
+    let mut remote_routes = Vec::new();
+    for route in routes_list {
+        let route_fields = route
+            .get("list")
+            .or_else(|| route.get("fields"))
+            .and_then(|f| f.as_array());
+
+        if let Some(rf) = route_fields {
+            let domain = rf
+                .get(0)
+                .and_then(|d| d.get("int"))
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as u32;
+
+            let router = rf
+                .get(1)
+                .and_then(|r| r.get("bytes"))
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !router.is_empty() {
+                remote_routes.push(RemoteRoute { domain, router });
+            }
+        }
+    }
+
+    // Parse owner (second field of datum)
+    let owner = fields
+        .get(1)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid owner"))?
+        .to_string();
+
+    // Parse total_bridged (third field of datum)
+    let total_bridged = fields
+        .get(2)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_i64())
+        .unwrap_or(0);
+
+    Ok((
+        token_type,
+        decimals,
+        remote_decimals,
+        remote_routes,
+        owner,
+        total_bridged,
+    ))
+}
+
+async fn list_routers(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
+    println!("{}", "Enrolled Remote Routers".cyan());
+
+    let policy_id = get_warp_policy(ctx, warp_policy)?;
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let warp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Warp route UTXO not found"))?;
+
+    if let Some(datum) = &warp_utxo.inline_datum {
+        // Decode CBOR if datum is a hex string (Blockfrost returns CBOR hex for inline datums)
+        let parsed_datum = if let Some(cbor_hex) = datum.as_str() {
+            decode_plutus_datum(cbor_hex)?
+        } else {
+            datum.clone()
+        };
+
+        // Parse remote_routes from datum
+        if let Some(fields) = parsed_datum.get("fields").and_then(|f| f.as_array()) {
+            // config is first field, remote_routes is inside config at index 3
+            // Config: [token_type, decimals, remote_decimals, remote_routes]
+            if let Some(config_fields) = fields
+                .get(0)
+                .and_then(|c| c.get("fields"))
+                .and_then(|f| f.as_array())
+            {
+                if let Some(routes) = config_fields
+                    .get(3)
+                    .and_then(|r| r.get("list"))
+                    .and_then(|l| l.as_array())
+                {
+                    if routes.is_empty() {
+                        println!("\n{}", "No remote routers enrolled".yellow());
+                        return Ok(());
+                    }
+
+                    println!("\n{}", "Remote Routers:".green());
+                    println!("{}", "-".repeat(80));
+
+                    for route in routes {
+                        // Routes can be encoded as either:
+                        // 1. {"list": [{"int": domain}, {"bytes": router}]} - tuple encoding
+                        // 2. {"fields": [{"int": domain}, {"bytes": router}]} - constructor encoding
+                        let route_items = route
+                            .get("list")
+                            .or_else(|| route.get("fields"))
+                            .and_then(|f| f.as_array());
+
+                        if let Some(items) = route_items {
+                            let domain = items
+                                .get(0)
+                                .and_then(|d| d.get("int"))
+                                .and_then(|i| i.as_u64());
+                            let router = items
+                                .get(1)
+                                .and_then(|r| r.get("bytes"))
+                                .and_then(|b| b.as_str());
+
+                            if let (Some(d), Some(r)) = (domain, router) {
+                                println!("  Domain {}: 0x{}", d, r);
+                            }
+                        }
+                    }
+
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    println!("\n{}", "No remote routers enrolled".yellow());
 
     Ok(())
 }

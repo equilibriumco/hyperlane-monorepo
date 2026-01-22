@@ -1062,4 +1062,121 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         Ok(tx)
     }
+
+    /// Build a warp route enroll remote router transaction
+    ///
+    /// This transaction spends the warp route UTXO and creates a new one with the
+    /// remote route added to the datum.
+    pub async fn build_enroll_route_tx(
+        &self,
+        payer: &Keypair,
+        fee_input: &Utxo,
+        collateral_utxo: &Utxo,
+        warp_utxo: &Utxo,
+        warp_script_cbor: &[u8],
+        new_datum: &[u8],
+        redeemer: &[u8],
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Parse tx hashes
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_input.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid warp route tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Warp route address
+        let warp_addr = pallas_addresses::Address::from_bech32(&warp_utxo.address)
+            .map_err(|e| anyhow!("Invalid warp route address: {}", e))?;
+
+        // Build inputs
+        let fee_input_ref = Input::new(Hash::new(fee_tx_hash), fee_input.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+        let warp_input = Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64);
+
+        // Build warp route output with updated datum and ALL existing assets preserved
+        // This is critical for collateral warp routes that hold locked tokens
+        let mut warp_output =
+            Output::new(warp_addr.clone(), warp_utxo.lovelace).set_inline_datum(new_datum.to_vec());
+
+        // Preserve all native tokens from the warp UTXO (state NFT + any collateral tokens)
+        for asset in &warp_utxo.assets {
+            let policy: [u8; 28] = hex::decode(&asset.policy_id)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid policy ID: {}", asset.policy_id))?;
+            let asset_name = hex::decode(&asset.asset_name).unwrap_or_default();
+            warp_output = warp_output
+                .add_asset(Hash::new(policy), asset_name, asset.quantity)
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to add asset {}.{}: {:?}",
+                        asset.policy_id,
+                        asset.asset_name,
+                        e
+                    )
+                })?;
+        }
+
+        // Fee estimate
+        let fee_estimate = 500_000u64;
+        let change = fee_input.lovelace.saturating_sub(fee_estimate);
+
+        // Build staging transaction
+        let mut staging = StagingTransaction::new()
+            .input(fee_input_ref)
+            .input(warp_input.clone())
+            .collateral_input(collateral)
+            .output(warp_output)
+            .add_spend_redeemer(
+                warp_input,
+                redeemer.to_vec(),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 300_000_000,
+                }),
+            )
+            .script(ScriptKind::PlutusV3, warp_script_cbor.to_vec())
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        // Add required signer (must be owner)
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
 }

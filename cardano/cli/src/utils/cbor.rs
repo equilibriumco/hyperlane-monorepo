@@ -1121,6 +1121,185 @@ pub fn build_warp_route_synthetic_datum(
     )
 }
 
+/// Build a WarpRoute EnrollRemoteRoute redeemer
+pub fn build_enroll_remote_route_redeemer(
+    domain: u32,
+    route_hex: &str, // 32 bytes (64 hex chars)
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // EnrollRemoteRoute is constructor 2
+    builder.start_constr(2);
+    builder.uint(domain as u64);
+    builder.bytes_hex(route_hex)?;
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Remote route tuple (domain, router_address)
+pub struct RemoteRoute {
+    pub domain: u32,
+    pub router: String, // 32 bytes hex (64 chars)
+}
+
+/// Build a WarpRoute datum for Collateral type with remote routes
+pub fn build_warp_route_collateral_datum_with_routes(
+    token_policy: &str,
+    token_asset: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Collateral - Constr 0
+    builder.start_constr(0);
+    builder.bytes_hex(token_policy)?;
+    builder.bytes_hex(token_asset)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    builder.start_list();
+    for route in remote_routes {
+        // Tuple is a plain array [domain, address]
+        builder
+            .start_list()
+            .uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Synthetic type with remote routes
+pub fn build_warp_route_synthetic_datum_with_routes(
+    minting_policy: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Synthetic - Constr 1
+    builder.start_constr(1);
+    builder.bytes_hex(minting_policy)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    builder.start_list();
+    for route in remote_routes {
+        builder
+            .start_list()
+            .uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Native (ADA) type with remote routes
+pub fn build_warp_route_native_datum_with_routes(
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Native - Constr 2 (no fields)
+    builder.start_constr(2);
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    builder.start_list();
+    for route in remote_routes {
+        builder
+            .start_list()
+            .uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
