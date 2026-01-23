@@ -149,7 +149,7 @@ async fn deploy_token(
         println!("  hyperlane-cardano warp deploy \\");
         println!("    --policy-id {} \\", applied.policy_id);
         println!("    --asset-name {} \\", name);
-        println!("    --type collateral");
+        println!("    --token-type collateral");
         return Ok(());
     }
 
@@ -217,7 +217,7 @@ async fn deploy_token(
     println!("  hyperlane-cardano warp deploy \\");
     println!("    --policy-id {} \\", applied.policy_id);
     println!("    --asset-name {} \\", name);
-    println!("    --type collateral");
+    println!("    --token-type collateral");
     println!();
 
     Ok(())

@@ -215,35 +215,6 @@ fn find_aiken() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Get the script hash for a non-parameterized validator from the blueprint
-///
-/// For validators with no parameters, the hash in plutus.json is the final script hash.
-/// For parameterized validators, use `apply_validator_param` instead.
-#[allow(dead_code)]
-pub fn get_script_hash(
-    contracts_dir: &Path,
-    module: &str,
-    validator: &str,
-) -> Result<String> {
-    let blueprint_path = contracts_dir.join("plutus.json");
-    let blueprint = PlutusBlueprint::from_file(&blueprint_path)?;
-
-    let title = format!("{}.{}", module, validator);
-    let validator_def = blueprint
-        .find_validator(&title)
-        .ok_or_else(|| anyhow!("Validator '{}' not found in blueprint", title))?;
-
-    // For non-parameterized validators, the hash is directly usable
-    if !validator_def.parameters.is_empty() {
-        return Err(anyhow!(
-            "Validator '{}' has parameters. Use apply_validator_param instead.",
-            title
-        ));
-    }
-
-    Ok(validator_def.hash.clone())
-}
-
 /// This shells out to `aiken blueprint apply` to apply CBOR parameters
 /// to a parameterized validator in the blueprint.
 pub fn apply_validator_param(
