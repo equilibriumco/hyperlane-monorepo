@@ -19,31 +19,37 @@ Implement advanced features including performance optimizations, contract upgrad
 
 ## Tasks
 
-| # | Task | Status | Depends On | Description |
-|---|------|--------|------------|-------------|
-| 4.1 | [NFT Lookups](./task-4.1-nft-lookups.md) | ⬜ | - | O(1) recipient lookups via NFT |
-| 4.2 | [Ref Script Cache](./task-4.2-ref-script-cache.md) | ⬜ | - | Cache reference script UTXOs |
-| 4.3 | [Parallel Queries](./task-4.3-parallel-queries.md) | ⬜ | - | Parallelize Blockfrost calls |
-| 4.4 | [NFT-Based Contract Identity](./task-4.4-nft-identity.md) | ⬜ | - | Stable identity across upgrades |
-| 4.5 | [Parallel Inbound Processing](./task-4.5-parallel-processing.md) | ⬜ | 4.4 | Reference inputs for scalability (includes per-recipient ISM) |
-| 4.6 | [IGP Refund Support](./task-4.6-igp-refund.md) | ⬜ | 3.1 | Refund unused gas payments to users |
+| #   | Task                                                             | Status | Depends On | Description                                                   |
+| --- | ---------------------------------------------------------------- | ------ | ---------- | ------------------------------------------------------------- |
+| 4.1 | [State NFT as Address](./task-4.1-nft-lookups.md)                | ⬜     | -          | Use state NFT policy as Hyperlane address                     |
+| 4.2 | [Ref Script Cache](./task-4.2-ref-script-cache.md)               | ⬜     | -          | Cache reference script UTXOs                                  |
+| 4.3 | [Parallel Queries](./task-4.3-parallel-queries.md)               | ⬜     | -          | Parallelize Blockfrost calls                                  |
+| 4.4 | [NFT-Based Contract Identity](./task-4.4-nft-identity.md)        | ⬜     | -          | Stable identity across upgrades                               |
+| 4.5 | [Parallel Inbound Processing](./task-4.5-parallel-processing.md) | ⬜     | 4.4        | Reference inputs for scalability (includes per-recipient ISM) |
+| 4.6 | [IGP Refund Support](./task-4.6-igp-refund.md)                   | ⬜     | 3.1        | Refund unused gas payments to users                           |
 
 ## Task Details
 
-### 4.1 NFT-Based Lookups
+### 4.1 State NFT Policy as Hyperlane Address
 
-**Current State:** O(n) iteration through registry dictionary.
+**Current State:** Script hash used as Hyperlane address. Warp routes need unused `_state_nft_policy_id` parameter for uniqueness. Registry lookups are O(n).
 
-**Solution:** Mint NFT with script hash as token name, query by asset directly.
+**Solution:** Use state NFT policy ID as the Hyperlane address instead of script hash:
 
-```rust
-// O(1) lookup via Blockfrost asset API
-async fn get_recipient_by_nft(&self, script_hash: &H256) -> Result<RecipientInfo> {
-    let asset_id = format!("{}{}", self.registry_policy_id, hex::encode(script_hash));
-    let utxo = self.blockfrost.get_asset_utxo(&asset_id).await?;
-    // Parse and return
-}
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│   Before: script_hash = Hyperlane address                       │
+│     - Warp routes need _state_nft_policy_id for uniqueness      │
+│     - Registry lookup: O(n) iteration by script_hash            │
+│                                                                  │
+│   After: state_nft_policy = Hyperlane address                   │
+│     - Warp routes only need mailbox_policy_id parameter         │
+│     - Registry lookup: O(1) via asset query                     │
+│     - Consistent pattern for all recipient types                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Related to Task 4.4 - both establish NFT policies as stable identifiers.
 
 ### 4.2 Reference Script Cache
 
@@ -97,17 +103,17 @@ async fn get_recipient_by_nft(&self, script_hash: &H256) -> Result<RecipientInfo
 
 ## Performance Targets
 
-| Metric | Current | Target |
-|--------|---------|--------|
-| Recipient lookup | O(n) | O(1) |
-| Transaction build time | ~2s | ~500ms |
-| Blockfrost calls per tx | ~8 | ~4 |
-| Inbound throughput | ~3 msg/min | N msg/block (N=unique recipients) |
-| Upgrade impact | All contracts | Single contract |
+| Metric                  | Current       | Target                            |
+| ----------------------- | ------------- | --------------------------------- |
+| Recipient lookup        | O(n)          | O(1)                              |
+| Transaction build time  | ~2s           | ~500ms                            |
+| Blockfrost calls per tx | ~8            | ~4                                |
+| Inbound throughput      | ~3 msg/min    | N msg/block (N=unique recipients) |
+| Upgrade impact          | All contracts | Single contract                   |
 
 ## Definition of Done
 
-- [ ] NFT-based recipient lookups implemented
+- [ ] State NFT policy used as Hyperlane address for all recipients
 - [ ] Reference scripts cached in memory
 - [ ] Independent queries parallelized
 - [ ] Mailbox can be upgraded without redeploying recipients
@@ -118,18 +124,18 @@ async fn get_recipient_by_nft(&self, script_hash: &H256) -> Result<RecipientInfo
 
 ## Risks & Mitigations
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Cache staleness | Medium | Conservative TTL, refresh on failure |
-| NFT migration complexity | Low | Gradual rollout, backwards compatible |
-| Parallel query race conditions | Low | Proper async handling |
-| Migration complexity for upgradeability | High | Phased rollout, backwards compatibility period |
-| Minting policy size increase | Medium | Optimize code, potentially split validation |
+| Risk                                    | Impact | Mitigation                                     |
+| --------------------------------------- | ------ | ---------------------------------------------- |
+| Cache staleness                         | Medium | Conservative TTL, refresh on failure           |
+| Address scheme change                   | Low    | Clean break, no mainnet deployments yet        |
+| Parallel query race conditions          | Low    | Proper async handling                          |
+| Migration complexity for upgradeability | High   | Phased rollout, backwards compatibility period |
+| Minting policy size increase            | Medium | Optimize code, potentially split validation    |
 
 ## Acceptance Criteria
 
 1. Custom ISM honored for recipients that set it
-2. Recipient lookups are O(1) via NFT
+2. State NFT policy is the Hyperlane address (O(1) lookups)
 3. Transaction building is measurably faster
 4. Mailbox upgrade does not require recipient redeployment
 5. Multiple inbound messages processed in parallel (different recipients)
