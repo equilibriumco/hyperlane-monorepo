@@ -8,7 +8,10 @@ use pallas_txbuilder::{
 };
 
 use super::blockfrost::BlockfrostClient;
-use super::cbor::{build_mint_redeemer, build_registry_datum, build_registry_admin_register_redeemer, RegistrationData};
+use super::cbor::{
+    build_mint_redeemer, build_registry_admin_register_redeemer, build_registry_datum,
+    RegistrationData,
+};
 use super::crypto::Keypair;
 use super::types::Utxo;
 
@@ -66,7 +69,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let policy_id = super::crypto::script_hash(mint_script_cbor);
 
         // Convert asset name to bytes (empty vec if None)
-        let asset_name_bytes: Vec<u8> = asset_name.map(|n| n.as_bytes().to_vec()).unwrap_or_default();
+        let asset_name_bytes: Vec<u8> = asset_name
+            .map(|n| n.as_bytes().to_vec())
+            .unwrap_or_default();
 
         // Parse tx hashes
         let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
@@ -81,7 +86,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
 
         // Build the script output
         let script_output = Output::new(
@@ -95,7 +103,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build change output
         let fee_estimate = 2_000_000u64;
-        let change = input_utxo.lovelace.saturating_sub(output_lovelace).saturating_sub(fee_estimate);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
 
         let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
             .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
@@ -114,12 +125,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(policy_id),
                 mint_redeemer,
-                Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 200_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -130,7 +148,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -148,7 +167,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let public_key = payer.pallas_public_key();
 
         // Add the signature to the built transaction
-        let signed = tx.add_signature(public_key.clone(), signature)
+        let signed = tx
+            .add_signature(public_key.clone(), signature)
             .map_err(|e| anyhow!("Failed to add signature: {:?}", e))?;
 
         // Return the serialized signed transaction
@@ -163,9 +183,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
     pub async fn build_registry_register_tx(
         &self,
         payer: &Keypair,
-        input_utxo: &Utxo,          // For fees
-        collateral_utxo: &Utxo,     // Collateral
-        registry_utxo: &Utxo,       // Existing registry UTXO
+        input_utxo: &Utxo,           // For fees
+        collateral_utxo: &Utxo,      // Collateral
+        registry_utxo: &Utxo,        // Existing registry UTXO
         registry_script_cbor: &[u8], // Registry validator script
         existing_registrations: &[RegistrationData],
         new_registration: &RegistrationData,
@@ -218,11 +238,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let fee_input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
-        let registry_input = Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+        let registry_input = Input::new(
+            Hash::new(registry_tx_hash),
+            registry_utxo.output_index as u64,
+        );
 
         // Get state NFT from registry UTXO
-        let state_nft = registry_utxo.assets.iter()
+        let state_nft = registry_utxo
+            .assets
+            .iter()
             .find(|a| a.quantity == 1)
             .ok_or_else(|| anyhow!("Registry UTXO has no state NFT"))?;
 
@@ -243,7 +271,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Fee estimate
         let fee_estimate = 1_000_000u64;
-        let change = input_utxo.lovelace.saturating_sub(fee_estimate + registry_ada_bump);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(fee_estimate + registry_ada_bump);
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
@@ -252,14 +282,24 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .collateral_input(collateral)
             .output(registry_output)
             .add_spend_redeemer(
-                Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64),
+                Input::new(
+                    Hash::new(registry_tx_hash),
+                    registry_utxo.output_index as u64,
+                ),
                 redeemer,
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         // Use reference script if provided, otherwise include script inline
         if let Some(ref_script_utxo) = registry_ref_script_utxo {
@@ -281,7 +321,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -337,11 +378,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .map_err(|e| anyhow!("Invalid registry address: {}", e))?;
 
         let fee_input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
-        let registry_input = Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+        let registry_input = Input::new(
+            Hash::new(registry_tx_hash),
+            registry_utxo.output_index as u64,
+        );
 
         // Get state NFT from registry UTXO
-        let state_nft = registry_utxo.assets.iter()
+        let state_nft = registry_utxo
+            .assets
+            .iter()
             .find(|a| a.quantity == 1)
             .ok_or_else(|| anyhow!("Registry UTXO has no state NFT"))?;
 
@@ -366,14 +415,24 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .collateral_input(collateral)
             .output(registry_output)
             .add_spend_redeemer(
-                Input::new(Hash::new(registry_tx_hash), registry_utxo.output_index as u64),
+                Input::new(
+                    Hash::new(registry_tx_hash),
+                    registry_utxo.output_index as u64,
+                ),
                 redeemer,
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         // Use reference script if provided, otherwise include script inline
         if let Some(ref_script_utxo) = registry_ref_script_utxo {
@@ -393,7 +452,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
         staging = staging.disclosed_signer(signer_hash);
 
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -428,20 +488,28 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Calculate fee and change
         let fee_estimate = 500_000u64; // Reference script txs are typically larger
-        let change = input_utxo.lovelace.saturating_sub(output_lovelace).saturating_sub(fee_estimate);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
 
         let mut staging = StagingTransaction::new()
             .input(input)
             .output(ref_script_output)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -492,7 +560,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
 
         // Asset names: state NFT has empty name, ref NFT has "ref" (726566 in hex)
         let state_asset_name: Vec<u8> = vec![];
@@ -520,7 +591,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Fee estimate (larger due to reference script)
         let fee_estimate = 3_000_000u64;
         let total_outputs = state_output_lovelace + ref_output_lovelace;
-        let change = input_utxo.lovelace.saturating_sub(total_outputs).saturating_sub(fee_estimate);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(total_outputs)
+            .saturating_sub(fee_estimate);
 
         // Build staging transaction - mint both NFTs
         let mut staging = StagingTransaction::new()
@@ -538,12 +612,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(policy_id),
                 mint_redeemer,
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -554,7 +635,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -576,14 +658,14 @@ impl<'a> HyperlaneTxBuilder<'a> {
         payer: &Keypair,
         input_utxo: &Utxo,
         collateral_utxo: &Utxo,
-        mint_script_cbor: &[u8],          // state_nft minting policy
-        recipient_script_cbor: &[u8],     // recipient validator to attach as reference script
-        msg_nft_script_cbor: &[u8],       // stored_message_nft policy to attach as reference script
-        script_address: &str,             // recipient script address
-        datum_cbor: &[u8],                // initial datum for state UTXO
-        state_output_lovelace: u64,       // ADA for state UTXO
-        ref_output_lovelace: u64,         // ADA for recipient reference script UTXO
-        msg_ref_output_lovelace: u64,     // ADA for message NFT reference script UTXO
+        mint_script_cbor: &[u8],      // state_nft minting policy
+        recipient_script_cbor: &[u8], // recipient validator to attach as reference script
+        msg_nft_script_cbor: &[u8],   // stored_message_nft policy to attach as reference script
+        script_address: &str,         // recipient script address
+        datum_cbor: &[u8],            // initial datum for state UTXO
+        state_output_lovelace: u64,   // ADA for state UTXO
+        ref_output_lovelace: u64,     // ADA for recipient reference script UTXO
+        msg_ref_output_lovelace: u64, // ADA for message NFT reference script UTXO
     ) -> Result<BuiltTransaction> {
         // Get current slot for validity
         let current_slot = self.client.get_latest_slot().await?;
@@ -610,11 +692,14 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
 
         // Asset names: state NFT (empty), ref NFT ("ref"), msg_ref NFT ("msg_ref")
         let state_asset_name: Vec<u8> = vec![];
-        let ref_asset_name: Vec<u8> = b"ref".to_vec();         // 0x726566
+        let ref_asset_name: Vec<u8> = b"ref".to_vec(); // 0x726566
         let msg_ref_asset_name: Vec<u8> = b"msg_ref".to_vec(); // 0x6d73675f726566
 
         // Output 1: State UTXO at script address with state NFT + datum
@@ -645,7 +730,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Fee estimate (larger due to two reference scripts)
         let fee_estimate = 4_000_000u64;
         let total_outputs = state_output_lovelace + ref_output_lovelace + msg_ref_output_lovelace;
-        let change = input_utxo.lovelace.saturating_sub(total_outputs).saturating_sub(fee_estimate);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(total_outputs)
+            .saturating_sub(fee_estimate);
 
         // Build staging transaction - mint all three NFTs
         let mut staging = StagingTransaction::new()
@@ -667,12 +755,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(policy_id),
                 mint_redeemer,
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -683,7 +778,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -740,7 +836,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
 
         // Build the token output - send minted tokens to payer
         let token_output = Output::new(payer_addr.clone(), output_lovelace)
@@ -752,7 +851,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Fee estimate
         let fee_estimate = 2_000_000u64;
-        let change = input_utxo.lovelace.saturating_sub(output_lovelace).saturating_sub(fee_estimate);
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
@@ -765,12 +867,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(policy_id),
                 mint_redeemer,
-                Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 200_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
@@ -781,7 +890,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
-        let tx = staging.build_conway_raw()
+        let tx = staging
+            .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
         Ok(tx)
@@ -843,7 +953,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         // Build inputs
         let fee_input = Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64);
-        let message_input = Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
+        let message_input =
+            Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
         let state_input = Input::new(Hash::new(state_tx_hash), state_utxo.output_index as u64);
 
         // Get state NFT from state UTXO
@@ -871,15 +982,14 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Fee estimate
         let fee_estimate = 2_000_000u64;
         let total_input = fee_utxo.lovelace + message_utxo.lovelace;
-        let change = total_input
-            .saturating_sub(fee_estimate);
+        let change = total_input.saturating_sub(fee_estimate);
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
             .input(fee_input.clone())
             .input(message_input.clone())
             .input(state_input.clone())
-            .collateral_input(fee_input)  // Use fee input as collateral
+            .collateral_input(fee_input) // Use fee input as collateral
             .output(state_output)
             // Burn the message NFT (-1)
             .mint_asset(Hash::new(nft_policy), message_id_bytes.clone(), -1)
@@ -888,23 +998,36 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_spend_redeemer(
                 message_input,
                 recipient_redeemer.to_vec(),
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .add_spend_redeemer(
                 state_input,
                 recipient_redeemer.to_vec(),
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             // Add mint redeemer for burning
             .add_mint_redeemer(
                 Hash::new(nft_policy),
                 nft_burn_redeemer.to_vec(),
-                Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 200_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         // Add reference scripts if provided
         if let Some(ref_script) = recipient_ref_script {
@@ -939,5 +1062,4 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         Ok(tx)
     }
-
 }
