@@ -984,24 +984,97 @@ pub fn normalize_datum(datum: &Value) -> Result<Value> {
 // Warp Route Datum Builder
 // ============================================================================
 
-/// Build a WarpRoute datum for Collateral type
+/// Token type for warp routes
+///
+/// Corresponds to WarpTokenType in Aiken:
+/// - Collateral (0): Lock existing tokens in the warp route UTXO
+/// - Synthetic (1): Mint new tokens via a minting policy
+/// - Native (2): Lock ADA directly
+pub enum WarpTokenType<'a> {
+    /// Collateral: lock existing tokens (policy_id, asset_name)
+    Collateral { policy_id: &'a str, asset_name: &'a str },
+    /// Synthetic: mint new tokens via minting_policy
+    Synthetic { minting_policy: &'a str },
+    /// Native: lock ADA directly
+    Native,
+}
+
+/// Build a WarpRoute datum with the given token type
 ///
 /// Structure:
 /// ```
 /// WarpRouteDatum {
 ///   config: WarpRouteConfig {
-///     token_type: WarpTokenType::Collateral {
-///       policy_id: PolicyId,
-///       asset_name: AssetName,
-///     },
+///     token_type: WarpTokenType,
 ///     decimals: Int,
+///     remote_decimals: Int,
 ///     remote_routes: List<(Domain, HyperlaneAddress)>,
 ///   },
 ///   owner: VerificationKeyHash,
 ///   total_bridged: Int,
 /// }
 /// ```
-/// Tokens are held directly in the warp route UTXO.
+fn build_warp_route_datum(
+    token_type: WarpTokenType,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType
+    match token_type {
+        WarpTokenType::Collateral { policy_id, asset_name } => {
+            // Collateral - Constr 0 [policy_id, asset_name]
+            builder.start_constr(0);
+            builder.bytes_hex(policy_id)?;
+            builder.bytes_hex(asset_name)?;
+            builder.end_constr();
+        }
+        WarpTokenType::Synthetic { minting_policy } => {
+            // Synthetic - Constr 1 [minting_policy]
+            builder.start_constr(1);
+            builder.bytes_hex(minting_policy)?;
+            builder.end_constr();
+        }
+        WarpTokenType::Native => {
+            // Native - Constr 2 (no fields)
+            builder.start_constr(2);
+            builder.end_constr();
+        }
+    }
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
+    builder.start_list().end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int - starts at 0
+    builder.int(0);
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Collateral type
+///
+/// Collateral warp routes lock existing tokens in the warp route UTXO.
 pub fn build_warp_route_collateral_datum(
     token_policy: &str,
     token_asset: &str,
@@ -1009,125 +1082,43 @@ pub fn build_warp_route_collateral_datum(
     remote_decimals: u32,
     owner_pkh: &str,
 ) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // WarpRouteDatum - Constr 0
-    builder.start_constr(0);
-
-    // config: WarpRouteConfig - Constr 0
-    builder.start_constr(0);
-
-    // token_type: WarpTokenType::Collateral - Constr 0
-    builder.start_constr(0);
-    builder.bytes_hex(token_policy)?;
-    builder.bytes_hex(token_asset)?;
-    builder.end_constr();
-
-    // decimals: Int (local token decimals)
-    builder.uint(decimals as u64);
-
-    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
-    builder.uint(remote_decimals as u64);
-
-    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
-    builder.start_list().end_list();
-
-    builder.end_constr(); // end WarpRouteConfig
-
-    // owner: VerificationKeyHash
-    builder.bytes_hex(owner_pkh)?;
-
-    // total_bridged: Int - starts at 0
-    builder.int(0);
-
-    builder.end_constr(); // end WarpRouteDatum
-
-    Ok(builder.build())
+    build_warp_route_datum(
+        WarpTokenType::Collateral {
+            policy_id: token_policy,
+            asset_name: token_asset,
+        },
+        decimals,
+        remote_decimals,
+        owner_pkh,
+    )
 }
 
 /// Build a WarpRoute datum for Native (ADA) type
 ///
 /// Native warp routes lock ADA directly in the warp route UTXO.
-/// WarpTokenType::Native is constructor 2 with no fields.
 pub fn build_warp_route_native_datum(
     decimals: u32,
     remote_decimals: u32,
     owner_pkh: &str,
 ) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // WarpRouteDatum - Constr 0
-    builder.start_constr(0);
-
-    // config: WarpRouteConfig - Constr 0
-    builder.start_constr(0);
-
-    // token_type: WarpTokenType::Native - Constr 2 (no fields)
-    builder.start_constr(2);
-    builder.end_constr();
-
-    // decimals: Int (local token decimals, ADA has 6)
-    builder.uint(decimals as u64);
-
-    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
-    builder.uint(remote_decimals as u64);
-
-    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
-    builder.start_list().end_list();
-
-    builder.end_constr(); // end WarpRouteConfig
-
-    // owner: VerificationKeyHash
-    builder.bytes_hex(owner_pkh)?;
-
-    // total_bridged: Int - starts at 0
-    builder.int(0);
-
-    builder.end_constr(); // end WarpRouteDatum
-
-    Ok(builder.build())
+    build_warp_route_datum(WarpTokenType::Native, decimals, remote_decimals, owner_pkh)
 }
 
 /// Build a WarpRoute datum for Synthetic type
+///
+/// Synthetic warp routes mint new tokens via a minting policy.
 pub fn build_warp_route_synthetic_datum(
     minting_policy: &str,
     decimals: u32,
     remote_decimals: u32,
     owner_pkh: &str,
 ) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // WarpRouteDatum - Constr 0
-    builder.start_constr(0);
-
-    // config: WarpRouteConfig - Constr 0
-    builder.start_constr(0);
-
-    // token_type: WarpTokenType::Synthetic - Constr 1
-    builder.start_constr(1);
-    builder.bytes_hex(minting_policy)?;
-    builder.end_constr();
-
-    // decimals: Int (local token decimals)
-    builder.uint(decimals as u64);
-
-    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
-    builder.uint(remote_decimals as u64);
-
-    // remote_routes: empty list
-    builder.start_list().end_list();
-
-    builder.end_constr(); // end WarpRouteConfig
-
-    // owner: VerificationKeyHash
-    builder.bytes_hex(owner_pkh)?;
-
-    // total_bridged: Int
-    builder.int(0);
-
-    builder.end_constr();
-
-    Ok(builder.build())
+    build_warp_route_datum(
+        WarpTokenType::Synthetic { minting_policy },
+        decimals,
+        remote_decimals,
+        owner_pkh,
+    )
 }
 
 #[cfg(test)]
