@@ -16,45 +16,56 @@ interface ITokenRouter {
  * @title DeployCardanoISM
  * @notice Deploys a MultisigISM on Fuji for validating messages from Cardano
  * @dev Creates a simple 1-of-1 multisig with the Cardano validator
+ *
+ * Required environment variables:
+ *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
+ *   - CARDANO_VALIDATOR: Cardano validator address (20-byte EVM address)
+ *
+ * Optional environment variables:
+ *   - CARDANO_DOMAIN: Cardano domain ID (default: 2003 for Preview)
+ *   - CARDANO_ISM_THRESHOLD: Validator threshold (default: 1)
  */
 contract DeployCardanoISM is Script {
-    // Cardano domain ID
-    uint32 constant CARDANO_DOMAIN = 2003;
+    // Default Cardano domain ID (Preview testnet)
+    uint32 constant DEFAULT_CARDANO_DOMAIN = 2003;
 
-    // Cardano validator address (derived from CARDANO_VALIDATOR_KEY)
-    // Key: 0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764
-    address constant CARDANO_VALIDATOR =
-        0x0A923108968Cf8427693679eeE7b98340Fe038ce;
-
-    // Threshold for multisig (1 of 1)
-    uint8 constant THRESHOLD = 1;
+    // Default threshold for multisig (1 of 1)
+    uint8 constant DEFAULT_THRESHOLD = 1;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
+        // Read validator address from environment (required)
+        address cardanoValidator = vm.envAddress("CARDANO_VALIDATOR");
+
+        // Read optional parameters with defaults
+        uint8 threshold = uint8(
+            vm.envOr("CARDANO_ISM_THRESHOLD", uint256(DEFAULT_THRESHOLD))
+        );
+
         console.log("Deploying Cardano MultisigISM on Fuji");
         console.log("Deployer:", deployer);
-        console.log("Cardano Validator:", CARDANO_VALIDATOR);
-        console.log("Threshold:", THRESHOLD);
+        console.log("Cardano Validator:", cardanoValidator);
+        console.log("Threshold:", threshold);
 
         vm.startBroadcast(deployerPrivateKey);
 
         // Create validator set
         address[] memory validators = new address[](1);
-        validators[0] = CARDANO_VALIDATOR;
+        validators[0] = cardanoValidator;
 
         // Deploy StaticMerkleRootMultisigIsm for Cardano domain
         // Using the factory pattern for deterministic deployment
         StaticMerkleRootMultisigIsmFactory factory = new StaticMerkleRootMultisigIsmFactory();
-        address ism = factory.deploy(validators, THRESHOLD);
+        address ism = factory.deploy(validators, threshold);
 
         console.log("\n=== Deployment Complete ===");
         console.log("Factory deployed:", address(factory));
         console.log("MultisigISM deployed:", ism);
         console.log("\nThis ISM validates messages with:");
-        console.log("  - Validator:", CARDANO_VALIDATOR);
-        console.log("  - Threshold:", THRESHOLD);
+        console.log("  - Validator:", cardanoValidator);
+        console.log("  - Threshold:", threshold);
 
         vm.stopBroadcast();
 

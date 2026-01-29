@@ -21,6 +21,29 @@ import {TypeCasts} from "contracts/libs/TypeCasts.sol";
  *      5. Cardano Native <-> Fuji Collateral (ADA -> WADA ERC20)
  *      6. Fuji Native <-> Cardano Collateral (AVAX -> WAVAX token)
  *      7. Collateral <-> Collateral (TokenA <-> TokenB)
+ *
+ * Required environment variables:
+ *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
+ *
+ * Optional environment variables for token customization:
+ *   Test ERC20 Tokens:
+ *   - FTEST_NAME: Name for FTEST token (default: "Fuji Test Token")
+ *   - FTEST_SYMBOL: Symbol for FTEST token (default: "FTEST")
+ *   - FTEST_DECIMALS: Decimals for FTEST token (default: 18)
+ *   - WADA_NAME: Name for WADA token (default: "Wrapped ADA")
+ *   - WADA_SYMBOL: Symbol for WADA token (default: "WADA")
+ *   - WADA_DECIMALS: Decimals for WADA token (default: 18)
+ *   - TOKENA_NAME: Name for TokenA (default: "Token A")
+ *   - TOKENA_SYMBOL: Symbol for TokenA (default: "TOKA")
+ *   - TOKENA_DECIMALS: Decimals for TokenA (default: 18)
+ *
+ *   Synthetic Warp Routes:
+ *   - WCTEST_NAME: Name for wCTEST synthetic (default: "Wrapped CTEST")
+ *   - WCTEST_SYMBOL: Symbol for wCTEST synthetic (default: "wCTEST")
+ *   - WCTEST_DECIMALS: Decimals for wCTEST synthetic (default: 6)
+ *   - SYNTHETIC_WADA_NAME: Name for wADA synthetic (default: "Wrapped ADA")
+ *   - SYNTHETIC_WADA_SYMBOL: Symbol for wADA synthetic (default: "wADA")
+ *   - SYNTHETIC_WADA_DECIMALS: Decimals for wADA synthetic (default: 6)
  */
 contract DeployFujiWarp is Script {
     using TypeCasts for address;
@@ -48,12 +71,20 @@ contract DeployFujiWarp is Script {
         address syntheticWCtest; // Scenario 1: receives CTEST, mints wCTEST
         address syntheticWAda; // Scenario 3: receives ADA, mints wADA
         address syntheticWAvax; // Scenario 4: for Cardano to receive wAVAX
+        address syntheticWGuitkn; // Test 2: receives GUITKN from Cardano collateral, mints wGUITKN
         // Collateral warp routes
         address collateralFtest; // Scenario 2: locks FTEST
         address collateralWada; // Scenario 5: releases pre-deposited WADA
         address collateralTokenA; // Scenario 7: collateral-collateral TokenA side
         // Native warp route
         address nativeAvax; // Scenario 4 & 6: locks AVAX
+    }
+
+    // Token configuration struct
+    struct TokenConfig {
+        string name;
+        string symbol;
+        uint8 decimals;
     }
 
     function run() external {
@@ -65,6 +96,59 @@ contract DeployFujiWarp is Script {
         console.log("Mailbox:", FUJI_MAILBOX);
         console.log("ISM:", FUJI_ISM);
 
+        // Read token configurations from environment (with defaults)
+        TokenConfig memory ftestConfig = TokenConfig({
+            name: vm.envOr("FTEST_NAME", string("Fuji Test Token")),
+            symbol: vm.envOr("FTEST_SYMBOL", string("FTEST")),
+            decimals: uint8(vm.envOr("FTEST_DECIMALS", uint256(18)))
+        });
+
+        TokenConfig memory wadaConfig = TokenConfig({
+            name: vm.envOr("WADA_NAME", string("Wrapped ADA")),
+            symbol: vm.envOr("WADA_SYMBOL", string("WADA")),
+            decimals: uint8(vm.envOr("WADA_DECIMALS", uint256(18)))
+        });
+
+        TokenConfig memory tokenAConfig = TokenConfig({
+            name: vm.envOr("TOKENA_NAME", string("Token A")),
+            symbol: vm.envOr("TOKENA_SYMBOL", string("TOKA")),
+            decimals: uint8(vm.envOr("TOKENA_DECIMALS", uint256(18)))
+        });
+
+        TokenConfig memory wctestConfig = TokenConfig({
+            name: vm.envOr("WCTEST_NAME", string("Wrapped CTEST")),
+            symbol: vm.envOr("WCTEST_SYMBOL", string("wCTEST")),
+            decimals: uint8(vm.envOr("WCTEST_DECIMALS", uint256(6)))
+        });
+
+        TokenConfig memory syntheticWadaConfig = TokenConfig({
+            name: vm.envOr("SYNTHETIC_WADA_NAME", string("Wrapped ADA")),
+            symbol: vm.envOr("SYNTHETIC_WADA_SYMBOL", string("wADA")),
+            decimals: uint8(vm.envOr("SYNTHETIC_WADA_DECIMALS", uint256(6)))
+        });
+
+        TokenConfig memory syntheticWguitknConfig = TokenConfig({
+            name: vm.envOr("SYNTHETIC_WGUITKN_NAME", string("Wrapped GUITKN")),
+            symbol: vm.envOr("SYNTHETIC_WGUITKN_SYMBOL", string("wGUITKN")),
+            decimals: uint8(vm.envOr("SYNTHETIC_WGUITKN_DECIMALS", uint256(6)))
+        });
+
+        // Log token configurations
+        console.log("\n=== Token Configurations ===");
+        console.log("FTEST:", ftestConfig.name, ftestConfig.symbol);
+        console.log("WADA:", wadaConfig.name, wadaConfig.symbol);
+        console.log("TokenA:", tokenAConfig.name, tokenAConfig.symbol);
+        console.log(
+            "wCTEST Synthetic:",
+            wctestConfig.name,
+            wctestConfig.symbol
+        );
+        console.log(
+            "wADA Synthetic:",
+            syntheticWadaConfig.name,
+            syntheticWadaConfig.symbol
+        );
+
         vm.startBroadcast(deployerPrivateKey);
 
         DeployedContracts memory contracts;
@@ -74,42 +158,78 @@ contract DeployFujiWarp is Script {
 
         // FTEST - Fuji test token for collateral scenario 2
         contracts.ftest = address(
-            new TestERC20("Fuji Test Token", "FTEST", 18)
+            new TestERC20(
+                ftestConfig.name,
+                ftestConfig.symbol,
+                ftestConfig.decimals
+            )
         );
         console.log("FTEST deployed:", contracts.ftest);
 
         // WADA - Wrapped ADA ERC20 for native-collateral scenario 5
-        contracts.wada = address(new TestERC20("Wrapped ADA", "WADA", 18));
+        contracts.wada = address(
+            new TestERC20(
+                wadaConfig.name,
+                wadaConfig.symbol,
+                wadaConfig.decimals
+            )
+        );
         console.log("WADA deployed:", contracts.wada);
 
         // TokenA - For collateral-collateral scenario 7
-        contracts.tokenA = address(new TestERC20("Token A", "TOKA", 18));
+        contracts.tokenA = address(
+            new TestERC20(
+                tokenAConfig.name,
+                tokenAConfig.symbol,
+                tokenAConfig.decimals
+            )
+        );
         console.log("TokenA deployed:", contracts.tokenA);
 
         // ========== Deploy Synthetic Warp Routes ==========
         console.log("\n=== Deploying Synthetic Warp Routes ===");
 
+        // Calculate scale factor based on decimals
+        // Scale = 10^(18 - sourceDecimals) for Cardano -> EVM
+        uint256 wctestScale = wctestConfig.decimals < 18
+            ? 10 ** (18 - wctestConfig.decimals)
+            : 1;
+        uint256 syntheticWadaScale = syntheticWadaConfig.decimals < 18
+            ? 10 ** (18 - syntheticWadaConfig.decimals)
+            : 1;
+
         // Scenario 1: Synthetic wCTEST (receives CTEST from Cardano)
-        // Cardano collateral has 6 decimals, Fuji synthetic has 18
         contracts.syntheticWCtest = _deploySynthetic(
-            6, // decimals (matches Cardano token)
-            SCALE_6_TO_18, // scale up from 6 to 18
-            "Wrapped CTEST",
-            "wCTEST",
+            wctestConfig.decimals,
+            wctestScale,
+            wctestConfig.name,
+            wctestConfig.symbol,
             deployer
         );
         console.log("Synthetic wCTEST deployed:", contracts.syntheticWCtest);
 
         // Scenario 3: Synthetic wADA (receives ADA from Cardano)
-        // Cardano ADA has 6 decimals (lovelace)
         contracts.syntheticWAda = _deploySynthetic(
-            6, // decimals (matches ADA)
-            SCALE_6_TO_18, // scale up from 6 to 18
-            "Wrapped ADA",
-            "wADA",
+            syntheticWadaConfig.decimals,
+            syntheticWadaScale,
+            syntheticWadaConfig.name,
+            syntheticWadaConfig.symbol,
             deployer
         );
         console.log("Synthetic wADA deployed:", contracts.syntheticWAda);
+
+        // Test 2: Synthetic wGUITKN (receives GUITKN from Cardano collateral)
+        uint256 syntheticWguitknScale = syntheticWguitknConfig.decimals < 18
+            ? 10 ** (18 - syntheticWguitknConfig.decimals)
+            : 1;
+        contracts.syntheticWGuitkn = _deploySynthetic(
+            syntheticWguitknConfig.decimals,
+            syntheticWguitknScale,
+            syntheticWguitknConfig.name,
+            syntheticWguitknConfig.symbol,
+            deployer
+        );
+        console.log("Synthetic wGUITKN deployed:", contracts.syntheticWGuitkn);
 
         // Scenario 4: Synthetic wAVAX (for Cardano to receive)
         // This is deployed on Cardano side, but we track it here for router enrollment
@@ -164,6 +284,7 @@ contract DeployFujiWarp is Script {
         console.log("\nSynthetic Warp Routes:");
         console.log("  wCTEST (scenario 1):", contracts.syntheticWCtest);
         console.log("  wADA (scenario 3):", contracts.syntheticWAda);
+        console.log("  wGUITKN (test 2):", contracts.syntheticWGuitkn);
         console.log("\nCollateral Warp Routes:");
         console.log("  FTEST (scenario 2):", contracts.collateralFtest);
         console.log("  WADA (scenario 5):", contracts.collateralWada);
@@ -188,6 +309,12 @@ contract DeployFujiWarp is Script {
             string.concat(
                 "FUJI_SYNTHETIC_WADA=",
                 vm.toString(contracts.syntheticWAda)
+            )
+        );
+        console.log(
+            string.concat(
+                "FUJI_SYNTHETIC_WGUITKN=",
+                vm.toString(contracts.syntheticWGuitkn)
             )
         );
         console.log(
@@ -414,5 +541,116 @@ contract DeployFujiWarp is Script {
         console.log("Pre-deposited 100K TokenA to collateral contract");
 
         vm.stopBroadcast();
+    }
+
+    /**
+     * @notice Deploy only the wGUITKN synthetic for Test 2
+     * @dev Use this if you already have other contracts deployed
+     */
+    function deployWGuitknSynthetic() external {
+        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        string memory name = vm.envOr(
+            "SYNTHETIC_WGUITKN_NAME",
+            string("Wrapped GUITKN")
+        );
+        string memory symbol = vm.envOr(
+            "SYNTHETIC_WGUITKN_SYMBOL",
+            string("wGUITKN")
+        );
+        uint8 decimals = uint8(
+            vm.envOr("SYNTHETIC_WGUITKN_DECIMALS", uint256(6))
+        );
+
+        uint256 scale = decimals < 18 ? 10 ** (18 - decimals) : 1;
+
+        console.log("Deploying wGUITKN Synthetic");
+        console.log("  Decimals:", decimals);
+        console.log("  Scale:", scale);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        address syntheticWGuitkn = _deploySynthetic(
+            decimals,
+            scale,
+            name,
+            symbol,
+            deployer
+        );
+
+        vm.stopBroadcast();
+
+        console.log("wGUITKN Synthetic deployed:", syntheticWGuitkn);
+        console.log(
+            string.concat(
+                "FUJI_SYNTHETIC_WGUITKN=",
+                vm.toString(syntheticWGuitkn)
+            )
+        );
+    }
+
+    /**
+     * @notice Enroll routers for Test 2: Cardano Collateral <-> Fuji Synthetic wGUITKN
+     * @dev Requires env vars:
+     *      - FUJI_SYNTHETIC_WGUITKN: Fuji wGUITKN synthetic address
+     *      - CARDANO_COLLATERAL_GUITKN: Cardano collateral address (H256 format)
+     */
+    function enrollTest2Router() external {
+        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+
+        address syntheticWGuitkn = vm.envAddress("FUJI_SYNTHETIC_WGUITKN");
+        bytes32 cardanoCollateralGuitkn = vm.envBytes32(
+            "CARDANO_COLLATERAL_GUITKN"
+        );
+
+        console.log("Enrolling Test 2 routers:");
+        console.log("  Fuji wGUITKN Synthetic:", syntheticWGuitkn);
+        console.log("  Cardano Collateral GUITKN:");
+        console.logBytes32(cardanoCollateralGuitkn);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        HypERC20(syntheticWGuitkn).enrollRemoteRouter(
+            CARDANO_DOMAIN,
+            cardanoCollateralGuitkn
+        );
+
+        vm.stopBroadcast();
+
+        console.log(
+            "Enrolled Cardano collateral GUITKN as router for wGUITKN synthetic"
+        );
+    }
+
+    /**
+     * @notice Enroll routers for Test 3: Cardano Synthetic <-> Fuji Collateral GUITKN
+     * @dev Requires env vars:
+     *      - FUJI_COLLATERAL_FTEST: Fuji GUITKN collateral address
+     *      - CARDANO_SYNTHETIC: Cardano synthetic address (H256 format)
+     */
+    function enrollTest3Router() external {
+        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+
+        address collateralFtest = vm.envAddress("FUJI_COLLATERAL_FTEST");
+        bytes32 cardanoSynthetic = vm.envBytes32("CARDANO_SYNTHETIC");
+
+        console.log("Enrolling Test 3 routers:");
+        console.log("  Fuji GUITKN Collateral:", collateralFtest);
+        console.log("  Cardano Synthetic:");
+        console.logBytes32(cardanoSynthetic);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        HypERC20Collateral(collateralFtest).enrollRemoteRouter(
+            CARDANO_DOMAIN,
+            cardanoSynthetic
+        );
+
+        vm.stopBroadcast();
+
+        console.log(
+            "Enrolled Cardano synthetic as router for GUITKN collateral"
+        );
     }
 }
