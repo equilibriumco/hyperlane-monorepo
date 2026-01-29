@@ -198,6 +198,21 @@ async fn deploy(
         _ => decimals.ok_or_else(|| anyhow!("--decimals required for collateral/synthetic type"))?,
     };
 
+    // Cardano native token amounts are limited to i64 (~9.2×10^18).
+    // With decimals > 6, large transfer amounts can overflow when scaled.
+    // For example, with 18 decimals, transferring just 10 tokens = 10×10^18 > i64::MAX.
+    // We enforce a maximum of 6 decimals to prevent overflow issues.
+    const MAX_CARDANO_DECIMALS: u8 = 6;
+    if decimals > MAX_CARDANO_DECIMALS {
+        return Err(anyhow!(
+            "Cardano warp routes support a maximum of {} decimals (got {}). \
+             Cardano native token amounts are limited to i64, and higher decimal \
+             values can cause overflow during token transfers.",
+            MAX_CARDANO_DECIMALS,
+            decimals
+        ));
+    }
+
     let type_str = match token_type {
         TokenType::Native => "Native (ADA)",
         TokenType::Collateral => "Collateral (Lock existing tokens)",
@@ -1017,29 +1032,10 @@ async fn enroll_router(
     // Build and submit transaction
     println!("\n{}", "Step 5: Building transaction...".cyan());
 
-    // Get warp route script for the transaction
-    // The warp_route validator takes two params: mailbox_policy_id + state_nft_policy_id
-    let deployment = ctx.load_deployment_info()?;
-    let mailbox_policy_id = deployment
-        .mailbox
-        .as_ref()
-        .and_then(|m| m.state_nft_policy.as_ref())
-        .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-
-    // The policy_id we received is the state_nft_policy for this warp route
-    let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-    let state_nft_param_cbor = encode_script_hash_param(&policy_id)?;
-    let warp_route_applied = apply_validator_params(
-        &ctx.contracts_dir,
-        "warp_route",
-        "warp_route",
-        &[
-            &hex::encode(&mailbox_param_cbor),
-            &hex::encode(&state_nft_param_cbor),
-        ],
-    )?;
-    let warp_script = hex::decode(&warp_route_applied.compiled_code)
-        .with_context(|| "Invalid warp route script CBOR")?;
+    // Use the reference script UTXO for the warp route
+    // The reference script is at output index 1 of the same tx that created the warp route
+    let warp_ref_script = format!("{}#1", warp_utxo.tx_hash);
+    println!("  Reference Script: {}", warp_ref_script);
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let tx = tx_builder
@@ -1048,7 +1044,7 @@ async fn enroll_router(
             fee_input,
             collateral,
             &warp_utxo,
-            &warp_script,
+            Some(&warp_ref_script),
             &new_datum,
             &redeemer,
         )
@@ -1668,13 +1664,23 @@ async fn transfer(
         .find(|u| u.lovelace >= 10_000_000 && u.assets.is_empty())
         .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 10+ ADA without tokens)"))?;
 
+    // Calculate minimum lovelace needed for fee UTXO
+    // For Native transfers, need: amount + fee_estimate + min_change_buffer
+    // For other types, just need enough for fees
+    let fee_estimate = 3_000_000u64;
+    let min_change = 2_000_000u64;
+    let min_fee_utxo_lovelace = match &token_type {
+        WarpTokenTypeInfo::Native => amount + fee_estimate + min_change,
+        _ => 5_000_000,
+    };
+
     // Find fee UTXO that sorts AFTER the warp route UTXO
     // This ensures the warp route script is the first input and thus the sender
     // Inputs are sorted lexicographically by (tx_hash, output_index)
     let fee_utxo = payer_utxos
         .iter()
         .filter(|u| {
-            u.lovelace >= 5_000_000 &&
+            u.lovelace >= min_fee_utxo_lovelace &&
             u.assets.is_empty() &&
             (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
         })
@@ -1689,7 +1695,19 @@ async fn transfer(
                 _ => (&a.tx_hash, a.output_index).cmp(&(&b.tx_hash, b.output_index)),
             }
         })
-        .unwrap_or(collateral_utxo);
+        .ok_or_else(|| {
+            let needed_ada = min_fee_utxo_lovelace / 1_000_000;
+            anyhow!(
+                "No suitable fee UTXO found. Need at least {} ADA for this {} transfer.\n\
+                Hint: You may need to combine smaller UTXOs or use a smaller transfer amount.",
+                needed_ada,
+                match &token_type {
+                    WarpTokenTypeInfo::Native => "native",
+                    WarpTokenTypeInfo::Collateral { .. } => "collateral",
+                    WarpTokenTypeInfo::Synthetic { .. } => "synthetic",
+                }
+            )
+        })?;
 
     println!("  Fee UTXO: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
@@ -1762,19 +1780,27 @@ async fn transfer(
 
     // For Collateral transfers, add the locked tokens to the warp_route UTXO
     if let WarpTokenTypeInfo::Collateral { policy_id: token_pol, asset_name: token_asset } = &token_type {
+        println!("  Adding collateral tokens to warp output...");
+        println!("    Token Policy: {}", token_pol);
+        println!("    Token Asset (hex): {}", token_asset);
+
         let token_pol_bytes: [u8; 28] = hex::decode(token_pol)?.try_into()
             .map_err(|_| anyhow!("Invalid token policy"))?;
         let token_asset_bytes = hex::decode(token_asset)?;
+        println!("    Token Asset (decoded): {} bytes", token_asset_bytes.len());
 
         // Get current token amount in warp route (if any)
         let current_warp_tokens = warp_utxo.assets.iter()
             .find(|a| a.policy_id == *token_pol)
             .map(|a| a.quantity)
             .unwrap_or(0);
+        println!("    Current tokens in warp route: {}", current_warp_tokens);
+        println!("    Adding: {} tokens", current_warp_tokens + amount);
 
         warp_output = warp_output
-            .add_asset(Hash::new(token_pol_bytes), token_asset_bytes, current_warp_tokens + amount)
+            .add_asset(Hash::new(token_pol_bytes), token_asset_bytes.clone(), current_warp_tokens + amount)
             .map_err(|e| anyhow!("Failed to add tokens to warp route: {:?}", e))?;
+        println!("    Collateral tokens added successfully");
     }
 
     // Build mailbox continuation output
@@ -1787,7 +1813,6 @@ async fn transfer(
     let payer_pkh_bytes: [u8; 28] = payer_pkh.try_into()
         .map_err(|_| anyhow!("Invalid payer pkh length"))?;
 
-    let fee_estimate = 3_000_000u64;
     // For native transfers, the amount being locked in warp_route comes from the fee UTXO
     let native_transfer_amount = match &token_type {
         WarpTokenTypeInfo::Native => amount,
@@ -2553,9 +2578,18 @@ async fn deploy_minting_ref(
     let nft_asset_name: Vec<u8> = b"mint_ref".to_vec();
 
     // Calculate reference script UTXO ADA (needs to cover script size)
-    let ref_script_lovelace = 12_000_000u64; // 12 ADA for ~4KB script
+    let base_ref_script_lovelace = 12_000_000u64; // 12 ADA for ~4KB script
     let fee_estimate = 2_500_000u64;
-    let change = deploy_input.lovelace.saturating_sub(ref_script_lovelace).saturating_sub(fee_estimate);
+    let change = deploy_input.lovelace.saturating_sub(base_ref_script_lovelace).saturating_sub(fee_estimate);
+
+    // If change is below min UTXO, add it to the ref script output to conserve value
+    let min_utxo = 1_500_000u64;
+    let (ref_script_lovelace, actual_change) = if change >= min_utxo {
+        (base_ref_script_lovelace, change)
+    } else {
+        // Add the dust change to the ref script output
+        (base_ref_script_lovelace + change, 0)
+    };
 
     // Build reference script output at payer address with NFT and script attached
     let nft_policy_hash: [u8; 28] = hex::decode(nft_policy_id)?
@@ -2588,8 +2622,8 @@ async fn deploy_minting_ref(
         .network_id(if matches!(ctx.pallas_network(), Network::Testnet) { 0 } else { 1 });
 
     // Add change output if there's enough
-    if change >= 1_500_000 {
-        staging = staging.output(Output::new(payer_addr.clone(), change));
+    if actual_change >= min_utxo {
+        staging = staging.output(Output::new(payer_addr.clone(), actual_change));
     }
 
     // Add required signer

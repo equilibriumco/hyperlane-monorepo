@@ -406,6 +406,18 @@ async fn announce_validator(
     println!("  Storage Location: {}", storage_location);
     println!("  Action: {}", if is_update { "Updated" } else { "Created" });
 
+    // Update deployment_info.json with the parametrized validator_announce hash
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        if let Some(ref mut va) = deployment.validator_announce {
+            // Update with the parametrized hash (after applying mailbox_policy_id and domain)
+            va.hash = va_script_hash.clone();
+            va.address = va_address.clone();
+            va.initialized = true;
+            ctx.save_deployment_info(&deployment)?;
+            println!("{}", "✓ Deployment info updated with parametrized validator_announce hash".green());
+        }
+    }
+
     Ok(())
 }
 

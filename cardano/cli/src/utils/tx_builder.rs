@@ -1073,7 +1073,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         fee_input: &Utxo,
         collateral_utxo: &Utxo,
         warp_utxo: &Utxo,
-        warp_script_cbor: &[u8],
+        warp_ref_script: Option<&str>,
         new_datum: &[u8],
         redeemer: &[u8],
     ) -> Result<BuiltTransaction> {
@@ -1154,7 +1154,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
                     steps: 300_000_000,
                 }),
             )
-            .script(ScriptKind::PlutusV3, warp_script_cbor.to_vec())
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
@@ -1163,6 +1162,15 @@ impl<'a> HyperlaneTxBuilder<'a> {
             } else {
                 1
             });
+
+        // Add reference script or inline script
+        if let Some(ref_script) = warp_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid warp reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        }
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));
