@@ -1,8 +1,8 @@
 {
   "amount": 1000000,
-  "asset_name": "WARPTEST",
-  "asset_name_hex": "5741525054455354",
-  "mint_tx_hash": "fc9c88d5d7de7cb997c993eaf727104e39c404bbff0d40604851b5088e1f6013",
-  "policy_id": "908d51752e4c76fe1404a92b1276b1c1093dae0c7f302c5442f0177e",
-  "seed_utxo": "dbdd64a8b5d146c470b33dc41994f9b79f39d92205aeb9c7de7ef8eb7090834c#1"
+  "asset_name": "GUITKN",
+  "asset_name_hex": "475549544b4e",
+  "mint_tx_hash": "ae1955bb2bc6b20ab2cb6597b9be4a5e29f2ee512a7c29baabd1041326a94ff5",
+  "policy_id": "288e36e6e1d120fb7ecbb8c5a3de4e069ce5f02cc2dea15785af1b93",
+  "seed_utxo": "aa7e2450e3bee4619c2d316f51609d249af87cebbfae30cd9860319e5b47793b#0"
 }
