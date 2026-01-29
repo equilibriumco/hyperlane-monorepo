@@ -430,32 +430,6 @@ async fn finalize_warp_deployment(
     deploy_ctx.client.wait_for_tx(&warp_tx_hash, 120).await?;
     println!("  ✓ Warp route confirmed");
 
-    // Save deployment info
-    let warp_ref_script_utxo = format!("{}#1", warp_tx_hash);
-    let info_filename = format!("{}_warp_route.json", warp_type);
-    let warp_info_path = ctx.network_deployments_dir().join(&info_filename);
-
-    let mut warp_info = serde_json::json!({
-        "type": warp_type,
-        "warp_route": {
-            "script_hash": deploy_ctx.warp_route_applied.policy_id,
-            "nft_policy": deploy_ctx.warp_nft_applied.policy_id,
-            "address": deploy_ctx.warp_address,
-            "tx_hash": warp_tx_hash,
-            "reference_script_utxo": warp_ref_script_utxo,
-        },
-        "owner": deploy_ctx.owner_pkh,
-    });
-
-    // Merge extra info
-    if let (Some(base), Some(extra)) = (warp_info.as_object_mut(), extra_info.as_object()) {
-        for (k, v) in extra {
-            base.insert(k.clone(), v.clone());
-        }
-    }
-
-    std::fs::write(&warp_info_path, serde_json::to_string_pretty(&warp_info)?)?;
-
     // Update deployment_info.json
     if let Ok(mut deployment) = ctx.load_deployment_info() {
         let warp_deployment = WarpRouteDeployment {
