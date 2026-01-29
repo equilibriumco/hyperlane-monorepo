@@ -947,51 +947,363 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --warp-policy $WARP_POLICY
 ```
 
-### 7.8 Test Warp Route Transfer
+### 7.8 Test Warp Route Transfer (E2E Testing)
 
-#### Cardano → Remote Chain (Outbound)
+> **Prerequisites**: Before testing transfers, ensure the Hyperlane validator and relayer agents are running and properly configured. See [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements) for setup instructions, including how to extract required addresses from your deployment files.
+
+This section provides comprehensive end-to-end testing procedures for all warp route types. We cover three main test scenarios:
+
+| Test | Cardano Type | Remote Type | Description                                 |
+| ---- | ------------ | ----------- | ------------------------------------------- |
+| 1    | Native (ADA) | Synthetic   | Lock ADA on Cardano, mint wADA on remote    |
+| 2    | Native (ADA) | Synthetic   | Burn wADA on remote, release ADA on Cardano |
+| 3    | Synthetic    | Collateral  | Bidirectional synthetic token transfers     |
+
+#### Common Setup
+
+Set up environment variables for testing:
 
 ```bash
-# Transfer 10 ADA to an address on Fuji
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  warp transfer \
-  --warp-policy $WARP_POLICY \
-  --domain 43113 \
-  --recipient "0x000000000000000000000000YOUR_FUJI_ADDRESS_HERE" \
-  --amount 10000000  # Amount in lovelace (10 ADA = 10,000,000 lovelace)
+# CLI path
+CLI="./cli/target/release/hyperlane-cardano"
+
+# Cardano configuration
+export NETWORK="preview"
+export BLOCKFROST_API_KEY="your_blockfrost_api_key"
+export CARDANO_SIGNING_KEY="/path/to/payment.skey"
+
+# Remote chain configuration (Fuji example)
+export FUJI_RPC_URL="https://api.avax-test.network/ext/bc/C/rpc"
+export FUJI_SIGNER_KEY="0xyour_private_key"
+export FUJI_SIGNER_ADDRESS="0xYourAddress"
+
+# Domain IDs
+CARDANO_DOMAIN=2003       # Cardano Preview
+FUJI_DOMAIN=43113         # Avalanche Fuji
 ```
 
-**Parameters:**
+#### Get Cardano Recipient Address (H256 Format)
 
-- `--domain`: Destination chain domain ID
-- `--recipient`: Recipient address in H256 format (32 bytes)
-- `--amount`: Amount in smallest unit (lovelace for ADA, base units for tokens)
+For inbound transfers to Cardano, you need your address in H256 format:
 
-**Output:**
+```bash
+# 1. Get your wallet's bech32 address
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK utxo list
+# Example output: addr_test1vqfp9gpr8qqzp7x8h99cx8j90w0wvhcqnhuar4vggvxuezg4hvheh
+
+# 2. Extract the payment credential using cardano-cli
+cardano-cli address info --address addr_test1vqfp9gpr8qqzp7x8h99cx8j90w0wvhcqnhuar4vggvxuezg4hvheh
+# Output: { "base16": "601212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89", ... }
+
+# 3. Convert to H256 format:
+#    - Remove first byte (2 hex chars) = network/type indicator
+#    - Add "0x00000000" prefix (4 zero bytes for pubkey hash addresses)
+CARDANO_RECIPIENT="0x000000001212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"
+```
+
+---
+
+#### Test 1: Native Warp Route — Cardano → Remote (Outbound)
+
+This test locks ADA on Cardano and mints synthetic wADA on the remote chain.
+
+**Prerequisites:**
+
+- Native warp route deployed on Cardano (see section 7.2)
+- Synthetic warp route deployed on remote chain
+- Both routes enrolled with each other's router addresses
+- Relayer and validator agents running
+
+**Step 1: Load warp route configuration**
+
+```bash
+# Read deployment info
+NATIVE_WARP=$(cat deployments/$NETWORK/native_warp_route.json)
+WARP_POLICY=$(echo $NATIVE_WARP | jq -r '.warp_route.nft_policy')
+echo "Warp Policy: $WARP_POLICY"
+```
+
+**Step 2: Check your ADA balance**
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK utxo list
+```
+
+**Step 3: Execute the transfer**
+
+```bash
+# Transfer 10 ADA to Fuji
+# Note: Amount is in lovelace (1 ADA = 1,000,000 lovelace)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  warp transfer \
+  --warp-policy $WARP_POLICY \
+  --domain $FUJI_DOMAIN \
+  --recipient "0x000000000000000000000000$FUJI_SIGNER_ADDRESS" \
+  --amount 10000000
+```
+
+**Expected output:**
 
 ```
 Transfer initiated!
-  Transaction: 9876fedc...
+  Transaction: abc123...
   Message ID: 0x1234567890abcdef...
   Sender: 0x020000001212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89
-  Recipient: 0x000000000000000000000000your_fuji_address_here
+  Recipient: 0x0000000000000000000000001f26bfc6f52cbfad5c3fa8dabb71007b28bf4749
   Amount: 10000000 (10.000000 local units → 10.000000000000000000 remote units)
 ```
 
-#### Remote Chain → Cardano (Inbound)
+**Step 4: Monitor the relayer**
 
-Inbound transfers are processed automatically by the Hyperlane relayer. The relayer:
+```bash
+docker compose -f e2e-docker/docker-compose.yml logs -f relayer
+```
 
-1. Detects the message on the source chain
-2. Fetches validator signatures
-3. Builds and submits the Cardano transaction
-4. Depending on warp route type:
-   - **Native**: Releases ADA from the state UTXO to the recipient
-   - **Collateral**: Releases tokens from the state UTXO to the recipient
-   - **Synthetic**: Mints synthetic tokens to the recipient
+Look for:
+
+- `Dispatched message to destination` - Message indexed on Cardano
+- `Message successfully processed` - Delivery confirmed on Fuji
+
+**Step 5: Verify receipt on Fuji**
+
+```bash
+# Check wADA balance on Fuji (should show 10 * 10^18 = 10000000000000000000)
+cast call $FUJI_WARP_ROUTE "balanceOf(address)(uint256)" $FUJI_SIGNER_ADDRESS --rpc-url $FUJI_RPC_URL
+```
+
+---
+
+#### Test 2: Native Warp Route — Remote → Cardano (Inbound)
+
+This test burns synthetic wADA on the remote chain and releases ADA on Cardano.
+
+**Prerequisites:**
+
+- Completed Test 1 (have wADA tokens on Fuji)
+- Same infrastructure running
+
+**Step 1: Check wADA balance on Fuji**
+
+```bash
+# Get token info
+cast call $FUJI_WARP_ROUTE "symbol()(string)" --rpc-url $FUJI_RPC_URL
+cast call $FUJI_WARP_ROUTE "decimals()(uint8)" --rpc-url $FUJI_RPC_URL
+
+# Check balance (should have tokens from Test 1)
+cast call $FUJI_WARP_ROUTE "balanceOf(address)(uint256)" $FUJI_SIGNER_ADDRESS --rpc-url $FUJI_RPC_URL
+```
+
+**Step 2: Get interchain gas quote**
+
+```bash
+GAS_QUOTE=$(cast call $FUJI_WARP_ROUTE \
+  "quoteGasPayment(uint32)(uint256)" $CARDANO_DOMAIN \
+  --rpc-url $FUJI_RPC_URL)
+echo "Gas quote: $GAS_QUOTE wei ($(echo "scale=6; $GAS_QUOTE / 1000000000000000000" | bc) AVAX)"
+```
+
+**Step 3: Execute the transfer**
+
+```bash
+# Transfer 5 wADA back to Cardano
+# Amount is in wei (5 wADA with 18 decimals = 5 * 10^18)
+cast send $FUJI_WARP_ROUTE \
+  "transferRemote(uint32,bytes32,uint256)" \
+  $CARDANO_DOMAIN \
+  $CARDANO_RECIPIENT \
+  5000000000000000000 \
+  --value $GAS_QUOTE \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+**Step 4: Monitor the relayer**
+
+```bash
+docker compose -f e2e-docker/docker-compose.yml logs -f relayer
+```
+
+Look for:
+
+- `Fetching metadata for message` - Relayer detected the Fuji message
+- `Transaction is finalized` - Cardano transaction confirmed
+
+**Step 5: Verify receipt on Cardano**
+
+```bash
+# Check UTXOs - should see 5 ADA returned to your wallet
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK utxo list
+```
+
+---
+
+#### Test 3: Synthetic Warp Route — Bidirectional Testing
+
+This test demonstrates the synthetic warp route where Cardano mints/burns synthetic tokens backed by collateral locked on the remote chain.
+
+**Route configuration:**
+
+- **Fuji**: Collateral warp route (locks ERC20 tokens)
+- **Cardano**: Synthetic warp route (mints/burns synthetic tokens)
+
+**Prerequisites:**
+
+- Collateral warp route deployed on Fuji with an ERC20 token
+- Synthetic warp route deployed on Cardano (max 6 decimals)
+- Both routes enrolled with each other's router addresses
+- Minting policy reference script deployed and registered
+
+##### Test 3a: Remote → Cardano (Mint Synthetic)
+
+**Step 1: Load configuration**
+
+```bash
+# Read Cardano synthetic warp route config
+SYNTH_WARP=$(cat deployments/$NETWORK/synthetic_warp_route.json)
+SYNTH_POLICY=$(echo $SYNTH_WARP | jq -r '.synthetic_policy')
+SYNTH_DECIMALS=$(echo $SYNTH_WARP | jq -r '.decimals')
+echo "Synthetic Policy: $SYNTH_POLICY"
+echo "Decimals: $SYNTH_DECIMALS"
+
+# Fuji collateral warp route address
+FUJI_COLLATERAL_WARP="0xYourCollateralWarpRouteAddress"
+```
+
+**Step 2: Approve token spending on Fuji**
+
+```bash
+# Get the ERC20 token address from the collateral warp route
+TOKEN_ADDRESS=$(cast call $FUJI_COLLATERAL_WARP "wrappedToken()(address)" --rpc-url $FUJI_RPC_URL)
+
+# Approve the warp route to spend tokens
+cast send $TOKEN_ADDRESS \
+  "approve(address,uint256)" \
+  $FUJI_COLLATERAL_WARP \
+  1000000000000000000000 \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+**Step 3: Transfer tokens to Cardano**
+
+```bash
+# Get gas quote
+GAS_QUOTE=$(cast call $FUJI_COLLATERAL_WARP \
+  "quoteGasPayment(uint32)(uint256)" $CARDANO_DOMAIN \
+  --rpc-url $FUJI_RPC_URL)
+
+# Transfer 10 tokens to Cardano
+# Note: If Fuji token has 18 decimals and Cardano has 6, relayer handles conversion
+cast send $FUJI_COLLATERAL_WARP \
+  "transferRemote(uint32,bytes32,uint256)" \
+  $CARDANO_DOMAIN \
+  $CARDANO_RECIPIENT \
+  10000000000000000000 \
+  --value $GAS_QUOTE \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+**Step 4: Monitor and verify**
+
+```bash
+# Monitor relayer
+docker compose -f e2e-docker/docker-compose.yml logs -f relayer
+
+# After delivery, check synthetic tokens on Cardano
+# The amount should be 10,000,000 (10 tokens with 6 decimals)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK utxo list
+# Look for tokens with policy ID matching $SYNTH_POLICY
+```
+
+##### Test 3b: Cardano → Remote (Burn Synthetic)
+
+**Step 1: Load warp route configuration**
+
+```bash
+SYNTH_WARP=$(cat deployments/$NETWORK/synthetic_warp_route.json)
+WARP_POLICY=$(echo $SYNTH_WARP | jq -r '.warp_route.nft_policy')
+```
+
+**Step 2: Execute the transfer**
+
+```bash
+# Transfer 5 synthetic tokens back to Fuji
+# Amount is in Cardano units (5 tokens with 6 decimals = 5,000,000)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  warp transfer \
+  --warp-policy $WARP_POLICY \
+  --domain $FUJI_DOMAIN \
+  --recipient "0x000000000000000000000000$FUJI_SIGNER_ADDRESS" \
+  --amount 5000000
+```
+
+**Expected output:**
+
+```
+Transfer initiated!
+  Transaction: def456...
+  Message ID: 0xabcdef123456...
+  Amount: 5000000 (5.000000 local units → 5.000000000000000000 remote units)
+```
+
+**Step 3: Monitor and verify**
+
+```bash
+# Monitor relayer
+docker compose -f e2e-docker/docker-compose.yml logs -f relayer
+
+# After delivery, check collateral tokens released on Fuji
+cast call $TOKEN_ADDRESS "balanceOf(address)(uint256)" $FUJI_SIGNER_ADDRESS --rpc-url $FUJI_RPC_URL
+```
+
+---
+
+#### Troubleshooting E2E Tests
+
+**Common Issues:**
+
+| Error                         | Cause                                          | Solution                                                                      |
+| ----------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| `MissingScriptWitnessesUTXOW` | Reference scripts not found                    | Deploy minting ref script (for synthetic) and verify registry entries         |
+| `BabbageNonDisjointRefInputs` | Same UTXO used as reference and spending input | Check registry `--ref-script-asset` is correct (should be `726566` for "ref") |
+| `RecipientNotFound`           | Registry entry not indexed yet                 | Wait for Blockfrost to index the registration transaction                     |
+| `InsufficientBalance`         | Not enough tokens/ADA                          | Check UTXO balances before transfer                                           |
+| `NoRelayerActivity`           | Relayer not detecting messages                 | Check relayer logs, verify domain configuration                               |
+| `GasPaymentFailed`            | Insufficient AVAX for gas                      | Ensure adequate AVAX balance for `--value` parameter                          |
+
+**Checking Message Status:**
+
+1. **On Cardano (outbound):** Check that the dispatch transaction was confirmed and note the message ID
+2. **On Fuji (outbound delivery):** Use Hyperlane Explorer or query the mailbox contract
+3. **On relayer:** Look for message indexing and delivery logs
+
+**Verifying Relayer Configuration:**
+
+```bash
+# Check relayer is properly configured for both domains
+docker compose -f e2e-docker/docker-compose.yml exec relayer cat /config/relayer.json
+
+# Verify required fields:
+# - Cardano chain with correct mailbox, ISM, and warp route addresses
+# - Fuji chain with correct RPC URL and contract addresses
+# - Signing keys for both chains
+```
+
+**Decimal Handling:**
+
+Cardano warp routes support a maximum of 6 decimals due to the i64 token amount limit. When bridging to/from chains with higher decimals (e.g., 18 on EVM):
+
+- **Outbound (Cardano → EVM):** Amount is scaled up (e.g., 1,000,000 → 1,000,000,000,000,000,000)
+- **Inbound (EVM → Cardano):** Amount is scaled down (e.g., 1,000,000,000,000,000,000 → 1,000,000)
+
+Ensure your warp route is configured with correct `decimals` and `remote_decimals` values during deployment.
 
 ### 7.9 Complete Warp Route Deployment Script
 
@@ -1555,28 +1867,137 @@ aiken blueprint apply \
 
 ## Appendix: Agent Configuration Requirements
 
-When configuring the Hyperlane agents (validator and relayer) for Cardano, several critical fields must be set correctly to avoid runtime errors.
+When configuring the Hyperlane agents (validator and relayer) for Cardano, several environment variables must be set correctly. This section documents all required variables and how to extract them from your deployment.
 
-### Required Relayer Configuration Fields
+### Environment Variables Overview
 
-The relayer config must include the following Cardano-specific fields:
+#### Variables Used by Both Validator and Relayer
 
-```json
-{
-  "chains": {
-    "cardanopreview": {
-      "connection": {
-        "processedMessagesNftScriptCbor": "<CBOR-encoded processed_message_nft script>",
-        "mailboxReferenceScriptUtxo": "<tx_hash>#<index>",
-        "ismReferenceScriptUtxo": "<tx_hash>#<index>",
-        ...
-      }
-    }
-  }
-}
+| Variable                          | Description                           | Source                                    |
+| --------------------------------- | ------------------------------------- | ----------------------------------------- |
+| `BLOCKFROST_API_KEY`              | Blockfrost API key for Cardano access | Blockfrost dashboard                      |
+| `CARDANO_MAILBOX`                 | Mailbox identifier (H256 format)      | `0x00000000` + `.mailbox.stateNftPolicy`  |
+| `CARDANO_VALIDATOR_ANNOUNCE`      | Validator announce (H256 format)      | `0x00000000` + `.validator_announce.hash` |
+| `CARDANO_MERKLE_TREE_HOOK`        | Merkle tree hook (H256 format)        | `0x00000000` + `.mailbox.hash`            |
+| `CARDANO_ISM`                     | ISM identifier (H256 format)          | `0x00000000` + `.ism.stateNftPolicy`      |
+| `CARDANO_MAILBOX_POLICY_ID`       | Mailbox state NFT policy              | `.mailbox.stateNftPolicy`                 |
+| `CARDANO_MAILBOX_SCRIPT_HASH`     | Mailbox validator script hash         | `.mailbox.hash`                           |
+| `CARDANO_MAILBOX_REF_UTXO`        | Mailbox reference script UTXO         | `.mailbox.referenceScriptUtxo`            |
+| `CARDANO_ISM_SCRIPT_HASH`         | ISM validator script hash             | `.ism.hash`                               |
+| `CARDANO_ISM_STATE_NFT_POLICY_ID` | ISM state NFT policy                  | `.ism.stateNftPolicy`                     |
+| `CARDANO_ISM_REF_UTXO`            | ISM reference script UTXO             | `.ism.referenceScriptUtxo`                |
+| `CARDANO_REGISTRY_POLICY_ID`      | Registry state NFT policy             | `.registry.stateNftPolicy`                |
+| `CARDANO_PROCESSED_MSG_POLICY_ID` | Processed messages NFT policy         | `.mailbox.appliedParameters[0].value`     |
+| `CARDANO_VA_POLICY_ID`            | Validator announce policy ID          | `.validator_announce.hash`                |
+| `CARDANO_INDEX_FROM`              | Block height to start indexing        | See note below                            |
+
+#### Validator-Only Variables
+
+| Variable                | Description                                 |
+| ----------------------- | ------------------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | AWS credentials for S3 checkpoint storage   |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials for S3 checkpoint storage   |
+| `AWS_REGION`            | AWS region for S3 bucket                    |
+| `AWS_S3_BUCKET`         | S3 bucket name for checkpoints              |
+| `CARDANO_VALIDATOR_KEY` | ECDSA secp256k1 key for signing checkpoints |
+
+#### Relayer-Only Variables
+
+| Variable                                | Description                                  |
+| --------------------------------------- | -------------------------------------------- |
+| `CARDANO_SIGNER_KEY`                    | Ed25519 key for Cardano transactions         |
+| `CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR` | CBOR-encoded processed message NFT script    |
+| `FUJI_*`                                | Fuji chain configuration (see Fuji appendix) |
+
+---
+
+### Extracting Variables from deployment_info.json
+
+After deploying Cardano contracts, extract the required values:
+
+```bash
+cd cardano/deployments/preview
+
+# H256 Contract Addresses (with 0x00000000 prefix)
+export CARDANO_MAILBOX=0x00000000$(jq -r '.mailbox.stateNftPolicy' deployment_info.json)
+export CARDANO_VALIDATOR_ANNOUNCE=0x00000000$(jq -r '.validator_announce.hash' deployment_info.json)
+export CARDANO_MERKLE_TREE_HOOK=0x00000000$(jq -r '.mailbox.hash' deployment_info.json)
+export CARDANO_ISM=0x00000000$(jq -r '.ism.stateNftPolicy' deployment_info.json)
+
+# Policy IDs and Script Hashes
+export CARDANO_MAILBOX_POLICY_ID=$(jq -r '.mailbox.stateNftPolicy' deployment_info.json)
+export CARDANO_MAILBOX_SCRIPT_HASH=$(jq -r '.mailbox.hash' deployment_info.json)
+export CARDANO_ISM_SCRIPT_HASH=$(jq -r '.ism.hash' deployment_info.json)
+export CARDANO_ISM_STATE_NFT_POLICY_ID=$(jq -r '.ism.stateNftPolicy' deployment_info.json)
+export CARDANO_REGISTRY_POLICY_ID=$(jq -r '.registry.stateNftPolicy' deployment_info.json)
+export CARDANO_PROCESSED_MSG_POLICY_ID=$(jq -r '.mailbox.appliedParameters[0].value' deployment_info.json)
+export CARDANO_VA_POLICY_ID=$(jq -r '.validator_announce.hash' deployment_info.json)
+
+# Reference Script UTXOs
+export CARDANO_MAILBOX_REF_UTXO=$(jq -r '.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
+export CARDANO_ISM_REF_UTXO=$(jq -r '.ism.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
+
+# Processed Message NFT Script CBOR (for relayer)
+export CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR=$(jq -r '.cborHex' ../processed_message_nft_applied.plutus)
 ```
 
-#### Processed Messages NFT Script CBOR
+#### One-liner Export Script
+
+```bash
+cd cardano/deployments/preview
+eval $(jq -r '
+  "export CARDANO_MAILBOX=0x00000000" + .mailbox.stateNftPolicy,
+  "export CARDANO_VALIDATOR_ANNOUNCE=0x00000000" + .validator_announce.hash,
+  "export CARDANO_MERKLE_TREE_HOOK=0x00000000" + .mailbox.hash,
+  "export CARDANO_ISM=0x00000000" + .ism.stateNftPolicy,
+  "export CARDANO_MAILBOX_POLICY_ID=" + .mailbox.stateNftPolicy,
+  "export CARDANO_MAILBOX_SCRIPT_HASH=" + .mailbox.hash,
+  "export CARDANO_ISM_SCRIPT_HASH=" + .ism.hash,
+  "export CARDANO_ISM_STATE_NFT_POLICY_ID=" + .ism.stateNftPolicy,
+  "export CARDANO_REGISTRY_POLICY_ID=" + .registry.stateNftPolicy,
+  "export CARDANO_PROCESSED_MSG_POLICY_ID=" + .mailbox.appliedParameters[0].value,
+  "export CARDANO_VA_POLICY_ID=" + .validator_announce.hash,
+  "export CARDANO_MAILBOX_REF_UTXO=" + (.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"),
+  "export CARDANO_ISM_REF_UTXO=" + (.ism.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)")
+' deployment_info.json)
+
+# Also export the script CBOR
+export CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR=$(jq -r '.cborHex' processed_message_nft_applied.plutus)
+```
+
+---
+
+### CARDANO_INDEX_FROM Configuration
+
+**Critical**: The `CARDANO_INDEX_FROM` setting must be a **block height**, not a slot number.
+
+```bash
+# WRONG - This is a slot number (will cause indexing to skip messages)
+CARDANO_INDEX_FROM=101311900
+
+# CORRECT - This is a block height
+CARDANO_INDEX_FROM=3936000
+```
+
+To find the correct block height for your mailbox initialization transaction:
+
+```bash
+# Get the block height (not slot) for the mailbox init transaction
+INIT_TX=$(jq -r '.mailbox.initTxHash' deployment_info.json)
+curl -s -H "project_id: $BLOCKFROST_API_KEY" \
+  "https://cardano-preview.blockfrost.io/api/v0/txs/$INIT_TX" \
+  | jq '.block_height'
+```
+
+**Symptoms of incorrect CARDANO_INDEX_FROM**:
+
+- Validator logs show: "Current indexing snapshot's block height is less than or equal to the lowest block height, not indexing anything below"
+- Validator doesn't sign checkpoints for existing messages
+- Relayer shows "Operation not ready" indefinitely
+
+---
+
+### Processed Messages NFT Script CBOR
 
 **Critical**: The `processedMessagesNftScriptCbor` field is **required** for the Fuji → Cardano direction. Without it, the relayer cannot mint the processed message NFT, and message processing will fail with a Plutus validation error.
 
@@ -1593,32 +2014,7 @@ Or from deployment_info.json if your CLI version exports it:
 cat deployments/$NETWORK/deployment_info.json | jq -r '.processed_message_nft.cbor'
 ```
 
-### Indexing Configuration
-
-**Critical**: The `CARDANO_INDEX_FROM` / `index.from` setting must be a **block height**, not a slot number.
-
-```bash
-# WRONG - This is a slot number (will cause indexing to skip messages)
-CARDANO_INDEX_FROM=101311900
-
-# CORRECT - This is a block height
-CARDANO_INDEX_FROM=3936000
-```
-
-To find the correct block height for a transaction:
-
-```bash
-# Get the block height (not slot) for a transaction
-curl -s -H "project_id: $BLOCKFROST_API_KEY" \
-  "https://cardano-preview.blockfrost.io/api/v0/txs/<tx_hash>" \
-  | jq '.block_height'
-```
-
-**Symptoms of incorrect INDEX_FROM**:
-
-- Validator logs show: "Current indexing snapshot's block height is less than or equal to the lowest block height, not indexing anything below"
-- Validator doesn't sign checkpoints for existing messages
-- Relayer shows "Operation not ready" indefinitely
+---
 
 ### Validator Announcement S3 URL Format
 
@@ -2021,565 +2417,768 @@ The following scenarios test all warp route types bidirectionally:
 | 5        | Fuji → Cardano | Native     | Burn wADA, release ADA on Cardano        |
 | 6        | Fuji → Cardano | Collateral | Burn wCTEST, release WARPTEST on Cardano |
 
+> **Note**: For detailed step-by-step E2E testing instructions with Avalanche Fuji, see [Appendix: Fuji (Avalanche Testnet) Deployment Guide](#appendix-fuji-avalanche-testnet-deployment-guide).
+
 ---
 
-## E2E Warp Route Testing Guide
+## Appendix: Fuji (Avalanche Testnet) Deployment Guide
 
-This section provides detailed step-by-step instructions for deploying and testing warp routes between Cardano Preview and Avalanche Fuji testnet.
+This appendix provides step-by-step instructions for deploying Hyperlane warp route infrastructure on Avalanche Fuji testnet for E2E testing with Cardano.
 
 ### Prerequisites
 
-#### Environment Setup
+#### 1. Install Foundry
 
 ```bash
-# Set up environment variables
-export NETWORK="preview"
-export BLOCKFROST_API_KEY="your_blockfrost_api_key"
-export CARDANO_SIGNING_KEY="./keys/payment.skey"
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+```
 
-# Fuji configuration
+#### 2. Get Fuji Test AVAX
+
+- Use the [Avalanche Fuji Faucet](https://faucet.avax.network/) to get test AVAX
+- You'll need at least 1 AVAX for deployments
+
+#### 3. Set Up Base Environment Variables
+
+Create a `.env` file or export these variables. These are required for all subsequent steps:
+
+```bash
+# ============================================================
+# BASE CONFIGURATION (Required for all steps)
+# ============================================================
+
+# Fuji RPC endpoint
 export FUJI_RPC_URL="https://api.avax-test.network/ext/bc/C/rpc"
-export FUJI_SIGNER_KEY="0x..."  # Your Fuji private key
+
+# Your Fuji private key (with 0x prefix) - must have AVAX for gas
+export FUJI_SIGNER_KEY="0x..."
+
+# Fuji Hyperlane infrastructure (already deployed on Fuji testnet)
+export FUJI_MAILBOX="0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0"
 
 # Domain IDs
-export CARDANO_DOMAIN=2003
-export FUJI_DOMAIN=43113
-
-# CLI alias
-CLI="./cli/target/release/hyperlane-cardano"
+export CARDANO_DOMAIN=2003  # Cardano Preview testnet
+export FUJI_DOMAIN=43113    # Avalanche Fuji testnet
 ```
 
-#### Required Tools
+### Deployment Flow Overview
+
+The deployment follows this order, with each step producing outputs needed by subsequent steps:
+
+```
+Step 1: Deploy ISM ──────────────────► FUJI_CARDANO_ISM
+                                              │
+Step 2: Deploy Warp Routes ──────────► FUJI_SYNTHETIC_*, FUJI_COLLATERAL_*, FUJI_*
+                                              │
+Step 3: Set ISM on Routes ◄──────────────────┘
+                                              │
+Step 4: Mint Test Tokens ◄───────────────────┘
+                                              │
+Step 5: Pre-deposit Collateral ◄─────────────┘
+                                              │
+Step 6: Enroll Cardano Routers ◄─────── CARDANO_NATIVE_ADA, CARDANO_COLLATERAL_*, etc.
+```
+
+---
+
+### Step 1: Deploy Cardano MultisigISM on Fuji
+
+The ISM (Interchain Security Module) validates messages coming from Cardano. It needs the Cardano validator's EVM address.
+
+#### Required Environment Variables
+
+| Variable            | Description                       | Example                                      |
+| ------------------- | --------------------------------- | -------------------------------------------- |
+| `FUJI_SIGNER_KEY`   | Private key for Fuji transactions | `0x...`                                      |
+| `CARDANO_VALIDATOR` | Cardano validator's EVM address   | `0x0A923108968Cf8427693679eeE7b98340Fe038ce` |
+
+#### Optional Environment Variables
+
+| Variable                | Description                   | Default |
+| ----------------------- | ----------------------------- | ------- |
+| `CARDANO_ISM_THRESHOLD` | Number of validators required | `1`     |
+
+#### 1.1 Get Cardano Validator Address
+
+The validator address is derived from the validator's ECDSA private key (the same key used by the Cardano validator agent for checkpoint signing):
 
 ```bash
-# Cardano CLI
-$CLI --version
+# If you have the validator key from cardano/e2e-docker/.env
+CARDANO_VALIDATOR_KEY="0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764"
 
-# Foundry (for Fuji interactions)
-cast --version
-forge --version
-
-# jq (for JSON parsing)
-jq --version
+# Derive the EVM address
+export CARDANO_VALIDATOR=$(cast wallet address --private-key $CARDANO_VALIDATOR_KEY)
+echo "Cardano Validator Address: $CARDANO_VALIDATOR"
+# Output: 0x0A923108968Cf8427693679eeE7b98340Fe038ce
 ```
 
-### Step-by-Step: Native ADA Warp Route (Cardano → Fuji)
-
-This example deploys a Native ADA warp route paired with a Collateral warp route on Fuji.
-
-#### Step 1: Deploy Native Warp Route on Cardano
+#### 1.2 Deploy the ISM
 
 ```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp deploy \
-  --token-type native \
-  --decimals 6 \
-  --remote-decimals 18
-
-# Save the output values
-CARDANO_NATIVE_SCRIPT_HASH="<script_hash_from_output>"
-CARDANO_NATIVE_NFT_POLICY="<nft_policy_from_output>"
-CARDANO_NATIVE_H256="0x02000000${CARDANO_NATIVE_SCRIPT_HASH}"
-```
-
-**Expected output:**
-
-```
-Warp route deployed!
-  Type: Native
-  Script Hash: 0ea635a9db202792c36ceec3a6c9d4bea53a15eb481eb545b6976ddb
-  NFT Policy: fd52936316b21a7dafafe0c859da8d52fd49c56b8dfbea62ce1926e3
-  Address: addr_test1wq82vddfmvsz0ykrdnhv8fkf6jl22ws4adypad29k6tkmkc64j8ph
-  Reference Script UTXO: fc9ce993...#1
-  Hyperlane Address: 0x020000000ea635a9db202792c36ceec3a6c9d4bea53a15eb481eb545b6976ddb
-```
-
-#### Step 2: Register Warp Route in Cardano Registry
-
-```bash
-# Wait for transaction confirmation (~30 seconds)
-sleep 30
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  registry register \
-  --script-hash $CARDANO_NATIVE_SCRIPT_HASH \
-  --state-policy $CARDANO_NATIVE_NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $CARDANO_NATIVE_NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
-```
-
-#### Step 3: Deploy Collateral Warp Route on Fuji
-
-Create a Solidity script or use Forge to deploy:
-
-```bash
-# Using existing HypERC20Collateral deployment
-# Or deploy new one with:
 cd solidity
 
-# Deploy a test ERC20 (WADA) if needed
-forge script script/warp-e2e/DeployTestERC20.s.sol:DeployTestERC20 \
+# Ensure CARDANO_VALIDATOR is set
+echo "Deploying ISM with validator: $CARDANO_VALIDATOR"
+
+# Deploy
+forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
   --rpc-url $FUJI_RPC_URL \
   --broadcast \
   --private-key $FUJI_SIGNER_KEY
 
-# Deploy HypERC20Collateral
-forge script script/warp-e2e/DeployCollateral.s.sol:DeployCollateral \
-  --rpc-url $FUJI_RPC_URL \
-  --broadcast \
-  --private-key $FUJI_SIGNER_KEY
-
-# Save the deployed address
-FUJI_COLLATERAL_WADA="0x..."
+# ⚠️ IMPORTANT: Save the ISM address from the output
+export FUJI_CARDANO_ISM="0x..."  # Copy from "MultisigISM deployed:" line
 ```
 
-#### Step 4: Configure Fuji Collateral with Cardano MultisigISM
+---
+
+### Step 2: Deploy Fuji Warp Routes
+
+This deploys all the test ERC20 tokens and warp routes needed for E2E testing.
+
+#### Required Environment Variables
+
+| Variable          | Description                       | Example |
+| ----------------- | --------------------------------- | ------- |
+| `FUJI_SIGNER_KEY` | Private key for Fuji transactions | `0x...` |
+
+#### Optional Environment Variables for Token Customization
+
+You can customize token names, symbols, and decimals via environment variables:
+
+**Test ERC20 Tokens:**
+
+| Variable          | Description              | Default           |
+| ----------------- | ------------------------ | ----------------- |
+| `FTEST_NAME`      | Name for FTEST token     | `Fuji Test Token` |
+| `FTEST_SYMBOL`    | Symbol for FTEST token   | `FTEST`           |
+| `FTEST_DECIMALS`  | Decimals for FTEST token | `18`              |
+| `WADA_NAME`       | Name for WADA token      | `Wrapped ADA`     |
+| `WADA_SYMBOL`     | Symbol for WADA token    | `WADA`            |
+| `WADA_DECIMALS`   | Decimals for WADA token  | `18`              |
+| `TOKENA_NAME`     | Name for TokenA          | `Token A`         |
+| `TOKENA_SYMBOL`   | Symbol for TokenA        | `TOKA`            |
+| `TOKENA_DECIMALS` | Decimals for TokenA      | `18`              |
+
+**Synthetic Warp Routes:**
+
+| Variable                  | Description                   | Default         |
+| ------------------------- | ----------------------------- | --------------- |
+| `WCTEST_NAME`             | Name for wCTEST synthetic     | `Wrapped CTEST` |
+| `WCTEST_SYMBOL`           | Symbol for wCTEST synthetic   | `wCTEST`        |
+| `WCTEST_DECIMALS`         | Decimals for wCTEST synthetic | `6`             |
+| `SYNTHETIC_WADA_NAME`     | Name for wADA synthetic       | `Wrapped ADA`   |
+| `SYNTHETIC_WADA_SYMBOL`   | Symbol for wADA synthetic     | `wADA`          |
+| `SYNTHETIC_WADA_DECIMALS` | Decimals for wADA synthetic   | `6`             |
+
+#### What Gets Deployed
+
+The script deploys these contracts (with default configurations shown):
+
+| Contract Type        | Name            | Symbol | Decimals | Purpose                           |
+| -------------------- | --------------- | ------ | -------- | --------------------------------- |
+| TestERC20            | Fuji Test Token | FTEST  | 18       | Test token for Fuji → Cardano     |
+| TestERC20            | Wrapped ADA     | WADA   | 18       | Wrapped ADA for collateral route  |
+| TestERC20            | Token A         | TOKA   | 18       | For collateral-collateral tests   |
+| HypERC20 (Synthetic) | Wrapped CTEST   | wCTEST | 6        | Receives from Cardano collateral  |
+| HypERC20 (Synthetic) | Wrapped ADA     | wADA   | 6        | Receives from Cardano native      |
+| HypERC20Collateral   | -               | -      | -        | Locks FTEST for Cardano synthetic |
+| HypERC20Collateral   | -               | -      | -        | Releases WADA for Cardano native  |
+| HypNative            | -               | -      | -        | Locks native AVAX                 |
+
+#### 2.1 Deploy Warp Routes (Default Configuration)
 
 ```bash
-# Set the ISM to use for Cardano messages
-# This ISM must have Cardano validators configured
-FUJI_CARDANO_ISM="0x65Cb8b60eB48E605ae6C9CFE2CF1dcBbf8d0F795"
+cd solidity
 
-cast send $FUJI_COLLATERAL_WADA \
+forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+#### 2.1b Deploy Warp Routes (Custom Token Names)
+
+To deploy with custom token names, set the environment variables before running:
+
+```bash
+cd solidity
+
+# Example: Custom token names for a specific test scenario
+export FTEST_NAME="My Test Token"
+export FTEST_SYMBOL="MTT"
+export WCTEST_NAME="Wrapped My Test Token"
+export WCTEST_SYMBOL="wMTT"
+
+forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+#### 2.2 Save Output Addresses
+
+The script outputs environment variables at the end. **Copy and export all of them**:
+
+```bash
+# ⚠️ IMPORTANT: Export ALL addresses from the deployment output
+
+# Test ERC20 Tokens
+export FUJI_FTEST="0x..."           # Fuji Test Token
+export FUJI_WADA="0x..."            # Wrapped ADA ERC20
+export FUJI_TOKENA="0x..."          # Token A
+
+# Synthetic Warp Routes (mint tokens when receiving from Cardano)
+export FUJI_SYNTHETIC_WCTEST="0x..."   # Receives CTEST from Cardano, mints wCTEST
+export FUJI_SYNTHETIC_WADA="0x..."     # Receives ADA from Cardano, mints wADA
+
+# Collateral Warp Routes (lock/release tokens)
+export FUJI_COLLATERAL_FTEST="0x..."   # Locks FTEST, Cardano receives synthetic wFTEST
+export FUJI_COLLATERAL_WADA="0x..."    # Releases WADA when Cardano sends ADA
+export FUJI_COLLATERAL_TOKENA="0x..."  # For collateral-collateral tests
+
+# Native Warp Route
+export FUJI_NATIVE_AVAX="0x..."        # Locks native AVAX
+```
+
+---
+
+### Step 3: Set Cardano ISM on Warp Routes
+
+Configure the warp routes to use the Cardano ISM for validating inbound messages from Cardano.
+
+#### Required Environment Variables
+
+| Variable                | Description                       | Set In        |
+| ----------------------- | --------------------------------- | ------------- |
+| `FUJI_SIGNER_KEY`       | Private key for Fuji transactions | Prerequisites |
+| `FUJI_CARDANO_ISM`      | Cardano MultisigISM address       | Step 1        |
+| `FUJI_SYNTHETIC_WCTEST` | wCTEST synthetic route            | Step 2        |
+| `FUJI_SYNTHETIC_WADA`   | wADA synthetic route              | Step 2        |
+| `FUJI_COLLATERAL_FTEST` | FTEST collateral route            | Step 2        |
+| `FUJI_COLLATERAL_WADA`  | WADA collateral route             | Step 2        |
+
+#### 3.1 Verify Variables Are Set
+
+```bash
+# Check all required variables are set
+echo "ISM: $FUJI_CARDANO_ISM"
+echo "Synthetic wCTEST: $FUJI_SYNTHETIC_WCTEST"
+echo "Synthetic wADA: $FUJI_SYNTHETIC_WADA"
+echo "Collateral FTEST: $FUJI_COLLATERAL_FTEST"
+echo "Collateral WADA: $FUJI_COLLATERAL_WADA"
+```
+
+#### 3.2 Set ISM on All Routes
+
+```bash
+cd solidity
+
+forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
+  --sig "setISMOnWarpRoutes()" \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+#### 3.3 Alternative: Set ISM on Single Route Using Cast
+
+```bash
+# Set ISM on a specific warp route manually
+cast send $FUJI_SYNTHETIC_WCTEST \
   "setInterchainSecurityModule(address)" \
   $FUJI_CARDANO_ISM \
   --rpc-url $FUJI_RPC_URL \
   --private-key $FUJI_SIGNER_KEY
 ```
 
-#### Step 5: Enroll Routers (Both Sides)
+---
 
-**On Cardano - Enroll Fuji Router:**
+### Step 4: Mint Test Tokens
+
+Mint test tokens to your wallet for testing transfers from Fuji to Cardano.
+
+#### Required Environment Variables
+
+| Variable          | Description                       | Set In        |
+| ----------------- | --------------------------------- | ------------- |
+| `FUJI_SIGNER_KEY` | Private key for Fuji transactions | Prerequisites |
+| `FUJI_FTEST`      | FTEST token address               | Step 2        |
+| `FUJI_WADA`       | WADA token address                | Step 2        |
+| `FUJI_TOKENA`     | TokenA address                    | Step 2        |
+
+#### 4.1 Mint Using Script
 
 ```bash
-# Convert Fuji address to H256 format (pad with zeros)
-FUJI_ROUTER_H256="0x000000000000000000000000${FUJI_COLLATERAL_WADA:2}"
+cd solidity
 
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp enroll-router \
-  --domain $FUJI_DOMAIN \
-  --router $FUJI_ROUTER_H256 \
-  --warp-policy $CARDANO_NATIVE_NFT_POLICY
-```
-
-**On Fuji - Enroll Cardano Router:**
-
-```bash
-# Cardano router is the H256 address
-cast send $FUJI_COLLATERAL_WADA \
-  "enrollRemoteRouter(uint32,bytes32)" \
-  $CARDANO_DOMAIN \
-  $CARDANO_NATIVE_H256 \
+forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+  --sig "mintTestTokens()" \
   --rpc-url $FUJI_RPC_URL \
+  --broadcast \
   --private-key $FUJI_SIGNER_KEY
 ```
 
-#### Step 6: Verify Router Enrollment
+This mints 1,000,000 tokens (with 18 decimals) of each test token to your wallet.
 
-**On Cardano:**
-
-```bash
-$CLI --network $NETWORK warp show --warp-policy $CARDANO_NATIVE_NFT_POLICY
-```
-
-**On Fuji:**
+#### 4.2 Alternative: Mint Using Cast
 
 ```bash
-# Check enrolled router for Cardano domain
-cast call $FUJI_COLLATERAL_WADA \
-  "routers(uint32)(bytes32)" \
-  $CARDANO_DOMAIN \
-  --rpc-url $FUJI_RPC_URL
-```
+# Mint 1000 FTEST to your wallet
+WALLET=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
 
-#### Step 7: Fund Cardano Warp Route (for Inbound Transfers)
-
-For Native routes, send ADA to the warp route state UTXO to enable inbound releases:
-
-```bash
-# Get the warp route address
-WARP_ROUTE_ADDR=$(cat deployments/$NETWORK/native_warp_route.json | jq -r '.address')
-
-# Send ADA using cardano-cli or your wallet
-# Minimum: enough to cover expected inbound transfers + MIN_UTXO
-```
-
-#### Step 8: Test Transfer (Cardano → Fuji)
-
-```bash
-# Get your Fuji wallet address
-FUJI_RECIPIENT=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
-
-# Convert to H256 format (pad with leading zeros)
-FUJI_RECIPIENT_H256="0x000000000000000000000000${FUJI_RECIPIENT:2}"
-
-# Transfer 2 ADA (2,000,000 lovelace)
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp transfer \
-  --warp-policy $CARDANO_NATIVE_NFT_POLICY \
-  --domain $FUJI_DOMAIN \
-  --recipient $FUJI_RECIPIENT_H256 \
-  --amount 2000000
-```
-
-**Expected output:**
-
-```
-Transfer initiated!
-  Transaction: b423193ce7a8aa9c92212da3d7dbad7fd1479915...
-  Message ID: 0x8bad1f4e4527338dc37b52a04cab7b18d1089daa...
-  Amount: 2000000 lovelace → 2000000000000000000 (2 WADA with 18 decimals)
-```
-
-#### Step 9: Monitor Relay and Verify
-
-```bash
-# Watch relayer logs for message processing
-docker logs -f hyperlane-relayer-cardano-fuji 2>&1 | grep -E "(message_id|Finalized|error)"
-
-# After relay completes, check WADA balance on Fuji
-cast call $FUJI_WADA_TOKEN \
-  "balanceOf(address)(uint256)" \
-  $FUJI_RECIPIENT \
-  --rpc-url $FUJI_RPC_URL
-
-# Check the Fuji transaction
-cast receipt $FUJI_TX_HASH --rpc-url $FUJI_RPC_URL
+cast send $FUJI_FTEST \
+  "mint(address,uint256)" \
+  $WALLET \
+  "1000000000000000000000" \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
 ```
 
 ---
 
-### Step-by-Step: Synthetic Warp Route (Fuji → Cardano)
+### Step 5: Pre-deposit Collateral (for Cardano → Fuji)
 
-This example deploys a Synthetic warp route on Cardano to receive tokens from Fuji.
+For collateral routes that **release** tokens (like WADA when receiving ADA from Cardano), you must pre-deposit tokens into the collateral contract.
 
-#### Step 1: Deploy Synthetic Warp Route on Cardano
+#### Required Environment Variables
+
+| Variable                 | Description                       | Set In        |
+| ------------------------ | --------------------------------- | ------------- |
+| `FUJI_SIGNER_KEY`        | Private key for Fuji transactions | Prerequisites |
+| `FUJI_WADA`              | WADA token address                | Step 2        |
+| `FUJI_TOKENA`            | TokenA address                    | Step 2        |
+| `FUJI_COLLATERAL_WADA`   | WADA collateral route             | Step 2        |
+| `FUJI_COLLATERAL_TOKENA` | TokenA collateral route           | Step 2        |
+
+#### 5.1 Pre-deposit Using Script
 
 ```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp deploy \
-  --token-type synthetic \
-  --decimals 18 \
-  --remote-decimals 18
+cd solidity
 
-# Save the output values
-CARDANO_SYNTHETIC_SCRIPT_HASH="<script_hash>"
-CARDANO_SYNTHETIC_NFT_POLICY="<nft_policy>"
-CARDANO_SYNTHETIC_MINTING_POLICY="<minting_policy>"
-CARDANO_SYNTHETIC_H256="0x02000000${CARDANO_SYNTHETIC_SCRIPT_HASH}"
+forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+  --sig "preDepositCollateral()" \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
 ```
 
-#### Step 2: Deploy Minting Policy Reference Script
+This deposits 100,000 tokens to each collateral contract.
 
-**Critical for inbound transfers** - the relayer needs this to mint synthetic tokens:
+#### 5.2 Alternative: Pre-deposit Using Cast
 
 ```bash
-sleep 30
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp deploy-minting-ref \
-  --warp-policy $CARDANO_SYNTHETIC_NFT_POLICY
+# Transfer WADA directly to collateral contract
+cast send $FUJI_WADA \
+  "transfer(address,uint256)" \
+  $FUJI_COLLATERAL_WADA \
+  "100000000000000000000000" \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
 ```
 
-#### Step 3: Register in Cardano Registry
+---
+
+### Step 6: Enroll Cardano Routers on Fuji
+
+After deploying Cardano warp routes, enroll them as remote routers on the Fuji warp routes.
+
+#### Required Environment Variables
+
+| Variable                   | Description                       | Format                     |
+| -------------------------- | --------------------------------- | -------------------------- |
+| `FUJI_SIGNER_KEY`          | Private key for Fuji transactions | `0x...`                    |
+| `FUJI_SYNTHETIC_WCTEST`    | Fuji wCTEST synthetic             | `0x...` (20 bytes)         |
+| `FUJI_SYNTHETIC_WADA`      | Fuji wADA synthetic               | `0x...` (20 bytes)         |
+| `FUJI_COLLATERAL_FTEST`    | Fuji FTEST collateral             | `0x...` (20 bytes)         |
+| `FUJI_COLLATERAL_WADA`     | Fuji WADA collateral              | `0x...` (20 bytes)         |
+| `CARDANO_NATIVE_ADA`       | Cardano Native ADA route          | `0x02000000...` (32 bytes) |
+| `CARDANO_COLLATERAL_CTEST` | Cardano Collateral CTEST route    | `0x02000000...` (32 bytes) |
+| `CARDANO_SYNTHETIC_FTEST`  | Cardano Synthetic FTEST route     | `0x02000000...` (32 bytes) |
+
+#### Optional Environment Variables
+
+| Variable         | Description       | Default          |
+| ---------------- | ----------------- | ---------------- |
+| `CARDANO_DOMAIN` | Cardano domain ID | `2003` (Preview) |
+
+#### 6.1 Get Cardano Warp Route Addresses
+
+From your Cardano deployment, get the script hashes and convert to H256 format:
 
 ```bash
-sleep 30
+# Cardano addresses use H256 format: 0x02000000 + 28-byte script hash
+# The "02000000" prefix indicates a script address
 
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  registry register \
-  --script-hash $CARDANO_SYNTHETIC_SCRIPT_HASH \
-  --state-policy $CARDANO_SYNTHETIC_NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $CARDANO_SYNTHETIC_NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
+# Example: From Cardano CLI output or deployment artifacts
+# If warp show --warp-policy returns script hash: 0ea635a9db202792c36ceec3a6c9d4bea53a15eb481eb545b6976ddb
+
+# Native ADA warp route
+export CARDANO_NATIVE_ADA="0x020000000ea635a9db202792c36ceec3a6c9d4bea53a15eb481eb545b6976ddb"
+
+# Collateral CTEST warp route (for bridging Cardano native tokens)
+export CARDANO_COLLATERAL_CTEST="0x02000000b72f2aeeddc9d0203429ecdb0fb1d65129592a9da62757a6bee7e472"
+
+# Synthetic wFTEST warp route (receives FTEST from Fuji)
+export CARDANO_SYNTHETIC_FTEST="0x02000000503a80b8f25f64f5375f7b1cac6e862dd333ec3dace7dc9544e9040c"
 ```
 
-#### Step 4: Deploy/Configure Collateral on Fuji
+> **Tip**: You can find script hashes in `cardano/deployments/preview/*.json` files or by running `hyperlane-cardano warp show --warp-policy <NFT_POLICY>`.
 
-Use an existing Fuji collateral contract or deploy a new one:
+#### 6.2 Run Enrollment Script
 
 ```bash
-# Example: Using existing FTEST collateral
-FUJI_COLLATERAL_FTEST="0xa09d37502eD9ae021aA97268E383ad2791330C7b"
+cd solidity
 
-# Enroll Cardano synthetic route as remote router
-cast send $FUJI_COLLATERAL_FTEST \
+# Verify Cardano addresses are set
+echo "Cardano Native ADA: $CARDANO_NATIVE_ADA"
+echo "Cardano Collateral CTEST: $CARDANO_COLLATERAL_CTEST"
+echo "Cardano Synthetic FTEST: $CARDANO_SYNTHETIC_FTEST"
+
+forge script script/warp-e2e/EnrollCardanoRouters.s.sol:EnrollCardanoRouters \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+#### 6.3 Alternative: Enroll Single Router
+
+To enroll a single Cardano router on a specific Fuji warp route:
+
+```bash
+# Set the specific route pair
+export FUJI_WARP_ROUTE="$FUJI_SYNTHETIC_WADA"  # Fuji route to configure
+export CARDANO_ROUTER="$CARDANO_NATIVE_ADA"    # Cardano route to enroll
+
+forge script script/warp-e2e/EnrollCardanoRouters.s.sol:EnrollCardanoRouters \
+  --sig "enrollSingle()" \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
+```
+
+#### 6.4 Alternative: Enroll Using Cast
+
+```bash
+# Enroll Cardano native ADA on Fuji wADA synthetic
+cast send $FUJI_SYNTHETIC_WADA \
   "enrollRemoteRouter(uint32,bytes32)" \
   $CARDANO_DOMAIN \
-  $CARDANO_SYNTHETIC_H256 \
+  $CARDANO_NATIVE_ADA \
   --rpc-url $FUJI_RPC_URL \
   --private-key $FUJI_SIGNER_KEY
 ```
 
-#### Step 5: Enroll Fuji Router on Cardano
+---
+
+### Step 7: Verify Deployments
+
+#### Check ISM Configuration
 
 ```bash
-FUJI_COLLATERAL_H256="0x000000000000000000000000${FUJI_COLLATERAL_FTEST:2}"
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp enroll-router \
-  --domain $FUJI_DOMAIN \
-  --router $FUJI_COLLATERAL_H256 \
-  --warp-policy $CARDANO_SYNTHETIC_NFT_POLICY
+# Check ISM on a warp route (should return FUJI_CARDANO_ISM address)
+cast call $FUJI_SYNTHETIC_WCTEST \
+  "interchainSecurityModule()(address)" \
+  --rpc-url $FUJI_RPC_URL
 ```
 
-#### Step 6: Test Transfer (Fuji → Cardano)
+#### Check Enrolled Routers
 
 ```bash
-# Get Cardano recipient (your signer credential in H256 format)
-# Format: 0x01000000 + 28-byte payment credential
-CARDANO_RECIPIENT="0x010000001212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"
+# Check if Cardano router is enrolled (should return non-zero bytes32)
+cast call $FUJI_SYNTHETIC_WCTEST \
+  "routers(uint32)(bytes32)" \
+  $CARDANO_DOMAIN \
+  --rpc-url $FUJI_RPC_URL
 
-# Approve collateral to spend tokens
-cast send $FUJI_FTEST_TOKEN \
+# Expected output: 0x02000000... (Cardano warp route address)
+# If 0x0000...0000, enrollment failed or wasn't done
+```
+
+#### Check Token Balances
+
+```bash
+# Your wallet address
+WALLET=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
+
+# Check FTEST balance in your wallet
+cast call $FUJI_FTEST \
+  "balanceOf(address)(uint256)" \
+  $WALLET \
+  --rpc-url $FUJI_RPC_URL
+
+# Check WADA balance in collateral contract (for Cardano → Fuji releases)
+cast call $FUJI_WADA \
+  "balanceOf(address)(uint256)" \
+  $FUJI_COLLATERAL_WADA \
+  --rpc-url $FUJI_RPC_URL
+```
+
+---
+
+### Step 8: Test Transfer (Fuji → Cardano)
+
+> **Prerequisites**: Before testing transfers, ensure the Hyperlane validator and relayer agents are running and properly configured. See [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements) for setup instructions.
+
+#### Required Environment Variables
+
+| Variable                | Description                       |
+| ----------------------- | --------------------------------- |
+| `FUJI_SIGNER_KEY`       | Private key for Fuji transactions |
+| `FUJI_FTEST`            | FTEST token address               |
+| `FUJI_COLLATERAL_FTEST` | FTEST collateral warp route       |
+| `CARDANO_DOMAIN`        | Cardano domain ID (2003)          |
+
+#### 8.1 Approve Token Spending
+
+```bash
+# Approve FTEST collateral to spend your tokens
+cast send $FUJI_FTEST \
   "approve(address,uint256)" \
   $FUJI_COLLATERAL_FTEST \
-  "5000000000000000000" \
+  "1000000000000000000000" \
   --rpc-url $FUJI_RPC_URL \
   --private-key $FUJI_SIGNER_KEY
+```
 
-# Transfer 5 FTEST to Cardano
+#### 8.2 Prepare Cardano Recipient Address
+
+```bash
+# Cardano recipient in H256 format:
+# - Pubkey addresses: 0x01000000 + 28-byte payment credential
+# - Script addresses: 0x02000000 + 28-byte script hash
+
+# Example: From your Cardano wallet/deployment
+CARDANO_RECIPIENT="0x010000001212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"
+```
+
+#### 8.3 Initiate Transfer
+
+```bash
+# Transfer 5 FTEST (18 decimals) to Cardano
 cast send $FUJI_COLLATERAL_FTEST \
   "transferRemote(uint32,bytes32,uint256)" \
   $CARDANO_DOMAIN \
   $CARDANO_RECIPIENT \
   "5000000000000000000" \
-  --value 1wei \
   --rpc-url $FUJI_RPC_URL \
   --private-key $FUJI_SIGNER_KEY
+
+# Save the transaction hash for tracking
 ```
 
-#### Step 7: Verify on Cardano
+#### 8.4 Monitor the Transfer
 
 ```bash
-# Watch relayer logs
-docker logs -f hyperlane-relayer-cardano-fuji 2>&1 | grep -E "(message_id|Submitted|error)"
-
-# After relay, query your UTXOs for synthetic tokens
-$CLI --network $NETWORK utxo list --address $YOUR_CARDANO_ADDRESS
-
-# The synthetic token will have the minting policy ID as its policy
-# Asset name is derived from the origin domain and sender
+# Check Hyperlane Explorer or relayer logs for message delivery
+# The relayer will pick up the message and deliver it to Cardano
 ```
 
 ---
 
-### Recipient Address Formats
+### Complete Environment Variables Reference
 
-Understanding address formats is critical for successful transfers:
-
-#### Cardano → EVM (Fuji)
-
-The recipient must be an EVM address padded to 32 bytes:
-
-```bash
-# EVM address: 0x1f26bfC6f52CbFad5c3fA8dABb71007b28bf4749
-# H256 format: 0x0000000000000000000000001f26bfC6f52CbFad5c3fA8dABb71007b28bf4749
-#              ^^^^^^^^^^^^^^^^^^^^^^^^ 12 bytes of zeros
-#                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 20 byte address
-
-FUJI_ADDR="0x1f26bfC6f52CbFad5c3fA8dABb71007b28bf4749"
-FUJI_H256="0x000000000000000000000000${FUJI_ADDR:2}"
-```
-
-#### EVM → Cardano
-
-The recipient must be a Cardano credential in H256 format:
-
-```bash
-# For payment key credential (sends to base address):
-# Format: 0x01000000 + 28-byte payment credential hash
-CARDANO_RECIPIENT="0x010000001212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"
-
-# For script credential (sends to script address):
-# Format: 0x02000000 + 28-byte script hash
-CARDANO_RECIPIENT="0x02000000503a80b8f25f64f5375f7b1cac6e862dd333ec3dace7dc9544e9040c"
-```
-
-**Common Error**: Using Cardano credential format (`0x01000000...`) as recipient for Cardano → EVM transfers causes `TypeCasts: bytes32ToAddress overflow` on the EVM side.
-
----
-
-### Complete E2E Test Script
-
-Here's a complete script for testing Native ADA transfers:
+Here's a template with all environment variables organized by when they're set:
 
 ```bash
 #!/bin/bash
-set -e
+# Fuji E2E Deployment Environment Variables
 
-# Configuration
-export NETWORK="preview"
-export BLOCKFROST_API_KEY="your_api_key"
-export CARDANO_SIGNING_KEY="./keys/payment.skey"
+# ============================================================
+# PREREQUISITES (Set before starting)
+# ============================================================
 export FUJI_RPC_URL="https://api.avax-test.network/ext/bc/C/rpc"
-export FUJI_SIGNER_KEY="0x..."
+export FUJI_SIGNER_KEY="0x..."  # Your Fuji private key
 
-CLI="./cli/target/release/hyperlane-cardano"
-CARDANO_DOMAIN=2003
-FUJI_DOMAIN=43113
+# Fuji Hyperlane Infrastructure (pre-deployed)
+export FUJI_MAILBOX="0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0"
 
-echo "=== E2E Warp Route Test: Native ADA ==="
+# Domain IDs
+export CARDANO_DOMAIN=2003
+export FUJI_DOMAIN=43113
 
-# Step 1: Deploy Cardano Native warp route
-echo "Step 1: Deploying Native warp route on Cardano..."
-DEPLOY_OUTPUT=$(BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-  $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp deploy --token-type native --decimals 6 --remote-decimals 18 2>&1)
+# ============================================================
+# STEP 1: ISM Deployment Inputs
+# ============================================================
+export CARDANO_VALIDATOR="0x..."  # From: cast wallet address --private-key $CARDANO_VALIDATOR_KEY
 
-echo "$DEPLOY_OUTPUT"
-CARDANO_SCRIPT_HASH=$(echo "$DEPLOY_OUTPUT" | grep "Script Hash:" | awk '{print $3}')
-CARDANO_NFT_POLICY=$(echo "$DEPLOY_OUTPUT" | grep "NFT Policy:" | awk '{print $3}')
-CARDANO_H256="0x02000000${CARDANO_SCRIPT_HASH}"
+# Optional
+export CARDANO_ISM_THRESHOLD=1
 
-echo "Cardano Warp Route H256: $CARDANO_H256"
-sleep 30
+# ============================================================
+# STEP 1: ISM Deployment Outputs (set after deployment)
+# ============================================================
+export FUJI_CARDANO_ISM="0x..."
 
-# Step 2: Register in registry
-echo "Step 2: Registering in Cardano registry..."
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  registry register \
-  --script-hash $CARDANO_SCRIPT_HASH \
-  --state-policy $CARDANO_NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $CARDANO_NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
+# ============================================================
+# STEP 2: Warp Route Deployment Outputs (set after deployment)
+# ============================================================
+# Test Tokens
+export FUJI_FTEST="0x..."
+export FUJI_WADA="0x..."
+export FUJI_TOKENA="0x..."
 
-sleep 30
+# Synthetic Routes
+export FUJI_SYNTHETIC_WCTEST="0x..."
+export FUJI_SYNTHETIC_WADA="0x..."
 
-# Step 3: Enroll Fuji router on Cardano
-echo "Step 3: Enrolling Fuji router on Cardano..."
-FUJI_COLLATERAL="0x98EC10ec36465b562192e588C4313d5D4071Cba3"
-FUJI_ROUTER_H256="0x000000000000000000000000${FUJI_COLLATERAL:2}"
+# Collateral Routes
+export FUJI_COLLATERAL_FTEST="0x..."
+export FUJI_COLLATERAL_WADA="0x..."
+export FUJI_COLLATERAL_TOKENA="0x..."
 
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp enroll-router \
-  --domain $FUJI_DOMAIN \
-  --router $FUJI_ROUTER_H256 \
-  --warp-policy $CARDANO_NFT_POLICY
+# Native Route
+export FUJI_NATIVE_AVAX="0x..."
 
-sleep 30
-
-# Step 4: Enroll Cardano router on Fuji
-echo "Step 4: Enrolling Cardano router on Fuji..."
-cast send $FUJI_COLLATERAL \
-  "enrollRemoteRouter(uint32,bytes32)" \
-  $CARDANO_DOMAIN \
-  $CARDANO_H256 \
-  --rpc-url $FUJI_RPC_URL \
-  --private-key $FUJI_SIGNER_KEY
-
-sleep 10
-
-# Step 5: Verify enrollment
-echo "Step 5: Verifying router enrollment..."
-echo "Cardano side:"
-$CLI --network $NETWORK warp show --warp-policy $CARDANO_NFT_POLICY
-
-echo "Fuji side:"
-cast call $FUJI_COLLATERAL "routers(uint32)(bytes32)" $CARDANO_DOMAIN --rpc-url $FUJI_RPC_URL
-
-# Step 6: Test transfer
-echo "Step 6: Initiating test transfer (2 ADA)..."
-FUJI_RECIPIENT=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
-FUJI_RECIPIENT_H256="0x000000000000000000000000${FUJI_RECIPIENT:2}"
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  warp transfer \
-  --warp-policy $CARDANO_NFT_POLICY \
-  --domain $FUJI_DOMAIN \
-  --recipient $FUJI_RECIPIENT_H256 \
-  --amount 2000000
-
-echo ""
-echo "=== Transfer Initiated ==="
-echo "Monitor relayer logs: docker logs -f hyperlane-relayer-cardano-fuji"
-echo "Check Fuji balance after relay: cast call $FUJI_WADA 'balanceOf(address)' $FUJI_RECIPIENT --rpc-url $FUJI_RPC_URL"
+# ============================================================
+# STEP 6: Cardano Router Enrollment Inputs
+# (Get from Cardano deployment artifacts)
+# ============================================================
+export CARDANO_NATIVE_ADA="0x02000000..."
+export CARDANO_COLLATERAL_CTEST="0x02000000..."
+export CARDANO_SYNTHETIC_FTEST="0x02000000..."
 ```
 
 ---
 
-### Troubleshooting Warp Routes
+### Warp Route Pairing Reference
 
-#### "ValueNotConservedUTxO" Error
+| Scenario | Cardano Route    | Fuji Route       | Direction      | Token Flow               |
+| -------- | ---------------- | ---------------- | -------------- | ------------------------ |
+| 1        | Collateral CTEST | Synthetic wCTEST | Cardano → Fuji | Lock CTEST → Mint wCTEST |
+| 2        | Synthetic wFTEST | Collateral FTEST | Fuji → Cardano | Lock FTEST → Mint wFTEST |
+| 3        | Native ADA       | Synthetic wADA   | Cardano → Fuji | Lock ADA → Mint wADA     |
+| 4        | Synthetic wAVAX  | Native AVAX      | Fuji → Cardano | Lock AVAX → Mint wAVAX   |
+| 5        | Native ADA       | Collateral WADA  | Cardano → Fuji | Lock ADA → Release WADA  |
 
-**Cause**: Transaction inputs and outputs don't balance.
+---
 
-**Common scenarios:**
+### Customizing Token Deployment
 
-1. **Native/Collateral release with low warp route balance**: The warp route state UTXO must have enough assets to:
+The `DeployFujiWarp.s.sol` script supports customization via environment variables.
 
-   - Continue the warp route state (MIN_UTXO = 2 ADA + remaining tokens)
-   - Send to recipient (amount or MIN_UTXO, whichever is larger)
+#### Option 1: Environment Variables (Recommended)
 
-2. **Insufficient liquidity**: The state UTXO must have tokens/ADA before inbound releases work.
-
-**Solution**: Ensure the warp route state UTXO has sufficient funds before inbound transfers. For Native routes, this means enough ADA; for Collateral routes, enough of the locked token.
-
-#### "Router not enrolled" Error
-
-**Cause**: Attempting to transfer to a domain without an enrolled router.
-
-**Solution**:
+Set environment variables before running the deployment script:
 
 ```bash
-# Check enrolled routers
-warp routers --warp-policy $POLICY
+# Custom token names and symbols
+export FTEST_NAME="My Test Token"
+export FTEST_SYMBOL="MTT"
+export FTEST_DECIMALS=18
 
-# Enroll missing router
-warp enroll-router --domain $DOMAIN --router $REMOTE_ROUTER
+export WCTEST_NAME="Wrapped My Test Token"
+export WCTEST_SYMBOL="wMTT"
+export WCTEST_DECIMALS=6
+
+export SYNTHETIC_WADA_NAME="Synthetic ADA"
+export SYNTHETIC_WADA_SYMBOL="sADA"
+
+# Then deploy
+forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+  --rpc-url $FUJI_RPC_URL \
+  --broadcast \
+  --private-key $FUJI_SIGNER_KEY
 ```
 
-#### "Reference script not found" Error
+See [Step 2](#step-2-deploy-fuji-warp-routes) for the full list of customizable environment variables.
 
-**Cause**: Registry entry missing `reference_script_locator`.
+#### Option 2: Deploy Individual Contracts Manually
 
-**Solution**: Re-register with ref script locator:
+For complete control, deploy contracts individually using `forge create`:
 
 ```bash
-registry register \
-  --script-hash $HASH \
-  --state-policy $NFT_POLICY \
-  --ref-script-policy $NFT_POLICY \
-  --ref-script-asset 726566 \
-  ...
+# Deploy custom TestERC20
+forge create script/warp-e2e/TestERC20.sol:TestERC20 \
+  --constructor-args "My Token" "MTK" 18 \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
+
+# Deploy HypERC20 synthetic
+forge create contracts/token/HypERC20.sol:HypERC20 \
+  --constructor-args 6 1000000000000 $FUJI_MAILBOX \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
+
+# Initialize the synthetic
+WALLET=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
+cast send $DEPLOYED_ADDRESS \
+  "initialize(uint256,string,string,address,address,address)" \
+  0 "Wrapped Token" "wTKN" "0x0000000000000000000000000000000000000000" $FUJI_CARDANO_ISM $WALLET \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
 ```
 
-#### "Synthetic minting policy not found" Error
+---
 
-**Cause**: Minting reference script not deployed for synthetic route.
+### Troubleshooting Fuji Deployments
 
-**Solution**:
+#### "Environment variable not set" Error
 
 ```bash
-warp deploy-minting-ref --warp-policy $WARP_POLICY
+# Check which variables are missing
+env | grep -E "^FUJI_|^CARDANO_"
+
+# Make sure to export (not just set) variables
+export FUJI_CARDANO_ISM="0x..."  # ✓ Correct
+FUJI_CARDANO_ISM="0x..."         # ✗ Won't be available to forge
 ```
 
-#### Decimal Mismatch
+#### "Execution reverted" on Transfer
 
-**Symptoms**: Receiving wrong token amounts on destination chain.
+1. **Check ISM is set correctly:**
 
-**Solution**: Verify decimals match:
+   ```bash
+   cast call $FUJI_SYNTHETIC_WCTEST "interchainSecurityModule()(address)" --rpc-url $FUJI_RPC_URL
+   # Should return $FUJI_CARDANO_ISM
+   ```
+
+2. **Verify router enrollment:**
+
+   ```bash
+   cast call $FUJI_SYNTHETIC_WCTEST "routers(uint32)(bytes32)" $CARDANO_DOMAIN --rpc-url $FUJI_RPC_URL
+   # Should return non-zero (Cardano address)
+   ```
+
+3. **Ensure token approval for collateral routes:**
+   ```bash
+   WALLET=$(cast wallet address --private-key $FUJI_SIGNER_KEY)
+   cast call $FUJI_FTEST "allowance(address,address)(uint256)" $WALLET $FUJI_COLLATERAL_FTEST --rpc-url $FUJI_RPC_URL
+   ```
+
+#### "Router not enrolled"
 
 ```bash
-# Check Cardano warp route config
-warp show --warp-policy $POLICY
+# Check current enrolled router
+cast call $FUJI_WARP_ROUTE "routers(uint32)(bytes32)" $CARDANO_DOMAIN --rpc-url $FUJI_RPC_URL
 
-# Ensure remote_decimals matches destination chain's token decimals
+# If returns 0x000...000, enroll the router
+cast send $FUJI_WARP_ROUTE \
+  "enrollRemoteRouter(uint32,bytes32)" \
+  $CARDANO_DOMAIN \
+  $CARDANO_ROUTER \
+  --rpc-url $FUJI_RPC_URL \
+  --private-key $FUJI_SIGNER_KEY
 ```
+
+#### "Insufficient balance" in Collateral
+
+Pre-deposit more tokens to the collateral contract:
+
+```bash
+# First mint more tokens if needed
+cast send $FUJI_WADA "mint(address,uint256)" $WALLET "1000000000000000000000000" \
+  --rpc-url $FUJI_RPC_URL --private-key $FUJI_SIGNER_KEY
+
+# Then transfer to collateral
+cast send $FUJI_WADA "transfer(address,uint256)" $FUJI_COLLATERAL_WADA "500000000000000000000000" \
+  --rpc-url $FUJI_RPC_URL --private-key $FUJI_SIGNER_KEY
+```
+
+#### Message Not Delivered to Cardano
+
+1. Check the [Hyperlane Explorer](https://explorer.hyperlane.xyz/) for message status
+2. Verify Cardano relayer is running and configured for Fuji (domain 43113) as origin
+3. Check relayer logs: `docker logs -f hyperlane-relayer 2>&1 | grep -E "(message|error)"`
+4. Verify Cardano ISM has the correct Fuji validators configured
