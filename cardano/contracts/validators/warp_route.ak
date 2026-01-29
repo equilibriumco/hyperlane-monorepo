@@ -440,6 +440,11 @@ fn address_matches_bytes(addr: Address, recipient_bytes: ByteArray) -> Bool {
 /// - bytes 0-31: recipient (bytes32) - Cardano credential padded with 4 leading zeros
 /// - bytes 32-63: amount (uint256, big-endian) - wire format amount (remote_decimals)
 /// - bytes 64+: metadata (optional, ignored)
+///
+/// Note: The amount is a full 32-byte uint256. We read all 32 bytes to handle
+/// large wire amounts (e.g., 35 * 10^18 for 35 tokens with 18 decimal wire format).
+/// Aiken's Int type is arbitrary precision so it can handle the full uint256.
+/// The decimal conversion (e.g., dividing by 10^12) happens after parsing.
 fn decode_evm_token_message(body: ByteArray) -> Option<WarpTransferBody> {
   let len = bytearray.length(body)
   // Minimum 64 bytes: 32 recipient + 32 amount
@@ -451,9 +456,10 @@ fn decode_evm_token_message(body: ByteArray) -> Option<WarpTransferBody> {
     // We extract the last 28 bytes: bytes 4-31
     let recipient = bytearray.slice(body, 4, 31)
 
-    // Extract amount: bytes 32-63 (32 bytes uint256)
-    // We only use the last 8 bytes since Cardano amounts fit in u64
-    let amount_bytes = bytearray.slice(body, 56, 63)
+    // Extract amount: bytes 32-63 (full 32 bytes uint256, big-endian)
+    // We read all 32 bytes to handle large wire amounts that exceed u64
+    // (e.g., 35 * 10^18 > 2^64 for tokens using 18 decimal wire format)
+    let amount_bytes = bytearray.slice(body, 32, 63)
     let amount = bytes_to_int(amount_bytes)
 
     Some(WarpTransferBody { recipient, amount })
