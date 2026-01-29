@@ -332,24 +332,24 @@ impl HyperlaneTxBuilder {
             crate::types::RecipientType::TokenReceiver { .. } => {
                 info!("TokenReceiver recipient - using WarpRouteRedeemer::ReceiveTransfer");
 
-                // Log the original EVM TokenMessage for debugging
-                let token_msg = parse_evm_token_message(&msg.body)?;
+                // Log the original TokenMessage for debugging
+                let token_msg = parse_token_message(&msg.body)?;
                 info!(
-                    "EVM TokenMessage: recipient={}, wire_amount={}",
+                    "TokenMessage: recipient={}, wire_amount={}",
                     hex::encode(&token_msg.recipient),
                     token_msg.amount
                 );
 
                 // SECURITY: Pass the ORIGINAL message body to the warp route
                 // The on-chain contract will:
-                // 1. Parse the EVM format (32 bytes recipient + 32 bytes amount)
+                // 1. Parse the TokenMessage format (32 bytes recipient + 32 bytes amount)
                 // 2. Extract the 28-byte Cardano credential
                 // 3. Convert wire amount to local amount using remote_decimals/decimals
                 // This ensures the amount conversion is validated on-chain
                 let warp_redeemer = crate::types::WarpRouteRedeemer::ReceiveTransfer {
                     origin: msg.origin,
                     sender: msg.sender,
-                    body: msg.body.clone(), // Original EVM format body
+                    body: msg.body.clone(), // Original wire format body
                 };
                 encode_warp_route_redeemer(&warp_redeemer)?
             }
@@ -401,8 +401,8 @@ impl HyperlaneTxBuilder {
             }
             crate::types::RecipientType::TokenReceiver { .. } => {
                 // TokenReceiver (warp routes) need special continuation datum handling
-                // Parse EVM TokenMessage and convert amount for the WarpRouteDatum update
-                let token_msg = parse_evm_token_message(&msg.body)?;
+                // Parse TokenMessage and convert amount for the WarpRouteDatum update
+                let token_msg = parse_token_message(&msg.body)?;
                 let decimals = extract_warp_route_decimals(&recipient_utxo)?;
 
                 // Convert wire amount to local amount using both decimal values
@@ -502,8 +502,8 @@ impl HyperlaneTxBuilder {
         ) {
             info!("TokenReceiver - preparing release from warp route UTXO");
 
-            // Parse EVM TokenMessage format: recipient (32 bytes) || amount (32 bytes uint256)
-            let token_msg = parse_evm_token_message(&msg.body)?;
+            // Parse TokenMessage format: recipient (32 bytes) || amount (32 bytes uint256)
+            let token_msg = parse_token_message(&msg.body)?;
 
             // Convert from wire format to local token decimals
             let decimals = extract_warp_route_decimals(&recipient_utxo)?;
@@ -1738,7 +1738,7 @@ fn credential_to_address(
 
     // Create a payment-only address (Type 6 address: payment key hash, no staking)
     // The credential could be either a pubkey hash or script hash
-    // For recipients from EVM TokenMessage, it's typically a pubkey hash (0x00 prefix)
+    // For recipients from TokenMessage, it's typically a pubkey hash (0x00 prefix)
     // or a script hash (0x01 prefix)
     // Cardano addresses format: [header_byte] [28-byte payment credential] [optional 28-byte staking credential]
     // Header byte for Type 6 (enterprise address): 0110_XXXX where XXXX = network tag
@@ -3279,20 +3279,20 @@ fn build_warp_transfer_body(recipient: &[u8], amount: u64) -> Vec<u8> {
     body
 }
 
-/// Parsed EVM TokenMessage
-/// EVM warp routes use a fixed format: recipient (32 bytes) || amount (32 bytes uint256)
+/// Parsed Hyperlane TokenMessage
+/// Warp routes use a standard wire format: recipient (32 bytes) || amount (32 bytes uint256)
 #[derive(Debug)]
-struct EvmTokenMessage {
-    /// 32-byte recipient (bytes32 in Solidity)
+struct TokenMessage {
+    /// 32-byte recipient (bytes32)
     recipient: [u8; 32],
-    /// Amount as U256 (full 32-byte uint256 from EVM)
+    /// Amount as U256 (full 32-byte uint256)
     /// This is the wire format amount (typically 18 decimals)
     /// Use convert_wire_to_local_amount() to convert to local decimals
     amount: U256,
 }
 
-/// Parse an EVM TokenMessage body
-/// EVM TokenMessage format (from TokenMessage.sol):
+/// Parse a Hyperlane TokenMessage body
+/// Standard wire format (defined in TokenMessage.sol, used by all chains):
 /// - bytes 0-31: recipient (bytes32)
 /// - bytes 32-63: amount (uint256, big-endian)
 /// - bytes 64+: metadata (optional, ignored)
@@ -3300,10 +3300,10 @@ struct EvmTokenMessage {
 /// Note: We read the full 32-byte uint256 amount to handle large wire amounts
 /// (e.g., 35 * 10^18 for 35 tokens with 18 decimal wire format exceeds u64 max).
 /// The decimal conversion happens after parsing via convert_wire_to_local_amount().
-fn parse_evm_token_message(body: &[u8]) -> Result<EvmTokenMessage, TxBuilderError> {
+fn parse_token_message(body: &[u8]) -> Result<TokenMessage, TxBuilderError> {
     if body.len() < 64 {
         return Err(TxBuilderError::Encoding(format!(
-            "EVM TokenMessage too short: {} bytes, expected at least 64",
+            "TokenMessage too short: {} bytes, expected at least 64",
             body.len()
         )));
     }
@@ -3321,11 +3321,11 @@ fn parse_evm_token_message(body: &[u8]) -> Result<EvmTokenMessage, TxBuilderErro
     })?;
     let amount = U256::from_big_endian(&amount_bytes);
 
-    Ok(EvmTokenMessage { recipient, amount })
+    Ok(TokenMessage { recipient, amount })
 }
 
 /// Extract Cardano credential hash from a bytes32 recipient
-/// EVM bytes32 pads 28-byte Cardano hashes with 4 leading zeros:
+/// Hyperlane bytes32 pads 28-byte Cardano hashes with 4 leading zeros:
 /// [0x00, 0x00, 0x00, 0x00, <28 bytes credential hash>]
 fn extract_cardano_credential_from_bytes32(recipient: &[u8; 32]) -> [u8; 28] {
     let mut credential = [0u8; 28];
@@ -3736,7 +3736,7 @@ mod tests {
 
     #[test]
     fn test_convert_wire_to_local_18_to_8_decimals() {
-        // EVM (18 dec) -> 8 decimal token: scale = 10^10
+        // 18 dec -> 8 decimal token: scale = 10^10
         // 1 unit in wire format (1e18) = 1e8 local units
         assert_eq!(
             convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 8),
@@ -3765,7 +3765,7 @@ mod tests {
 
     #[test]
     fn test_convert_wire_to_local_18_to_0_decimals() {
-        // EVM (18 dec) -> 0 decimal token: scale = 10^18
+        // 18 dec -> 0 decimal token: scale = 10^18
         // 1e18 wire = 1 local unit
         assert_eq!(
             convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 0),
