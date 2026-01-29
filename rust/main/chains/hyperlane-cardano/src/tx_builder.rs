@@ -3247,18 +3247,26 @@ pub fn encode_warp_route_redeemer(
     encode_plutus_data(&plutus_data)
 }
 
-/// Convert wire format amount to local token amount
+/// Convert wire format amount (U256) to local token amount (u64)
 /// Formula: local_amount = wire_amount / 10^(remote_decimals - local_decimals)
 /// If local_decimals >= remote_decimals, multiply instead
-fn convert_wire_to_local_amount(wire_amount: u64, remote_decimals: u8, local_decimals: u8) -> u64 {
+///
+/// This function takes U256 to handle large wire amounts (e.g., 35 * 10^18)
+/// and returns u64 after decimal conversion (which brings it into u64 range).
+fn convert_wire_to_local_amount(wire_amount: U256, remote_decimals: u8, local_decimals: u8) -> u64 {
     if local_decimals >= remote_decimals {
         // Upsample: multiply by 10^(local_decimals - remote_decimals)
-        let multiplier = 10u64.pow((local_decimals - remote_decimals) as u32);
-        wire_amount.saturating_mul(multiplier)
+        let multiplier = U256::from(10u64).pow(U256::from(local_decimals - remote_decimals));
+        let result = wire_amount.saturating_mul(multiplier);
+        // After upsampling, result should fit in u64 for reasonable amounts
+        result.as_u64()
     } else {
         // Downsample: divide by 10^(remote_decimals - local_decimals)
-        let divisor = 10u64.pow((remote_decimals - local_decimals) as u32);
-        wire_amount / divisor
+        // This is the common case (18 decimals -> 6 decimals)
+        // Division brings large U256 values into u64 range
+        let divisor = U256::from(10u64).pow(U256::from(remote_decimals - local_decimals));
+        let result = wire_amount / divisor;
+        result.as_u64()
     }
 }
 
@@ -3277,8 +3285,10 @@ fn build_warp_transfer_body(recipient: &[u8], amount: u64) -> Vec<u8> {
 struct EvmTokenMessage {
     /// 32-byte recipient (bytes32 in Solidity)
     recipient: [u8; 32],
-    /// Amount as u64 (extracted from uint256 - assumes amount fits in u64)
-    amount: u64,
+    /// Amount as U256 (full 32-byte uint256 from EVM)
+    /// This is the wire format amount (typically 18 decimals)
+    /// Use convert_wire_to_local_amount() to convert to local decimals
+    amount: U256,
 }
 
 /// Parse an EVM TokenMessage body
@@ -3286,6 +3296,10 @@ struct EvmTokenMessage {
 /// - bytes 0-31: recipient (bytes32)
 /// - bytes 32-63: amount (uint256, big-endian)
 /// - bytes 64+: metadata (optional, ignored)
+///
+/// Note: We read the full 32-byte uint256 amount to handle large wire amounts
+/// (e.g., 35 * 10^18 for 35 tokens with 18 decimal wire format exceeds u64 max).
+/// The decimal conversion happens after parsing via convert_wire_to_local_amount().
 fn parse_evm_token_message(body: &[u8]) -> Result<EvmTokenMessage, TxBuilderError> {
     if body.len() < 64 {
         return Err(TxBuilderError::Encoding(format!(
@@ -3299,12 +3313,13 @@ fn parse_evm_token_message(body: &[u8]) -> Result<EvmTokenMessage, TxBuilderErro
         TxBuilderError::Encoding("Failed to extract recipient from TokenMessage".to_string())
     })?;
 
-    // Extract amount (bytes 32-63, uint256 big-endian)
-    // Only use the last 8 bytes since we store as u64
-    let amount_bytes: [u8; 8] = body[56..64].try_into().map_err(|_| {
+    // Extract amount (bytes 32-63, full 32-byte uint256 big-endian)
+    // We read all 32 bytes to handle large wire amounts that exceed u64
+    // (e.g., 35 * 10^18 > 2^64 for tokens using 18 decimal wire format)
+    let amount_bytes: [u8; 32] = body[32..64].try_into().map_err(|_| {
         TxBuilderError::Encoding("Failed to extract amount from TokenMessage".to_string())
     })?;
-    let amount = u64::from_be_bytes(amount_bytes);
+    let amount = U256::from_big_endian(&amount_bytes);
 
     Ok(EvmTokenMessage { recipient, amount })
 }
@@ -3704,14 +3719,17 @@ mod tests {
         // EVM (18 dec) -> Cardano ADA (6 dec): scale = 10^12
         // 1 unit in wire format (1e18) = 1_000_000 local units
         assert_eq!(
-            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 6),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 6),
             1_000_000
         );
         // 1e12 wire = 1 local unit
-        assert_eq!(convert_wire_to_local_amount(1_000_000_000_000, 18, 6), 1);
+        assert_eq!(
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000u64), 18, 6),
+            1
+        );
         // 5e18 wire = 5_000_000 local units
         assert_eq!(
-            convert_wire_to_local_amount(5_000_000_000_000_000_000, 18, 6),
+            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 6),
             5_000_000
         );
     }
@@ -3721,22 +3739,28 @@ mod tests {
         // EVM (18 dec) -> 8 decimal token: scale = 10^10
         // 1 unit in wire format (1e18) = 1e8 local units
         assert_eq!(
-            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 8),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 8),
             100_000_000
         );
         // 1e10 wire = 1 local unit
-        assert_eq!(convert_wire_to_local_amount(10_000_000_000, 18, 8), 1);
+        assert_eq!(
+            convert_wire_to_local_amount(U256::from(10_000_000_000u64), 18, 8),
+            1
+        );
     }
 
     #[test]
     fn test_convert_wire_to_local_same_decimals() {
         // Same decimals: no conversion needed
         assert_eq!(
-            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 18),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 18),
             1_000_000_000_000_000_000
         );
-        assert_eq!(convert_wire_to_local_amount(12345, 6, 6), 12345);
-        assert_eq!(convert_wire_to_local_amount(100, 8, 8), 100);
+        assert_eq!(
+            convert_wire_to_local_amount(U256::from(12345u64), 6, 6),
+            12345
+        );
+        assert_eq!(convert_wire_to_local_amount(U256::from(100u64), 8, 8), 100);
     }
 
     #[test]
@@ -3744,12 +3768,12 @@ mod tests {
         // EVM (18 dec) -> 0 decimal token: scale = 10^18
         // 1e18 wire = 1 local unit
         assert_eq!(
-            convert_wire_to_local_amount(1_000_000_000_000_000_000, 18, 0),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 0),
             1
         );
         // 5e18 wire = 5 local units
         assert_eq!(
-            convert_wire_to_local_amount(5_000_000_000_000_000_000, 18, 0),
+            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 0),
             5
         );
     }
@@ -3758,10 +3782,13 @@ mod tests {
     fn test_convert_wire_to_local_upsample() {
         // 6 dec remote -> 18 dec local: multiply by 10^12
         assert_eq!(
-            convert_wire_to_local_amount(1_000_000, 6, 18),
+            convert_wire_to_local_amount(U256::from(1_000_000u64), 6, 18),
             1_000_000_000_000_000_000
         );
-        assert_eq!(convert_wire_to_local_amount(1, 6, 18), 1_000_000_000_000);
+        assert_eq!(
+            convert_wire_to_local_amount(U256::from(1u64), 6, 18),
+            1_000_000_000_000
+        );
     }
 
     #[test]
@@ -3769,14 +3796,37 @@ mod tests {
         // Verify 18->6 decimals matches the old hardcoded 10^12 factor
         let old_factor = 1_000_000_000_000u64;
         let wire = 500_000_000_000_000_000u64;
-        assert_eq!(wire / old_factor, convert_wire_to_local_amount(wire, 18, 6));
+        assert_eq!(
+            wire / old_factor,
+            convert_wire_to_local_amount(U256::from(wire), 18, 6)
+        );
 
         // More test cases
         let wire2 = 1_234_567_890_123_456_789u64;
         assert_eq!(
             wire2 / old_factor,
-            convert_wire_to_local_amount(wire2, 18, 6)
+            convert_wire_to_local_amount(U256::from(wire2), 18, 6)
         );
+    }
+
+    #[test]
+    fn test_large_amount_exceeding_u64() {
+        // Test large amount that exceeds u64 (35 * 10^18)
+        // This was the bug case: 35 ADA transferred but only ~16.5 received
+        // because the wire amount (35 * 10^18) exceeds u64::MAX (~18.4 * 10^18)
+        let large_amount = U256::from(35u64) * U256::from(10u64).pow(U256::from(18u64));
+        assert_eq!(
+            convert_wire_to_local_amount(large_amount, 18, 6),
+            35_000_000
+        );
+
+        // 50 tokens in wire format (50 * 10^18)
+        let fifty = U256::from(50u64) * U256::from(10u64).pow(U256::from(18u64));
+        assert_eq!(convert_wire_to_local_amount(fifty, 18, 6), 50_000_000);
+
+        // 100 tokens in wire format (100 * 10^18)
+        let hundred = U256::from(100u64) * U256::from(10u64).pow(U256::from(18u64));
+        assert_eq!(convert_wire_to_local_amount(hundred, 18, 6), 100_000_000);
     }
 }
 
