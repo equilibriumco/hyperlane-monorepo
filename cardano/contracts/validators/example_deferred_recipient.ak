@@ -128,7 +128,11 @@ pub type ExampleDeferredRecipientInner {
 ///    - script_hash: deferred_recipient hash
 ///    - state_locator: state NFT policy + asset name
 ///    - recipient_type: Deferred { message_policy: message_nft_policy }
-validator example_deferred_recipient(mailbox_policy_id: PolicyId, message_nft_policy: PolicyId) {
+validator example_deferred_recipient(
+  mailbox_policy_id: PolicyId,
+  message_nft_policy: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+) {
   spend(
     datum_data: Option<Data>,
     redeemer: HyperlaneRecipientRedeemer<DeferredAction>,
@@ -154,6 +158,7 @@ validator example_deferred_recipient(mailbox_policy_id: PolicyId, message_nft_po
             own_ref,
             mailbox_policy_id,
             message_nft_policy,
+            processed_messages_nft_policy,
           )
 
         // Phase 2: Process a stored message
@@ -213,6 +218,7 @@ fn handle_message(
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
   message_nft_policy: PolicyId,
+  processed_messages_nft_policy: PolicyId,
 ) -> Bool {
   // 1. CRITICAL SECURITY CHECK: Verify message data matches the ISM-validated message_id
   //
@@ -225,9 +231,10 @@ fn handle_message(
   expect computed_message_id == message_id
 
   // 2. Verify called by the REAL Mailbox
-  //    We check for the mailbox NFT, not just the script address.
-  //    This prevents attackers from creating fake mailbox UTXOs.
   expect mailbox_is_caller(tx, mailbox_policy_id)
+
+  // 3. CRITICAL: Verify the mailbox validated THIS exact message_id
+  expect processed_nft_minted(tx, processed_messages_nft_policy, message_id)
 
   // 3. Verify a message NFT is being minted WITH THE CORRECT MESSAGE_ID
   //    The NFT's asset name must be the verified message_id.
@@ -319,6 +326,20 @@ fn process_stored_message(
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+/// Verify the mailbox minted a processed message NFT for this message_id
+/// This proves the mailbox ISM-validated this exact message in this transaction
+fn processed_nft_minted(
+  tx: Transaction,
+  processed_messages_nft_policy: PolicyId,
+  message_id: ByteArray,
+) -> Bool {
+  let policy_mints = tokens(tx.mint, processed_messages_nft_policy)
+  when dict.get(policy_mints, message_id) is {
+    Some(quantity) -> quantity == 1
+    None -> False
+  }
+}
 
 /// Verify that the REAL mailbox is calling this recipient
 ///

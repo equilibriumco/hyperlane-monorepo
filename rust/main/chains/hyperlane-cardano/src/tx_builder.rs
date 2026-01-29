@@ -347,9 +347,8 @@ impl HyperlaneTxBuilder {
                 // 3. Convert wire amount to local amount using remote_decimals/decimals
                 // This ensures the amount conversion is validated on-chain
                 let warp_redeemer = crate::types::WarpRouteRedeemer::ReceiveTransfer {
-                    origin: msg.origin,
-                    sender: msg.sender,
-                    body: msg.body.clone(), // Original wire format body
+                    message: msg.clone(),
+                    message_id,
                 };
                 encode_warp_route_redeemer(&warp_redeemer)?
             }
@@ -3195,7 +3194,7 @@ fn encode_ism_redeemer(
 
 /// Encode warp route redeemer to CBOR
 /// WarpRouteRedeemer:
-/// - ReceiveTransfer(1) = [origin: Int, sender: ByteArray, body: ByteArray]
+/// - ReceiveTransfer(1) = [message: Message, message_id: ByteArray]
 /// - TransferRemote(0) = [destination: Int, recipient: ByteArray, amount: Int]
 /// - EnrollRemoteRoute(2) = [domain: Int, route: ByteArray]
 pub fn encode_warp_route_redeemer(
@@ -3218,17 +3217,32 @@ pub fn encode_warp_route_redeemer(
             })
         }
         crate::types::WarpRouteRedeemer::ReceiveTransfer {
-            origin,
-            sender,
-            body,
+            message,
+            message_id,
         } => {
+            // Message is Constructor 0 with fields:
+            // [version: Int, nonce: Int, origin: Int, sender: ByteArray,
+            //  destination: Int, recipient: ByteArray, body: ByteArray]
+            let message_data = PlutusData::Constr(Constr {
+                tag: 121, // Constructor 0
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BigInt(BigInt::Int((message.version as i64).into())),
+                    PlutusData::BigInt(BigInt::Int((message.nonce as i64).into())),
+                    PlutusData::BigInt(BigInt::Int((message.origin as i64).into())),
+                    PlutusData::BoundedBytes(message.sender.to_vec().into()),
+                    PlutusData::BigInt(BigInt::Int((message.destination as i64).into())),
+                    PlutusData::BoundedBytes(message.recipient.to_vec().into()),
+                    PlutusData::BoundedBytes(message.body.clone().into()),
+                ]),
+            });
+
             PlutusData::Constr(Constr {
                 tag: 122, // Constructor 1
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
-                    PlutusData::BigInt(BigInt::Int((*origin as i64).into())),
-                    PlutusData::BoundedBytes(sender.to_vec().into()),
-                    PlutusData::BoundedBytes(body.clone().into()),
+                    message_data,
+                    PlutusData::BoundedBytes(message_id.to_vec().into()),
                 ]),
             })
         }

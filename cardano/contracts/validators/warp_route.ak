@@ -4,11 +4,13 @@ use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Script}
 use cardano/assets.{lovelace_of, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
+use aiken/crypto.{keccak_256}
 use types.{
-  AssetName, Domain, HyperlaneAddress, PolicyId, ScriptHash,
+  AssetName, Domain, HyperlaneAddress, Message, PolicyId, ScriptHash,
   WarpRouteDatum, WarpRouteRedeemer, WarpTransferBody,
   TransferRemote, ReceiveTransfer, EnrollRemoteRoute,
   Collateral, Synthetic, Native,
+  encode_message,
 }
 use utils.{assoc_find, find_input, is_signed_by}
 
@@ -32,7 +34,11 @@ use utils.{assoc_find, find_input, is_signed_by}
 /// 2. Calls ReceiveTransfer with origin, sender, body
 /// 3. Tokens are released from warp route UTXO (collateral/native) or minted (synthetic)
 /// 4. Recipient receives tokens
-validator warp_route(mailbox_policy_id: PolicyId, _state_nft_policy_id: PolicyId) {
+validator warp_route(
+  mailbox_policy_id: PolicyId,
+  _state_nft_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+) {
   spend(
     datum: Option<WarpRouteDatum>,
     redeemer: WarpRouteRedeemer,
@@ -53,16 +59,21 @@ validator warp_route(mailbox_policy_id: PolicyId, _state_nft_policy_id: PolicyId
           mailbox_policy_id,
         )
 
-      ReceiveTransfer { origin, sender, body } ->
+      ReceiveTransfer { message, message_id } -> {
+        // SECURITY: Verify the message hashes to the ISM-validated message_id
+        expect keccak_256(encode_message(message)) == message_id
         validate_receive_transfer(
           warp_datum,
-          origin,
-          sender,
-          body,
+          message.origin,
+          message.sender,
+          message.body,
           tx,
           own_ref,
           mailbox_policy_id,
+          processed_messages_nft_policy,
+          message_id,
         )
+      }
 
       EnrollRemoteRoute { domain, route } ->
         validate_enroll_remote_route(warp_datum, domain, route, tx, own_ref)
@@ -145,6 +156,8 @@ fn validate_receive_transfer(
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+  message_id: ByteArray,
 ) -> Bool {
   // 1. Verify sender is an enrolled remote route
   expect Some(expected_sender) = assoc_find(datum.config.remote_routes, origin)
@@ -152,6 +165,12 @@ fn validate_receive_transfer(
 
   // 2. Verify mailbox is calling us (mailbox UTXO spent in same tx)
   expect mailbox_is_caller(mailbox_policy_id, tx)
+
+  // 3. CRITICAL: Verify the mailbox validated THIS exact message_id
+  // The mailbox mints a processed message NFT with the message_id as asset name
+  // during Process. Checking this NFT in tx.mint proves the mailbox ISM-validated
+  // this specific message_id in this transaction.
+  expect processed_nft_minted(processed_messages_nft_policy, message_id, tx)
 
   // 3. Decode the EVM TokenMessage body (wire format)
   // This parses: recipient (32 bytes) || amount (32 bytes uint256)
@@ -370,6 +389,20 @@ fn validate_native_release(
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Verify the mailbox minted a processed message NFT for this message_id
+/// This proves the mailbox ISM-validated this exact message in this transaction
+fn processed_nft_minted(
+  processed_messages_nft_policy: PolicyId,
+  message_id: ByteArray,
+  tx: Transaction,
+) -> Bool {
+  let policy_mints = assets.tokens(tx.mint, processed_messages_nft_policy)
+  when dict.get(policy_mints, message_id) is {
+    Some(quantity) -> quantity == 1
+    None -> False
+  }
+}
 
 /// Check if mailbox is being called (its UTXO is spent)
 fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {

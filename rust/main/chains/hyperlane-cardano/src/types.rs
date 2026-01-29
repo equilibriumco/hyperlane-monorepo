@@ -487,9 +487,8 @@ pub enum WarpRouteRedeemer {
         amount: u64,
     },
     ReceiveTransfer {
-        origin: Domain,
-        sender: HyperlaneAddress,
-        body: Vec<u8>,
+        message: Message,
+        message_id: [u8; 32],
     },
     EnrollRemoteRoute {
         domain: Domain,

@@ -3,6 +3,7 @@ use aiken/collection/dict
 use aiken/crypto.{keccak_256}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use cardano/assets.{lovelace_of, tokens}
+use aiken/collection/dict
 use types.{
   HyperlaneRecipientDatum, HyperlaneRecipientRedeemer, Message,
   PolicyId, HandleMessage, ContractAction, encode_message,
@@ -73,7 +74,10 @@ pub type GenericRecipientInner {
 ///
 /// IMPORTANT: Parameterized by `mailbox_policy_id` (the NFT policy), NOT script hash!
 /// This ensures we verify the REAL mailbox, not a fake UTXO at the same address.
-validator example_generic_recipient(mailbox_policy_id: PolicyId) {
+validator example_generic_recipient(
+  mailbox_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+) {
   spend(
     datum: Option<HyperlaneRecipientDatum<GenericRecipientInner>>,
     redeemer: HyperlaneRecipientRedeemer<Void>,
@@ -91,6 +95,7 @@ validator example_generic_recipient(mailbox_policy_id: PolicyId) {
           tx,
           own_ref,
           mailbox_policy_id,
+          processed_messages_nft_policy,
         )
 
       ContractAction { action: _ } ->
@@ -112,6 +117,7 @@ fn handle_message(
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
 ) -> Bool {
   // 1. CRITICAL SECURITY CHECK: Verify message data matches the ISM-validated message_id
   //
@@ -124,11 +130,13 @@ fn handle_message(
   expect computed_message_id == message_id
 
   // 2. Verify called by the REAL Mailbox (check for mailbox NFT, not just script hash)
-  //
-  // SECURITY: This is critical! We check for the unique mailbox NFT, not just
-  // any input from the mailbox script address. This prevents attackers from
-  // creating fake mailbox UTXOs to bypass security.
   expect mailbox_is_caller(tx, mailbox_policy_id)
+
+  // 3. CRITICAL: Verify the mailbox validated THIS exact message_id
+  // The mailbox mints a processed message NFT with the message_id as asset name
+  // during Process. Checking this NFT in tx.mint proves the mailbox ISM-validated
+  // this specific message_id in this transaction.
+  expect processed_nft_minted(tx, processed_messages_nft_policy, message_id)
 
   // 3. Update state using the VERIFIED message data
   let new_inner =
@@ -153,6 +161,20 @@ fn handle_message(
 
   // 5. Validate continuation
   validate_recipient_continuation(datum, new_datum, tx, own_ref)
+}
+
+/// Verify the mailbox minted a processed message NFT for this message_id
+/// This proves the mailbox ISM-validated this exact message in this transaction
+fn processed_nft_minted(
+  tx: Transaction,
+  processed_messages_nft_policy: PolicyId,
+  message_id: ByteArray,
+) -> Bool {
+  let policy_mints = tokens(tx.mint, processed_messages_nft_policy)
+  when dict.get(policy_mints, message_id) is {
+    Some(quantity) -> quantity == 1
+    None -> False
+  }
 }
 
 /// Verify that the REAL mailbox is calling this recipient

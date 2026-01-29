@@ -464,7 +464,9 @@ pub type WarpRouteRedeemer {
     amount: Int,
   }
   /// Receive tokens from another chain (via Hyperlane message)
-  ReceiveTransfer { origin: Domain, sender: HyperlaneAddress, body: ByteArray }
+  /// SECURITY: The contract verifies keccak256(encode_message(message)) == message_id
+  /// to ensure the data matches what was ISM-validated.
+  ReceiveTransfer { message: Message, message_id: ByteArray }
   /// Admin: enroll a remote route
   EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
 }
