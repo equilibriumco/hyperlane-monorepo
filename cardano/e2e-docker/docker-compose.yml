@@ -19,9 +19,13 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      AWS_S3_BUCKET_FOLDER: ${AWS_S3_BUCKET_FOLDER}
 
       # Validator signing key (ECDSA secp256k1)
       VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY}
+
+      # Cardano signer for on-chain announcements (Ed25519)
+      CARDANO_SIGNER_KEY: ${CARDANO_SIGNER_KEY}
 
       # Blockfrost API
       BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
