@@ -219,13 +219,6 @@ pub struct DeploymentInfo {
     /// List of deployed warp routes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warp_routes: Vec<WarpRouteDeployment>,
-    // Legacy fields for backwards compatibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warp_route: Option<ScriptInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_warp_route: Option<ScriptInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_warp_route: Option<ScriptInfo>,
 }
 
 impl DeploymentInfo {
@@ -239,9 +232,6 @@ impl DeploymentInfo {
             igp: None,
             validator_announce: None,
             warp_routes: Vec::new(),
-            warp_route: None,
-            synthetic_warp_route: None,
-            native_warp_route: None,
         }
     }
 }

@@ -2016,12 +2016,13 @@ fn get_warp_policy(ctx: &CliContext, warp_policy: Option<String>) -> Result<Stri
     }
 
     let deployment = ctx.load_deployment_info()?;
-    deployment
-        .warp_route
-        .and_then(|w| w.state_nft_policy)
-        .ok_or_else(|| {
-            anyhow!("Warp policy not found. Use --warp-policy or update deployment_info.json")
-        })
+    if deployment.warp_routes.len() == 1 {
+        Ok(deployment.warp_routes[0].nft_policy.clone())
+    } else {
+        Err(anyhow!(
+            "Multiple warp routes found. Use --warp-policy to specify which one."
+        ))
+    }
 }
 
 // ============================================================================

@@ -165,11 +165,5 @@
         "lovelace": 12500000
       }
     }
-  ],
-  "warp_route": {
-    "hashBeforeParametrization": "9f99e910121918fba1fe920ac34b6f657115e3d797e8e180c93c6ef6",
-    "hash": "9f99e910121918fba1fe920ac34b6f657115e3d797e8e180c93c6ef6",
-    "address": "addr_test1wz0en6gszgv337apl6fq4s6tdajhz90r67t73cvqey7xaassmgk0n",
-    "initialized": false
-  }
+  ]
 }

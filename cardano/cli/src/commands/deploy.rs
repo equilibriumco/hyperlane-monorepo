@@ -226,10 +226,6 @@ async fn extract(
         igp: validators.igp.as_ref().map(to_script_info),
         validator_announce: validators.validator_announce.as_ref().map(to_script_info),
         warp_routes: Vec::new(),
-        // Legacy fields
-        warp_route: validators.warp_route.as_ref().map(to_script_info),
-        synthetic_warp_route: None,
-        native_warp_route: None,
     };
 
     let info_path = output_dir.join("deployment_info.json");
@@ -531,9 +527,7 @@ async fn deploy_reference_script_internal(
                 }
             }
             "warp_route" => {
-                if let Some(ref mut wr) = deployment.warp_route {
-                    wr.reference_script_utxo = Some(ref_utxo);
-                }
+                // Warp route ref scripts are managed per-route in warp_routes array
             }
             _ => {
                 // Unknown script, skip updating deployment_info.json
