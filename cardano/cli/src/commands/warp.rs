@@ -3,16 +3,17 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use colored::Colorize;
-use pallas_primitives::conway::{PlutusData, BigInt};
+use pallas_primitives::conway::{BigInt, PlutusData};
 use sha3::{Digest, Keccak256};
 
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
     build_enroll_remote_route_redeemer, build_mailbox_datum, build_mailbox_dispatch_redeemer,
-    build_mint_redeemer, build_transfer_remote_redeemer, build_warp_route_collateral_datum,
-    build_warp_route_collateral_datum_with_routes, build_warp_route_native_datum,
-    build_warp_route_native_datum_with_routes, build_warp_route_synthetic_datum,
-    build_warp_route_synthetic_datum_with_routes, decode_plutus_datum, RemoteRoute,
+    build_mint_redeemer, build_redemption_claim_redeemer, build_transfer_remote_redeemer,
+    build_warp_route_collateral_datum, build_warp_route_collateral_datum_with_routes,
+    build_warp_route_native_datum, build_warp_route_native_datum_with_routes,
+    build_warp_route_synthetic_datum, build_warp_route_synthetic_datum_with_routes,
+    decode_plutus_datum, RemoteRoute,
 };
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
@@ -126,6 +127,26 @@ enum WarpCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Claim tokens from a redemption UTXO
+    /// Recipients must claim their tokens by providing their own ADA for the UTXO
+    Claim {
+        /// Transaction hash of the redemption UTXO
+        #[arg(long)]
+        tx_hash: String,
+
+        /// Output index of the redemption UTXO
+        #[arg(long)]
+        output_index: u32,
+
+        /// Redemption script hash (from deployment_info.json)
+        #[arg(long)]
+        redemption_hash: String,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -178,6 +199,12 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             warp_policy,
             dry_run,
         } => deploy_minting_ref(ctx, &warp_policy, dry_run).await,
+        WarpCommands::Claim {
+            tx_hash,
+            output_index,
+            redemption_hash,
+            dry_run,
+        } => claim(ctx, &tx_hash, output_index, &redemption_hash, dry_run).await,
     }
 }
 
@@ -195,7 +222,9 @@ async fn deploy(
     // For Native (ADA), decimals is always 6. For others, it's required.
     let decimals = match token_type {
         TokenType::Native => 6,
-        _ => decimals.ok_or_else(|| anyhow!("--decimals required for collateral/synthetic type"))?,
+        _ => {
+            decimals.ok_or_else(|| anyhow!("--decimals required for collateral/synthetic type"))?
+        }
     };
 
     // Cardano native token amounts are limited to i64 (~9.2×10^18).
@@ -1022,7 +1051,8 @@ async fn enroll_router(
 
     // Look up reference script UTXO from deployment info
     // The reference script stays at the original init tx, not the current warp UTXO tx
-    let deployment = ctx.load_deployment_info()
+    let deployment = ctx
+        .load_deployment_info()
         .with_context(|| "Failed to load deployment info for reference script lookup")?;
     let warp_ref_script = deployment
         .warp_routes
@@ -1388,14 +1418,23 @@ async fn transfer(
     warp_policy: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    println!("\n{}", "═══════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
     println!("{}", "Initiating Cross-Chain Token Transfer".cyan().bold());
-    println!("{}", "═══════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
 
     // Automatically pad shorter addresses (e.g., 20-byte ETH, 28-byte Cardano) to 32 bytes
     let recipient_hex = recipient.strip_prefix("0x").unwrap_or(recipient);
     if recipient_hex.len() > 64 {
-        return Err(anyhow!("Recipient too long: {} chars (max 64)", recipient_hex.len()));
+        return Err(anyhow!(
+            "Recipient too long: {} chars (max 64)",
+            recipient_hex.len()
+        ));
     }
     // Left-pad with zeros to 64 hex chars (32 bytes)
     let recipient_padded = format!("{:0>64}", recipient_hex);
@@ -1427,9 +1466,12 @@ async fn transfer(
 
     println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
 
-    let warp_datum = warp_utxo.inline_datum.as_ref()
+    let warp_datum = warp_utxo
+        .inline_datum
+        .as_ref()
         .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
-    let (token_type, decimals, remote_decimals, remote_routes, warp_owner, total_bridged) = parse_warp_datum(warp_datum)?;
+    let (token_type, decimals, remote_decimals, remote_routes, warp_owner, total_bridged) =
+        parse_warp_datum(warp_datum)?;
 
     println!("  Token Type: {:?}", token_type);
     println!("  Decimals: {}", decimals);
@@ -1438,12 +1480,15 @@ async fn transfer(
     println!("  Total Bridged: {}", total_bridged);
 
     // Verify destination has an enrolled route
-    let remote_router = remote_routes.iter()
+    let remote_router = remote_routes
+        .iter()
         .find(|r| r.domain == domain)
-        .ok_or_else(|| anyhow!(
-            "No remote router enrolled for domain {}. Use 'warp enroll-router' first.",
-            domain
-        ))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "No remote router enrolled for domain {}. Use 'warp enroll-router' first.",
+                domain
+            )
+        })?;
     println!("  Remote Router ({}): 0x{}", domain, remote_router.router);
 
     // The Hyperlane message recipient is the remote warp route contract, not the user's recipient.
@@ -1471,9 +1516,14 @@ async fn transfer(
         .await?
         .ok_or_else(|| anyhow!("Mailbox UTXO not found"))?;
 
-    println!("  TX: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
 
-    let mailbox_datum_value = mailbox_utxo.inline_datum.as_ref()
+    let mailbox_datum_value = mailbox_utxo
+        .inline_datum
+        .as_ref()
         .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
     let mailbox_data = parse_mailbox_datum_for_transfer(mailbox_datum_value)?;
 
@@ -1485,10 +1535,16 @@ async fn transfer(
     // No separate vault needed
     match &token_type {
         WarpTokenTypeInfo::Collateral { .. } | WarpTokenTypeInfo::Native => {
-            println!("\n{}", "Step 3: Native/Collateral - tokens locked in warp route UTXO".cyan());
+            println!(
+                "\n{}",
+                "Step 3: Native/Collateral - tokens locked in warp route UTXO".cyan()
+            );
         }
         WarpTokenTypeInfo::Synthetic { .. } => {
-            println!("\n{}", "Step 3: Synthetic route - tokens will be burned".cyan());
+            println!(
+                "\n{}",
+                "Step 3: Synthetic route - tokens will be burned".cyan()
+            );
         }
     };
 
@@ -1503,30 +1559,43 @@ async fn transfer(
         let scale_exponent = remote_decimals - decimals;
         let scale_factor: u128 = 10u128.pow(scale_exponent);
         let result = (amount as u128) * scale_factor;
-        println!("  Scaling: {} (local, {} decimals) * 10^{} = {} (wire, {} decimals)",
-            amount, decimals, scale_exponent, result, remote_decimals);
+        println!(
+            "  Scaling: {} (local, {} decimals) * 10^{} = {} (wire, {} decimals)",
+            amount, decimals, scale_exponent, result, remote_decimals
+        );
         result
     } else {
         let scale_exponent = decimals - remote_decimals;
         let scale_factor: u128 = 10u128.pow(scale_exponent);
         let result = (amount as u128) / scale_factor;
-        println!("  Scaling: {} (local, {} decimals) / 10^{} = {} (wire, {} decimals)",
-            amount, decimals, scale_exponent, result, remote_decimals);
+        println!(
+            "  Scaling: {} (local, {} decimals) / 10^{} = {} (wire, {} decimals)",
+            amount, decimals, scale_exponent, result, remote_decimals
+        );
         result
     };
 
     let body_hex = build_warp_message_body(&recipient_padded, scaled_amount)?;
-    println!("  Body: 0x{} ({} bytes)", &body_hex[..std::cmp::min(40, body_hex.len())], body_hex.len() / 2);
+    println!(
+        "  Body: 0x{} ({} bytes)",
+        &body_hex[..std::cmp::min(40, body_hex.len())],
+        body_hex.len() / 2
+    );
 
     // The sender is the warp_route script - the mailbox is skipped when computing sender
     // (matching the Aiken contract's get_sender_address logic which skips the mailbox input)
-    let warp_route_info = deployment.warp_routes.iter()
+    let warp_route_info = deployment
+        .warp_routes
+        .iter()
         .find(|w| w.nft_policy == warp_policy_id)
         .ok_or_else(|| anyhow!("Warp route not found in deployment info"))?;
     let warp_script_hash = &warp_route_info.script_hash;
 
     // The sender is always the warp_route - the mailbox is explicitly skipped
-    println!("  Sender (warp route): {}#{} -> {}", warp_utxo.tx_hash, warp_utxo.output_index, warp_script_hash);
+    println!(
+        "  Sender (warp route): {}#{} -> {}",
+        warp_utxo.tx_hash, warp_utxo.output_index, warp_script_hash
+    );
 
     // Build sender address (32 bytes: 0x02000000 + script_hash for script credential)
     let sender_hex = format!("02000000{}", warp_script_hash);
@@ -1560,17 +1629,18 @@ async fn transfer(
     // Updated warp route datum (increment total_bridged)
     let new_total_bridged = total_bridged + amount as i64;
     let new_warp_datum = match &token_type {
-        WarpTokenTypeInfo::Collateral { policy_id, asset_name } => {
-            build_warp_route_collateral_datum_with_routes(
-                policy_id,
-                asset_name,
-                decimals,
-                remote_decimals,
-                &remote_routes,
-                &warp_owner,
-                new_total_bridged,
-            )?
-        }
+        WarpTokenTypeInfo::Collateral {
+            policy_id,
+            asset_name,
+        } => build_warp_route_collateral_datum_with_routes(
+            policy_id,
+            asset_name,
+            decimals,
+            remote_decimals,
+            &remote_routes,
+            &warp_owner,
+            new_total_bridged,
+        )?,
         WarpTokenTypeInfo::Synthetic { minting_policy } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
@@ -1581,15 +1651,13 @@ async fn transfer(
                 new_total_bridged,
             )?
         }
-        WarpTokenTypeInfo::Native => {
-            build_warp_route_native_datum_with_routes(
-                decimals,
-                remote_decimals,
-                &remote_routes,
-                &warp_owner,
-                new_total_bridged,
-            )?
-        }
+        WarpTokenTypeInfo::Native => build_warp_route_native_datum_with_routes(
+            decimals,
+            remote_decimals,
+            &remote_routes,
+            &warp_owner,
+            new_total_bridged,
+        )?,
     };
     println!("  Warp Datum: {} bytes", new_warp_datum.len());
 
@@ -1616,16 +1684,34 @@ async fn transfer(
     println!("  Dispatch Redeemer: {} bytes", mailbox_redeemer.len());
 
     if dry_run {
-        println!("\n{}", "═══════════════════════════════════════════════════════════════".yellow());
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
         println!("{}", "[Dry run - not submitting transaction]".yellow());
-        println!("{}", "═══════════════════════════════════════════════════════════════".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
         println!("\n{}", "Transaction Summary:".cyan());
-        println!("  - Spend Warp Route UTXO: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
-        println!("  - Spend Mailbox UTXO: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+        println!(
+            "  - Spend Warp Route UTXO: {}#{}",
+            warp_utxo.tx_hash, warp_utxo.output_index
+        );
+        println!(
+            "  - Spend Mailbox UTXO: {}#{}",
+            mailbox_utxo.tx_hash, mailbox_utxo.output_index
+        );
         println!("\n{}", "Message Summary:".cyan());
         println!("  Message ID: 0x{}", message_id);
-        println!("  From: {} (domain {})", payer_address, mailbox_data.local_domain);
-        println!("  To Warp Route: 0x{} (domain {})", message_recipient, domain);
+        println!(
+            "  From: {} (domain {})",
+            payer_address, mailbox_data.local_domain
+        );
+        println!(
+            "  To Warp Route: 0x{} (domain {})",
+            message_recipient, domain
+        );
         println!("  Final Recipient: 0x{}", recipient_padded);
         println!("  Amount: {}", amount);
         return Ok(());
@@ -1639,26 +1725,35 @@ async fn transfer(
 
     // Find tokens to transfer (for collateral type) or burn (for synthetic)
     let token_utxo = match &token_type {
-        WarpTokenTypeInfo::Collateral { policy_id: token_pol, asset_name: token_asset, .. } => {
+        WarpTokenTypeInfo::Collateral {
+            policy_id: token_pol,
+            asset_name: token_asset,
+            ..
+        } => {
             // Find UTXO with the tokens to transfer
-            let asset_name_ascii = String::from_utf8(hex::decode(token_asset).unwrap_or_default())
-                .unwrap_or_default();
-            payer_utxos.iter()
-                .find(|u| u.assets.iter().any(|a|
-                    a.policy_id == *token_pol &&
-                    (a.asset_name == *token_asset || a.asset_name == asset_name_ascii) &&
-                    a.quantity >= amount
-                ))
+            let asset_name_ascii =
+                String::from_utf8(hex::decode(token_asset).unwrap_or_default()).unwrap_or_default();
+            payer_utxos
+                .iter()
+                .find(|u| {
+                    u.assets.iter().any(|a| {
+                        a.policy_id == *token_pol
+                            && (a.asset_name == *token_asset || a.asset_name == asset_name_ascii)
+                            && a.quantity >= amount
+                    })
+                })
                 .cloned()
         }
         WarpTokenTypeInfo::Synthetic { minting_policy } => {
             // Find UTXO with synthetic tokens to burn
             // Synthetic tokens use empty asset name
-            payer_utxos.iter()
-                .find(|u| u.assets.iter().any(|a|
-                    a.policy_id == *minting_policy &&
-                    a.quantity >= amount
-                ))
+            payer_utxos
+                .iter()
+                .find(|u| {
+                    u.assets
+                        .iter()
+                        .any(|a| a.policy_id == *minting_policy && a.quantity >= amount)
+                })
                 .cloned()
         }
         _ => None,
@@ -1686,17 +1781,20 @@ async fn transfer(
     let fee_utxo = payer_utxos
         .iter()
         .filter(|u| {
-            u.lovelace >= min_fee_utxo_lovelace &&
-            u.assets.is_empty() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= min_fee_utxo_lovelace
+                && u.assets.is_empty()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         // Prefer UTXOs that sort after the warp route UTXO
         .min_by(|a, b| {
             // Sort by: (sorts_after_warp DESC, tx_hash ASC, output_index ASC)
-            let a_after_warp = (&a.tx_hash, a.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
-            let b_after_warp = (&b.tx_hash, b.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
+            let a_after_warp =
+                (&a.tx_hash, a.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
+            let b_after_warp =
+                (&b.tx_hash, b.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
             match (a_after_warp, b_after_warp) {
-                (true, false) => std::cmp::Ordering::Less,    // a sorts after warp, prefer a
+                (true, false) => std::cmp::Ordering::Less, // a sorts after warp, prefer a
                 (false, true) => std::cmp::Ordering::Greater, // b sorts after warp, prefer b
                 _ => (&a.tx_hash, a.output_index).cmp(&(&b.tx_hash, b.output_index)),
             }
@@ -1716,7 +1814,10 @@ async fn transfer(
         })?;
 
     println!("  Fee UTXO: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
 
     // Get cost model and current slot
     let cost_model = client.get_plutusv3_cost_model().await?;
@@ -1724,7 +1825,9 @@ async fn transfer(
     let validity_end = current_slot + 7200; // ~2 hours
 
     // Find warp route reference script UTXO from deployment info
-    let warp_ref_utxo = deployment.warp_routes.iter()
+    let warp_ref_utxo = deployment
+        .warp_routes
+        .iter()
         .find(|w| w.nft_policy == warp_policy_id)
         .and_then(|w| w.reference_script_utxo.as_ref());
 
@@ -1756,8 +1859,8 @@ async fn transfer(
     };
 
     // Build the transaction using pallas_txbuilder
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction, ScriptKind, ExUnits};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses
     let warp_addr = pallas_addresses::Address::from_bech32(&warp_utxo.address)?;
@@ -1765,19 +1868,25 @@ async fn transfer(
     let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)?;
 
     // Parse tx hashes
-    let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?.try_into()
+    let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid warp tx hash"))?;
-    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?.try_into()
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
-    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?.try_into()
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid fee tx hash"))?;
-    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?.try_into()
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
 
     // Parse policy IDs
-    let warp_policy_bytes: [u8; 28] = hex::decode(&warp_policy_id)?.try_into()
+    let warp_policy_bytes: [u8; 28] = hex::decode(&warp_policy_id)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid warp policy"))?;
-    let mailbox_policy_bytes: [u8; 28] = hex::decode(mailbox_policy_id)?.try_into()
+    let mailbox_policy_bytes: [u8; 28] = hex::decode(mailbox_policy_id)?
+        .try_into()
         .map_err(|_| anyhow!("Invalid mailbox policy"))?;
     let mailbox_asset_bytes = hex::decode(&mailbox_asset_name)?;
 
@@ -1793,18 +1902,28 @@ async fn transfer(
         .map_err(|e| anyhow!("Failed to add warp NFT: {:?}", e))?;
 
     // For Collateral transfers, add the locked tokens to the warp_route UTXO
-    if let WarpTokenTypeInfo::Collateral { policy_id: token_pol, asset_name: token_asset } = &token_type {
+    if let WarpTokenTypeInfo::Collateral {
+        policy_id: token_pol,
+        asset_name: token_asset,
+    } = &token_type
+    {
         println!("  Adding collateral tokens to warp output...");
         println!("    Token Policy: {}", token_pol);
         println!("    Token Asset (hex): {}", token_asset);
 
-        let token_pol_bytes: [u8; 28] = hex::decode(token_pol)?.try_into()
+        let token_pol_bytes: [u8; 28] = hex::decode(token_pol)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid token policy"))?;
         let token_asset_bytes = hex::decode(token_asset)?;
-        println!("    Token Asset (decoded): {} bytes", token_asset_bytes.len());
+        println!(
+            "    Token Asset (decoded): {} bytes",
+            token_asset_bytes.len()
+        );
 
         // Get current token amount in warp route (if any)
-        let current_warp_tokens = warp_utxo.assets.iter()
+        let current_warp_tokens = warp_utxo
+            .assets
+            .iter()
             .find(|a| a.policy_id == *token_pol)
             .map(|a| a.quantity)
             .unwrap_or(0);
@@ -1812,7 +1931,11 @@ async fn transfer(
         println!("    Adding: {} tokens", current_warp_tokens + amount);
 
         warp_output = warp_output
-            .add_asset(Hash::new(token_pol_bytes), token_asset_bytes.clone(), current_warp_tokens + amount)
+            .add_asset(
+                Hash::new(token_pol_bytes),
+                token_asset_bytes.clone(),
+                current_warp_tokens + amount,
+            )
             .map_err(|e| anyhow!("Failed to add tokens to warp route: {:?}", e))?;
         println!("    Collateral tokens added successfully");
     }
@@ -1824,7 +1947,8 @@ async fn transfer(
         .map_err(|e| anyhow!("Failed to add mailbox NFT: {:?}", e))?;
 
     // Build staging transaction
-    let payer_pkh_bytes: [u8; 28] = payer_pkh.try_into()
+    let payer_pkh_bytes: [u8; 28] = payer_pkh
+        .try_into()
         .map_err(|_| anyhow!("Invalid payer pkh length"))?;
 
     // For native transfers, the amount being locked in warp_route comes from the fee UTXO
@@ -1832,7 +1956,10 @@ async fn transfer(
         WarpTokenTypeInfo::Native => amount,
         _ => 0,
     };
-    let change = fee_utxo.lovelace.saturating_sub(fee_estimate).saturating_sub(native_transfer_amount);
+    let change = fee_utxo
+        .lovelace
+        .saturating_sub(fee_estimate)
+        .saturating_sub(native_transfer_amount);
 
     // If change is too small to create an output, add it to the fee to balance the transaction
     let actual_fee = if change > 1_500_000 {
@@ -1843,13 +1970,25 @@ async fn transfer(
 
     let mut staging = StagingTransaction::new()
         // Fee input
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
         // Warp route input
-        .input(Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(warp_tx_hash),
+            warp_utxo.output_index as u64,
+        ))
         // Mailbox input
-        .input(Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        ))
         // Collateral
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         // Required signer
         .disclosed_signer(Hash::new(payer_pkh_bytes))
         // Outputs
@@ -1859,13 +1998,19 @@ async fn transfer(
         .add_spend_redeemer(
             Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64),
             warp_redeemer.clone(),
-            Some(ExUnits { mem: 2_000_000, steps: 1_000_000_000 }),
+            Some(ExUnits {
+                mem: 2_000_000,
+                steps: 1_000_000_000,
+            }),
         )
         // Mailbox spend redeemer
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
             mailbox_redeemer.clone(),
-            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
         )
         // Cost model
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -1875,21 +2020,31 @@ async fn transfer(
         .network_id(0); // Testnet
 
     // For collateral type, add token input and change output
-    if let (Some(ref tu), WarpTokenTypeInfo::Collateral { policy_id: token_pol, asset_name: token_asset }) =
-           (&token_utxo, &token_type) {
-        let token_tx_hash: [u8; 32] = hex::decode(&tu.tx_hash)?.try_into()
+    if let (
+        Some(ref tu),
+        WarpTokenTypeInfo::Collateral {
+            policy_id: token_pol,
+            asset_name: token_asset,
+        },
+    ) = (&token_utxo, &token_type)
+    {
+        let token_tx_hash: [u8; 32] = hex::decode(&tu.tx_hash)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid token tx hash"))?;
 
         staging = staging.input(Input::new(Hash::new(token_tx_hash), tu.output_index as u64));
 
         // Build change output for remaining tokens
-        let token_asset_obj = tu.assets.iter()
+        let token_asset_obj = tu
+            .assets
+            .iter()
             .find(|a| a.policy_id == *token_pol)
             .ok_or_else(|| anyhow!("Token not found in UTXO"))?;
 
         if token_asset_obj.quantity > amount {
             let remaining = token_asset_obj.quantity - amount;
-            let token_pol_bytes: [u8; 28] = hex::decode(token_pol)?.try_into()
+            let token_pol_bytes: [u8; 28] = hex::decode(token_pol)?
+                .try_into()
                 .map_err(|_| anyhow!("Invalid token policy"))?;
             let token_asset_bytes = hex::decode(token_asset)?;
 
@@ -1901,17 +2056,23 @@ async fn transfer(
     }
 
     // Add synthetic token burning if needed
-    if let (WarpTokenTypeInfo::Synthetic { minting_policy }, Some(ref tu)) = (&token_type, &token_utxo) {
+    if let (WarpTokenTypeInfo::Synthetic { minting_policy }, Some(ref tu)) =
+        (&token_type, &token_utxo)
+    {
         println!("  Adding synthetic token burn...");
 
-        let token_tx_hash: [u8; 32] = hex::decode(&tu.tx_hash)?.try_into()
+        let token_tx_hash: [u8; 32] = hex::decode(&tu.tx_hash)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid synthetic token tx hash"))?;
 
-        let mint_policy_bytes: [u8; 28] = hex::decode(minting_policy)?.try_into()
+        let mint_policy_bytes: [u8; 28] = hex::decode(minting_policy)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid minting policy"))?;
 
         // Find the synthetic token asset in the UTXO
-        let synthetic_asset = tu.assets.iter()
+        let synthetic_asset = tu
+            .assets
+            .iter()
             .find(|a| a.policy_id == *minting_policy)
             .ok_or_else(|| anyhow!("Synthetic token not found in UTXO"))?;
 
@@ -1922,7 +2083,11 @@ async fn transfer(
 
         // Burn the tokens (negative mint)
         staging = staging
-            .mint_asset(Hash::new(mint_policy_bytes), asset_name_bytes.clone(), -(amount as i64))
+            .mint_asset(
+                Hash::new(mint_policy_bytes),
+                asset_name_bytes.clone(),
+                -(amount as i64),
+            )
             .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?;
 
         // Add burn redeemer (Burn is constructor 1 in synthetic minting policy)
@@ -1930,7 +2095,10 @@ async fn transfer(
         staging = staging.add_mint_redeemer(
             Hash::new(mint_policy_bytes),
             burn_redeemer,
-            Some(ExUnits { mem: 500_000, steps: 200_000_000 }),
+            Some(ExUnits {
+                mem: 500_000,
+                steps: 200_000_000,
+            }),
         );
 
         // Load and add the minting policy script
@@ -1957,25 +2125,46 @@ async fn transfer(
 
     // Add warp route script via reference if available, otherwise inline
     if let Some(ref_utxo) = warp_ref_utxo {
-        println!("  Using warp route reference script: {}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
-        let ref_tx_hash: [u8; 32] = hex::decode(&ref_utxo.tx_hash)?.try_into()
+        println!(
+            "  Using warp route reference script: {}#{}",
+            ref_utxo.tx_hash, ref_utxo.output_index
+        );
+        let ref_tx_hash: [u8; 32] = hex::decode(&ref_utxo.tx_hash)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid warp reference script tx hash"))?;
-        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_utxo.output_index as u64));
+        staging = staging.reference_input(Input::new(
+            Hash::new(ref_tx_hash),
+            ref_utxo.output_index as u64,
+        ));
     } else if let Some(script) = warp_script {
         println!("  Using inline warp route script ({} bytes)", script.len());
         staging = staging.script(ScriptKind::PlutusV3, script);
     }
 
     // Add mailbox script via reference if available, otherwise inline
-    if let Some(ref_utxo) = deployment.mailbox.as_ref().and_then(|m| m.reference_script_utxo.as_ref()) {
-        println!("  Using mailbox reference script: {}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
-        let ref_tx_hash: [u8; 32] = hex::decode(&ref_utxo.tx_hash)?.try_into()
+    if let Some(ref_utxo) = deployment
+        .mailbox
+        .as_ref()
+        .and_then(|m| m.reference_script_utxo.as_ref())
+    {
+        println!(
+            "  Using mailbox reference script: {}#{}",
+            ref_utxo.tx_hash, ref_utxo.output_index
+        );
+        let ref_tx_hash: [u8; 32] = hex::decode(&ref_utxo.tx_hash)?
+            .try_into()
             .map_err(|_| anyhow!("Invalid mailbox reference script tx hash"))?;
-        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_utxo.output_index as u64));
+        staging = staging.reference_input(Input::new(
+            Hash::new(ref_tx_hash),
+            ref_utxo.output_index as u64,
+        ));
     } else {
         let mailbox_script_raw = ctx.load_script_from_blueprint("mailbox", "mailbox.spend")?;
         let mailbox_script = hex::decode(&mailbox_script_raw)?;
-        println!("  Using inline mailbox script ({} bytes)", mailbox_script.len());
+        println!(
+            "  Using inline mailbox script ({} bytes)",
+            mailbox_script.len()
+        );
         staging = staging.script(ScriptKind::PlutusV3, mailbox_script);
     }
 
@@ -1985,7 +2174,8 @@ async fn transfer(
     }
 
     // Build the transaction
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -1994,30 +2184,49 @@ async fn transfer(
     println!("\n{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
     let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
 
-    println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!("{}", "Transfer Initiated Successfully!".green().bold());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!();
     println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!();
     println!("{}", "Message Details:".cyan());
     println!("  Message ID: 0x{}", message_id);
-    println!("  From: {} (domain {})", payer_address, mailbox_data.local_domain);
-    println!("  To Warp Route: 0x{} (domain {})", message_recipient, domain);
+    println!(
+        "  From: {} (domain {})",
+        payer_address, mailbox_data.local_domain
+    );
+    println!(
+        "  To Warp Route: 0x{} (domain {})",
+        message_recipient, domain
+    );
     println!("  Final Recipient: 0x{}", recipient_padded);
     println!("  Amount: {}", amount);
     println!("  Nonce: {}", mailbox_data.outbound_nonce);
     println!();
-    println!("{}", "Note: The relayer will pick up this message and deliver it".yellow());
-    println!("{}", "to the destination chain. Track progress on Hyperlane Explorer.".yellow());
+    println!(
+        "{}",
+        "Note: The relayer will pick up this message and deliver it".yellow()
+    );
+    println!(
+        "{}",
+        "to the destination chain. Track progress on Hyperlane Explorer.".yellow()
+    );
 
     Ok(())
 }
@@ -2206,7 +2415,10 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
     if fields.len() < 5 {
-        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields.len()));
+        return Err(anyhow!(
+            "Mailbox datum must have 5 fields, got {}",
+            fields.len()
+        ));
     }
 
     let local_domain = fields
@@ -2257,7 +2469,11 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
 
     let merkle_branches: Vec<String> = branches_list
         .iter()
-        .filter_map(|b| b.get("bytes").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|b| {
+            b.get("bytes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
 
     let merkle_count = merkle_tree_fields
@@ -2290,7 +2506,10 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
     if fields_vec.len() < 5 {
-        return Err(anyhow!("Mailbox datum must have 5 fields, got {}", fields_vec.len()));
+        return Err(anyhow!(
+            "Mailbox datum must have 5 fields, got {}",
+            fields_vec.len()
+        ));
     }
 
     let local_domain = extract_u32_for_transfer(fields_vec[0])?;
@@ -2311,11 +2530,10 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
     };
 
     let merkle_branches = match merkle_tree_fields[0] {
-        PlutusData::Array(arr) => {
-            arr.iter()
-                .map(|item| extract_bytes_hex_for_transfer(item))
-                .collect::<Result<Vec<String>>>()?
-        }
+        PlutusData::Array(arr) => arr
+            .iter()
+            .map(|item| extract_bytes_hex_for_transfer(item))
+            .collect::<Result<Vec<String>>>()?,
         _ => return Err(anyhow!("Expected array for merkle branches")),
     };
 
@@ -2364,24 +2582,35 @@ fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
 /// 2. Extract the warp route script hash from its address
 /// 3. Apply the parameter to the synthetic_token minting policy
 /// 4. Deploy the resulting script as a reference script UTXO with a marker NFT
-async fn deploy_minting_ref(
-    ctx: &CliContext,
-    warp_policy: &str,
-    dry_run: bool,
-) -> Result<()> {
-    println!("\n{}", "═══════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "Deploying Synthetic Minting Policy Reference Script".cyan().bold());
-    println!("{}", "═══════════════════════════════════════════════════════════════".cyan());
+async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) -> Result<()> {
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "Deploying Synthetic Minting Policy Reference Script"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
 
     println!("\n{}", "Configuration:".green());
     println!("  Warp Route NFT Policy: {}", warp_policy);
 
     // Load deployment info
     let deployment = ctx.load_deployment_info()?;
-    let mailbox = deployment.mailbox.as_ref()
+    let mailbox = deployment
+        .mailbox
+        .as_ref()
         .ok_or_else(|| anyhow!("Mailbox not deployed. Run 'hyperlane-cardano init' first"))?;
     // Verify mailbox has state NFT policy (for validation, not needed by this command)
-    let _mailbox_policy_id = mailbox.state_nft_policy.as_ref()
+    let _mailbox_policy_id = mailbox
+        .state_nft_policy
+        .as_ref()
         .ok_or_else(|| anyhow!("Mailbox state NFT policy not found in deployment"))?;
 
     // Load API and signing key
@@ -2395,7 +2624,9 @@ async fn deploy_minting_ref(
 
     // Step 1: Find the warp route UTXO
     println!("\n{}", "Step 1: Finding warp route UTXO...".cyan());
-    let warp_utxo = client.find_utxo_by_asset(warp_policy, "").await?
+    let warp_utxo = client
+        .find_utxo_by_asset(warp_policy, "")
+        .await?
         .ok_or_else(|| anyhow!("Could not find warp route UTXO with policy {}", warp_policy))?;
     println!("  Found: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
 
@@ -2417,9 +2648,13 @@ async fn deploy_minting_ref(
             }
             // Check header byte - 0x70, 0x71, 0xF0, 0xF1 indicate script payment credential
             let header = addr_bytes[0];
-            let is_script = (header & 0x10) == 0x10 || (header & 0xF0) == 0x70 || (header & 0xF0) == 0xF0;
+            let is_script =
+                (header & 0x10) == 0x10 || (header & 0xF0) == 0x70 || (header & 0xF0) == 0xF0;
             if !is_script {
-                return Err(anyhow!("Warp route address is not a script address (header: 0x{:02x})", header));
+                return Err(anyhow!(
+                    "Warp route address is not a script address (header: 0x{:02x})",
+                    header
+                ));
             }
             // Script hash is bytes 1-29
             hex::encode(&addr_bytes[1..29])
@@ -2430,14 +2665,17 @@ async fn deploy_minting_ref(
 
     // Step 3: Parse datum to verify it's a synthetic warp route and get minting policy
     println!("\n{}", "Step 3: Verifying synthetic warp route...".cyan());
-    let datum_json = warp_utxo.inline_datum.as_ref()
+    let datum_json = warp_utxo
+        .inline_datum
+        .as_ref()
         .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
 
     // Blockfrost returns datum as hex-encoded CBOR string
-    let datum_hex = datum_json.as_str()
+    let datum_hex = datum_json
+        .as_str()
         .ok_or_else(|| anyhow!("Datum is not a hex string"))?;
-    let datum_cbor = hex::decode(datum_hex)
-        .map_err(|e| anyhow!("Failed to decode datum hex: {}", e))?;
+    let datum_cbor =
+        hex::decode(datum_hex).map_err(|e| anyhow!("Failed to decode datum hex: {}", e))?;
 
     use pallas_codec::minicbor;
     let datum: PlutusData = minicbor::decode(&datum_cbor)
@@ -2468,11 +2706,13 @@ async fn deploy_minting_ref(
                         let policy = extract_bytes_hex_for_transfer(&tt_fields[0])?;
                         (122u64, policy)
                     }
-                    tag => return Err(anyhow!(
-                        "Warp route is not a Synthetic type (tag={}, expected 122). \
+                    tag => {
+                        return Err(anyhow!(
+                            "Warp route is not a Synthetic type (tag={}, expected 122). \
                          Only Synthetic warp routes need minting policy reference scripts.",
-                        tag
-                    )),
+                            tag
+                        ))
+                    }
                 }
             } else {
                 return Err(anyhow!("Invalid token_type in config"));
@@ -2520,7 +2760,8 @@ async fn deploy_minting_ref(
     // Need one UTXO for the reference script deployment
     // Exclude UTXOs with assets, reference scripts, or inline datums
     let min_ada = 15_000_000u64; // 15 ADA to cover reference script UTXO
-    let suitable_utxos: Vec<_> = utxos.iter()
+    let suitable_utxos: Vec<_> = utxos
+        .iter()
         .filter(|u| {
             u.lovelace >= min_ada
                 && u.assets.is_empty()
@@ -2538,7 +2779,10 @@ async fn deploy_minting_ref(
     }
 
     let deploy_input = suitable_utxos[0];
-    println!("  Deploy Input: {}#{}", deploy_input.tx_hash, deploy_input.output_index);
+    println!(
+        "  Deploy Input: {}#{}",
+        deploy_input.tx_hash, deploy_input.output_index
+    );
 
     // Step 6: Compute one-shot NFT policy for marker
     println!("\n{}", "Step 6: Computing marker NFT policy...".cyan());
@@ -2550,14 +2794,20 @@ async fn deploy_minting_ref(
         &hex::encode(&nft_output_ref),
     )?;
     let nft_policy_id = &nft_applied.policy_id;
-    let nft_script = hex::decode(&nft_applied.compiled_code)
-        .with_context(|| "Invalid NFT script CBOR")?;
+    let nft_script =
+        hex::decode(&nft_applied.compiled_code).with_context(|| "Invalid NFT script CBOR")?;
     println!("  Marker NFT Policy: {}", nft_policy_id);
 
     if dry_run {
-        println!("\n{}", "═══════════════════════════════════════════════════════════════".yellow());
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
         println!("{}", "[Dry run - not submitting transaction]".yellow());
-        println!("{}", "═══════════════════════════════════════════════════════════════".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
         println!("\nDeployment would create:");
         println!("  - Minting Policy Reference Script UTXO");
         println!("  - NFT Policy: {}", nft_policy_id);
@@ -2567,7 +2817,10 @@ async fn deploy_minting_ref(
     }
 
     // Step 7: Build and submit transaction
-    println!("\n{}", "Step 7: Deploying minting policy reference script...".cyan());
+    println!(
+        "\n{}",
+        "Step 7: Deploying minting policy reference script...".cyan()
+    );
 
     use pallas_addresses::Network;
     use pallas_crypto::hash::Hash;
@@ -2595,7 +2848,10 @@ async fn deploy_minting_ref(
     // Calculate reference script UTXO ADA (needs to cover script size)
     let base_ref_script_lovelace = 12_000_000u64; // 12 ADA for ~4KB script
     let fee_estimate = 2_500_000u64;
-    let change = deploy_input.lovelace.saturating_sub(base_ref_script_lovelace).saturating_sub(fee_estimate);
+    let change = deploy_input
+        .lovelace
+        .saturating_sub(base_ref_script_lovelace)
+        .saturating_sub(fee_estimate);
 
     // If change is below min UTXO, add it to the ref script output to conserve value
     let min_utxo = 1_500_000u64;
@@ -2629,12 +2885,19 @@ async fn deploy_minting_ref(
         .add_mint_redeemer(
             Hash::new(nft_policy_hash),
             mint_redeemer_cbor,
-            Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            Some(ExUnits {
+                mem: 1_000_000,
+                steps: 500_000_000,
+            }),
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .fee(fee_estimate)
         .invalid_from_slot(validity_end)
-        .network_id(if matches!(ctx.pallas_network(), Network::Testnet) { 0 } else { 1 });
+        .network_id(if matches!(ctx.pallas_network(), Network::Testnet) {
+            0
+        } else {
+            1
+        });
 
     // Add change output if there's enough
     if actual_change >= min_utxo {
@@ -2646,7 +2909,8 @@ async fn deploy_minting_ref(
     staging = staging.disclosed_signer(Hash::new(payer_hash));
 
     // Build the transaction
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -2654,7 +2918,8 @@ async fn deploy_minting_ref(
     // Sign the transaction
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
@@ -2675,11 +2940,12 @@ async fn deploy_minting_ref(
         // Find the matching warp route and add the minting ref script info
         for warp_route in updated_deployment.warp_routes.iter_mut() {
             if warp_route.nft_policy == warp_policy {
-                warp_route.minting_ref_script_utxo = Some(crate::utils::types::ReferenceScriptUtxo {
-                    tx_hash: tx_hash.clone(),
-                    output_index: 0,
-                    lovelace: ref_script_lovelace,
-                });
+                warp_route.minting_ref_script_utxo =
+                    Some(crate::utils::types::ReferenceScriptUtxo {
+                        tx_hash: tx_hash.clone(),
+                        output_index: 0,
+                        lovelace: ref_script_lovelace,
+                    });
                 break;
             }
         }
@@ -2688,9 +2954,18 @@ async fn deploy_minting_ref(
         }
     }
 
-    println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
-    println!("{}", "Minting Policy Reference Script Deployed!".green().bold());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!(
+        "{}",
+        "Minting Policy Reference Script Deployed!".green().bold()
+    );
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!();
     println!("{}", "Reference Script UTXO:".cyan());
     println!("  TX Hash: {}", tx_hash);
@@ -2701,16 +2976,28 @@ async fn deploy_minting_ref(
     println!();
     println!("{}", "Minting Policy:".cyan());
     println!("  Policy ID: {}", minting_policy);
-    println!("  Script Size: {} bytes", hex::decode(&mint_policy_applied.compiled_code)?.len());
+    println!(
+        "  Script Size: {} bytes",
+        hex::decode(&mint_policy_applied.compiled_code)?.len()
+    );
     println!();
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!("{}", "Next steps:".yellow());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!();
     println!("1. Update the registry to include this as an additional_input:");
     println!("   hyperlane-cardano registry update \\");
     println!("     --script-hash {} \\", warp_route_hash);
-    println!("     --additional-input mint_ref:{}:6d696e745f726566:false", nft_policy_id);
+    println!(
+        "     --additional-input mint_ref:{}:6d696e745f726566:false",
+        nft_policy_id
+    );
     println!();
     println!("   The 'false' means must_spend=false (use as reference input).");
     println!();
@@ -2718,3 +3005,340 @@ async fn deploy_minting_ref(
     Ok(())
 }
 
+/// Claim tokens from a redemption UTXO
+/// Recipients claim their tokens by providing their own ADA for the UTXO overhead
+async fn claim(
+    ctx: &CliContext,
+    tx_hash: &str,
+    output_index: u32,
+    redemption_hash: &str,
+    dry_run: bool,
+) -> Result<()> {
+    use pallas_addresses::{Address, Network};
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+
+    println!("{}", "Claiming tokens from redemption UTXO...".cyan());
+    println!();
+
+    // Get API key and keypair
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let payer_hash: [u8; 28] = keypair.verification_key_hash();
+
+    println!("{}", "Step 1: Configuration".cyan());
+    println!("  Payer Address: {}", payer_address);
+    println!("  Payer Hash: {}", hex::encode(&payer_hash));
+    println!("  Redemption Hash: {}", redemption_hash);
+    println!("  Redemption UTXO: {}#{}", tx_hash, output_index);
+
+    // Parse redemption script hash
+    let redemption_hash_bytes: [u8; 28] = hex::decode(redemption_hash)
+        .context("Invalid redemption_hash hex")?
+        .try_into()
+        .map_err(|_| anyhow!("redemption_hash must be 28 bytes"))?;
+
+    // Build redemption script address
+    let pallas_network = ctx.pallas_network();
+    let header_byte = match pallas_network {
+        Network::Testnet => 0x70,
+        Network::Mainnet => 0x71,
+        _ => 0x70,
+    };
+    let mut redemption_addr_bytes = vec![header_byte];
+    redemption_addr_bytes.extend_from_slice(&redemption_hash_bytes);
+    let redemption_address = Address::from_bytes(&redemption_addr_bytes)
+        .context("Failed to create redemption script address")?;
+    println!(
+        "  Redemption Address: {}",
+        redemption_address.to_bech32().unwrap_or_default()
+    );
+
+    // Step 2: Fetch the redemption UTXO
+    println!("\n{}", "Step 2: Fetching Redemption UTXO...".cyan());
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let redemption_utxos = client
+        .get_utxos(&redemption_address.to_bech32().unwrap())
+        .await?;
+    let redemption_utxo = redemption_utxos
+        .iter()
+        .find(|u| u.tx_hash == tx_hash && u.output_index == output_index)
+        .ok_or_else(|| anyhow!("Redemption UTXO not found: {}#{}", tx_hash, output_index))?;
+
+    println!("  Found UTXO:");
+    println!("    Lovelace: {}", redemption_utxo.lovelace);
+    println!("    Assets: {}", redemption_utxo.assets.len());
+    for asset in &redemption_utxo.assets {
+        println!(
+            "      - {}:{} = {}",
+            asset.policy_id, asset.asset_name, asset.quantity
+        );
+    }
+
+    // Step 3: Parse the redemption datum
+    println!("\n{}", "Step 3: Parsing Redemption Datum...".cyan());
+    let datum_value = redemption_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Redemption UTXO has no inline datum"))?;
+    // Datum may be CBOR hex string or already-parsed JSON
+    let datum = if let Some(cbor_hex) = datum_value.as_str() {
+        decode_plutus_datum(cbor_hex)?
+    } else {
+        datum_value.clone()
+    };
+
+    // Parse RedemptionDatum: Constr 0 [recipient, token_info, amount, return_address, expiry_slot]
+    let fields = match datum.get("fields").and_then(|f| f.as_array()) {
+        Some(f) if f.len() >= 5 => f,
+        _ => return Err(anyhow!("Invalid redemption datum structure")),
+    };
+
+    let recipient_hex = fields[0]
+        .get("bytes")
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid recipient in datum"))?;
+    let amount = fields[2]
+        .get("int")
+        .and_then(|i| i.as_i64())
+        .ok_or_else(|| anyhow!("Invalid amount in datum"))?;
+    let return_address_hex = fields[3]
+        .get("bytes")
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid return_address in datum"))?;
+    let expiry_slot = fields[4]
+        .get("int")
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid expiry_slot in datum"))?;
+
+    // Parse token_info to determine if it's Ada or Token
+    let token_info = &fields[1];
+    let token_type_constructor = token_info
+        .get("constructor")
+        .and_then(|c| c.as_u64())
+        .ok_or_else(|| anyhow!("Invalid token_info in datum"))?;
+
+    println!("  Recipient: {}", recipient_hex);
+    println!("  Amount: {}", amount);
+    println!("  Return Address: {}", return_address_hex);
+    println!("  Expiry Slot: {}", expiry_slot);
+    println!(
+        "  Token Type: {}",
+        if token_type_constructor == 0 {
+            "ADA"
+        } else {
+            "Token"
+        }
+    );
+
+    // Verify payer is the recipient
+    let recipient_bytes = hex::decode(recipient_hex)?;
+    if recipient_bytes != payer_hash.to_vec() {
+        return Err(anyhow!(
+            "Payer ({}) is not the recipient ({}) of this redemption UTXO",
+            hex::encode(&payer_hash),
+            recipient_hex
+        ));
+    }
+    println!("  {} Payer is the authorized recipient", "✓".green());
+
+    // Step 4: Check expiry
+    println!("\n{}", "Step 4: Checking Expiry...".cyan());
+    let current_slot = client.get_latest_slot().await?;
+    println!("  Current Slot: {}", current_slot);
+    println!("  Expiry Slot: {}", expiry_slot);
+
+    if current_slot >= expiry_slot {
+        return Err(anyhow!(
+            "Redemption UTXO has expired (current slot {} >= expiry slot {}). Use 'expire' command instead.",
+            current_slot, expiry_slot
+        ));
+    }
+    println!(
+        "  {} Redemption is still valid (expires in {} slots)",
+        "✓".green(),
+        expiry_slot - current_slot
+    );
+
+    // Step 5: Find fee UTXOs
+    println!("\n{}", "Step 5: Finding Fee UTXOs...".cyan());
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    let ada_only_utxos: Vec<_> = payer_utxos.iter().filter(|u| u.assets.is_empty()).collect();
+    let fee_utxo = ada_only_utxos
+        .first()
+        .ok_or_else(|| anyhow!("No ADA-only UTXOs available for fees"))?;
+    println!(
+        "  Using fee UTXO: {}#{} ({} lovelace)",
+        fee_utxo.tx_hash, fee_utxo.output_index, fee_utxo.lovelace
+    );
+
+    // Step 6: Load redemption script
+    println!("\n{}", "Step 6: Loading Redemption Script...".cyan());
+    let redemption_validator = apply_validator_params(
+        &ctx.contracts_dir,
+        "token_redemption",
+        "token_redemption",
+        &[],
+    )?;
+    let redemption_script = hex::decode(&redemption_validator.compiled_code)?;
+    println!("  Script loaded: {} bytes", redemption_script.len());
+
+    // Step 7: Build redeemer
+    println!("\n{}", "Step 7: Building Redeemer...".cyan());
+    let claim_redeemer = build_redemption_claim_redeemer();
+    println!("  Claim Redeemer: {} bytes", claim_redeemer.len());
+
+    if dry_run {
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("{}", "[Dry run - not submitting transaction]".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("\nWould claim:");
+        println!("  Amount: {}", amount);
+        println!("  Recipient: {}", payer_address);
+        return Ok(());
+    }
+
+    // Step 8: Build transaction
+    println!("\n{}", "Step 8: Building Transaction...".cyan());
+
+    // Parse UTXO inputs
+    let redemption_tx_hash: [u8; 32] = hex::decode(tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid redemption tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+
+    // Build recipient output with claimed tokens
+    let payer_addr = Address::from_bech32(&payer_address)?;
+    let min_lovelace = 2_000_000u64;
+
+    let mut recipient_output = Output::new(payer_addr.clone(), min_lovelace);
+
+    // Add tokens if token_info is Token (constructor 1)
+    if token_type_constructor == 1 {
+        let token_fields = token_info
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .ok_or_else(|| anyhow!("Invalid token_info fields"))?;
+        let policy_id_hex = token_fields[0]
+            .get("bytes")
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| anyhow!("Invalid policy_id in token_info"))?;
+        let asset_name_hex = token_fields[1]
+            .get("bytes")
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| anyhow!("Invalid asset_name in token_info"))?;
+
+        let policy_bytes: [u8; 28] = hex::decode(policy_id_hex)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid policy_id length"))?;
+        let asset_bytes = hex::decode(asset_name_hex)?;
+
+        recipient_output = recipient_output
+            .add_asset(Hash::new(policy_bytes), asset_bytes, amount as u64)
+            .map_err(|e| anyhow!("Failed to add tokens to output: {:?}", e))?;
+        println!("  Adding {} tokens to recipient output", amount);
+    } else {
+        // For ADA, the redemption amount IS the ADA
+        let total_ada = min_lovelace.max(amount as u64);
+        recipient_output = Output::new(payer_addr.clone(), total_ada);
+        println!("  Claiming {} lovelace to recipient", total_ada);
+    }
+
+    // Cost model
+    let cost_model = client.get_plutusv3_cost_model().await?;
+    let fee_estimate = 1_000_000u64;
+
+    // Build transaction
+    let mut staging = StagingTransaction::new()
+        // Redemption UTXO (script input)
+        .input(Input::new(
+            Hash::new(redemption_tx_hash),
+            output_index as u64,
+        ))
+        // Fee UTXO
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        // Collateral
+        .collateral_input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        // Recipient output with tokens
+        .output(recipient_output)
+        // Redemption script
+        .script(ScriptKind::PlutusV3, redemption_script)
+        // Spend redeemer
+        .add_spend_redeemer(
+            Input::new(Hash::new(redemption_tx_hash), output_index as u64),
+            claim_redeemer,
+            Some(ExUnits {
+                mem: 1_000_000,
+                steps: 500_000_000,
+            }),
+        )
+        // Cost model
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        // Fee
+        .fee(fee_estimate)
+        // Validity - must be before expiry_slot
+        .invalid_from_slot(expiry_slot)
+        // Required signer (recipient)
+        .disclosed_signer(Hash::new(payer_hash))
+        // Network
+        .network_id(if matches!(pallas_network, Network::Testnet) {
+            0
+        } else {
+            1
+        });
+
+    // Add change output
+    let change_amount = fee_utxo
+        .lovelace
+        .saturating_sub(fee_estimate)
+        .saturating_sub(min_lovelace);
+    if change_amount > min_lovelace {
+        staging = staging.output(Output::new(payer_addr.clone(), change_amount));
+    }
+
+    // Build the transaction
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX built: {} bytes", tx.tx_bytes.0.len());
+
+    // Sign and submit
+    println!("\n{}", "Step 9: Signing and Submitting...".cyan());
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
+    let submitted_tx_hash = client.submit_tx(&signed_tx).await?;
+
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!("{}", "Tokens Claimed Successfully!".green().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!();
+    println!("  TX Hash: {}", submitted_tx_hash);
+    println!("  Amount: {}", amount);
+    println!("  Recipient: {}", payer_address);
+    println!();
+
+    Ok(())
+}

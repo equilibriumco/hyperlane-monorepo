@@ -186,14 +186,12 @@ pub fn build_mailbox_datum(
     default_ism_hash: &str,
     owner_pkh: &str,
     outbound_nonce: u32,
-    branches: &[&str],  // 32 branch hashes (each 64 hex chars = 32 bytes)
+    branches: &[&str], // 32 branch hashes (each 64 hex chars = 32 bytes)
     merkle_count: u32,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    builder
-        .start_constr(0)
-        .uint(local_domain as u64);
+    builder.start_constr(0).uint(local_domain as u64);
 
     builder.bytes_hex(default_ism_hash)?;
     builder.bytes_hex(owner_pkh)?;
@@ -235,10 +233,7 @@ pub fn build_ism_datum(
     builder.start_list();
     for (domain, addrs) in validators {
         // Tuple is a plain array [domain, addrs], NOT Constr 0
-        builder
-            .start_list()
-            .uint(*domain as u64)
-            .start_list();
+        builder.start_list().uint(*domain as u64).start_list();
         for addr in addrs {
             builder.bytes_hex(addr)?;
         }
@@ -344,7 +339,7 @@ pub fn build_registry_datum(
                 // TokenReceiver { vault_locator: Option<UtxoLocator>, minting_policy: Option<ScriptHash> }
                 builder.start_constr(1);
                 builder.start_constr(1).end_constr(); // vault_locator: None (for now)
-                // minting_policy: Option<ScriptHash>
+                                                      // minting_policy: Option<ScriptHash>
                 match &reg.minting_policy {
                     Some(policy) => {
                         // Some = constructor 0
@@ -441,6 +436,20 @@ pub fn build_mint_redeemer() -> Vec<u8> {
     builder.build()
 }
 
+/// Build a redemption claim redeemer (Claim = constructor 0)
+pub fn build_redemption_claim_redeemer() -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+    builder.start_constr(0).end_constr();
+    builder.build()
+}
+
+/// Build a redemption expire redeemer (Expire = constructor 1)
+pub fn build_redemption_expire_redeemer() -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+    builder.start_constr(1).end_constr();
+    builder.build()
+}
+
 /// Build a Registry AdminRegister redeemer (admin-only, bypasses script ownership check)
 /// Redeemer: AdminRegister { registration: RecipientRegistration }
 /// AdminRegister is constructor 4 in RegistryRedeemer
@@ -514,7 +523,7 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
         "tokenreceiver" | "token-receiver" | "token_receiver" => {
             builder.start_constr(1);
             builder.start_constr(1).end_constr(); // vault_locator: None
-            // minting_policy: Option<ScriptHash>
+                                                  // minting_policy: Option<ScriptHash>
             match &reg.minting_policy {
                 Some(policy) => {
                     // Some(policy) = Constr 0 [policy]
@@ -534,7 +543,9 @@ pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<
             if let Some(msg_policy) = &reg.deferred_message_policy {
                 builder.bytes_hex(msg_policy)?;
             } else {
-                return Err(anyhow!("Deferred recipient requires message_policy (deferred_message_policy field)"));
+                return Err(anyhow!(
+                    "Deferred recipient requires message_policy (deferred_message_policy field)"
+                ));
             }
             builder.end_constr();
         }
@@ -715,9 +726,9 @@ pub fn build_deferred_recipient_datum(
 ///   default_gas_limit: Int
 /// ]
 pub fn build_igp_datum(
-    owner_pkh: &str,                      // 28 bytes hex (verification key hash)
-    beneficiary: &str,                    // 28 bytes hex (verification key hash)
-    gas_oracles: &[(u32, u64, u64)],      // (domain, gas_price, exchange_rate)
+    owner_pkh: &str,                 // 28 bytes hex (verification key hash)
+    beneficiary: &str,               // 28 bytes hex (verification key hash)
+    gas_oracles: &[(u32, u64, u64)], // (domain, gas_price, exchange_rate)
     default_gas_limit: u64,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
@@ -1039,7 +1050,10 @@ pub fn normalize_datum(datum: &Value) -> Result<Value> {
 /// - Native (2): Lock ADA directly
 pub enum WarpTokenType<'a> {
     /// Collateral: lock existing tokens (policy_id, asset_name)
-    Collateral { policy_id: &'a str, asset_name: &'a str },
+    Collateral {
+        policy_id: &'a str,
+        asset_name: &'a str,
+    },
     /// Synthetic: mint new tokens via minting_policy
     Synthetic { minting_policy: &'a str },
     /// Native: lock ADA directly
@@ -1077,7 +1091,10 @@ fn build_warp_route_datum(
 
     // token_type: WarpTokenType
     match token_type {
-        WarpTokenType::Collateral { policy_id, asset_name } => {
+        WarpTokenType::Collateral {
+            policy_id,
+            asset_name,
+        } => {
             // Collateral - Constr 0 [policy_id, asset_name]
             builder.start_constr(0);
             builder.bytes_hex(policy_id)?;
@@ -1268,9 +1285,7 @@ pub fn build_warp_route_collateral_datum_with_routes(
     builder.start_list();
     for route in remote_routes {
         // Tuple is a plain array [domain, address]
-        builder
-            .start_list()
-            .uint(route.domain as u64);
+        builder.start_list().uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
         builder.end_list();
     }
@@ -1320,9 +1335,7 @@ pub fn build_warp_route_synthetic_datum_with_routes(
     // remote_routes: List<(Domain, HyperlaneAddress)>
     builder.start_list();
     for route in remote_routes {
-        builder
-            .start_list()
-            .uint(route.domain as u64);
+        builder.start_list().uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
         builder.end_list();
     }
@@ -1369,8 +1382,7 @@ pub fn build_warp_route_native_datum_with_routes(
     // remote_routes: List<(Domain, HyperlaneAddress)>
     builder.start_list_definite(remote_routes.len());
     for route in remote_routes {
-        builder.start_list_definite(2)
-            .uint(route.domain as u64);
+        builder.start_list_definite(2).uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
     }
     // end WarpRouteConfig (no end needed for definite)
@@ -1490,7 +1502,7 @@ mod tests {
         let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
         let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
         let oracles = vec![
-            (43113u32, 25000000000u64, 1000000u64),   // Fuji
+            (43113u32, 25000000000u64, 1000000u64),    // Fuji
             (11155111u32, 30000000000u64, 1200000u64), // Sepolia
         ];
 
