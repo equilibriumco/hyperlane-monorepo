@@ -1136,8 +1136,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 })?;
         }
 
-        // Fee estimate
-        let fee_estimate = 500_000u64;
+        // Fee estimate (higher due to Plutus script execution costs)
+        let fee_estimate = 2_000_000u64;
         let change = fee_input.lovelace.saturating_sub(fee_estimate);
 
         // Build staging transaction
@@ -1150,8 +1150,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 warp_input,
                 redeemer.to_vec(),
                 Some(ExUnits {
-                    mem: 500_000,
-                    steps: 300_000_000,
+                    mem: 14_000_000,
+                    steps: 10_000_000_000,
                 }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
