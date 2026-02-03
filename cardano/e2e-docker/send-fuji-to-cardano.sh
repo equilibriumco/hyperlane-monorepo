@@ -18,6 +18,8 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
     source "$SCRIPT_DIR/.env"
     set +a
+    # Unset RUST_LOG to prevent trace output from corrupting cast output
+    unset RUST_LOG
 else
     echo "Error: .env file not found at $SCRIPT_DIR/.env"
     echo "Copy .env.example to .env and fill in your values"
