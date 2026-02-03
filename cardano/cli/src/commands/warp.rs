@@ -311,7 +311,8 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     println!("  Found {} UTXOs", utxos.len());
 
     // We need 2 UTXOs for warp route deployment (state + collateral)
-    let min_ada = 25_000_000u64;
+    // Minimum: 5 ADA state + 20 ADA ref script + 3 ADA fee = 28 ADA
+    let min_ada = 28_000_000u64;
     let suitable_utxos: Vec<_> = utxos
         .into_iter()
         .filter(|u| u.lovelace >= min_ada && u.assets.is_empty())
@@ -326,7 +327,7 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
         if !large_utxos.is_empty() {
             let large = large_utxos[0];
             return Err(anyhow!(
-                "Need at least 2 UTXOs with >= 25 ADA each. Found {}.\n\
+                "Need at least 2 UTXOs with >= 28 ADA each. Found {}.\n\
                 You have a large UTXO ({}#{}) with {} ADA that can be split.\n\
                 Run: hyperlane-cardano utxo split --utxo '{}#{}' --count 2 --amount 50000000",
                 suitable_utxos.len(),
@@ -339,7 +340,7 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
         }
 
         return Err(anyhow!(
-            "Need at least 2 UTXOs with >= 25 ADA each. Found {}. \
+            "Need at least 2 UTXOs with >= 28 ADA each. Found {}. \
             Please fund the wallet with more ADA.",
             suitable_utxos.len()
         ));
@@ -371,16 +372,29 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     println!("  State NFT Policy: {}", warp_nft_applied.policy_id.green());
 
     // Compute warp_route script hash
-    // The warp_route validator takes 3 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy
+    // The warp_route validator takes 4 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy, redemption_script
     let processed_messages_nft_policy = deployment
         .mailbox
         .as_ref()
         .and_then(|m| m.applied_parameters.first())
         .map(|p| p.value.clone())
         .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
+
+    // Load token_redemption script hash (not parameterized - fixed hash from blueprint)
+    let blueprint_path = ctx.contracts_dir.join("plutus.json");
+    let blueprint = crate::utils::plutus::PlutusBlueprint::from_file(&blueprint_path)?;
+    let redemption_validator = blueprint
+        .find_validator("token_redemption.token_redemption.spend")
+        .ok_or_else(|| anyhow!("token_redemption validator not found in blueprint"))?;
+    println!(
+        "  Token Redemption Script Hash: {}",
+        redemption_validator.hash.green()
+    );
+
     let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
     let state_nft_param_cbor = encode_script_hash_param(&warp_nft_applied.policy_id)?;
     let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
+    let redemption_param_cbor = encode_script_hash_param(&redemption_validator.hash)?;
     let warp_route_applied = apply_validator_params(
         &ctx.contracts_dir,
         "warp_route",
@@ -389,6 +403,7 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
             &hex::encode(&mailbox_param_cbor),
             &hex::encode(&state_nft_param_cbor),
             &hex::encode(&pm_nft_param_cbor),
+            &hex::encode(&redemption_param_cbor),
         ],
     )?;
     println!(
@@ -453,7 +468,7 @@ async fn finalize_warp_deployment(
             &deploy_ctx.warp_address,
             warp_datum,
             5_000_000,
-            18_000_000,
+            20_000_000, // Increased to cover minUTxO with ~4KB script + NFT
         )
         .await?;
 
@@ -484,7 +499,7 @@ async fn finalize_warp_deployment(
             reference_script_utxo: Some(ReferenceScriptUtxo {
                 tx_hash: warp_tx_hash.clone(),
                 output_index: 1,
-                lovelace: 18_000_000,
+                lovelace: 20_000_000, // Matches ref_output_lovelace above
             }),
             token_policy: extra_info
                 .get("token_policy")
@@ -934,6 +949,8 @@ async fn enroll_router(
     println!("  Total Bridged: {}", total_bridged);
 
     // Verify owner matches signer
+    println!("  Current Owner: {}", current_owner);
+    println!("  Signer PKH: {}", owner_pkh);
     if current_owner != owner_pkh {
         return Err(anyhow!(
             "Signing key does not match owner. Expected: {}, Got: {}",
@@ -994,10 +1011,12 @@ async fn enroll_router(
         )?,
     };
     println!("  New Datum CBOR: {} bytes", new_datum.len());
+    println!("  New Datum Hex: {}", hex::encode(&new_datum));
 
     // Build redeemer
     let redeemer = build_enroll_remote_route_redeemer(domain, router)?;
     println!("  Redeemer CBOR: {} bytes", redeemer.len());
+    println!("  Redeemer Hex: {}", hex::encode(&redeemer));
 
     if dry_run {
         println!(
