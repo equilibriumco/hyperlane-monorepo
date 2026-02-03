@@ -138,6 +138,14 @@ impl BlockfrostProvider {
         Ok(block.height.unwrap_or(0) as u64)
     }
 
+    /// Get the latest slot number
+    #[instrument(skip(self))]
+    pub async fn get_latest_slot(&self) -> Result<u64, BlockfrostProviderError> {
+        self.rate_limit().await;
+        let block = self.api.blocks_latest().await?;
+        Ok(block.slot.unwrap_or(0) as u64)
+    }
+
     /// Get UTXOs at an address with manual pagination and rate limiting
     /// Returns empty vector if the address has no UTXOs (404 from Blockfrost)
     #[instrument(skip(self))]
