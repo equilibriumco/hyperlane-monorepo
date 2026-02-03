@@ -1,8 +1,8 @@
 {
   "amount": 1000000,
-  "asset_name": "GUITKN",
-  "asset_name_hex": "475549544b4e",
-  "mint_tx_hash": "ae1955bb2bc6b20ab2cb6597b9be4a5e29f2ee512a7c29baabd1041326a94ff5",
-  "policy_id": "288e36e6e1d120fb7ecbb8c5a3de4e069ce5f02cc2dea15785af1b93",
-  "seed_utxo": "aa7e2450e3bee4619c2d316f51609d249af87cebbfae30cd9860319e5b47793b#0"
+  "asset_name": "CTEST",
+  "asset_name_hex": "4354455354",
+  "mint_tx_hash": "f66d149c2aee265a33994685cf7947936e51a9f67cc87049cf3b0d6fbe7c4aa1",
+  "policy_id": "505745eaf33beb82adab1937f545f4895ca2049c1f9be43cb6c273c5",
+  "seed_utxo": "8d5a196a80213ebcba15addcc6b0cab3e72458ebe7685dcd54ce94feaa351608#0"
 }

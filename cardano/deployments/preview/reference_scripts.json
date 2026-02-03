@@ -1,22 +1,22 @@
 [
   {
     "script_name": "mailbox",
-    "script_hash": "5d43f6a75de75483ba94654dae2956912602c6f05a9e73fd0fdc1557",
-    "tx_hash": "8d5a196a80213ebcba15addcc6b0cab3e72458ebe7685dcd54ce94feaa351608",
+    "script_hash": "535e9b5e46cf2c98b2e75aa2f1f8e08c6358701b368e7f97a6a0c8e4",
+    "tx_hash": "60187dbef60a8fd31bb14f07f9e05c69623bb6fb8fbde2ee9dc6ae949f6b7c6d",
     "output_index": 0,
     "lovelace": 17000000
   },
   {
     "script_name": "multisig_ism",
     "script_hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
-    "tx_hash": "0de9896f96715b8e335e75c1c2a250bc262df4b3d611b4caf6262f768a8e3249",
+    "tx_hash": "d4be7d63820e5dffead8a190496157f4ad72835492b67c89b3b64f4bd8addac0",
     "output_index": 0,
     "lovelace": 13000000
   },
   {
     "script_name": "registry",
     "script_hash": "7caa3e97e2de64f5386ac8587df4ec0f24398ea05bca1e2c54f6795b",
-    "tx_hash": "3a147feb3a4174c53bc37e8cb6c7c401fd8efdb210500c4a095c4ecfe94a7040",
+    "tx_hash": "ebef8edfa74e0bae61ecb84d5e0b5bed9dad4bc0bf17e6c7e31f42fe1ada5cd9",
     "output_index": 0,
     "lovelace": 16000000
   }
