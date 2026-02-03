@@ -27,6 +27,7 @@ use pallas_txbuilder::{
 };
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::OnceCell;
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Error, Debug)]
@@ -67,8 +68,30 @@ const DEFAULT_STEP_UNITS: u64 = 1_500_000_000;
 const ISM_MEM_UNITS: u64 = 4_000_000;
 const ISM_STEP_UNITS: u64 = 2_500_000_000;
 
-/// Minimum lovelace per UTXO (Cardano protocol parameter ~1 ADA)
-const MIN_UTXO_LOVELACE: u64 = 2_000_000;
+/// Default coins per UTXO byte (Cardano protocol parameter)
+/// Used as fallback when protocol parameters cannot be fetched.
+/// Current mainnet/preview value is ~4310 lovelace per byte.
+const DEFAULT_COINS_PER_UTXO_BYTE: u64 = 4310;
+
+/// Base overhead for UTXO entry structure (address, value encoding, etc.)
+/// This is the minimum overhead for a simple ADA-only output.
+const UTXO_BASE_OVERHEAD: u64 = 160;
+
+/// Types of UTXO outputs for minimum lovelace calculation
+#[derive(Debug, Clone, Copy)]
+enum OutputType {
+    /// Simple output containing only ADA
+    SimpleAda,
+    /// Output with a native token (policy ID + asset name)
+    WithNativeToken { asset_name_len: usize },
+    /// Output with an inline datum
+    WithInlineDatum { datum_size: usize },
+    /// Output with both native token and inline datum
+    WithTokenAndDatum {
+        asset_name_len: usize,
+        datum_size: usize,
+    },
+}
 
 /// Estimated fee for a complex script transaction (~2-3 ADA)
 const ESTIMATED_FEE_LOVELACE: u64 = 3_000_000;
@@ -84,6 +107,8 @@ pub struct HyperlaneTxBuilder {
     provider: Arc<BlockfrostProvider>,
     registry: RecipientRegistry,
     conf: ConnectionConf,
+    /// Cached protocol parameter: lovelace cost per UTXO byte
+    coins_per_utxo_byte: OnceCell<u64>,
 }
 
 impl HyperlaneTxBuilder {
@@ -99,7 +124,91 @@ impl HyperlaneTxBuilder {
             provider,
             registry,
             conf: conf.clone(),
+            coins_per_utxo_byte: OnceCell::new(),
         }
+    }
+
+    /// Get the coins per UTXO byte from protocol parameters.
+    /// Fetches from Blockfrost once and caches the result.
+    async fn get_coins_per_utxo_byte(&self) -> u64 {
+        *self
+            .coins_per_utxo_byte
+            .get_or_init(|| async {
+                match self.provider.get_protocol_parameters().await {
+                    Ok(params) => {
+                        // Try coins_per_utxo_size (Babbage+) first, then coins_per_utxo_word (Alonzo)
+                        let value = params
+                            .get("coins_per_utxo_size")
+                            .or_else(|| params.get("coins_per_utxo_word"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(DEFAULT_COINS_PER_UTXO_BYTE);
+                        debug!(
+                            "Fetched coins_per_utxo_byte from protocol params: {}",
+                            value
+                        );
+                        value
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch protocol parameters, using default: {}. Error: {}",
+                            DEFAULT_COINS_PER_UTXO_BYTE, e
+                        );
+                        DEFAULT_COINS_PER_UTXO_BYTE
+                    }
+                }
+            })
+            .await
+    }
+
+    /// Calculate minimum lovelace required for a UTXO based on its size.
+    ///
+    /// The formula is: min_lovelace = coins_per_utxo_byte × (base_overhead + output_size)
+    ///
+    /// Output sizes vary by content:
+    /// - Simple ADA output: ~60 bytes
+    /// - With native token: +56 bytes (policy ID) + asset_name_len
+    /// - With inline datum: +datum_size bytes
+    async fn calculate_min_lovelace(&self, output_type: OutputType) -> u64 {
+        let coins_per_byte = self.get_coins_per_utxo_byte().await;
+
+        // Estimate output size based on type
+        let output_size: u64 = match output_type {
+            OutputType::SimpleAda => 60, // Just address + lovelace value
+            OutputType::WithNativeToken { asset_name_len } => {
+                // Address + value + policy_id (28) + asset_name + multiasset overhead
+                60 + 28 + asset_name_len as u64 + 20
+            }
+            OutputType::WithInlineDatum { datum_size } => {
+                // Simple output + datum
+                60 + datum_size as u64
+            }
+            OutputType::WithTokenAndDatum {
+                asset_name_len,
+                datum_size,
+            } => {
+                // Address + value + policy_id + asset_name + multiasset overhead + datum
+                60 + 28 + asset_name_len as u64 + 20 + datum_size as u64
+            }
+        };
+
+        let min_lovelace = coins_per_byte * (UTXO_BASE_OVERHEAD + output_size);
+
+        // Round up to nearest 100k lovelace for safety margin
+        let rounded = ((min_lovelace + 99_999) / 100_000) * 100_000;
+
+        debug!(
+            "Calculated min_lovelace for {:?}: {} (raw: {}, coins_per_byte: {}, output_size: {})",
+            output_type, rounded, min_lovelace, coins_per_byte, output_size
+        );
+
+        rounded
+    }
+
+    /// Calculate minimum lovelace for a simple ADA-only output.
+    /// This is the most common case and provides a quick accessor.
+    async fn min_lovelace_simple(&self) -> u64 {
+        self.calculate_min_lovelace(OutputType::SimpleAda).await
     }
 
     /// Find the mailbox UTXO by NFT or fall back to script address lookup
@@ -616,28 +725,30 @@ impl HyperlaneTxBuilder {
         components: &ProcessTxComponents,
         payer: &Keypair,
     ) -> Result<BuiltTransaction, TxBuilderError> {
+        // Get minimum UTXO lovelace from protocol parameters
+        let min_lovelace = self.min_lovelace_simple().await;
+
         // Get payer address and UTXOs for fee payment
         let payer_address = payer.address_bech32(self.network_to_pallas());
         debug!("Payer address: {}", payer_address);
 
         // Calculate additional funds needed when warp route doesn't have enough lovelace.
         // This applies to:
-        // - Synthetic: need MIN_UTXO_LOVELACE for recipient output (minted tokens go there)
-        // - Native with small amounts: release amount < MIN_UTXO_LOVELACE but output needs MIN_UTXO_LOVELACE
-        // - Collateral: need MIN_UTXO_LOVELACE for the token release output
+        // - Synthetic: need min_lovelace for recipient output (minted tokens go there)
+        // - Native with small amounts: release amount < min_lovelace but output needs min_lovelace
+        // - Collateral: need min_lovelace for the token release output
         let payer_extra = match &components.warp_token_type {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                let extra = if original_lovelace > MIN_UTXO_LOVELACE * 2 {
+                let extra = if original_lovelace > min_lovelace * 2 {
                     0 // Warp route has enough (4+ ADA)
-                } else if original_lovelace > MIN_UTXO_LOVELACE {
+                } else if original_lovelace > min_lovelace {
                     // Warp route has some but not full amount (2-4 ADA)
-                    MIN_UTXO_LOVELACE
-                        .saturating_sub(original_lovelace.saturating_sub(MIN_UTXO_LOVELACE))
+                    min_lovelace.saturating_sub(original_lovelace.saturating_sub(min_lovelace))
                 } else {
-                    MIN_UTXO_LOVELACE // Warp route at minimum, payer covers full cost
+                    min_lovelace // Warp route at minimum, payer covers full cost
                 };
                 info!(
                     "Synthetic route: warp_route_lovelace={}, payer covers extra={} lovelace",
@@ -648,15 +759,15 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // The release output needs amount.max(MIN_UTXO_LOVELACE)
-                let release_needed = release_amount.max(MIN_UTXO_LOVELACE);
-                // The warp route continuation needs MIN_UTXO_LOVELACE
-                let total_needed = release_needed + MIN_UTXO_LOVELACE;
+                // The release output needs amount.max(min_lovelace)
+                let release_needed = release_amount.max(min_lovelace);
+                // The warp route continuation needs min_lovelace
+                let total_needed = release_needed + min_lovelace;
                 let extra = total_needed.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
                         "Native route shortfall: warp_route_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, payer covers extra={} lovelace",
-                        original_lovelace, release_needed, MIN_UTXO_LOVELACE, total_needed, extra
+                        original_lovelace, release_needed, min_lovelace, total_needed, extra
                     );
                 }
                 extra
@@ -665,8 +776,8 @@ impl HyperlaneTxBuilder {
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                // Collateral releases need MIN_UTXO_LOVELACE for the token output
-                let total_needed = MIN_UTXO_LOVELACE * 2; // continuation + release output
+                // Collateral releases need min_lovelace for the token output
+                let total_needed = min_lovelace * 2; // continuation + release output
                 let extra = total_needed.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
@@ -682,7 +793,7 @@ impl HyperlaneTxBuilder {
         // Find payer UTXOs for fee payment (coin selection)
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
         let (selected_utxos, total_input) =
-            self.select_utxos_for_fee_with_extra(&payer_utxos, payer_extra)?;
+            self.select_utxos_for_fee_with_extra(&payer_utxos, payer_extra, min_lovelace)?;
         debug!(
             "Selected {} UTXOs with {} lovelace for fees",
             selected_utxos.len(),
@@ -754,6 +865,32 @@ impl HyperlaneTxBuilder {
             );
         }
 
+        // Add minting policy reference script UTXO for synthetic warp routes.
+        // The minting policy script must be available as a reference input so the
+        // ledger can validate the mint redeemer. The CLI's `warp deploy-minting-ref`
+        // places this UTXO at the deployer/payer address with reference_script_hash
+        // matching the minting policy hash.
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = &components.warp_token_type {
+            let mint_ref_utxo = payer_utxos
+                .iter()
+                .find(|u| u.reference_script_hash.as_deref() == Some(minting_policy.as_str()));
+            if let Some(mint_ref) = mint_ref_utxo {
+                let mint_ref_input = utxo_to_input(mint_ref)?;
+                tx = tx.reference_input(mint_ref_input);
+                info!(
+                    "Added minting policy reference script UTXO: {}#{} (script_hash={})",
+                    mint_ref.tx_hash, mint_ref.output_index, minting_policy
+                );
+            } else {
+                return Err(TxBuilderError::MissingInput(format!(
+                    "Minting policy reference script UTXO not found at payer address. \
+                     Deploy it with `warp deploy-minting-ref` using the same signing key. \
+                     Expected reference_script_hash={}",
+                    minting_policy
+                )));
+            }
+        }
+
         // Add fee payment UTXOs
         for utxo in &selected_utxos {
             let input = utxo_to_input(utxo)?;
@@ -823,8 +960,11 @@ impl HyperlaneTxBuilder {
         // Create outputs
 
         // 1. Mailbox continuation output (same address, same datum, same value)
-        let mailbox_output =
-            create_continuation_output(&components.mailbox_utxo, &self.conf.mailbox_policy_id)?;
+        let mailbox_output = create_continuation_output(
+            &components.mailbox_utxo,
+            &self.conf.mailbox_policy_id,
+            min_lovelace,
+        )?;
         tx = tx.output(mailbox_output);
 
         // 2. Recipient continuation output (same address, UPDATED datum)
@@ -837,6 +977,7 @@ impl HyperlaneTxBuilder {
             &components.recipient_continuation_datum_cbor,
             components.token_release_amount,
             components.warp_token_type.as_ref(),
+            min_lovelace,
         )?;
         tx = tx.output(recipient_output);
 
@@ -850,8 +991,12 @@ impl HyperlaneTxBuilder {
         ) {
             // Skip release output for Synthetic (tokens minted by minting policy)
             if !matches!(token_type, WarpTokenTypeInfo::Synthetic { .. }) {
-                let release_output =
-                    create_token_release_output(recipient_bytes, release_amount, token_type)?;
+                let release_output = create_token_release_output(
+                    recipient_bytes,
+                    release_amount,
+                    token_type,
+                    min_lovelace,
+                )?;
                 tx = tx.output(release_output);
                 info!(
                     "Added release output: amount={} to recipient {}, token_type={:?}",
@@ -889,7 +1034,7 @@ impl HyperlaneTxBuilder {
                     release_amount, minting_policy
                 );
 
-                // Create recipient output with minted tokens + MIN_UTXO_LOVELACE
+                // Create recipient output with minted tokens + min_lovelace
                 // Parse recipient credential (28 bytes) to derive address
                 let pallas_network = match self.conf.network {
                     CardanoNetwork::Mainnet => Network::Mainnet,
@@ -901,7 +1046,7 @@ impl HyperlaneTxBuilder {
                     recipient_address.to_bech32().unwrap_or_default()
                 );
 
-                let mut recipient_output = Output::new(recipient_address, MIN_UTXO_LOVELACE);
+                let mut recipient_output = Output::new(recipient_address, min_lovelace);
                 recipient_output = recipient_output
                     .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
                     .map_err(|e| {
@@ -965,7 +1110,7 @@ impl HyperlaneTxBuilder {
                         )
                     })?;
 
-            let mut message_utxo_output = Output::new(recipient_address, MIN_UTXO_LOVELACE)
+            let mut message_utxo_output = Output::new(recipient_address, min_lovelace)
                 .set_inline_datum(stored_datum_cbor.clone());
 
             // Add the message NFT to this output
@@ -1009,7 +1154,7 @@ impl HyperlaneTxBuilder {
 
         // 3. ISM continuation output (same address, same datum, same value)
         // The ISM is spent for verification but must continue with unchanged state
-        let ism_output = create_ism_continuation_output(&components.ism_utxo)?;
+        let ism_output = create_ism_continuation_output(&components.ism_utxo, min_lovelace)?;
         tx = tx.output(ism_output);
         debug!("Added ISM continuation output");
 
@@ -1019,6 +1164,7 @@ impl HyperlaneTxBuilder {
         let mut processed_marker_output = self.create_processed_marker_output(
             &components.message_id,
             &components.processed_datum_cbor,
+            min_lovelace,
         )?;
 
         // 4. Optional: Mint processed message NFT for efficient O(1) lookups
@@ -1092,13 +1238,13 @@ impl HyperlaneTxBuilder {
         // The payer's input funds: fee + processed marker output + (optional) message UTXO
         // (mailbox and recipient continuation outputs return the same value they consume)
         let fee = ESTIMATED_FEE_LOVELACE;
-        let processed_marker_cost = MIN_UTXO_LOVELACE;
-        // For Deferred, we also create a message UTXO which needs MIN_UTXO_LOVELACE
+        let processed_marker_cost = min_lovelace;
+        // For Deferred, we also create a message UTXO which needs min_lovelace
         let message_utxo_cost = if matches!(
             &components.recipient_type,
             crate::types::RecipientType::Deferred { .. }
         ) {
-            MIN_UTXO_LOVELACE
+            min_lovelace
         } else {
             0
         };
@@ -1106,22 +1252,22 @@ impl HyperlaneTxBuilder {
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
         // to fund both the continuation output AND the recipient output, payer covers the difference.
         // This applies to:
-        // - Synthetic: need MIN_UTXO_LOVELACE for recipient (minted tokens go there)
-        // - Native: need amount.max(MIN_UTXO_LOVELACE) for recipient + MIN_UTXO_LOVELACE for continuation
-        // - Collateral: need MIN_UTXO_LOVELACE for recipient (tokens) + MIN_UTXO_LOVELACE for continuation
+        // - Synthetic: need min_lovelace for recipient (minted tokens go there)
+        // - Native: need amount.max(min_lovelace) for recipient + min_lovelace for continuation
+        // - Collateral: need min_lovelace for recipient (tokens) + min_lovelace for continuation
         let recipient_shortfall = match &components.warp_token_type {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                let warp_contribution = if original_lovelace > MIN_UTXO_LOVELACE * 2 {
-                    MIN_UTXO_LOVELACE
-                } else if original_lovelace > MIN_UTXO_LOVELACE {
-                    original_lovelace.saturating_sub(MIN_UTXO_LOVELACE)
+                let warp_contribution = if original_lovelace > min_lovelace * 2 {
+                    min_lovelace
+                } else if original_lovelace > min_lovelace {
+                    original_lovelace.saturating_sub(min_lovelace)
                 } else {
                     0
                 };
-                let shortfall = MIN_UTXO_LOVELACE.saturating_sub(warp_contribution);
+                let shortfall = min_lovelace.saturating_sub(warp_contribution);
                 debug!(
                     "Synthetic recipient shortfall: warp_lovelace={}, warp_contribution={}, shortfall={}",
                     original_lovelace, warp_contribution, shortfall
@@ -1131,9 +1277,9 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // Release output needs amount.max(MIN_UTXO_LOVELACE), continuation needs MIN_UTXO_LOVELACE
-                let release_needed = release_amount.max(MIN_UTXO_LOVELACE);
-                let total_needed = release_needed + MIN_UTXO_LOVELACE;
+                // Release output needs amount.max(min_lovelace), continuation needs min_lovelace
+                let release_needed = release_amount.max(min_lovelace);
+                let total_needed = release_needed + min_lovelace;
                 let shortfall = total_needed.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
@@ -1147,8 +1293,8 @@ impl HyperlaneTxBuilder {
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                // Both continuation and recipient outputs need MIN_UTXO_LOVELACE
-                let total_needed = MIN_UTXO_LOVELACE * 2;
+                // Both continuation and recipient outputs need min_lovelace
+                let total_needed = min_lovelace * 2;
                 let shortfall = total_needed.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
@@ -1168,7 +1314,7 @@ impl HyperlaneTxBuilder {
         let change_amount = total_input
             .saturating_sub(fee + processed_marker_cost + message_utxo_cost + recipient_shortfall);
 
-        if change_amount >= MIN_UTXO_LOVELACE {
+        if change_amount >= min_lovelace {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
             tx = tx.output(change_output);
         }
@@ -1331,14 +1477,19 @@ impl HyperlaneTxBuilder {
     }
 
     /// Select UTXOs for fee payment using simple greedy algorithm
-    fn select_utxos_for_fee(&self, utxos: &[Utxo]) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
-        self.select_utxos_for_fee_with_extra(utxos, 0)
+    fn select_utxos_for_fee(
+        &self,
+        utxos: &[Utxo],
+        min_lovelace: u64,
+    ) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
+        self.select_utxos_for_fee_with_extra(utxos, 0, min_lovelace)
     }
 
     fn select_utxos_for_fee_with_extra(
         &self,
         utxos: &[Utxo],
         extra: u64,
+        min_lovelace: u64,
     ) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
         // Sort UTXOs by lovelace amount (largest first) for efficient selection
         let mut sorted: Vec<_> = utxos.iter().collect();
@@ -1347,10 +1498,10 @@ impl HyperlaneTxBuilder {
         let mut selected = Vec::new();
         let mut total: u64 = 0;
         // Need enough for fee + min UTXO for change + extra (e.g., synthetic recipient shortfall)
-        let needed = ESTIMATED_FEE_LOVELACE + MIN_UTXO_LOVELACE + extra;
+        let needed = ESTIMATED_FEE_LOVELACE + min_lovelace + extra;
         debug!(
             "UTXO selection: need {} lovelace (fee={}, min_utxo={}, extra={})",
-            needed, ESTIMATED_FEE_LOVELACE, MIN_UTXO_LOVELACE, extra
+            needed, ESTIMATED_FEE_LOVELACE, min_lovelace, extra
         );
 
         for utxo in sorted {
@@ -1392,6 +1543,7 @@ impl HyperlaneTxBuilder {
         &self,
         _message_id: &[u8; 32],
         datum_cbor: &[u8],
+        min_lovelace: u64,
     ) -> Result<Output, TxBuilderError> {
         // The processed messages are stored at the processed_messages_script address
         // This must match the parameter applied to the mailbox validator
@@ -1400,7 +1552,7 @@ impl HyperlaneTxBuilder {
             .script_hash_to_address(&self.conf.processed_messages_script_hash)?;
 
         // Just create a simple output with inline datum, no NFT needed
-        let output = Output::new(parse_address(&script_address)?, MIN_UTXO_LOVELACE)
+        let output = Output::new(parse_address(&script_address)?, min_lovelace)
             .set_inline_datum(datum_cbor.to_vec());
 
         Ok(output)
@@ -1426,6 +1578,9 @@ impl HyperlaneTxBuilder {
         ism_policy_id: &str,
         payer: &Keypair,
     ) -> Result<String, TxBuilderError> {
+        // Get minimum UTXO lovelace from protocol parameters
+        let min_lovelace = self.min_lovelace_simple().await;
+
         info!(
             "Updating ISM validators for domain {} (threshold: {}, validators: {})",
             domain,
@@ -1535,7 +1690,8 @@ impl HyperlaneTxBuilder {
         // 6. Get payer address and UTXOs
         let payer_address = payer.address_bech32(self.network_to_pallas());
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
-        let (selected_utxos, total_input) = self.select_utxos_for_fee(&payer_utxos)?;
+        let (selected_utxos, total_input) =
+            self.select_utxos_for_fee(&payer_utxos, min_lovelace)?;
 
         info!(
             "Selected {} payer UTXOs with {} lovelace",
@@ -1568,7 +1724,7 @@ impl HyperlaneTxBuilder {
 
         // ISM continuation output (same address, same value, updated datum)
         let ism_address = parse_address(&ism_utxo.address)?;
-        let ism_lovelace = ism_utxo.lovelace().max(MIN_UTXO_LOVELACE);
+        let ism_lovelace = ism_utxo.lovelace().max(min_lovelace);
 
         let mut ism_output = Output::new(ism_address, ism_lovelace);
         ism_output = ism_output.set_inline_datum(new_datum_cbor);
@@ -1586,7 +1742,7 @@ impl HyperlaneTxBuilder {
             .saturating_sub(ism_lovelace)
             .saturating_sub(ESTIMATED_FEE_LOVELACE);
 
-        if change_amount >= MIN_UTXO_LOVELACE {
+        if change_amount >= min_lovelace {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
             tx = tx.output(change_output);
         }
@@ -1774,11 +1930,15 @@ fn encode_constructor_0_redeemer() -> Vec<u8> {
 
 /// Create a continuation output for a script UTXO
 /// This preserves the address, value, and inline datum from the original UTXO
-fn create_continuation_output(utxo: &Utxo, _policy_id: &str) -> Result<Output, TxBuilderError> {
+fn create_continuation_output(
+    utxo: &Utxo,
+    _policy_id: &str,
+    min_lovelace: u64,
+) -> Result<Output, TxBuilderError> {
     let address = parse_address(&utxo.address)?;
     let lovelace = utxo.lovelace();
 
-    let mut output = Output::new(address, lovelace.max(MIN_UTXO_LOVELACE));
+    let mut output = Output::new(address, lovelace.max(min_lovelace));
 
     // Preserve inline datum if present
     if let Some(datum_json) = &utxo.inline_datum {
@@ -1821,37 +1981,38 @@ fn create_warp_route_continuation_output(
     new_datum_cbor: &[u8],
     release_amount: Option<u64>,
     token_type: Option<&WarpTokenTypeInfo>,
+    min_lovelace: u64,
 ) -> Result<Output, TxBuilderError> {
     let address = parse_address(&utxo.address)?;
     let original_lovelace = utxo.lovelace();
 
     // Adjust lovelace based on token type:
     // - Native: reduce lovelace by the release amount (tokens are ADA)
-    // - Collateral: reduce lovelace by MIN_UTXO_LOVELACE to fund the release output
-    // - Synthetic: reduce lovelace by MIN_UTXO_LOVELACE to fund the recipient output (minted tokens go there)
+    // - Collateral: reduce lovelace by min_lovelace to fund the release output
+    // - Synthetic: reduce lovelace by min_lovelace to fund the recipient output (minted tokens go there)
     let final_lovelace = match (&token_type, release_amount) {
         (Some(WarpTokenTypeInfo::Native), Some(amount)) => {
             // Native: release amount IS the ADA being sent
-            // The release output uses amount.max(MIN_UTXO_LOVELACE), so we must subtract that
-            let release_lovelace = amount.max(MIN_UTXO_LOVELACE);
+            // The release output uses amount.max(min_lovelace), so we must subtract that
+            let release_lovelace = amount.max(min_lovelace);
             original_lovelace
                 .saturating_sub(release_lovelace)
-                .max(MIN_UTXO_LOVELACE)
+                .max(min_lovelace)
         }
         (Some(WarpTokenTypeInfo::Collateral { .. }), Some(_)) => {
-            // Collateral: need to fund the release output with MIN_UTXO_LOVELACE
+            // Collateral: need to fund the release output with min_lovelace
             original_lovelace
-                .saturating_sub(MIN_UTXO_LOVELACE)
-                .max(MIN_UTXO_LOVELACE)
+                .saturating_sub(min_lovelace)
+                .max(min_lovelace)
         }
         (Some(WarpTokenTypeInfo::Synthetic { .. }), Some(_)) => {
-            // Synthetic: need to fund the recipient output with MIN_UTXO_LOVELACE
-            // The minted tokens go to a new output which requires MIN_UTXO_LOVELACE
+            // Synthetic: need to fund the recipient output with min_lovelace
+            // The minted tokens go to a new output which requires min_lovelace
             original_lovelace
-                .saturating_sub(MIN_UTXO_LOVELACE)
-                .max(MIN_UTXO_LOVELACE)
+                .saturating_sub(min_lovelace)
+                .max(min_lovelace)
         }
-        _ => original_lovelace.max(MIN_UTXO_LOVELACE),
+        _ => original_lovelace.max(min_lovelace),
     };
 
     let mut output = Output::new(address, final_lovelace);
@@ -1910,11 +2071,14 @@ fn create_warp_route_continuation_output(
 
 /// Create ISM continuation output (same address, same datum, same value)
 /// Used when ISM is spent for Verify operation - must recreate unchanged
-fn create_ism_continuation_output(utxo: &Utxo) -> Result<Output, TxBuilderError> {
+fn create_ism_continuation_output(
+    utxo: &Utxo,
+    min_lovelace: u64,
+) -> Result<Output, TxBuilderError> {
     let address = parse_address(&utxo.address)?;
     let lovelace = utxo.lovelace();
 
-    let mut output = Output::new(address, lovelace.max(MIN_UTXO_LOVELACE));
+    let mut output = Output::new(address, lovelace.max(min_lovelace));
 
     // Preserve inline datum (ISM datum contains validators and thresholds)
     if let Some(datum_json) = &utxo.inline_datum {
@@ -1949,7 +2113,11 @@ fn create_ism_continuation_output(utxo: &Utxo) -> Result<Output, TxBuilderError>
 /// Create a release output to send ADA to the recipient
 /// The recipient_bytes should contain the Cardano address hash (28 bytes)
 #[allow(dead_code)] // May be useful for future token release patterns
-fn create_release_output(recipient_bytes: &[u8], amount: u64) -> Result<Output, TxBuilderError> {
+fn create_release_output(
+    recipient_bytes: &[u8],
+    amount: u64,
+    min_lovelace: u64,
+) -> Result<Output, TxBuilderError> {
     // The recipient_bytes contain the raw address bytes
     // For Cardano Preview testnet, we need to construct a proper address
     // Format: network_tag (1 byte) || payment_credential_hash (28 bytes)
@@ -1981,7 +2149,7 @@ fn create_release_output(recipient_bytes: &[u8], amount: u64) -> Result<Output, 
     let address = parse_address(&bech32_addr)?;
 
     // Ensure we meet minimum UTXO requirement
-    let lovelace = amount.max(MIN_UTXO_LOVELACE);
+    let lovelace = amount.max(min_lovelace);
 
     Ok(Output::new(address, lovelace))
 }
@@ -1994,6 +2162,7 @@ fn create_token_release_output(
     recipient_bytes: &[u8],
     amount: u64,
     token_type: &WarpTokenTypeInfo,
+    min_lovelace: u64,
 ) -> Result<Output, TxBuilderError> {
     if recipient_bytes.len() != 28 {
         return Err(TxBuilderError::InvalidAddress(format!(
@@ -2015,7 +2184,7 @@ fn create_token_release_output(
     match token_type {
         WarpTokenTypeInfo::Native => {
             // Native: Send ADA to recipient
-            let lovelace = amount.max(MIN_UTXO_LOVELACE);
+            let lovelace = amount.max(min_lovelace);
             Ok(Output::new(address, lovelace))
         }
         WarpTokenTypeInfo::Collateral {
@@ -2028,7 +2197,7 @@ fn create_token_release_output(
                 TxBuilderError::Encoding(format!("Invalid collateral asset name: {}", e))
             })?;
 
-            let mut output = Output::new(address, MIN_UTXO_LOVELACE);
+            let mut output = Output::new(address, min_lovelace);
             output = output
                 .add_asset(policy_hash, asset_name_bytes, amount)
                 .map_err(|e| {
