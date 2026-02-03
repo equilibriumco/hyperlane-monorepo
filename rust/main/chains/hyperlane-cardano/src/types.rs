@@ -486,9 +486,15 @@ pub enum WarpRouteRedeemer {
         recipient: HyperlaneAddress,
         amount: u64,
     },
+    /// Receive tokens from another chain via Hyperlane message.
+    /// Creates a redemption UTXO for the recipient to claim with their own ADA.
     ReceiveTransfer {
         message: Message,
         message_id: [u8; 32],
+        /// Address to return minUTxO after recipient claims (relayer's credential)
+        return_address: [u8; 28],
+        /// Slot after which relayer can reclaim if unclaimed
+        expiry_slot: u64,
     },
     EnrollRemoteRoute {
         domain: Domain,
@@ -524,6 +530,40 @@ impl WarpTransferBody {
         let amount = u64::from_be_bytes(amount_bytes);
         Some(Self { recipient, amount })
     }
+}
+
+// ============================================================================
+// Token Redemption Types (Two-Phase Token Claiming)
+// ============================================================================
+
+/// Token information for the redemption (matches Aiken RedemptionTokenInfo)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RedemptionTokenInfo {
+    /// Native ADA (no policy/asset)
+    Ada,
+    /// Native token with policy and asset name
+    Token {
+        policy_id: [u8; 28],
+        asset_name: Vec<u8>,
+    },
+}
+
+/// Redemption datum stored in the UTXO (matches Aiken RedemptionDatum)
+/// Holds bridged tokens in escrow until recipient claims with their own ADA
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionDatum {
+    /// Credential of the intended recipient (28-byte hash)
+    /// Can be a verification key hash or script hash
+    pub recipient: Vec<u8>,
+    /// Token being held for redemption
+    pub token_info: RedemptionTokenInfo,
+    /// Amount of tokens (in local decimals)
+    pub amount: i64,
+    /// Address to return the minUTxO (and tokens on expiry)
+    /// This is typically the relayer's payment credential
+    pub return_address: [u8; 28],
+    /// Slot after which the relayer can reclaim
+    pub expiry_slot: u64,
 }
 
 #[cfg(test)]
