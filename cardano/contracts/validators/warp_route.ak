@@ -1,15 +1,16 @@
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/crypto.{VerificationKeyHash, keccak_256}
 use aiken/primitive/bytearray
-use cardano/address.{Address, Credential, Script}
+use cardano/address.{Credential, Script}
 use cardano/assets.{lovelace_of, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
-use aiken/crypto.{keccak_256}
 use types.{
   AssetName, Domain, HyperlaneAddress, Message, PolicyId, ScriptHash,
   WarpRouteDatum, WarpRouteRedeemer, WarpTransferBody,
   TransferRemote, ReceiveTransfer, EnrollRemoteRoute,
   Collateral, Synthetic, Native,
+  RedemptionDatum, RedemptionTokenInfo, RedemptionAda, RedemptionToken,
   encode_message,
 }
 use utils.{assoc_find, find_input, is_signed_by}
@@ -29,15 +30,21 @@ use utils.{assoc_find, find_input, is_signed_by}
 /// 3. Message is dispatched via Mailbox
 /// 4. Relayer delivers message to destination chain warp route
 ///
-/// Inbound (Other → Cardano):
+/// Inbound (Other → Cardano) - Two-Phase Redemption Pattern:
 /// 1. Relayer processes message from origin warp route
-/// 2. Calls ReceiveTransfer with origin, sender, body
-/// 3. Tokens are released from warp route UTXO (collateral/native) or minted (synthetic)
-/// 4. Recipient receives tokens
+/// 2. Calls ReceiveTransfer with origin, sender, body, return_address, expiry_slot
+/// 3. Tokens are released to a redemption UTXO (not directly to recipient)
+/// 4. Recipient claims tokens from redemption UTXO with their own ADA
+/// 5. Relayer's minUTxO ADA is returned to return_address
+/// 6. If unclaimed after expiry_slot, relayer can reclaim tokens + minUTxO
+///
+/// This pattern ensures recipients provide their own minUTxO (economically sound)
+/// and relayer's ADA is a revolving float, not a gift.
 validator warp_route(
   mailbox_policy_id: PolicyId,
   _state_nft_policy_id: PolicyId,
   processed_messages_nft_policy: PolicyId,
+  redemption_script: ScriptHash,
 ) {
   spend(
     datum: Option<WarpRouteDatum>,
@@ -59,7 +66,7 @@ validator warp_route(
           mailbox_policy_id,
         )
 
-      ReceiveTransfer { message, message_id } -> {
+      ReceiveTransfer { message, message_id, return_address, expiry_slot } -> {
         // SECURITY: Verify the message hashes to the ISM-validated message_id
         expect keccak_256(encode_message(message)) == message_id
         validate_receive_transfer(
@@ -72,6 +79,9 @@ validator warp_route(
           mailbox_policy_id,
           processed_messages_nft_policy,
           message_id,
+          redemption_script,
+          return_address,
+          expiry_slot,
         )
       }
 
@@ -148,6 +158,7 @@ fn validate_transfer_remote(
 }
 
 /// Validate inbound transfer (receiving tokens from another chain)
+/// Creates a redemption UTXO for the recipient to claim with their own ADA
 fn validate_receive_transfer(
   datum: WarpRouteDatum,
   origin: Domain,
@@ -158,6 +169,9 @@ fn validate_receive_transfer(
   mailbox_policy_id: PolicyId,
   processed_messages_nft_policy: PolicyId,
   message_id: ByteArray,
+  redemption_script: ScriptHash,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
 ) -> Bool {
   // 1. Verify sender is an enrolled remote route
   expect Some(expected_sender) = assoc_find(datum.config.remote_routes, origin)
@@ -172,12 +186,12 @@ fn validate_receive_transfer(
   // this specific message_id in this transaction.
   expect processed_nft_minted(processed_messages_nft_policy, message_id, tx)
 
-  // 3. Decode the EVM TokenMessage body (wire format)
+  // 4. Decode the EVM TokenMessage body (wire format)
   // This parses: recipient (32 bytes) || amount (32 bytes uint256)
   expect Some(wire_transfer) = decode_evm_token_message(body)
   expect wire_transfer.amount > 0
 
-  // 4. Convert wire amount (remote_decimals) to local amount (local_decimals)
+  // 5. Convert wire amount (remote_decimals) to local amount (local_decimals)
   // Example: 1e18 wire (18 decimals) -> 1e6 local (6 decimals ADA)
   let local_amount = convert_decimals(
     wire_transfer.amount,
@@ -186,20 +200,30 @@ fn validate_receive_transfer(
   )
   expect local_amount > 0
 
-  // 5. Find own input
+  // 6. Find own input
   expect Some(own_input) = find_input(tx, own_ref)
   let own_address = own_input.output.address
 
-  // 6. Find continuation output
+  // 7. Find continuation output
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
-  // 7. Based on token type, validate token release/mint with LOCAL amount
-  // For Native/Collateral: tokens are released from the warp route UTXO itself
-  let token_valid =
+  // 8. Determine token info for redemption datum
+  let redemption_token_info =
+    when datum.config.token_type is {
+      Native -> RedemptionAda
+      Collateral { policy_id, asset_name } ->
+        RedemptionToken { policy_id, asset_name }
+      Synthetic { minting_policy } ->
+        // For synthetic tokens, the policy is the minting policy with empty asset name
+        RedemptionToken { policy_id: minting_policy, asset_name: "" }
+    }
+
+  // 9. Validate redemption UTXO is created with correct datum and tokens
+  let redemption_valid =
     when datum.config.token_type is {
       Collateral { policy_id, asset_name } ->
-        validate_collateral_release(
+        validate_collateral_redemption(
           own_input.output,
           continuation,
           policy_id,
@@ -207,28 +231,39 @@ fn validate_receive_transfer(
           wire_transfer.recipient,
           local_amount,
           tx,
+          redemption_script,
+          redemption_token_info,
+          return_address,
+          expiry_slot,
         )
 
       Synthetic { minting_policy } ->
-        validate_synthetic_mint(
+        validate_synthetic_redemption(
           minting_policy,
           wire_transfer.recipient,
           local_amount,
           tx,
+          redemption_script,
+          redemption_token_info,
+          return_address,
+          expiry_slot,
         )
 
       Native ->
-        validate_native_release(
+        validate_native_redemption(
           own_input.output,
           continuation,
           wire_transfer.recipient,
           local_amount,
           tx,
+          redemption_script,
+          return_address,
+          expiry_slot,
         )
     }
-  expect token_valid
+  expect redemption_valid
 
-  // 8. Verify datum updated (decrement total_bridged by LOCAL amount)
+  // 10. Verify datum updated (decrement total_bridged by LOCAL amount)
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: WarpRouteDatum = cont_datum_data
   expect cont_datum.config == datum.config
@@ -299,8 +334,8 @@ fn validate_collateral_lock(
   output_tokens >= input_tokens + amount
 }
 
-/// Validate that tokens are released from the warp route UTXO
-fn validate_collateral_release(
+/// Validate that tokens are released to a redemption UTXO
+fn validate_collateral_redemption(
   own_input: Output,
   own_output: Output,
   policy_id: PolicyId,
@@ -308,15 +343,28 @@ fn validate_collateral_release(
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
+  redemption_script: ScriptHash,
+  token_info: RedemptionTokenInfo,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
 ) -> Bool {
   // Warp route UTXO should release `amount` tokens
   let input_tokens = quantity_of(own_input.value, policy_id, asset_name)
   let output_tokens = quantity_of(own_output.value, policy_id, asset_name)
   expect input_tokens - output_tokens == amount
 
-  // Recipient should receive the tokens
+  // Redemption UTXO should be created with correct datum and tokens
   expect
-    recipient_receives_tokens(tx, recipient, policy_id, asset_name, amount)
+    redemption_utxo_created(
+      tx,
+      redemption_script,
+      recipient,
+      token_info,
+      amount,
+      return_address,
+      expiry_slot,
+      Some((policy_id, asset_name)),
+    )
 
   True
 }
@@ -336,20 +384,34 @@ fn validate_synthetic_burn(
   minted == -amount
 }
 
-/// Validate that synthetic tokens are minted to recipient
-fn validate_synthetic_mint(
+/// Validate that synthetic tokens are minted to a redemption UTXO
+fn validate_synthetic_redemption(
   minting_policy: ScriptHash,
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
+  redemption_script: ScriptHash,
+  token_info: RedemptionTokenInfo,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
 ) -> Bool {
   // Check that exactly +amount is minted
   let minted = get_minted_amount(tx, minting_policy)
   expect minted == amount
 
-  // Recipient should receive the minted tokens
-  // The asset name for synthetic tokens is typically empty or "synthetic"
-  expect recipient_receives_tokens(tx, recipient, minting_policy, "", amount)
+  // Redemption UTXO should be created with correct datum and tokens
+  // The asset name for synthetic tokens is empty
+  expect
+    redemption_utxo_created(
+      tx,
+      redemption_script,
+      recipient,
+      token_info,
+      amount,
+      return_address,
+      expiry_slot,
+      Some((minting_policy, "")),
+    )
 
   True
 }
@@ -367,23 +429,99 @@ fn validate_native_lock(own_input: Output, own_output: Output, amount: Int) -> B
   output_ada >= input_ada + amount
 }
 
-/// Validate that ADA is released from the warp route UTXO
-fn validate_native_release(
+/// Validate that ADA is released to a redemption UTXO
+fn validate_native_redemption(
   own_input: Output,
   own_output: Output,
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
+  redemption_script: ScriptHash,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
 ) -> Bool {
   // Warp route UTXO should release `amount` lovelace
   let input_ada = lovelace_of(own_input.value)
   let output_ada = lovelace_of(own_output.value)
   expect input_ada - output_ada >= amount
 
-  // Recipient should receive the ADA
-  expect recipient_receives_ada(tx, recipient, amount)
+  // Redemption UTXO should be created with correct datum and ADA
+  // For native ADA, no additional tokens - just the ADA amount
+  expect
+    redemption_utxo_created(
+      tx,
+      redemption_script,
+      recipient,
+      RedemptionAda,
+      amount,
+      return_address,
+      expiry_slot,
+      None,
+    )
 
   True
+}
+
+// ============================================================================
+// Redemption UTXO Helpers
+// ============================================================================
+
+/// Validate that a redemption UTXO is created with correct datum and tokens
+/// This is the core function for the two-phase redemption pattern
+fn redemption_utxo_created(
+  tx: Transaction,
+  redemption_script: ScriptHash,
+  recipient: ByteArray,
+  token_info: RedemptionTokenInfo,
+  amount: Int,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
+  expected_tokens: Option<(PolicyId, AssetName)>,
+) -> Bool {
+  // Build the expected redemption datum
+  let expected_datum =
+    RedemptionDatum {
+      recipient,
+      token_info,
+      amount,
+      return_address,
+      expiry_slot,
+    }
+
+  // Find an output at the redemption script address with the correct datum
+  list.any(
+    tx.outputs,
+    fn(output) {
+      // Check address is the redemption script
+      let address_valid =
+        when output.address.payment_credential is {
+          Script(hash) -> hash == redemption_script
+          _ -> False
+        }
+
+      // Check datum matches
+      let datum_valid =
+        when output.datum is {
+          InlineDatum(datum_data) -> {
+            expect actual_datum: RedemptionDatum = datum_data
+            actual_datum == expected_datum
+          }
+          _ -> False
+        }
+
+      // Check tokens if specified
+      let tokens_valid =
+        when expected_tokens is {
+          Some((policy_id, asset_name)) ->
+            quantity_of(output.value, policy_id, asset_name) >= amount
+          None ->
+            // For native ADA redemption, check lovelace
+            lovelace_of(output.value) >= amount
+        }
+
+      address_valid && datum_valid && tokens_valid
+    },
+  )
 }
 
 // ============================================================================
@@ -420,52 +558,6 @@ fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
 fn mailbox_dispatch_called(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
   // Same check - if mailbox UTXO is spent, dispatch is happening
   mailbox_is_caller(mailbox_policy_id, tx)
-}
-
-/// Check if recipient receives tokens
-fn recipient_receives_tokens(
-  tx: Transaction,
-  recipient_bytes: ByteArray,
-  policy_id: PolicyId,
-  asset_name: AssetName,
-  amount: Int,
-) -> Bool {
-  // Find output to recipient with enough tokens
-  list.any(
-    tx.outputs,
-    fn(output) {
-      address_matches_bytes(output.address, recipient_bytes) && quantity_of(
-        output.value,
-        policy_id,
-        asset_name,
-      ) >= amount
-    },
-  )
-}
-
-/// Check if recipient receives ADA
-fn recipient_receives_ada(
-  tx: Transaction,
-  recipient_bytes: ByteArray,
-  amount: Int,
-) -> Bool {
-  list.any(
-    tx.outputs,
-    fn(output) {
-      address_matches_bytes(output.address, recipient_bytes) && lovelace_of(
-        output.value,
-      ) >= amount
-    },
-  )
-}
-
-/// Check if address matches recipient bytes
-/// The recipient bytes can be a payment credential hash or full address
-fn address_matches_bytes(addr: Address, recipient_bytes: ByteArray) -> Bool {
-  when addr.payment_credential is {
-    Credential.VerificationKey(hash) -> hash == recipient_bytes
-    Script(hash) -> hash == recipient_bytes
-  }
 }
 
 /// Decode EVM TokenMessage body (wire format from other chains)
