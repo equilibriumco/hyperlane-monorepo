@@ -13,6 +13,29 @@ impl CborBuilder {
         Self { bytes: Vec::new() }
     }
 
+    /// Start a definite-length constructor (Constr n [...]) with known field count
+    pub fn start_constr_definite(&mut self, index: u32, count: usize) -> &mut Self {
+        match index {
+            0..=6 => {
+                self.bytes.push(0xd8);
+                self.bytes.push((121 + index) as u8);
+            }
+            7..=127 => {
+                self.bytes.push(0xd9);
+                let tag = 1280 + index;
+                self.bytes.extend_from_slice(&(tag as u16).to_be_bytes());
+            }
+            _ => {
+                self.bytes.push(0xd8);
+                self.bytes.push(102);
+                self.start_list_definite(2); // [tag, fields]
+                self.uint(index as u64);
+            }
+        }
+        self.encode_array_header(count);
+        self
+    }
+
     /// Start an indefinite-length constructor (Constr n [...])
     pub fn start_constr(&mut self, index: u32) -> &mut Self {
         match index {
@@ -39,9 +62,15 @@ impl CborBuilder {
         self
     }
 
-    /// End a constructor
+    /// End a constructor (only for indefinite-length)
     pub fn end_constr(&mut self) -> &mut Self {
         self.bytes.push(0xff); // break
+        self
+    }
+
+    /// Start a definite-length list with known item count
+    pub fn start_list_definite(&mut self, count: usize) -> &mut Self {
+        self.encode_array_header(count);
         self
     }
 
@@ -51,10 +80,28 @@ impl CborBuilder {
         self
     }
 
-    /// End a list
+    /// End a list (only for indefinite-length)
     pub fn end_list(&mut self) -> &mut Self {
         self.bytes.push(0xff);
         self
+    }
+
+    /// Encode a CBOR array header with definite length
+    fn encode_array_header(&mut self, count: usize) {
+        let major_bits: u8 = 4 << 5; // major type 4 = array
+        match count {
+            0..=23 => {
+                self.bytes.push(major_bits | (count as u8));
+            }
+            24..=255 => {
+                self.bytes.push(major_bits | 24);
+                self.bytes.push(count as u8);
+            }
+            _ => {
+                self.bytes.push(major_bits | 25);
+                self.bytes.extend_from_slice(&(count as u16).to_be_bytes());
+            }
+        }
     }
 
     /// Add an unsigned integer
@@ -1134,11 +1181,10 @@ pub fn build_enroll_remote_route_redeemer(
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    // EnrollRemoteRoute is constructor 2
-    builder.start_constr(2);
+    // EnrollRemoteRoute is constructor 2 with 2 fields
+    builder.start_constr_definite(2, 2);
     builder.uint(domain as u64);
     builder.bytes_hex(route_hex)?;
-    builder.end_constr();
 
     Ok(builder.build())
 }
@@ -1305,15 +1351,14 @@ pub fn build_warp_route_native_datum_with_routes(
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    // WarpRouteDatum - Constr 0
-    builder.start_constr(0);
+    // WarpRouteDatum - Constr 0 with 3 fields
+    builder.start_constr_definite(0, 3);
 
-    // config: WarpRouteConfig - Constr 0
-    builder.start_constr(0);
+    // config: WarpRouteConfig - Constr 0 with 4 fields
+    builder.start_constr_definite(0, 4);
 
-    // token_type: WarpTokenType::Native - Constr 2 (no fields)
-    builder.start_constr(2);
-    builder.end_constr();
+    // token_type: WarpTokenType::Native - Constr 2 (0 fields)
+    builder.start_constr_definite(2, 0);
 
     // decimals: Int (local token decimals)
     builder.uint(decimals as u64);
@@ -1322,17 +1367,13 @@ pub fn build_warp_route_native_datum_with_routes(
     builder.uint(remote_decimals as u64);
 
     // remote_routes: List<(Domain, HyperlaneAddress)>
-    builder.start_list();
+    builder.start_list_definite(remote_routes.len());
     for route in remote_routes {
-        builder
-            .start_list()
+        builder.start_list_definite(2)
             .uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
-        builder.end_list();
     }
-    builder.end_list();
-
-    builder.end_constr(); // end WarpRouteConfig
+    // end WarpRouteConfig (no end needed for definite)
 
     // owner: VerificationKeyHash
     builder.bytes_hex(owner_pkh)?;
@@ -1340,7 +1381,7 @@ pub fn build_warp_route_native_datum_with_routes(
     // total_bridged: Int
     builder.int(total_bridged);
 
-    builder.end_constr(); // end WarpRouteDatum
+    // No end needed for definite-length constructors
 
     Ok(builder.build())
 }
