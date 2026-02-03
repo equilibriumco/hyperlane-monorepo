@@ -3174,16 +3174,16 @@ async fn claim(
         fee_utxo.tx_hash, fee_utxo.output_index, fee_utxo.lovelace
     );
 
-    // Step 6: Load redemption script
+    // Step 6: Load redemption script (not parameterized - load directly from blueprint)
     println!("\n{}", "Step 6: Loading Redemption Script...".cyan());
-    let redemption_validator = apply_validator_params(
-        &ctx.contracts_dir,
-        "token_redemption",
-        "token_redemption",
-        &[],
-    )?;
+    let blueprint_path = ctx.contracts_dir.join("plutus.json");
+    let blueprint = crate::utils::plutus::PlutusBlueprint::from_file(&blueprint_path)?;
+    let redemption_validator = blueprint
+        .find_validator("token_redemption.token_redemption.spend")
+        .ok_or_else(|| anyhow!("token_redemption validator not found in blueprint"))?;
     let redemption_script = hex::decode(&redemption_validator.compiled_code)?;
     println!("  Script loaded: {} bytes", redemption_script.len());
+    println!("  Script hash: {}", redemption_validator.hash);
 
     // Step 7: Build redeemer
     println!("\n{}", "Step 7: Building Redeemer...".cyan());
