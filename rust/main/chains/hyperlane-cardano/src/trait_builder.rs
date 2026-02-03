@@ -56,6 +56,9 @@ pub struct ConnectionConf {
     pub igp_policy_id: String,
     /// Validator Announce policy ID (hex)
     pub validator_announce_policy_id: String,
+    /// Token Redemption script hash (hex) - optional, enables two-phase token claiming
+    /// When set, warp route transfers create redemption UTXOs instead of direct transfers
+    pub redemption_script_hash: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -81,6 +84,7 @@ pub struct RawConnectionConf {
     ism_reference_script_utxo: Option<String>,
     igp_policy_id: Option<String>,
     validator_announce_policy_id: Option<String>,
+    redemption_script_hash: Option<String>,
 }
 
 /// An error type when parsing a connection configuration.
@@ -214,6 +218,9 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let ism_script_cbor = raw.ism_script_cbor;
         let ism_reference_script_utxo = raw.ism_reference_script_utxo;
 
+        // Token redemption script (optional - enables two-phase token claiming)
+        let redemption_script_hash = raw.redemption_script_hash;
+
         Ok(Self {
             url,
             api_key,
@@ -235,6 +242,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             ism_reference_script_utxo,
             igp_policy_id,
             validator_announce_policy_id,
+            redemption_script_hash,
         })
     }
 }

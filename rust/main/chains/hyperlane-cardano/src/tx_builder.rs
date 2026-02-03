@@ -628,7 +628,14 @@ impl HyperlaneTxBuilder {
 
         // 11. Handle TokenReceiver - extract release amount, recipient, and token type
         // Funds are released directly from the warp_route UTXO (no separate vault)
-        let (token_release_amount, token_release_recipient, warp_token_type) = if matches!(
+        // If redemption is enabled, build redemption datum
+        let (
+            token_release_amount,
+            token_release_recipient,
+            warp_token_type,
+            redemption_datum_cbor,
+            redemption_script_hash,
+        ) = if matches!(
             &registration.recipient_type,
             crate::types::RecipientType::TokenReceiver { .. }
         ) {
@@ -662,13 +669,103 @@ impl HyperlaneTxBuilder {
                     token_msg.amount, local_amount, decimals.remote_decimals, decimals.local_decimals,
                     hex::encode(&cardano_credential), token_type);
 
+            // Build redemption datum if redemption is enabled
+            let (redemption_datum, redemption_hash) = if let Some(ref redemption_hash_hex) =
+                self.conf.redemption_script_hash
+            {
+                // Parse the redemption script hash
+                let hash_bytes = hex::decode(redemption_hash_hex).map_err(|e| {
+                    TxBuilderError::Encoding(format!("Invalid redemption_script_hash hex: {}", e))
+                })?;
+                let redemption_hash: [u8; 28] = hash_bytes.try_into().map_err(|_| {
+                    TxBuilderError::Encoding("redemption_script_hash must be 28 bytes".to_string())
+                })?;
+
+                // Get return_address and expiry_slot from the redeemer we built earlier
+                let return_address = *payer.payment_credential_hash();
+                let current_slot = self
+                    .provider
+                    .get_latest_slot()
+                    .await
+                    .map_err(|e| TxBuilderError::Blockfrost(e))?;
+                let expiry_slot = current_slot + REDEMPTION_EXPIRY_SLOTS;
+
+                // Build token_info based on warp route token type
+                let token_info = match &token_type {
+                    WarpTokenTypeInfo::Native => crate::types::RedemptionTokenInfo::Ada,
+                    WarpTokenTypeInfo::Collateral {
+                        policy_id,
+                        asset_name,
+                    } => {
+                        let policy_bytes: [u8; 28] = hex::decode(policy_id)
+                            .map_err(|e| {
+                                TxBuilderError::TxBuild(format!("Invalid policy_id hex: {}", e))
+                            })?
+                            .try_into()
+                            .map_err(|_| {
+                                TxBuilderError::TxBuild("policy_id must be 28 bytes".to_string())
+                            })?;
+                        let asset_bytes = hex::decode(asset_name).map_err(|e| {
+                            TxBuilderError::TxBuild(format!("Invalid asset_name hex: {}", e))
+                        })?;
+                        crate::types::RedemptionTokenInfo::Token {
+                            policy_id: policy_bytes,
+                            asset_name: asset_bytes,
+                        }
+                    }
+                    WarpTokenTypeInfo::Synthetic { minting_policy } => {
+                        let policy_bytes: [u8; 28] = hex::decode(minting_policy)
+                            .map_err(|e| {
+                                TxBuilderError::TxBuild(format!(
+                                    "Invalid minting_policy hex: {}",
+                                    e
+                                ))
+                            })?
+                            .try_into()
+                            .map_err(|_| {
+                                TxBuilderError::TxBuild(
+                                    "minting_policy must be 28 bytes".to_string(),
+                                )
+                            })?;
+                        crate::types::RedemptionTokenInfo::Token {
+                            policy_id: policy_bytes,
+                            asset_name: vec![], // Empty asset name for synthetic
+                        }
+                    }
+                };
+
+                // Build the redemption datum
+                let datum = crate::types::RedemptionDatum {
+                    recipient: cardano_credential.to_vec(),
+                    token_info,
+                    amount: local_amount as i64,
+                    return_address,
+                    expiry_slot,
+                };
+                let datum_cbor = encode_redemption_datum(&datum)?;
+
+                info!(
+                        "Built redemption datum: recipient={}, amount={}, return_address={}, expiry_slot={}",
+                        hex::encode(&cardano_credential),
+                        local_amount,
+                        hex::encode(&return_address),
+                        expiry_slot
+                    );
+
+                (Some(datum_cbor), Some(redemption_hash))
+            } else {
+                (None, None)
+            };
+
             (
                 Some(local_amount),
                 Some(cardano_credential.to_vec()),
                 Some(token_type),
+                redemption_datum,
+                redemption_hash,
             )
         } else {
-            (None, None, None)
+            (None, None, None, None, None)
         };
 
         Ok(ProcessTxComponents {
@@ -692,6 +789,8 @@ impl HyperlaneTxBuilder {
             token_release_amount,
             token_release_recipient,
             warp_token_type,
+            redemption_datum_cbor,
+            redemption_script_hash,
         })
     }
 
@@ -1008,98 +1107,229 @@ impl HyperlaneTxBuilder {
         // 2a. For TokenReceiver (warp routes): Create release output to recipient
         // The release output contains ADA (for Native) or tokens (for Collateral)
         // For Synthetic routes, tokens are minted directly - no release output needed
+        // If redemption is enabled, create a redemption UTXO instead of direct transfer
         if let (Some(release_amount), Some(ref recipient_bytes), Some(ref token_type)) = (
             components.token_release_amount,
             &components.token_release_recipient,
             &components.warp_token_type,
         ) {
-            // Skip release output for Synthetic (tokens minted by minting policy)
-            if !matches!(token_type, WarpTokenTypeInfo::Synthetic { .. }) {
-                let release_output = create_token_release_output(
-                    recipient_bytes,
-                    release_amount,
-                    token_type,
-                    min_lovelace,
-                )?;
-                tx = tx.output(release_output);
+            // Check if redemption is enabled
+            if let (Some(ref redemption_datum_cbor), Some(redemption_hash)) = (
+                &components.redemption_datum_cbor,
+                &components.redemption_script_hash,
+            ) {
+                // Redemption enabled - create redemption UTXO instead of direct transfer
                 info!(
-                    "Added release output: amount={} to recipient {}, token_type={:?}",
+                    "Creating redemption UTXO for token release: amount={}, recipient={}",
                     release_amount,
-                    hex::encode(recipient_bytes),
-                    token_type
-                );
-            } else if let WarpTokenTypeInfo::Synthetic { minting_policy } = token_type {
-                // Synthetic route: Mint tokens directly to recipient
-                info!(
-                    "Synthetic route - minting {} tokens to recipient (len={}, bytes={})",
-                    release_amount,
-                    recipient_bytes.len(),
                     hex::encode(recipient_bytes)
                 );
 
-                // Parse minting policy ID
-                let minting_policy_bytes: Hash<28> = parse_policy_id(minting_policy)?;
-
-                // Asset name is empty for synthetic tokens (as per warp_route.ak: recipient_receives_tokens(..., "", amount))
-                let asset_name: Vec<u8> = Vec::new();
-
-                // Mint the synthetic tokens
-                tx = tx
-                    .mint_asset(
-                        minting_policy_bytes,
-                        asset_name.clone(),
-                        release_amount as i64,
-                    )
-                    .map_err(|e| {
-                        TxBuilderError::TxBuild(format!("Failed to mint synthetic tokens: {:?}", e))
-                    })?;
-                info!(
-                    "Minting {} synthetic tokens with policy {}",
-                    release_amount, minting_policy
-                );
-
-                // Create recipient output with minted tokens + min_lovelace
-                // Parse recipient credential (28 bytes) to derive address
+                // Get network for address conversion
                 let pallas_network = match self.conf.network {
                     CardanoNetwork::Mainnet => Network::Mainnet,
                     CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
                 };
-                let recipient_address = credential_to_address(recipient_bytes, pallas_network)?;
+
+                // Create redemption script address
+                let redemption_address = script_hash_to_address(redemption_hash, pallas_network)?;
                 info!(
-                    "Recipient address: {}",
-                    recipient_address.to_bech32().unwrap_or_default()
+                    "Redemption script address: {}",
+                    redemption_address.to_bech32().unwrap_or_default()
                 );
 
-                let mut recipient_output = Output::new(recipient_address, min_lovelace);
-                recipient_output = recipient_output
-                    .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
-                    .map_err(|e| {
-                        TxBuilderError::TxBuild(format!(
-                            "Failed to add synthetic tokens to output: {:?}",
-                            e
-                        ))
+                // Create redemption output with inline datum
+                let mut redemption_output = Output::new(redemption_address, min_lovelace)
+                    .set_inline_datum(redemption_datum_cbor.clone());
+
+                // For Synthetic, we still need to mint the tokens to the redemption UTXO
+                if let WarpTokenTypeInfo::Synthetic { minting_policy } = token_type {
+                    let minting_policy_bytes: Hash<28> = parse_policy_id(minting_policy)?;
+                    let asset_name: Vec<u8> = Vec::new();
+
+                    // Mint synthetic tokens
+                    tx = tx
+                        .mint_asset(
+                            minting_policy_bytes,
+                            asset_name.clone(),
+                            release_amount as i64,
+                        )
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to mint synthetic tokens: {:?}",
+                                e
+                            ))
+                        })?;
+
+                    // Add tokens to redemption output
+                    redemption_output = redemption_output
+                        .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to add synthetic tokens to redemption output: {:?}",
+                                e
+                            ))
+                        })?;
+
+                    // Add mint redeemer
+                    let mint_redeemer_cbor = encode_constructor_0_redeemer();
+                    let ex_units_mint = ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    };
+                    tx = tx.add_mint_redeemer(
+                        minting_policy_bytes,
+                        mint_redeemer_cbor,
+                        Some(ex_units_mint),
+                    );
+
+                    info!(
+                        "Minting {} synthetic tokens to redemption UTXO",
+                        release_amount
+                    );
+                } else if let WarpTokenTypeInfo::Collateral {
+                    policy_id,
+                    asset_name,
+                } = token_type
+                {
+                    // Add collateral tokens to redemption output
+                    let policy_decoded: [u8; 28] = hex::decode(policy_id)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!("Invalid policy_id hex: {}", e))
+                        })?
+                        .try_into()
+                        .map_err(|_| {
+                            TxBuilderError::TxBuild("policy_id must be 28 bytes".to_string())
+                        })?;
+                    let policy_bytes: Hash<28> = Hash::new(policy_decoded);
+                    let asset_bytes = hex::decode(asset_name).map_err(|e| {
+                        TxBuilderError::TxBuild(format!("Invalid asset_name hex: {}", e))
                     })?;
-                tx = tx.output(recipient_output);
+                    redemption_output = redemption_output
+                        .add_asset(policy_bytes, asset_bytes, release_amount)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to add collateral tokens to redemption output: {:?}",
+                                e
+                            ))
+                        })?;
+                    info!(
+                        "Adding {} collateral tokens to redemption UTXO",
+                        release_amount
+                    );
+                } else if let WarpTokenTypeInfo::Native = token_type {
+                    // For native ADA, the redemption output needs to hold the release amount
+                    // The min_lovelace is for UTXO overhead, release_amount is the actual value
+                    let total_ada = min_lovelace.max(release_amount);
+                    redemption_output = Output::new(
+                        script_hash_to_address(redemption_hash, pallas_network)?,
+                        total_ada,
+                    )
+                    .set_inline_datum(redemption_datum_cbor.clone());
+                    info!(
+                        "Creating native ADA redemption UTXO with {} lovelace",
+                        total_ada
+                    );
+                }
 
-                // Add mint redeemer for synthetic token (Mint = Constr 0 [])
-                // The synthetic_token minting policy uses MintMessage (constructor 0) for minting
-                let mint_redeemer_cbor = encode_constructor_0_redeemer();
-                let ex_units_mint = ExUnits {
-                    mem: DEFAULT_MEM_UNITS,
-                    steps: DEFAULT_STEP_UNITS,
-                };
-                tx = tx.add_mint_redeemer(
-                    minting_policy_bytes,
-                    mint_redeemer_cbor,
-                    Some(ex_units_mint),
+                tx = tx.output(redemption_output);
+                info!(
+                    "Added redemption UTXO: amount={}, token_type={:?}",
+                    release_amount, token_type
                 );
+            } else {
+                // No redemption - use direct transfer (original behavior)
+                // Skip release output for Synthetic (tokens minted by minting policy)
+                if !matches!(token_type, WarpTokenTypeInfo::Synthetic { .. }) {
+                    let release_output = create_token_release_output(
+                        recipient_bytes,
+                        release_amount,
+                        token_type,
+                        min_lovelace,
+                    )?;
+                    tx = tx.output(release_output);
+                    info!(
+                        "Added release output: amount={} to recipient {}, token_type={:?}",
+                        release_amount,
+                        hex::encode(recipient_bytes),
+                        token_type
+                    );
+                } else if let WarpTokenTypeInfo::Synthetic { minting_policy } = token_type {
+                    // Synthetic route: Mint tokens directly to recipient
+                    info!(
+                        "Synthetic route - minting {} tokens to recipient (len={}, bytes={})",
+                        release_amount,
+                        recipient_bytes.len(),
+                        hex::encode(recipient_bytes)
+                    );
 
-                debug!(
-                    "Added synthetic mint: amount={}, policy={}, recipient={}",
-                    release_amount,
-                    minting_policy,
-                    hex::encode(recipient_bytes)
-                );
+                    // Parse minting policy ID
+                    let minting_policy_bytes: Hash<28> = parse_policy_id(minting_policy)?;
+
+                    // Asset name is empty for synthetic tokens (as per warp_route.ak: recipient_receives_tokens(..., "", amount))
+                    let asset_name: Vec<u8> = Vec::new();
+
+                    // Mint the synthetic tokens
+                    tx = tx
+                        .mint_asset(
+                            minting_policy_bytes,
+                            asset_name.clone(),
+                            release_amount as i64,
+                        )
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to mint synthetic tokens: {:?}",
+                                e
+                            ))
+                        })?;
+                    info!(
+                        "Minting {} synthetic tokens with policy {}",
+                        release_amount, minting_policy
+                    );
+
+                    // Create recipient output with minted tokens + min_lovelace
+                    // Parse recipient credential (28 bytes) to derive address
+                    let pallas_network = match self.conf.network {
+                        CardanoNetwork::Mainnet => Network::Mainnet,
+                        CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
+                    };
+                    let recipient_address = credential_to_address(recipient_bytes, pallas_network)?;
+                    info!(
+                        "Recipient address: {}",
+                        recipient_address.to_bech32().unwrap_or_default()
+                    );
+
+                    let mut recipient_output = Output::new(recipient_address, min_lovelace);
+                    recipient_output = recipient_output
+                        .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to add synthetic tokens to output: {:?}",
+                                e
+                            ))
+                        })?;
+                    tx = tx.output(recipient_output);
+
+                    // Add mint redeemer for synthetic token (Mint = Constr 0 [])
+                    // The synthetic_token minting policy uses MintMessage (constructor 0) for minting
+                    let mint_redeemer_cbor = encode_constructor_0_redeemer();
+                    let ex_units_mint = ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    };
+                    tx = tx.add_mint_redeemer(
+                        minting_policy_bytes,
+                        mint_redeemer_cbor,
+                        Some(ex_units_mint),
+                    );
+
+                    debug!(
+                        "Added synthetic mint: amount={}, policy={}, recipient={}",
+                        release_amount,
+                        minting_policy,
+                        hex::encode(recipient_bytes)
+                    );
+                }
             }
         }
 
@@ -1837,6 +2067,12 @@ pub struct ProcessTxComponents {
     /// TokenReceiver (warp routes): Token type for release handling
     /// Native releases ADA, Collateral releases native tokens
     pub warp_token_type: Option<WarpTokenTypeInfo>,
+    /// TokenReceiver (warp routes): Redemption datum CBOR (pre-encoded)
+    /// Only set when redemption_script_hash is configured
+    pub redemption_datum_cbor: Option<Vec<u8>>,
+    /// TokenReceiver (warp routes): Redemption script hash (28 bytes)
+    /// Only set when redemption_script_hash is configured
+    pub redemption_script_hash: Option<[u8; 28]>,
 }
 
 // ============================================================================
@@ -1934,6 +2170,33 @@ fn credential_to_address(
 
     Address::from_bytes(&address_bytes).map_err(|e| {
         TxBuilderError::InvalidAddress(format!("Failed to create address from credential: {:?}", e))
+    })
+}
+
+/// Convert a 28-byte script hash to a Cardano script address (Type 7)
+/// The script hash is used as the payment credential with no staking credential
+fn script_hash_to_address(
+    script_hash: &[u8; 28],
+    network: Network,
+) -> Result<Address, TxBuilderError> {
+    // Cardano addresses format: [header_byte] [28-byte payment credential] [optional 28-byte staking credential]
+    // Header byte for Type 7 (enterprise script address): 0111_XXXX where XXXX = network tag
+    // Network 0 = testnet (0111_0000 = 0x70), Network 1 = mainnet (0111_0001 = 0x71)
+    let header_byte = match network {
+        Network::Testnet => 0x70, // Type 7, testnet
+        Network::Mainnet => 0x71, // Type 7, mainnet
+        _ => 0x70,                // Default to testnet
+    };
+
+    let mut address_bytes = Vec::with_capacity(29);
+    address_bytes.push(header_byte);
+    address_bytes.extend_from_slice(script_hash);
+
+    Address::from_bytes(&address_bytes).map_err(|e| {
+        TxBuilderError::InvalidAddress(format!(
+            "Failed to create script address from hash: {:?}",
+            e
+        ))
     })
 }
 
@@ -3057,6 +3320,58 @@ pub fn encode_message_nft_redeemer(
         tag,
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
+// ============================================================================
+// Token Redemption Encoding Functions
+// ============================================================================
+
+/// Encode a RedemptionDatum as Plutus Data CBOR
+/// Structure: Constr 0 [recipient: ByteArray, token_info: RedemptionTokenInfo, amount: Int,
+///                      return_address: ByteArray, expiry_slot: Int]
+pub fn encode_redemption_datum(
+    datum: &crate::types::RedemptionDatum,
+) -> Result<Vec<u8>, TxBuilderError> {
+    // Encode token_info based on variant
+    let token_info_data = match &datum.token_info {
+        crate::types::RedemptionTokenInfo::Ada => {
+            // RedemptionAda = Constr 0 []
+            PlutusData::Constr(Constr {
+                tag: 121, // Constructor 0
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![]),
+            })
+        }
+        crate::types::RedemptionTokenInfo::Token {
+            policy_id,
+            asset_name,
+        } => {
+            // RedemptionToken = Constr 1 [policy_id, asset_name]
+            PlutusData::Constr(Constr {
+                tag: 122, // Constructor 1
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BoundedBytes(policy_id.to_vec().into()),
+                    PlutusData::BoundedBytes(asset_name.clone().into()),
+                ]),
+            })
+        }
+    };
+
+    // Build the full RedemptionDatum
+    let plutus_data = PlutusData::Constr(Constr {
+        tag: 121, // Constructor 0
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            PlutusData::BoundedBytes(datum.recipient.clone().into()),
+            token_info_data,
+            PlutusData::BigInt(BigInt::Int(datum.amount.into())),
+            PlutusData::BoundedBytes(datum.return_address.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((datum.expiry_slot as i64).into())),
+        ]),
     });
 
     encode_plutus_data(&plutus_data)
