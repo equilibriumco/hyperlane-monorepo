@@ -342,8 +342,16 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     println!("  State NFT Policy: {}", warp_nft_applied.policy_id.green());
 
     // Compute warp_route script hash
+    // The warp_route validator takes 3 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy
+    let processed_messages_nft_policy = deployment
+        .mailbox
+        .as_ref()
+        .and_then(|m| m.applied_parameters.first())
+        .map(|p| p.value.clone())
+        .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
     let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
     let state_nft_param_cbor = encode_script_hash_param(&warp_nft_applied.policy_id)?;
+    let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
     let warp_route_applied = apply_validator_params(
         &ctx.contracts_dir,
         "warp_route",
@@ -351,6 +359,7 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
         &[
             &hex::encode(&mailbox_param_cbor),
             &hex::encode(&state_nft_param_cbor),
+            &hex::encode(&pm_nft_param_cbor),
         ],
     )?;
     println!(
@@ -981,7 +990,12 @@ async fn enroll_router(
     let utxos = client.get_utxos(&payer_address).await?;
     let suitable_utxos: Vec<_> = utxos
         .iter()
-        .filter(|u| u.lovelace >= 5_000_000 && u.assets.is_empty())
+        .filter(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
         .filter(|u| !(u.tx_hash == warp_utxo.tx_hash && u.output_index == warp_utxo.output_index))
         .collect();
 
@@ -1006,9 +1020,27 @@ async fn enroll_router(
     // Build and submit transaction
     println!("\n{}", "Step 5: Building transaction...".cyan());
 
-    // Use the reference script UTXO for the warp route
-    // The reference script is at output index 1 of the same tx that created the warp route
-    let warp_ref_script = format!("{}#1", warp_utxo.tx_hash);
+    // Look up reference script UTXO from deployment info
+    // The reference script stays at the original init tx, not the current warp UTXO tx
+    let deployment = ctx.load_deployment_info()
+        .with_context(|| "Failed to load deployment info for reference script lookup")?;
+    let warp_ref_script = deployment
+        .warp_routes
+        .iter()
+        .find(|wr| wr.nft_policy == policy_id)
+        .and_then(|wr| wr.reference_script_utxo.as_ref())
+        .map(|rs| format!("{}#{}", rs.tx_hash, rs.output_index))
+        .unwrap_or_else(|| {
+            // Fallback: assume reference script is at output #1 of init tx
+            let init_tx = deployment
+                .warp_routes
+                .iter()
+                .find(|wr| wr.nft_policy == policy_id)
+                .and_then(|wr| wr.init_tx_hash.as_ref())
+                .cloned()
+                .unwrap_or_else(|| warp_utxo.tx_hash.clone());
+            format!("{}#1", init_tx)
+        });
     println!("  Reference Script: {}", warp_ref_script);
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
@@ -1697,10 +1729,17 @@ async fn transfer(
         .and_then(|w| w.reference_script_utxo.as_ref());
 
     // Load warp script only if no reference UTXO available
-    // The warp_route validator takes two params: mailbox_policy_id + state_nft_policy_id
+    // The warp_route validator takes 3 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy
     let warp_script = if warp_ref_utxo.is_none() {
+        let processed_messages_nft_policy = deployment
+            .mailbox
+            .as_ref()
+            .and_then(|m| m.applied_parameters.first())
+            .map(|p| p.value.clone())
+            .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
         let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
         let state_nft_param_cbor = encode_script_hash_param(&warp_policy_id)?;
+        let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
         let warp_route_applied = apply_validator_params(
             &ctx.contracts_dir,
             "warp_route",
@@ -1708,6 +1747,7 @@ async fn transfer(
             &[
                 &hex::encode(&mailbox_param_cbor),
                 &hex::encode(&state_nft_param_cbor),
+                &hex::encode(&pm_nft_param_cbor),
             ],
         )?;
         Some(hex::decode(&warp_route_applied.compiled_code)?)

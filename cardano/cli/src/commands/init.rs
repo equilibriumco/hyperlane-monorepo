@@ -1262,12 +1262,28 @@ async fn init_recipient(
                 // Return the stored_message_nft compiled code for reference script deployment
                 (applied, Some(stored_msg_nft.policy_id), Some(stored_msg_nft.compiled_code))
             } else {
-                println!("\n{}", "Applying example_generic_recipient parameter...".cyan());
-                let applied = apply_validator_param(
+                // Generic recipient now requires processed_messages_nft_policy parameter
+                // to verify message chain of trust (commit 2d925e3b0)
+                let processed_nft_policy = deployment
+                    .mailbox
+                    .as_ref()
+                    .and_then(|m| m.applied_parameters.iter()
+                        .find(|p| p.name == "processed_messages_nft_policy")
+                        .map(|p| p.value.clone()))
+                    .ok_or_else(|| anyhow!("processed_messages_nft_policy not found in deployment info. Initialize mailbox first."))?;
+
+                let processed_nft_cbor = encode_script_hash_param(&processed_nft_policy)?;
+                let processed_nft_cbor_hex = hex::encode(&processed_nft_cbor);
+
+                println!("\n{}", "Applying example_generic_recipient parameters...".cyan());
+                println!("  Parameter 1: mailbox_policy_id = {}", mailbox_policy_id);
+                println!("  Parameter 2: processed_messages_nft_policy = {}", processed_nft_policy);
+
+                let applied = apply_validator_params(
                     &ctx.contracts_dir,
                     "example_generic_recipient",
                     "example_generic_recipient",
-                    &mailbox_policy_cbor_hex,
+                    &[&mailbox_policy_cbor_hex, &processed_nft_cbor_hex],
                 )?;
                 (applied, None, None)
             };
