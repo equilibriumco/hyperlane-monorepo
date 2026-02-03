@@ -317,15 +317,52 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{}", "Manual Transaction Required:".yellow().bold());
-    println!("Build a transaction with cardano-cli:");
-    println!("\ncardano-cli conway transaction build \\");
-    println!("  --testnet-magic {} \\", ctx.network_magic());
+    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
+    use pallas_crypto::hash::Hash;
+
+    let payer_addr = pallas_addresses::Address::from_bech32(&address)
+        .map_err(|e| anyhow!("Invalid address: {}", e))?;
+
+    let fee = 400_000u64;
+    let output_amount = total.saturating_sub(fee);
+
+    // Get current slot for validity
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+
+    let mut staging = StagingTransaction::new()
+        .fee(fee)
+        .invalid_from_slot(validity_end)
+        .network_id(if ctx.pallas_network() == pallas_addresses::Network::Testnet { 0 } else { 1 });
+
     for utxo in &pure_ada {
-        println!("  --tx-in {}#{} \\", utxo.tx_hash, utxo.output_index);
+        let tx_hash_bytes: [u8; 32] = hex::decode(&utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid tx hash"))?;
+        staging = staging.input(Input::new(Hash::new(tx_hash_bytes), utxo.output_index as u64));
     }
-    println!("  --change-address {} \\", address);
-    println!("  --out-file consolidate.raw");
+
+    staging = staging.output(Output::new(payer_addr.clone(), output_amount));
+
+    let tx = staging.build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let public_key = keypair.pallas_public_key();
+
+    let signed = tx.add_signature(public_key.clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    let tx_cbor = signed.tx_bytes.0.clone();
+
+    println!("\n{}", "Submitting consolidation transaction...".cyan());
+    let submitted_hash = client.submit_tx(&tx_cbor).await?;
+    println!("{}", format!("Transaction submitted: {}", submitted_hash).green());
+
+    println!("\n{}", "Waiting for confirmation...".cyan());
+    client.wait_for_tx(&submitted_hash, 120).await?;
+    println!("{}", format!("Confirmed! Consolidated {} UTXOs into {} lovelace", pure_ada.len(), output_amount).green());
 
     Ok(())
 }
