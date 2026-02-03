@@ -96,6 +96,10 @@ enum OutputType {
 /// Estimated fee for a complex script transaction (~2-3 ADA)
 const ESTIMATED_FEE_LOVELACE: u64 = 3_000_000;
 
+/// Redemption expiry duration in slots (30 days * 86400 seconds/day * 1 slot/second)
+/// Recipients have 30 days to claim their bridged tokens before the relayer can reclaim
+const REDEMPTION_EXPIRY_SLOTS: u64 = 30 * 86400;
+
 impl From<TxBuilderError> for ChainCommunicationError {
     fn from(e: TxBuilderError) -> Self {
         ChainCommunicationError::from_other_str(&e.to_string())
@@ -273,11 +277,13 @@ impl HyperlaneTxBuilder {
     /// 3. Spends recipient UTXO with HandleMessage redeemer
     /// 4. Creates processed message marker output
     /// 5. Creates continuation outputs for mailbox and recipient
-    #[instrument(skip(self, metadata))]
+    /// 6. For warp routes: Creates redemption UTXO instead of direct transfer
+    #[instrument(skip(self, metadata, payer))]
     pub async fn build_process_tx(
         &self,
         message: &HyperlaneMessage,
         metadata: &[u8],
+        payer: &Keypair,
     ) -> Result<ProcessTxComponents, TxBuilderError> {
         info!(
             "Building process transaction for message nonce {}",
@@ -439,7 +445,7 @@ impl HyperlaneTxBuilder {
         // Generic/Deferred use HyperlaneRecipientRedeemer::HandleMessage
         let recipient_redeemer_cbor = match &registration.recipient_type {
             crate::types::RecipientType::TokenReceiver { .. } => {
-                info!("TokenReceiver recipient - using WarpRouteRedeemer::ReceiveTransfer");
+                info!("TokenReceiver recipient - using WarpRouteRedeemer::ReceiveTransfer with redemption");
 
                 // Log the original TokenMessage for debugging
                 let token_msg = parse_token_message(&msg.body)?;
@@ -449,15 +455,33 @@ impl HyperlaneTxBuilder {
                     token_msg.amount
                 );
 
+                // Get payer's payment credential hash for return_address
+                let return_address = *payer.payment_credential_hash();
+
+                // Calculate expiry slot (current slot + 30 days)
+                let current_slot = self
+                    .provider
+                    .get_latest_slot()
+                    .await
+                    .map_err(|e| TxBuilderError::Blockfrost(e))?;
+                let expiry_slot = current_slot + REDEMPTION_EXPIRY_SLOTS;
+                info!(
+                    "Redemption expiry: current_slot={}, expiry_slot={} (~30 days)",
+                    current_slot, expiry_slot
+                );
+
                 // SECURITY: Pass the ORIGINAL message body to the warp route
                 // The on-chain contract will:
                 // 1. Parse the TokenMessage format (32 bytes recipient + 32 bytes amount)
                 // 2. Extract the 28-byte Cardano credential
                 // 3. Convert wire amount to local amount using remote_decimals/decimals
+                // 4. Create a redemption UTXO with the tokens for the recipient to claim
                 // This ensures the amount conversion is validated on-chain
                 let warp_redeemer = crate::types::WarpRouteRedeemer::ReceiveTransfer {
                     message: msg.clone(),
                     message_id,
+                    return_address,
+                    expiry_slot,
                 };
                 encode_warp_route_redeemer(&warp_redeemer)?
             }
@@ -687,7 +711,7 @@ impl HyperlaneTxBuilder {
             "Building process transaction components for message nonce {}",
             message.nonce
         );
-        let components = self.build_process_tx(message, metadata).await?;
+        let components = self.build_process_tx(message, metadata, payer).await?;
 
         // 2. Build the complete transaction
         info!("Constructing full transaction with pallas-txbuilder");
@@ -3363,8 +3387,8 @@ fn encode_ism_redeemer(
 
 /// Encode warp route redeemer to CBOR
 /// WarpRouteRedeemer:
-/// - ReceiveTransfer(1) = [message: Message, message_id: ByteArray]
 /// - TransferRemote(0) = [destination: Int, recipient: ByteArray, amount: Int]
+/// - ReceiveTransfer(1) = [message: Message, message_id: ByteArray, return_address: ByteArray, expiry_slot: Int]
 /// - EnrollRemoteRoute(2) = [domain: Int, route: ByteArray]
 pub fn encode_warp_route_redeemer(
     redeemer: &crate::types::WarpRouteRedeemer,
@@ -3388,6 +3412,8 @@ pub fn encode_warp_route_redeemer(
         crate::types::WarpRouteRedeemer::ReceiveTransfer {
             message,
             message_id,
+            return_address,
+            expiry_slot,
         } => {
             // Message is Constructor 0 with fields:
             // [version: Int, nonce: Int, origin: Int, sender: ByteArray,
@@ -3412,6 +3438,8 @@ pub fn encode_warp_route_redeemer(
                 fields: MaybeIndefArray::Def(vec![
                     message_data,
                     PlutusData::BoundedBytes(message_id.to_vec().into()),
+                    PlutusData::BoundedBytes(return_address.to_vec().into()),
+                    PlutusData::BigInt(BigInt::Int((*expiry_slot as i64).into())),
                 ]),
             })
         }
