@@ -466,7 +466,15 @@ pub type WarpRouteRedeemer {
   /// Receive tokens from another chain (via Hyperlane message)
   /// SECURITY: The contract verifies keccak256(encode_message(message)) == message_id
   /// to ensure the data matches what was ISM-validated.
-  ReceiveTransfer { message: Message, message_id: ByteArray }
+  /// Creates a redemption UTXO for the recipient to claim with their own ADA.
+  ReceiveTransfer {
+    message: Message,
+    message_id: ByteArray,
+    /// Address to return minUTxO after recipient claims (relayer's address)
+    return_address: VerificationKeyHash,
+    /// Slot after which relayer can reclaim if unclaimed
+    expiry_slot: Int,
+  }
   /// Admin: enroll a remote route
   EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
 }
@@ -477,6 +485,36 @@ pub type WarpTransferBody {
   recipient: ByteArray,
   /// Amount of tokens
   amount: Int,
+}
+
+// ============================================================================
+// Token Redemption Types (Two-Phase Token Claiming)
+// ============================================================================
+
+/// Token information for the redemption
+/// Indicates what type of token is being held in escrow
+pub type RedemptionTokenInfo {
+  /// Native ADA (no policy/asset)
+  RedemptionAda
+  /// Native token with policy and asset name
+  RedemptionToken { policy_id: PolicyId, asset_name: AssetName }
+}
+
+/// Redemption datum stored in the UTXO
+/// Holds bridged tokens in escrow until recipient claims with their own ADA
+pub type RedemptionDatum {
+  /// Credential of the intended recipient (28-byte hash)
+  /// Can be a verification key hash or script hash
+  recipient: ByteArray,
+  /// Token being held for redemption
+  token_info: RedemptionTokenInfo,
+  /// Amount of tokens (in local decimals)
+  amount: Int,
+  /// Address to return the minUTxO (and tokens on expiry)
+  /// This is typically the relayer's payment credential
+  return_address: VerificationKeyHash,
+  /// Slot after which the relayer can reclaim (POSIX time in slots)
+  expiry_slot: Int,
 }
 
 // ============================================================================
