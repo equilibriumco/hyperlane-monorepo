@@ -1046,6 +1046,14 @@ pub fn build_cardano_connection_conf(
         .end()
         .map(|s| s.to_string());
 
+    // Optional: Token redemption script hash (hex) - enables two-phase token claiming
+    let redemption_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("redemptionScriptHash")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
     if !local_err.is_ok() || url.is_none() || api_key.is_none() {
         err.merge(local_err);
         return None;
@@ -1072,5 +1080,6 @@ pub fn build_cardano_connection_conf(
         ism_reference_script_utxo,
         igp_policy_id: igp_policy_id.to_string(),
         validator_announce_policy_id: validator_announce_policy_id.to_string(),
+        redemption_script_hash,
     }))
 }
