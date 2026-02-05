@@ -2,7 +2,7 @@
   "amount": 1000000,
   "asset_name": "CTEST",
   "asset_name_hex": "4354455354",
-  "mint_tx_hash": "f66d149c2aee265a33994685cf7947936e51a9f67cc87049cf3b0d6fbe7c4aa1",
-  "policy_id": "505745eaf33beb82adab1937f545f4895ca2049c1f9be43cb6c273c5",
-  "seed_utxo": "8d5a196a80213ebcba15addcc6b0cab3e72458ebe7685dcd54ce94feaa351608#0"
+  "mint_tx_hash": "e419761846e7b9bbd0f3bbc150680d47859f33b20ea4c3ad945e761662d5f907",
+  "policy_id": "f24daaface9c4290d8f6b9748db1c2acb07c5d90890178615330d3c9",
+  "seed_utxo": "0de9896f96715b8e335e75c1c2a250bc262df4b3d611b4caf6262f768a8e3249#0"
 }
