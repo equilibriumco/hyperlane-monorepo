@@ -16,7 +16,7 @@ use crate::utils::cbor::{
     decode_plutus_datum, RemoteRoute,
 };
 use crate::utils::context::CliContext;
-use crate::utils::crypto::Keypair;
+use crate::utils::crypto::{script_address_bech32, Keypair};
 use crate::utils::plutus::{
     apply_validator_param, apply_validator_params, encode_output_reference,
     encode_script_hash_param, AppliedValidator,
@@ -129,19 +129,20 @@ enum WarpCommands {
     },
 
     /// Claim tokens from a redemption UTXO
-    /// Recipients must claim their tokens by providing their own ADA for the UTXO
+    /// Recipients must claim their tokens by providing their own ADA for the UTXO.
+    /// When called without arguments, auto-discovers claimable UTXOs for the signer.
     Claim {
-        /// Transaction hash of the redemption UTXO
+        /// Transaction hash of the redemption UTXO (auto-discovered if omitted)
         #[arg(long)]
-        tx_hash: String,
+        tx_hash: Option<String>,
 
-        /// Output index of the redemption UTXO
+        /// Output index of the redemption UTXO (default: 0 if tx_hash is provided)
         #[arg(long)]
-        output_index: u32,
+        output_index: Option<u32>,
 
-        /// Redemption script hash (from deployment_info.json)
+        /// Redemption script hash (auto-loaded from plutus.json if omitted)
         #[arg(long)]
-        redemption_hash: String,
+        redemption_hash: Option<String>,
 
         /// Dry run
         #[arg(long)]
@@ -204,7 +205,7 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             output_index,
             redemption_hash,
             dry_run,
-        } => claim(ctx, &tx_hash, output_index, &redemption_hash, dry_run).await,
+        } => claim(ctx, tx_hash, output_index, redemption_hash, dry_run).await,
     }
 }
 
@@ -3024,92 +3025,309 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
     Ok(())
 }
 
-/// Claim tokens from a redemption UTXO
-/// Recipients claim their tokens by providing their own ADA for the UTXO overhead
+/// Claim tokens from redemption UTXOs.
+/// When called without --tx-hash, auto-discovers all claimable UTXOs for the signer.
 async fn claim(
     ctx: &CliContext,
+    tx_hash: Option<String>,
+    output_index: Option<u32>,
+    redemption_hash: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Claiming tokens from redemption UTXO...".cyan());
+    println!();
+
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let pallas_network = ctx.pallas_network();
+    let payer_address = keypair.address_bech32(pallas_network);
+    let payer_hash: [u8; 28] = keypair.verification_key_hash();
+
+    // Resolve redemption script hash: use --redemption-hash override or load from plutus.json
+    let blueprint_path = ctx.contracts_dir.join("plutus.json");
+    let blueprint = crate::utils::plutus::PlutusBlueprint::from_file(&blueprint_path)?;
+    let redemption_validator = blueprint
+        .find_validator("token_redemption.token_redemption.spend")
+        .ok_or_else(|| anyhow!("token_redemption validator not found in blueprint"))?;
+
+    let redemption_hash_hex = redemption_hash.unwrap_or_else(|| redemption_validator.hash.clone());
+
+    let redemption_hash_bytes: [u8; 28] = hex::decode(&redemption_hash_hex)
+        .context("Invalid redemption_hash hex")?
+        .try_into()
+        .map_err(|_| anyhow!("redemption_hash must be 28 bytes"))?;
+
+    let redemption_address = script_address_bech32(&redemption_hash_bytes, pallas_network);
+
+    println!("{}", "Configuration".cyan());
+    println!("  Payer Address: {}", payer_address);
+    println!("  Payer Hash: {}", hex::encode(payer_hash));
+    println!("  Redemption Hash: {}", redemption_hash_hex);
+    println!("  Redemption Address: {}", redemption_address);
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    if let Some(ref explicit_tx_hash) = tx_hash {
+        // Explicit mode: claim a single specified UTXO
+        let idx = output_index.unwrap_or(0);
+        println!("  Redemption UTXO: {}#{}", explicit_tx_hash, idx);
+        println!();
+
+        claim_single_utxo(
+            ctx,
+            &client,
+            &keypair,
+            &payer_address,
+            &payer_hash,
+            &redemption_validator.compiled_code,
+            explicit_tx_hash,
+            idx,
+            &redemption_address,
+            dry_run,
+        )
+        .await
+    } else {
+        // Auto-discovery mode: find all claimable UTXOs for the signer
+        println!();
+        println!("{}", "Discovering claimable UTXOs...".cyan());
+
+        let (_current_slot, current_block_time) = client.get_latest_slot_and_time().await?;
+        let current_posix_millis = current_block_time * 1000;
+
+        let claimable = discover_claimable_utxos(
+            &client,
+            &redemption_address,
+            &payer_hash,
+            current_posix_millis,
+        )
+        .await?;
+
+        if claimable.is_empty() {
+            println!("\n  No claimable redemption UTXOs found for this address.");
+            println!("  Either there are no pending redemptions, or they have all expired.");
+            return Ok(());
+        }
+
+        println!("\n  Found {} claimable UTXO(s):\n", claimable.len());
+        for (i, info) in claimable.iter().enumerate() {
+            let remaining_secs = (info.expiry_millis - current_posix_millis) / 1000;
+            println!(
+                "  {}. {}#{} - {} {} (expires in {:.1} hours)",
+                i + 1,
+                info.tx_hash,
+                info.output_index,
+                info.amount,
+                info.token_label,
+                remaining_secs as f64 / 3600.0,
+            );
+        }
+        println!();
+
+        let total = claimable.len();
+        let mut succeeded = 0u32;
+        let mut failed = 0u32;
+
+        for (i, info) in claimable.iter().enumerate() {
+            println!(
+                "{}",
+                format!("--- Claiming UTXO {}/{} ---", i + 1, total).cyan()
+            );
+            match claim_single_utxo(
+                ctx,
+                &client,
+                &keypair,
+                &payer_address,
+                &payer_hash,
+                &redemption_validator.compiled_code,
+                &info.tx_hash,
+                info.output_index,
+                &redemption_address,
+                dry_run,
+            )
+            .await
+            {
+                Ok(()) => succeeded += 1,
+                Err(e) => {
+                    println!(
+                        "  {} Failed to claim {}#{}: {}",
+                        "x".red(),
+                        info.tx_hash,
+                        info.output_index,
+                        e
+                    );
+                    failed += 1;
+                }
+            }
+            println!();
+        }
+
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".cyan()
+        );
+        println!(
+            "  Summary: {} succeeded, {} failed out of {} total",
+            succeeded, failed, total
+        );
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".cyan()
+        );
+
+        if failed > 0 {
+            return Err(anyhow!("{} claim(s) failed", failed));
+        }
+        Ok(())
+    }
+}
+
+struct ClaimableUtxo {
+    tx_hash: String,
+    output_index: u32,
+    amount: i64,
+    token_label: String,
+    expiry_millis: u64,
+}
+
+/// Discover redemption UTXOs claimable by `payer_hash`, sorted by soonest expiry first.
+async fn discover_claimable_utxos(
+    client: &BlockfrostClient,
+    redemption_address: &str,
+    payer_hash: &[u8; 28],
+    current_posix_millis: u64,
+) -> Result<Vec<ClaimableUtxo>> {
+    let utxos = client.get_utxos(redemption_address).await?;
+    let payer_hex = hex::encode(payer_hash);
+    let mut claimable = Vec::new();
+
+    for utxo in &utxos {
+        let datum = match parse_redemption_datum(utxo) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let fields = match datum.get("fields").and_then(|f| f.as_array()) {
+            Some(f) if f.len() >= 5 => f,
+            _ => continue,
+        };
+
+        // fields[0] = recipient key hash
+        let recipient_hex = match fields[0].get("bytes").and_then(|b| b.as_str()) {
+            Some(h) => h,
+            None => continue,
+        };
+        if recipient_hex != payer_hex {
+            continue;
+        }
+
+        // fields[4] = expiry (POSIX millis)
+        let expiry = match fields[4].get("int").and_then(|i| i.as_u64()) {
+            Some(e) => e,
+            None => continue,
+        };
+        if current_posix_millis >= expiry {
+            continue;
+        }
+
+        // fields[2] = amount
+        let amount = fields[2]
+            .get("int")
+            .and_then(|i| i.as_i64())
+            .unwrap_or(0);
+
+        // fields[1] = token_info (constructor 0 = ADA, 1 = Token)
+        let token_label = match fields[1].get("constructor").and_then(|c| c.as_u64()) {
+            Some(0) => "lovelace".to_string(),
+            Some(1) => {
+                let token_fields = fields[1].get("fields").and_then(|f| f.as_array());
+                match token_fields {
+                    Some(tf) if tf.len() >= 2 => {
+                        let policy = tf[0]
+                            .get("bytes")
+                            .and_then(|b| b.as_str())
+                            .unwrap_or("?");
+                        let asset = tf[1]
+                            .get("bytes")
+                            .and_then(|b| b.as_str())
+                            .unwrap_or("?");
+                        format!("{}:{}", &policy[..8.min(policy.len())], asset)
+                    }
+                    _ => "token".to_string(),
+                }
+            }
+            _ => "unknown".to_string(),
+        };
+
+        claimable.push(ClaimableUtxo {
+            tx_hash: utxo.tx_hash.clone(),
+            output_index: utxo.output_index,
+            amount,
+            token_label,
+            expiry_millis: expiry,
+        });
+    }
+
+    // Sort by soonest expiry first
+    claimable.sort_by_key(|c| c.expiry_millis);
+    Ok(claimable)
+}
+
+fn parse_redemption_datum(utxo: &crate::utils::types::Utxo) -> Option<serde_json::Value> {
+    let datum_value = utxo.inline_datum.as_ref()?;
+    if let Some(cbor_hex) = datum_value.as_str() {
+        decode_plutus_datum(cbor_hex).ok()
+    } else {
+        Some(datum_value.clone())
+    }
+}
+
+/// Claim a single redemption UTXO
+async fn claim_single_utxo(
+    ctx: &CliContext,
+    client: &BlockfrostClient,
+    keypair: &Keypair,
+    payer_address: &str,
+    payer_hash: &[u8; 28],
+    redemption_compiled_code: &str,
     tx_hash: &str,
     output_index: u32,
-    redemption_hash: &str,
+    redemption_address: &str,
     dry_run: bool,
 ) -> Result<()> {
     use pallas_addresses::{Address, Network};
     use pallas_crypto::hash::Hash;
     use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
-    println!("{}", "Claiming tokens from redemption UTXO...".cyan());
-    println!();
-
-    // Get API key and keypair
-    let api_key = ctx.require_api_key()?;
-    let keypair = ctx.load_signing_key()?;
-    let payer_address = keypair.address_bech32(ctx.pallas_network());
-    let payer_hash: [u8; 28] = keypair.verification_key_hash();
-
-    println!("{}", "Step 1: Configuration".cyan());
-    println!("  Payer Address: {}", payer_address);
-    println!("  Payer Hash: {}", hex::encode(&payer_hash));
-    println!("  Redemption Hash: {}", redemption_hash);
-    println!("  Redemption UTXO: {}#{}", tx_hash, output_index);
-
-    // Parse redemption script hash
-    let redemption_hash_bytes: [u8; 28] = hex::decode(redemption_hash)
-        .context("Invalid redemption_hash hex")?
-        .try_into()
-        .map_err(|_| anyhow!("redemption_hash must be 28 bytes"))?;
-
-    // Build redemption script address
     let pallas_network = ctx.pallas_network();
-    let header_byte = match pallas_network {
-        Network::Testnet => 0x70,
-        Network::Mainnet => 0x71,
-        _ => 0x70,
-    };
-    let mut redemption_addr_bytes = vec![header_byte];
-    redemption_addr_bytes.extend_from_slice(&redemption_hash_bytes);
-    let redemption_address = Address::from_bytes(&redemption_addr_bytes)
-        .context("Failed to create redemption script address")?;
-    println!(
-        "  Redemption Address: {}",
-        redemption_address.to_bech32().unwrap_or_default()
-    );
 
-    // Step 2: Fetch the redemption UTXO
-    println!("\n{}", "Step 2: Fetching Redemption UTXO...".cyan());
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+    // Fetch the redemption UTXO
+    println!("  Fetching redemption UTXO {}#{}...", tx_hash, output_index);
 
-    let redemption_utxos = client
-        .get_utxos(&redemption_address.to_bech32().unwrap())
-        .await?;
+    let redemption_utxos = client.get_utxos(redemption_address).await?;
     let redemption_utxo = redemption_utxos
         .iter()
         .find(|u| u.tx_hash == tx_hash && u.output_index == output_index)
         .ok_or_else(|| anyhow!("Redemption UTXO not found: {}#{}", tx_hash, output_index))?;
 
-    println!("  Found UTXO:");
     println!("    Lovelace: {}", redemption_utxo.lovelace);
-    println!("    Assets: {}", redemption_utxo.assets.len());
     for asset in &redemption_utxo.assets {
         println!(
-            "      - {}:{} = {}",
+            "    Asset: {}:{} = {}",
             asset.policy_id, asset.asset_name, asset.quantity
         );
     }
 
-    // Step 3: Parse the redemption datum
-    println!("\n{}", "Step 3: Parsing Redemption Datum...".cyan());
+    // Parse the redemption datum
     let datum_value = redemption_utxo
         .inline_datum
         .as_ref()
         .ok_or_else(|| anyhow!("Redemption UTXO has no inline datum"))?;
-    // Datum may be CBOR hex string or already-parsed JSON
     let datum = if let Some(cbor_hex) = datum_value.as_str() {
         decode_plutus_datum(cbor_hex)?
     } else {
         datum_value.clone()
     };
 
-    // Parse RedemptionDatum: Constr 0 [recipient, token_info, amount, return_address, expiry_slot]
     let fields = match datum.get("fields").and_then(|f| f.as_array()) {
         Some(f) if f.len() >= 5 => f,
         _ => return Err(anyhow!("Invalid redemption datum structure")),
@@ -3132,103 +3350,70 @@ async fn claim(
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid expiry_slot in datum"))?;
 
-    // Parse token_info to determine if it's Ada or Token
     let token_info = &fields[1];
     let token_type_constructor = token_info
         .get("constructor")
         .and_then(|c| c.as_u64())
         .ok_or_else(|| anyhow!("Invalid token_info in datum"))?;
 
-    println!("  Recipient: {}", recipient_hex);
-    println!("  Amount: {}", amount);
-    println!("  Return Address: {}", return_address_hex);
-    println!("  Expiry Slot: {}", expiry_slot);
-    println!(
-        "  Token Type: {}",
-        if token_type_constructor == 0 {
-            "ADA"
-        } else {
-            "Token"
-        }
-    );
-
     // Verify payer is the recipient
     let recipient_bytes = hex::decode(recipient_hex)?;
     if recipient_bytes != payer_hash.to_vec() {
         return Err(anyhow!(
             "Payer ({}) is not the recipient ({}) of this redemption UTXO",
-            hex::encode(&payer_hash),
+            hex::encode(payer_hash),
             recipient_hex
         ));
     }
-    println!("  {} Payer is the authorized recipient", "✓".green());
 
-    // Step 4: Check expiry
-    println!("\n{}", "Step 4: Checking Expiry...".cyan());
-    let current_slot = client.get_latest_slot().await?;
-    println!("  Current Slot: {}", current_slot);
-    println!("  Expiry Slot: {}", expiry_slot);
+    // Check expiry
+    let (current_slot, current_block_time) = client.get_latest_slot_and_time().await?;
+    let current_posix_millis = current_block_time * 1000;
+    let slot_to_posix_offset = current_block_time - current_slot;
 
-    if current_slot >= expiry_slot {
+    if current_posix_millis >= expiry_slot {
         return Err(anyhow!(
-            "Redemption UTXO has expired (current slot {} >= expiry slot {}). Use 'expire' command instead.",
-            current_slot, expiry_slot
+            "Redemption UTXO has expired (current time {} >= expiry {})",
+            current_posix_millis,
+            expiry_slot
         ));
     }
-    println!(
-        "  {} Redemption is still valid (expires in {} slots)",
-        "✓".green(),
-        expiry_slot - current_slot
-    );
 
-    // Step 5: Find fee UTXOs
-    println!("\n{}", "Step 5: Finding Fee UTXOs...".cyan());
-    let payer_utxos = client.get_utxos(&payer_address).await?;
-    let ada_only_utxos: Vec<_> = payer_utxos.iter().filter(|u| u.assets.is_empty()).collect();
-    let fee_utxo = ada_only_utxos
-        .first()
+    // Find fee UTXOs
+    let payer_utxos = client.get_utxos(payer_address).await?;
+    let fee_utxo = payer_utxos
+        .iter()
+        .filter(|u| u.assets.is_empty())
+        .max_by_key(|u| u.lovelace)
         .ok_or_else(|| anyhow!("No ADA-only UTXOs available for fees"))?;
     println!(
-        "  Using fee UTXO: {}#{} ({} lovelace)",
+        "  Fee UTXO: {}#{} ({} lovelace)",
         fee_utxo.tx_hash, fee_utxo.output_index, fee_utxo.lovelace
     );
 
-    // Step 6: Load redemption script (not parameterized - load directly from blueprint)
-    println!("\n{}", "Step 6: Loading Redemption Script...".cyan());
-    let blueprint_path = ctx.contracts_dir.join("plutus.json");
-    let blueprint = crate::utils::plutus::PlutusBlueprint::from_file(&blueprint_path)?;
-    let redemption_validator = blueprint
-        .find_validator("token_redemption.token_redemption.spend")
-        .ok_or_else(|| anyhow!("token_redemption validator not found in blueprint"))?;
-    let redemption_script = hex::decode(&redemption_validator.compiled_code)?;
-    println!("  Script loaded: {} bytes", redemption_script.len());
-    println!("  Script hash: {}", redemption_validator.hash);
+    // Load redemption script
+    let redemption_script = hex::decode(redemption_compiled_code)?;
 
-    // Step 7: Build redeemer
-    println!("\n{}", "Step 7: Building Redeemer...".cyan());
+    // Build redeemer
     let claim_redeemer = build_redemption_claim_redeemer();
-    println!("  Claim Redeemer: {} bytes", claim_redeemer.len());
 
     if dry_run {
         println!(
-            "\n{}",
-            "═══════════════════════════════════════════════════════════════".yellow()
+            "  {} Would claim {} {}",
+            "[dry run]".yellow(),
+            amount,
+            if token_type_constructor == 0 {
+                "lovelace"
+            } else {
+                "tokens"
+            }
         );
-        println!("{}", "[Dry run - not submitting transaction]".yellow());
-        println!(
-            "{}",
-            "═══════════════════════════════════════════════════════════════".yellow()
-        );
-        println!("\nWould claim:");
-        println!("  Amount: {}", amount);
-        println!("  Recipient: {}", payer_address);
         return Ok(());
     }
 
-    // Step 8: Build transaction
-    println!("\n{}", "Step 8: Building Transaction...".cyan());
+    // Build transaction
+    println!("  Building transaction...");
 
-    // Parse UTXO inputs
     let redemption_tx_hash: [u8; 32] = hex::decode(tx_hash)?
         .try_into()
         .map_err(|_| anyhow!("Invalid redemption tx hash"))?;
@@ -3236,13 +3421,11 @@ async fn claim(
         .try_into()
         .map_err(|_| anyhow!("Invalid fee tx hash"))?;
 
-    // Build recipient output with claimed tokens
-    let payer_addr = Address::from_bech32(&payer_address)?;
+    let payer_addr = Address::from_bech32(payer_address)?;
     let min_lovelace = 2_000_000u64;
 
     let mut recipient_output = Output::new(payer_addr.clone(), min_lovelace);
 
-    // Add tokens if token_info is Token (constructor 1)
     if token_type_constructor == 1 {
         let token_fields = token_info
             .get("fields")
@@ -3265,40 +3448,75 @@ async fn claim(
         recipient_output = recipient_output
             .add_asset(Hash::new(policy_bytes), asset_bytes, amount as u64)
             .map_err(|e| anyhow!("Failed to add tokens to output: {:?}", e))?;
-        println!("  Adding {} tokens to recipient output", amount);
     } else {
-        // For ADA, the redemption amount IS the ADA
         let total_ada = min_lovelace.max(amount as u64);
         recipient_output = Output::new(payer_addr.clone(), total_ada);
-        println!("  Claiming {} lovelace to recipient", total_ada);
     }
 
-    // Cost model
+    // Build return address (relayer gets their ADA back)
+    let return_addr_bytes = hex::decode(return_address_hex)?;
+    let return_addr_hash: [u8; 28] = return_addr_bytes
+        .try_into()
+        .map_err(|_| anyhow!("return_address must be 28 bytes"))?;
+    let return_header_byte = match pallas_network {
+        Network::Testnet => 0x60,
+        Network::Mainnet => 0x61,
+        _ => 0x60,
+    };
+    let mut return_addr_raw = vec![return_header_byte];
+    return_addr_raw.extend_from_slice(&return_addr_hash);
+    let return_addr = Address::from_bytes(&return_addr_raw)
+        .context("Failed to create return address")?;
+
+    // Compute fee and optional change output
     let cost_model = client.get_plutusv3_cost_model().await?;
     let fee_estimate = 1_000_000u64;
+    let return_min_lovelace = redemption_utxo.lovelace;
 
-    // Build transaction
+    // For ADA claims the recipient output is max(min_lovelace, amount), not just min_lovelace
+    let recipient_lovelace = if token_type_constructor == 0 {
+        min_lovelace.max(amount as u64)
+    } else {
+        min_lovelace
+    };
+
+    // Cardano requires: sum(inputs) = sum(outputs) + fee
+    let total_input_lovelace = fee_utxo.lovelace + redemption_utxo.lovelace;
+    let fixed_outputs_lovelace = recipient_lovelace + return_min_lovelace;
+    let remainder = total_input_lovelace.saturating_sub(fixed_outputs_lovelace);
+
+    let (actual_fee, maybe_change) = if remainder > fee_estimate + min_lovelace {
+        (fee_estimate, Some(remainder - fee_estimate))
+    } else {
+        (remainder, None)
+    };
+
+    if actual_fee < 300_000 {
+        return Err(anyhow!(
+            "Insufficient funds for claim transaction fee (need at least 300,000 lovelace)"
+        ));
+    }
+
+    // Convert expiry POSIX millis to slot for TTL
+    let expiry_slot_number = (expiry_slot / 1000).saturating_sub(slot_to_posix_offset);
+    let ttl_slot = expiry_slot_number.min(current_slot + 7200);
+
     let mut staging = StagingTransaction::new()
-        // Redemption UTXO (script input)
         .input(Input::new(
             Hash::new(redemption_tx_hash),
             output_index as u64,
         ))
-        // Fee UTXO
         .input(Input::new(
             Hash::new(fee_tx_hash),
             fee_utxo.output_index as u64,
         ))
-        // Collateral
         .collateral_input(Input::new(
             Hash::new(fee_tx_hash),
             fee_utxo.output_index as u64,
         ))
-        // Recipient output with tokens
         .output(recipient_output)
-        // Redemption script
+        .output(Output::new(return_addr, return_min_lovelace))
         .script(ScriptKind::PlutusV3, redemption_script)
-        // Spend redeemer
         .add_spend_redeemer(
             Input::new(Hash::new(redemption_tx_hash), output_index as u64),
             claim_redeemer,
@@ -3307,57 +3525,40 @@ async fn claim(
                 steps: 500_000_000,
             }),
         )
-        // Cost model
         .language_view(ScriptKind::PlutusV3, cost_model)
-        // Fee
-        .fee(fee_estimate)
-        // Validity - must be before expiry_slot
-        .invalid_from_slot(expiry_slot)
-        // Required signer (recipient)
-        .disclosed_signer(Hash::new(payer_hash))
-        // Network
+        .fee(actual_fee)
+        .invalid_from_slot(ttl_slot)
+        .disclosed_signer(Hash::new(*payer_hash))
         .network_id(if matches!(pallas_network, Network::Testnet) {
             0
         } else {
             1
         });
 
-    // Add change output
-    let change_amount = fee_utxo
-        .lovelace
-        .saturating_sub(fee_estimate)
-        .saturating_sub(min_lovelace);
-    if change_amount > min_lovelace {
-        staging = staging.output(Output::new(payer_addr.clone(), change_amount));
+    if let Some(change) = maybe_change {
+        staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
-    // Build the transaction
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
-    println!("  TX built: {} bytes", tx.tx_bytes.0.len());
-
     // Sign and submit
-    println!("\n{}", "Step 9: Signing and Submitting...".cyan());
-    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
-    let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
+    let tx_builder = HyperlaneTxBuilder::new(client, pallas_network);
+    let signed_tx = tx_builder.sign_tx(tx, keypair)?;
     let submitted_tx_hash = client.submit_tx(&signed_tx).await?;
 
     println!(
-        "\n{}",
-        "═══════════════════════════════════════════════════════════════".green()
+        "  {} Claimed {} {} - TX: {}",
+        "ok".green(),
+        amount,
+        if token_type_constructor == 0 {
+            "lovelace"
+        } else {
+            "tokens"
+        },
+        submitted_tx_hash
     );
-    println!("{}", "Tokens Claimed Successfully!".green().bold());
-    println!(
-        "{}",
-        "═══════════════════════════════════════════════════════════════".green()
-    );
-    println!();
-    println!("  TX Hash: {}", submitted_tx_hash);
-    println!("  Amount: {}", amount);
-    println!("  Recipient: {}", payer_address);
-    println!();
 
     Ok(())
 }
