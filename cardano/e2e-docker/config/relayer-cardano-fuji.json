@@ -28,7 +28,7 @@
         "registryPolicyId": "${CARDANO_REGISTRY_POLICY_ID}",
         "url": "https://cardano-preview.blockfrost.io/api/v0",
         "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
-        "redemptionScriptHash": "e35a91c783d8c7763896f490408a464ea83c1980f856c1555fa6ce42"
+        "redemptionScriptHash": "b8484c36ffc2c93bafe91fbca92ba5c08b3704e7a838d4353f996295"
       },
       "domainId": 2003,
       "index": {
