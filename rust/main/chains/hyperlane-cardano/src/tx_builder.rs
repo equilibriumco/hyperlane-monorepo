@@ -96,9 +96,9 @@ enum OutputType {
 /// Estimated fee for a complex script transaction (~2-3 ADA)
 const ESTIMATED_FEE_LOVELACE: u64 = 3_000_000;
 
-/// Redemption expiry duration in slots (30 days * 86400 seconds/day * 1 slot/second)
+/// Redemption expiry duration in milliseconds (30 days)
 /// Recipients have 30 days to claim their bridged tokens before the relayer can reclaim
-const REDEMPTION_EXPIRY_SLOTS: u64 = 30 * 86400;
+const REDEMPTION_EXPIRY_MILLIS: u64 = 30 * 86400 * 1000;
 
 impl From<TxBuilderError> for ChainCommunicationError {
     fn from(e: TxBuilderError) -> Self {
@@ -440,6 +440,21 @@ impl HyperlaneTxBuilder {
         };
         let mailbox_redeemer_cbor = encode_mailbox_redeemer(&mailbox_redeemer)?;
 
+        // Pre-compute redemption expiry once to ensure the redeemer and datum use the
+        // same value (separate SystemTime::now() calls would drift by ~1ms)
+        let redemption_expiry = {
+            let current_posix_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| TxBuilderError::Encoding(format!("System time error: {}", e)))?
+                .as_millis() as u64;
+            let expiry = current_posix_millis + REDEMPTION_EXPIRY_MILLIS;
+            info!(
+                "Redemption expiry: current_posix_millis={}, expiry_posix_millis={} (~30 days)",
+                current_posix_millis, expiry
+            );
+            expiry
+        };
+
         // Build recipient redeemer based on recipient type
         // TokenReceiver (warp routes) use WarpRouteRedeemer::ReceiveTransfer
         // Generic/Deferred use HyperlaneRecipientRedeemer::HandleMessage
@@ -457,18 +472,7 @@ impl HyperlaneTxBuilder {
 
                 // Get payer's payment credential hash for return_address
                 let return_address = *payer.payment_credential_hash();
-
-                // Calculate expiry slot (current slot + 30 days)
-                let current_slot = self
-                    .provider
-                    .get_latest_slot()
-                    .await
-                    .map_err(|e| TxBuilderError::Blockfrost(e))?;
-                let expiry_slot = current_slot + REDEMPTION_EXPIRY_SLOTS;
-                info!(
-                    "Redemption expiry: current_slot={}, expiry_slot={} (~30 days)",
-                    current_slot, expiry_slot
-                );
+                let expiry_slot = redemption_expiry;
 
                 // SECURITY: Pass the ORIGINAL message body to the warp route
                 // The on-chain contract will:
@@ -681,14 +685,9 @@ impl HyperlaneTxBuilder {
                     TxBuilderError::Encoding("redemption_script_hash must be 28 bytes".to_string())
                 })?;
 
-                // Get return_address and expiry_slot from the redeemer we built earlier
+                // Use the same expiry as the redeemer for datum consistency
                 let return_address = *payer.payment_credential_hash();
-                let current_slot = self
-                    .provider
-                    .get_latest_slot()
-                    .await
-                    .map_err(|e| TxBuilderError::Blockfrost(e))?;
-                let expiry_slot = current_slot + REDEMPTION_EXPIRY_SLOTS;
+                let expiry_slot = redemption_expiry;
 
                 // Build token_info based on warp route token type
                 let token_info = match &token_type {
@@ -851,46 +850,113 @@ impl HyperlaneTxBuilder {
         // Get minimum UTXO lovelace from protocol parameters
         let min_lovelace = self.min_lovelace_simple().await;
 
+        // Calculate redemption minUTxO if redemption is enabled
+        // This is needed for proper cost calculation when warp route creates redemption output
+        let redemption_min_lovelace = if let (Some(ref datum_cbor), Some(ref token_type)) = (
+            &components.redemption_datum_cbor,
+            &components.warp_token_type,
+        ) {
+            match token_type {
+                WarpTokenTypeInfo::Synthetic { .. } => {
+                    // Synthetic uses empty asset name
+                    self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                        asset_name_len: 0,
+                        datum_size: datum_cbor.len(),
+                    })
+                    .await
+                }
+                WarpTokenTypeInfo::Collateral { asset_name, .. } => {
+                    let asset_name_len = hex::decode(asset_name).map(|v| v.len()).unwrap_or(0);
+                    self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                        asset_name_len,
+                        datum_size: datum_cbor.len(),
+                    })
+                    .await
+                }
+                WarpTokenTypeInfo::Native => {
+                    self.calculate_min_lovelace(OutputType::WithInlineDatum {
+                        datum_size: datum_cbor.len(),
+                    })
+                    .await
+                }
+            }
+        } else {
+            min_lovelace // Fallback if no redemption
+        };
+
+        // Calculate the actual minUTxO for the warp route continuation output
+        // The continuation output has an NFT (state token) + inline datum, so it needs
+        // more than the simple min_lovelace
+        let continuation_min_lovelace = if components.warp_token_type.is_some() {
+            // Warp route continuation has NFT + datum
+            // NFT asset name is ~13 bytes ("Mailbox State" or similar)
+            let nft_asset_name_len = 13;
+            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                asset_name_len: nft_asset_name_len,
+                datum_size: components.recipient_continuation_datum_cbor.len(),
+            })
+            .await
+        } else {
+            min_lovelace
+        };
+        info!(
+            "Continuation minUTxO: {} lovelace (datum_size={})",
+            continuation_min_lovelace,
+            components.recipient_continuation_datum_cbor.len()
+        );
+
         // Get payer address and UTXOs for fee payment
         let payer_address = payer.address_bech32(self.network_to_pallas());
         debug!("Payer address: {}", payer_address);
 
         // Calculate additional funds needed when warp route doesn't have enough lovelace.
         // This applies to:
-        // - Synthetic: need min_lovelace for recipient output (minted tokens go there)
-        // - Native with small amounts: release amount < min_lovelace but output needs min_lovelace
-        // - Collateral: need min_lovelace for the token release output
+        // - Synthetic: need redemption_min_lovelace for redemption output (minted tokens go there)
+        // - Native with small amounts: release amount < redemption_min_lovelace but output needs redemption_min_lovelace
+        // - Collateral: need redemption_min_lovelace for the token release output
+        // Use redemption_min_lovelace when redemption is enabled, otherwise min_lovelace
+        let recipient_output_cost = if components.redemption_datum_cbor.is_some() {
+            redemption_min_lovelace
+        } else {
+            min_lovelace
+        };
+
         let payer_extra = match &components.warp_token_type {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                let extra = if original_lovelace > min_lovelace * 2 {
-                    0 // Warp route has enough (4+ ADA)
-                } else if original_lovelace > min_lovelace {
-                    // Warp route has some but not full amount (2-4 ADA)
-                    min_lovelace.saturating_sub(original_lovelace.saturating_sub(min_lovelace))
+                let extra = if original_lovelace > continuation_min_lovelace + recipient_output_cost
+                {
+                    0 // Warp route has enough
+                } else if original_lovelace > continuation_min_lovelace {
+                    // Warp route has some but not full amount
+                    recipient_output_cost
+                        .saturating_sub(original_lovelace.saturating_sub(continuation_min_lovelace))
                 } else {
-                    min_lovelace // Warp route at minimum, payer covers full cost
+                    // Warp route below continuation minimum, payer covers full recipient
+                    // cost plus the continuation gap
+                    recipient_output_cost
+                        + continuation_min_lovelace.saturating_sub(original_lovelace)
                 };
                 info!(
-                    "Synthetic route: warp_route_lovelace={}, payer covers extra={} lovelace",
-                    original_lovelace, extra
+                    "Synthetic route: warp_route_lovelace={}, recipient_output_cost={}, payer covers extra={} lovelace",
+                    original_lovelace, recipient_output_cost, extra
                 );
                 extra
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // The release output needs amount.max(min_lovelace)
-                let release_needed = release_amount.max(min_lovelace);
-                // The warp route continuation needs min_lovelace
-                let total_needed = release_needed + min_lovelace;
+                // The release output needs amount.max(recipient_output_cost)
+                let release_needed = release_amount.max(recipient_output_cost);
+                // The warp route continuation needs continuation_min_lovelace (has NFT + datum)
+                let total_needed = release_needed + continuation_min_lovelace;
                 let extra = total_needed.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
                         "Native route shortfall: warp_route_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, payer covers extra={} lovelace",
-                        original_lovelace, release_needed, min_lovelace, total_needed, extra
+                        original_lovelace, release_needed, continuation_min_lovelace, total_needed, extra
                     );
                 }
                 extra
@@ -899,13 +965,13 @@ impl HyperlaneTxBuilder {
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                // Collateral releases need min_lovelace for the token output
-                let total_needed = min_lovelace * 2; // continuation + release output
+                // Collateral releases need recipient_output_cost for the token output
+                let total_needed = continuation_min_lovelace + recipient_output_cost; // continuation + release output
                 let extra = total_needed.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
-                        "Collateral route shortfall: warp_route_lovelace={}, payer covers extra={} lovelace",
-                        original_lovelace, extra
+                        "Collateral route shortfall: warp_route_lovelace={}, recipient_output_cost={}, payer covers extra={} lovelace",
+                        original_lovelace, recipient_output_cost, extra
                     );
                 }
                 extra
@@ -913,14 +979,39 @@ impl HyperlaneTxBuilder {
             _ => 0,
         };
 
+        // Calculate processed marker minUTxO - needed for UTXO selection
+        // This output is always created and needs higher minUTxO if NFT minting is enabled
+        let processed_marker_min_lovelace_for_selection =
+            if self.conf.processed_messages_nft_policy_id.is_some() {
+                // Output will have datum + NFT (asset name = 32-byte message_id)
+                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                    asset_name_len: 32, // message_id is 32 bytes
+                    datum_size: components.processed_datum_cbor.len(),
+                })
+                .await
+            } else {
+                // Output only has datum
+                self.calculate_min_lovelace(OutputType::WithInlineDatum {
+                    datum_size: components.processed_datum_cbor.len(),
+                })
+                .await
+            };
+
+        // Total extra the payer needs to cover:
+        // - payer_extra: shortfall from warp route for redemption output
+        // - processed_marker: the processed marker NFT output
+        let total_payer_extra = payer_extra + processed_marker_min_lovelace_for_selection;
+
         // Find payer UTXOs for fee payment (coin selection)
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
         let (selected_utxos, total_input) =
-            self.select_utxos_for_fee_with_extra(&payer_utxos, payer_extra, min_lovelace)?;
+            self.select_utxos_for_fee_with_extra(&payer_utxos, total_payer_extra, min_lovelace)?;
         debug!(
-            "Selected {} UTXOs with {} lovelace for fees",
+            "Selected {} UTXOs with {} lovelace for fees (processed_marker={}, payer_extra={})",
             selected_utxos.len(),
-            total_input
+            total_input,
+            processed_marker_min_lovelace_for_selection,
+            payer_extra
         );
 
         // Start building the transaction
@@ -1100,7 +1191,8 @@ impl HyperlaneTxBuilder {
             &components.recipient_continuation_datum_cbor,
             components.token_release_amount,
             components.warp_token_type.as_ref(),
-            min_lovelace,
+            continuation_min_lovelace,
+            recipient_output_cost,
         )?;
         tx = tx.output(recipient_output);
 
@@ -1138,9 +1230,43 @@ impl HyperlaneTxBuilder {
                     redemption_address.to_bech32().unwrap_or_default()
                 );
 
+                // Calculate proper minUTxO for redemption output based on its content
+                // Redemption outputs have inline datum (~120 bytes) and may have native tokens
+                let redemption_min_lovelace = match token_type {
+                    WarpTokenTypeInfo::Synthetic { .. } | WarpTokenTypeInfo::Collateral { .. } => {
+                        // Output has inline datum + native token (policy_id + asset_name)
+                        // Asset name is empty for synthetic, variable for collateral
+                        let asset_name_len = match token_type {
+                            WarpTokenTypeInfo::Collateral { asset_name, .. } => {
+                                hex::decode(asset_name).map(|v| v.len()).unwrap_or(0)
+                            }
+                            _ => 0, // Synthetic uses empty asset name
+                        };
+                        self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                            asset_name_len,
+                            datum_size: redemption_datum_cbor.len(),
+                        })
+                        .await
+                    }
+                    WarpTokenTypeInfo::Native => {
+                        // Native ADA output only has inline datum
+                        self.calculate_min_lovelace(OutputType::WithInlineDatum {
+                            datum_size: redemption_datum_cbor.len(),
+                        })
+                        .await
+                    }
+                };
+                info!(
+                    "Redemption UTXO minUTxO: {} lovelace (datum_size={}, token_type={:?})",
+                    redemption_min_lovelace,
+                    redemption_datum_cbor.len(),
+                    token_type
+                );
+
                 // Create redemption output with inline datum
-                let mut redemption_output = Output::new(redemption_address, min_lovelace)
-                    .set_inline_datum(redemption_datum_cbor.clone());
+                let mut redemption_output =
+                    Output::new(redemption_address, redemption_min_lovelace)
+                        .set_inline_datum(redemption_datum_cbor.clone());
 
                 // For Synthetic, we still need to mint the tokens to the redemption UTXO
                 if let WarpTokenTypeInfo::Synthetic { minting_policy } = token_type {
@@ -1219,16 +1345,16 @@ impl HyperlaneTxBuilder {
                     );
                 } else if let WarpTokenTypeInfo::Native = token_type {
                     // For native ADA, the redemption output needs to hold the release amount
-                    // The min_lovelace is for UTXO overhead, release_amount is the actual value
-                    let total_ada = min_lovelace.max(release_amount);
+                    // Use redemption_min_lovelace (accounts for inline datum) as the minimum
+                    let total_ada = redemption_min_lovelace.max(release_amount);
                     redemption_output = Output::new(
                         script_hash_to_address(redemption_hash, pallas_network)?,
                         total_ada,
                     )
                     .set_inline_datum(redemption_datum_cbor.clone());
                     info!(
-                        "Creating native ADA redemption UTXO with {} lovelace",
-                        total_ada
+                        "Creating native ADA redemption UTXO with {} lovelace (min={}, release={})",
+                        total_ada, redemption_min_lovelace, release_amount
                     );
                 }
 
@@ -1415,13 +1541,30 @@ impl HyperlaneTxBuilder {
         // 4. Processed message marker output
         // This output goes to the processed_messages_script address with inline datum
         // If NFT minting is configured, the NFT will be included in this output
+        // Calculate proper minUTxO based on whether NFT minting is enabled
+        let processed_marker_min_lovelace = if self.conf.processed_messages_nft_policy_id.is_some()
+        {
+            // Output will have datum + NFT (asset name = 32-byte message_id)
+            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                asset_name_len: 32, // message_id is 32 bytes
+                datum_size: components.processed_datum_cbor.len(),
+            })
+            .await
+        } else {
+            // Output only has datum
+            self.calculate_min_lovelace(OutputType::WithInlineDatum {
+                datum_size: components.processed_datum_cbor.len(),
+            })
+            .await
+        };
+
         let mut processed_marker_output = self.create_processed_marker_output(
             &components.message_id,
             &components.processed_datum_cbor,
-            min_lovelace,
+            processed_marker_min_lovelace,
         )?;
 
-        // 4. Optional: Mint processed message NFT for efficient O(1) lookups
+        // 4b. Optional: Mint processed message NFT for efficient O(1) lookups
         // If processed_messages_nft_policy_id is configured, mint an NFT with message_id as asset name
         if let (Some(ref policy_id), Some(ref script_cbor)) = (
             &self.conf.processed_messages_nft_policy_id,
@@ -1492,7 +1635,7 @@ impl HyperlaneTxBuilder {
         // The payer's input funds: fee + processed marker output + (optional) message UTXO
         // (mailbox and recipient continuation outputs return the same value they consume)
         let fee = ESTIMATED_FEE_LOVELACE;
-        let processed_marker_cost = min_lovelace;
+        let processed_marker_cost = processed_marker_min_lovelace;
         // For Deferred, we also create a message UTXO which needs min_lovelace
         let message_utxo_cost = if matches!(
             &components.recipient_type,
@@ -1504,41 +1647,42 @@ impl HyperlaneTxBuilder {
         };
 
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
-        // to fund both the continuation output AND the recipient output, payer covers the difference.
-        // This applies to:
-        // - Synthetic: need min_lovelace for recipient (minted tokens go there)
-        // - Native: need amount.max(min_lovelace) for recipient + min_lovelace for continuation
-        // - Collateral: need min_lovelace for recipient (tokens) + min_lovelace for continuation
+        // to fund both the continuation output AND the recipient/redemption output, payer covers the difference.
+        // Uses continuation_min_lovelace (accounts for NFT + datum in continuation output)
+        // and recipient_output_cost (accounts for redemption minUTxO when enabled).
         let recipient_shortfall = match &components.warp_token_type {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                let warp_contribution = if original_lovelace > min_lovelace * 2 {
-                    min_lovelace
-                } else if original_lovelace > min_lovelace {
-                    original_lovelace.saturating_sub(min_lovelace)
-                } else {
-                    0
-                };
-                let shortfall = min_lovelace.saturating_sub(warp_contribution);
+                let warp_contribution =
+                    if original_lovelace > continuation_min_lovelace + recipient_output_cost {
+                        recipient_output_cost
+                    } else if original_lovelace > continuation_min_lovelace {
+                        original_lovelace.saturating_sub(continuation_min_lovelace)
+                    } else {
+                        0
+                    };
+                let continuation_gap = continuation_min_lovelace.saturating_sub(original_lovelace);
+                let shortfall =
+                    recipient_output_cost.saturating_sub(warp_contribution) + continuation_gap;
                 debug!(
-                    "Synthetic recipient shortfall: warp_lovelace={}, warp_contribution={}, shortfall={}",
-                    original_lovelace, warp_contribution, shortfall
+                    "Synthetic recipient shortfall: warp_lovelace={}, recipient_output_cost={}, warp_contribution={}, continuation_gap={}, shortfall={}",
+                    original_lovelace, recipient_output_cost, warp_contribution, continuation_gap, shortfall
                 );
                 shortfall
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // Release output needs amount.max(min_lovelace), continuation needs min_lovelace
-                let release_needed = release_amount.max(min_lovelace);
-                let total_needed = release_needed + min_lovelace;
+                // Release output needs amount.max(recipient_output_cost), continuation needs continuation_min_lovelace
+                let release_needed = release_amount.max(recipient_output_cost);
+                let total_needed = release_needed + continuation_min_lovelace;
                 let shortfall = total_needed.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
-                        "Native recipient shortfall: warp_lovelace={}, release_needed={}, total_needed={}, shortfall={}",
-                        original_lovelace, release_needed, total_needed, shortfall
+                        "Native recipient shortfall: warp_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, shortfall={}",
+                        original_lovelace, release_needed, continuation_min_lovelace, total_needed, shortfall
                     );
                 }
                 shortfall
@@ -1547,13 +1691,13 @@ impl HyperlaneTxBuilder {
                 if components.token_release_amount.is_some() =>
             {
                 let original_lovelace = components.recipient_utxo.lovelace();
-                // Both continuation and recipient outputs need min_lovelace
-                let total_needed = min_lovelace * 2;
+                // Continuation needs continuation_min_lovelace, recipient/redemption needs recipient_output_cost
+                let total_needed = continuation_min_lovelace + recipient_output_cost;
                 let shortfall = total_needed.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
-                        "Collateral recipient shortfall: warp_lovelace={}, shortfall={}",
-                        original_lovelace, shortfall
+                        "Collateral recipient shortfall: warp_lovelace={}, continuation_needed={}, recipient_output_cost={}, shortfall={}",
+                        original_lovelace, continuation_min_lovelace, recipient_output_cost, shortfall
                     );
                 }
                 shortfall
@@ -2269,34 +2413,37 @@ fn create_warp_route_continuation_output(
     release_amount: Option<u64>,
     token_type: Option<&WarpTokenTypeInfo>,
     min_lovelace: u64,
+    release_output_cost: u64,
 ) -> Result<Output, TxBuilderError> {
     let address = parse_address(&utxo.address)?;
     let original_lovelace = utxo.lovelace();
 
     // Adjust lovelace based on token type:
     // - Native: reduce lovelace by the release amount (tokens are ADA)
-    // - Collateral: reduce lovelace by min_lovelace to fund the release output
-    // - Synthetic: reduce lovelace by min_lovelace to fund the recipient output (minted tokens go there)
+    // - Collateral: reduce lovelace by release_output_cost to fund the release output
+    // - Synthetic: reduce lovelace by release_output_cost to fund the recipient output
+    // release_output_cost accounts for the actual minUTxO of the release/redemption output
+    // (which may be higher than min_lovelace when it contains datum + tokens)
     let final_lovelace = match (&token_type, release_amount) {
         (Some(WarpTokenTypeInfo::Native), Some(amount)) => {
             // Native: release amount IS the ADA being sent
-            // The release output uses amount.max(min_lovelace), so we must subtract that
-            let release_lovelace = amount.max(min_lovelace);
+            // The release output uses amount.max(release_output_cost)
+            let release_lovelace = amount.max(release_output_cost);
             original_lovelace
                 .saturating_sub(release_lovelace)
                 .max(min_lovelace)
         }
         (Some(WarpTokenTypeInfo::Collateral { .. }), Some(_)) => {
-            // Collateral: need to fund the release output with min_lovelace
+            // Collateral: need to fund the release output with release_output_cost
             original_lovelace
-                .saturating_sub(min_lovelace)
+                .saturating_sub(release_output_cost)
                 .max(min_lovelace)
         }
         (Some(WarpTokenTypeInfo::Synthetic { .. }), Some(_)) => {
-            // Synthetic: need to fund the recipient output with min_lovelace
-            // The minted tokens go to a new output which requires min_lovelace
+            // Synthetic: need to fund the recipient output with release_output_cost
+            // The minted tokens go to a new output which requires release_output_cost
             original_lovelace
-                .saturating_sub(min_lovelace)
+                .saturating_sub(release_output_cost)
                 .max(min_lovelace)
         }
         _ => original_lovelace.max(min_lovelace),
