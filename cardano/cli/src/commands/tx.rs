@@ -4,8 +4,13 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 
+use pallas_addresses::Address;
+use pallas_crypto::hash::Hash;
+use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
+
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::context::CliContext;
+use crate::utils::tx_builder::HyperlaneTxBuilder;
 
 #[derive(Args)]
 pub struct TxArgs {
@@ -283,39 +288,91 @@ async fn build_payment(
     ctx: &CliContext,
     to: &str,
     amount: u64,
-    output: Option<String>,
+    _output: Option<String>,
 ) -> Result<()> {
     println!("{}", "Building payment transaction...".cyan());
     println!("  To: {}", to);
-    println!("  Amount: {} lovelace ({:.6} ADA)", amount, amount as f64 / 1_000_000.0);
+    println!(
+        "  Amount: {} lovelace ({:.6} ADA)",
+        amount,
+        amount as f64 / 1_000_000.0
+    );
 
     let keypair = ctx.load_signing_key()?;
     let from = keypair.address_bech32(ctx.pallas_network());
-
     println!("  From: {}", from);
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    // Find suitable UTXO (must not have reference script)
+    let fee_estimate = 200_000u64;
+    let min_change = 1_000_000u64;
+
     let utxos = client.get_utxos(&from).await?;
     let suitable = utxos
         .iter()
-        .find(|u| u.lovelace >= amount + 2_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} lovelace without assets or reference scripts)", amount + 2_000_000))?;
+        .find(|u| {
+            u.lovelace >= amount + fee_estimate + min_change
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "No suitable UTXO found (need >= {} lovelace without assets or reference scripts)",
+                amount + fee_estimate + min_change
+            )
+        })?;
 
-    println!("  Input UTXO: {}#{}", suitable.tx_hash, suitable.output_index);
+    println!(
+        "  Input UTXO: {}#{} ({} lovelace)",
+        suitable.tx_hash, suitable.output_index, suitable.lovelace
+    );
 
-    let output_file = output.unwrap_or_else(|| "payment.raw".to_string());
+    let input_tx_hash: [u8; 32] = hex::decode(&suitable.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid tx hash"))?;
 
-    println!("\n{}", "Manual Transaction Build Required:".yellow().bold());
-    println!("Use cardano-cli to build the transaction:");
-    println!("\ncardano-cli conway transaction build \\");
-    println!("  --testnet-magic {} \\", ctx.network_magic());
-    println!("  --tx-in {}#{} \\", suitable.tx_hash, suitable.output_index);
-    println!("  --tx-out {}+{} \\", to, amount);
-    println!("  --change-address {} \\", from);
-    println!("  --out-file {}", output_file);
+    let to_addr = Address::from_bech32(to).map_err(|e| anyhow!("Invalid recipient address: {:?}", e))?;
+    let from_addr = Address::from_bech32(&from).map_err(|e| anyhow!("Invalid sender address: {:?}", e))?;
+
+    let change_amount = suitable.lovelace - amount - fee_estimate;
+
+    let network_id: u8 = if matches!(ctx.pallas_network(), pallas_addresses::Network::Testnet) {
+        0
+    } else {
+        1
+    };
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(
+            Hash::new(input_tx_hash),
+            suitable.output_index as u64,
+        ))
+        .output(Output::new(to_addr, amount))
+        .fee(fee_estimate)
+        .network_id(network_id);
+
+    if change_amount >= min_change {
+        staging = staging.output(Output::new(from_addr, change_amount));
+    }
+
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX built: {} bytes", tx.tx_bytes.0.len());
+
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
+    let tx_hash = client.submit_tx(&signed_tx).await?;
+
+    println!("\n{}", "Payment submitted!".green().bold());
+    println!("  TX Hash: {}", tx_hash);
+    println!(
+        "  Amount: {} lovelace ({:.6} ADA)",
+        amount,
+        amount as f64 / 1_000_000.0
+    );
 
     Ok(())
 }

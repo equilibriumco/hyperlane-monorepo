@@ -263,6 +263,18 @@ impl BlockfrostClient {
         Ok(block.slot)
     }
 
+    /// Get latest block slot and POSIX time (seconds since epoch)
+    pub async fn get_latest_slot_and_time(&self) -> Result<(u64, u64)> {
+        #[derive(Deserialize)]
+        struct Block {
+            slot: u64,
+            time: u64,
+        }
+
+        let block: Block = self.get("/blocks/latest").await?;
+        Ok((block.slot, block.time))
+    }
+
     /// Get protocol parameters
     pub async fn get_protocol_params(&self) -> Result<ProtocolParams> {
         #[derive(Deserialize)]
