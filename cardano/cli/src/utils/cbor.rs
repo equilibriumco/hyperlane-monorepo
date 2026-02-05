@@ -1282,10 +1282,12 @@ pub fn build_warp_route_collateral_datum_with_routes(
     builder.uint(remote_decimals as u64);
 
     // remote_routes: List<(Domain, HyperlaneAddress)>
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
     builder.start_list();
     for route in remote_routes {
-        // Tuple is a plain array [domain, address]
-        builder.start_list().uint(route.domain as u64);
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
         builder.end_list();
     }
@@ -1333,9 +1335,12 @@ pub fn build_warp_route_synthetic_datum_with_routes(
     builder.uint(remote_decimals as u64);
 
     // remote_routes: List<(Domain, HyperlaneAddress)>
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
     builder.start_list();
     for route in remote_routes {
-        builder.start_list().uint(route.domain as u64);
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
         builder.end_list();
     }
@@ -1355,6 +1360,8 @@ pub fn build_warp_route_synthetic_datum_with_routes(
 }
 
 /// Build a WarpRoute datum for Native (ADA) type with remote routes
+/// Uses same indefinite-length encoding style as the original build_warp_route_datum
+/// to ensure datum comparisons work correctly in the validator
 pub fn build_warp_route_native_datum_with_routes(
     decimals: u32,
     remote_decimals: u32,
@@ -1364,14 +1371,16 @@ pub fn build_warp_route_native_datum_with_routes(
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    // WarpRouteDatum - Constr 0 with 3 fields
-    builder.start_constr_definite(0, 3);
+    // WarpRouteDatum - Constr 0 (indefinite length)
+    builder.start_constr(0);
 
-    // config: WarpRouteConfig - Constr 0 with 4 fields
-    builder.start_constr_definite(0, 4);
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
 
-    // token_type: WarpTokenType::Native - Constr 2 (0 fields)
-    builder.start_constr_definite(2, 0);
+    // token_type: WarpTokenType::Native - Constr 2 (no fields)
+    // Use indefinite encoding to match original on-chain datum
+    builder.start_constr(2);
+    builder.end_constr();
 
     // decimals: Int (local token decimals)
     builder.uint(decimals as u64);
@@ -1380,12 +1389,18 @@ pub fn build_warp_route_native_datum_with_routes(
     builder.uint(remote_decimals as u64);
 
     // remote_routes: List<(Domain, HyperlaneAddress)>
-    builder.start_list_definite(remote_routes.len());
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
+    builder.start_list();
     for route in remote_routes {
-        builder.start_list_definite(2).uint(route.domain as u64);
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
         builder.bytes_hex(&route.router)?;
+        builder.end_list();
     }
-    // end WarpRouteConfig (no end needed for definite)
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
 
     // owner: VerificationKeyHash
     builder.bytes_hex(owner_pkh)?;
@@ -1393,7 +1408,7 @@ pub fn build_warp_route_native_datum_with_routes(
     // total_bridged: Int
     builder.int(total_bridged);
 
-    // No end needed for definite-length constructors
+    builder.end_constr(); // end WarpRouteDatum
 
     Ok(builder.build())
 }
