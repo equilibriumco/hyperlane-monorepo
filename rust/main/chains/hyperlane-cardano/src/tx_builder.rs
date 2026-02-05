@@ -83,6 +83,7 @@ enum OutputType {
     /// Simple output containing only ADA
     SimpleAda,
     /// Output with a native token (policy ID + asset name)
+    #[allow(dead_code)]
     WithNativeToken { asset_name_len: usize },
     /// Output with an inline datum
     WithInlineDatum { datum_size: usize },
@@ -199,7 +200,7 @@ impl HyperlaneTxBuilder {
         let min_lovelace = coins_per_byte * (UTXO_BASE_OVERHEAD + output_size);
 
         // Round up to nearest 100k lovelace for safety margin
-        let rounded = ((min_lovelace + 99_999) / 100_000) * 100_000;
+        let rounded = min_lovelace.div_ceil(100_000) * 100_000;
 
         debug!(
             "Calculated min_lovelace for {:?}: {} (raw: {}, coins_per_byte: {}, output_size: {})",
@@ -308,7 +309,7 @@ impl HyperlaneTxBuilder {
             })?;
         info!(
             "Looking up recipient registration for script hash: {}",
-            hex::encode(&recipient_script_hash)
+            hex::encode(recipient_script_hash)
         );
 
         let registration = self
@@ -316,7 +317,7 @@ impl HyperlaneTxBuilder {
             .get_registration(&recipient_script_hash)
             .await?;
         info!("Registration found for script_hash={}: state_locator.policy_id={}, state_locator.asset_name={}, recipient_type={:?}",
-              hex::encode(&recipient_script_hash),
+              hex::encode(recipient_script_hash),
               registration.state_locator.policy_id,
               registration.state_locator.asset_name,
               registration.recipient_type);
@@ -445,7 +446,7 @@ impl HyperlaneTxBuilder {
         let redemption_expiry = {
             let current_posix_millis = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| TxBuilderError::Encoding(format!("System time error: {}", e)))?
+                .map_err(|e| TxBuilderError::Encoding(format!("System time error: {e}")))?
                 .as_millis() as u64;
             let expiry = current_posix_millis + REDEMPTION_EXPIRY_MILLIS;
             info!(
@@ -466,7 +467,7 @@ impl HyperlaneTxBuilder {
                 let token_msg = parse_token_message(&msg.body)?;
                 info!(
                     "TokenMessage: recipient={}, wire_amount={}",
-                    hex::encode(&token_msg.recipient),
+                    hex::encode(token_msg.recipient),
                     token_msg.amount
                 );
 
@@ -596,7 +597,7 @@ impl HyperlaneTxBuilder {
         debug!(
             "Checkpoint: origin={}, merkle_root={}, merkle_index={}",
             message.origin,
-            hex::encode(&parsed_metadata.merkle_root),
+            hex::encode(parsed_metadata.merkle_root),
             parsed_metadata.root_index
         );
 
@@ -613,10 +614,10 @@ impl HyperlaneTxBuilder {
         info!(
             "Checkpoint details:\n  origin: {}\n  merkle_root: {}\n  origin_merkle_tree_hook: {}\n  merkle_index: {}\n  message_id: {}",
             message.origin,
-            hex::encode(&parsed_metadata.merkle_root),
-            hex::encode(&parsed_metadata.origin_mailbox),
+            hex::encode(parsed_metadata.merkle_root),
+            hex::encode(parsed_metadata.origin_mailbox),
             parsed_metadata.root_index,
-            hex::encode(&message_id)
+            hex::encode(message_id)
         );
 
         // Build ISM redeemer with validator signatures and recovered public keys
@@ -659,19 +660,19 @@ impl HyperlaneTxBuilder {
             // Extract 28-byte Cardano credential hash from bytes32 recipient
             info!(
                 "TokenMessage recipient (32 bytes): {}",
-                hex::encode(&token_msg.recipient)
+                hex::encode(token_msg.recipient)
             );
             let cardano_credential = extract_cardano_credential_from_bytes32(&token_msg.recipient);
             info!(
                 "Extracted credential (28 bytes): {}",
-                hex::encode(&cardano_credential)
+                hex::encode(cardano_credential)
             );
 
             // Extract token type from warp route datum
             let token_type = extract_warp_route_token_type(&recipient_utxo)?;
             info!("Token release: wire_amount={}, local_amount={} (remote={}, local={}), credential={}, token_type={:?}",
                     token_msg.amount, local_amount, decimals.remote_decimals, decimals.local_decimals,
-                    hex::encode(&cardano_credential), token_type);
+                    hex::encode(cardano_credential), token_type);
 
             // Build redemption datum if redemption is enabled
             let (redemption_datum, redemption_hash) = if let Some(ref redemption_hash_hex) =
@@ -679,7 +680,7 @@ impl HyperlaneTxBuilder {
             {
                 // Parse the redemption script hash
                 let hash_bytes = hex::decode(redemption_hash_hex).map_err(|e| {
-                    TxBuilderError::Encoding(format!("Invalid redemption_script_hash hex: {}", e))
+                    TxBuilderError::Encoding(format!("Invalid redemption_script_hash hex: {e}"))
                 })?;
                 let redemption_hash: [u8; 28] = hash_bytes.try_into().map_err(|_| {
                     TxBuilderError::Encoding("redemption_script_hash must be 28 bytes".to_string())
@@ -698,14 +699,14 @@ impl HyperlaneTxBuilder {
                     } => {
                         let policy_bytes: [u8; 28] = hex::decode(policy_id)
                             .map_err(|e| {
-                                TxBuilderError::TxBuild(format!("Invalid policy_id hex: {}", e))
+                                TxBuilderError::TxBuild(format!("Invalid policy_id hex: {e}"))
                             })?
                             .try_into()
                             .map_err(|_| {
                                 TxBuilderError::TxBuild("policy_id must be 28 bytes".to_string())
                             })?;
                         let asset_bytes = hex::decode(asset_name).map_err(|e| {
-                            TxBuilderError::TxBuild(format!("Invalid asset_name hex: {}", e))
+                            TxBuilderError::TxBuild(format!("Invalid asset_name hex: {e}"))
                         })?;
                         crate::types::RedemptionTokenInfo::Token {
                             policy_id: policy_bytes,
@@ -715,10 +716,7 @@ impl HyperlaneTxBuilder {
                     WarpTokenTypeInfo::Synthetic { minting_policy } => {
                         let policy_bytes: [u8; 28] = hex::decode(minting_policy)
                             .map_err(|e| {
-                                TxBuilderError::TxBuild(format!(
-                                    "Invalid minting_policy hex: {}",
-                                    e
-                                ))
+                                TxBuilderError::TxBuild(format!("Invalid minting_policy hex: {e}"))
                             })?
                             .try_into()
                             .map_err(|_| {
@@ -745,9 +743,9 @@ impl HyperlaneTxBuilder {
 
                 info!(
                         "Built redemption datum: recipient={}, amount={}, return_address={}, expiry_slot={}",
-                        hex::encode(&cardano_credential),
+                        hex::encode(cardano_credential),
                         local_amount,
-                        hex::encode(&return_address),
+                        hex::encode(return_address),
                         expiry_slot
                     );
 
@@ -828,7 +826,7 @@ impl HyperlaneTxBuilder {
         // Convert tx_hash string to H512
         let mut tx_id_bytes = [0u8; 64];
         let hash_bytes = hex::decode(&tx_hash)
-            .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {}", e)))?;
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {e}")))?;
         tx_id_bytes[32..64].copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
 
         Ok(TxOutcome {
@@ -948,15 +946,18 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // The release output needs amount.max(recipient_output_cost)
-                let release_needed = release_amount.max(recipient_output_cost);
-                // The warp route continuation needs continuation_min_lovelace (has NFT + datum)
-                let total_needed = release_needed + continuation_min_lovelace;
-                let extra = total_needed.saturating_sub(original_lovelace);
+                // Continuation keeps max(original - amount, continuation_min).
+                // Redemption needs amount + recipient_output_cost (relayer deposit).
+                // Payer covers any deficit between warp outputs and warp input.
+                let continuation_actual = original_lovelace
+                    .saturating_sub(release_amount)
+                    .max(continuation_min_lovelace);
+                let total_outputs = continuation_actual + release_amount + recipient_output_cost;
+                let extra = total_outputs.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
-                        "Native route shortfall: warp_route_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, payer covers extra={} lovelace",
-                        original_lovelace, release_needed, continuation_min_lovelace, total_needed, extra
+                        "Native route shortfall: warp_lovelace={}, continuation_actual={}, redemption={}, total_outputs={}, payer covers extra={} lovelace",
+                        original_lovelace, continuation_actual, release_amount + recipient_output_cost, total_outputs, extra
                     );
                 }
                 extra
@@ -1099,8 +1100,7 @@ impl HyperlaneTxBuilder {
                 return Err(TxBuilderError::MissingInput(format!(
                     "Minting policy reference script UTXO not found at payer address. \
                      Deploy it with `warp deploy-minting-ref` using the same signing key. \
-                     Expected reference_script_hash={}",
-                    minting_policy
+                     Expected reference_script_hash={minting_policy}"
                 )));
             }
         }
@@ -1282,8 +1282,7 @@ impl HyperlaneTxBuilder {
                         )
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
-                                "Failed to mint synthetic tokens: {:?}",
-                                e
+                                "Failed to mint synthetic tokens: {e:?}"
                             ))
                         })?;
 
@@ -1292,8 +1291,7 @@ impl HyperlaneTxBuilder {
                         .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
-                                "Failed to add synthetic tokens to redemption output: {:?}",
-                                e
+                                "Failed to add synthetic tokens to redemption output: {e:?}"
                             ))
                         })?;
 
@@ -1321,7 +1319,7 @@ impl HyperlaneTxBuilder {
                     // Add collateral tokens to redemption output
                     let policy_decoded: [u8; 28] = hex::decode(policy_id)
                         .map_err(|e| {
-                            TxBuilderError::TxBuild(format!("Invalid policy_id hex: {}", e))
+                            TxBuilderError::TxBuild(format!("Invalid policy_id hex: {e}"))
                         })?
                         .try_into()
                         .map_err(|_| {
@@ -1329,14 +1327,13 @@ impl HyperlaneTxBuilder {
                         })?;
                     let policy_bytes: Hash<28> = Hash::new(policy_decoded);
                     let asset_bytes = hex::decode(asset_name).map_err(|e| {
-                        TxBuilderError::TxBuild(format!("Invalid asset_name hex: {}", e))
+                        TxBuilderError::TxBuild(format!("Invalid asset_name hex: {e}"))
                     })?;
                     redemption_output = redemption_output
                         .add_asset(policy_bytes, asset_bytes, release_amount)
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
-                                "Failed to add collateral tokens to redemption output: {:?}",
-                                e
+                                "Failed to add collateral tokens to redemption output: {e:?}"
                             ))
                         })?;
                     info!(
@@ -1344,16 +1341,17 @@ impl HyperlaneTxBuilder {
                         release_amount
                     );
                 } else if let WarpTokenTypeInfo::Native = token_type {
-                    // For native ADA, the redemption output needs to hold the release amount
-                    // Use redemption_min_lovelace (accounts for inline datum) as the minimum
-                    let total_ada = redemption_min_lovelace.max(release_amount);
+                    // Native ADA: redemption UTXO holds amount + relayer deposit.
+                    // The deposit (redemption_min_lovelace) covers the datum-bearing
+                    // UTXO cost and is returned to the relayer on claim.
+                    let total_ada = release_amount + redemption_min_lovelace;
                     redemption_output = Output::new(
                         script_hash_to_address(redemption_hash, pallas_network)?,
                         total_ada,
                     )
                     .set_inline_datum(redemption_datum_cbor.clone());
                     info!(
-                        "Creating native ADA redemption UTXO with {} lovelace (min={}, release={})",
+                        "Creating native ADA redemption UTXO with {} lovelace (deposit={}, release={})",
                         total_ada, redemption_min_lovelace, release_amount
                     );
                 }
@@ -1404,8 +1402,7 @@ impl HyperlaneTxBuilder {
                         )
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
-                                "Failed to mint synthetic tokens: {:?}",
-                                e
+                                "Failed to mint synthetic tokens: {e:?}"
                             ))
                         })?;
                     info!(
@@ -1430,8 +1427,7 @@ impl HyperlaneTxBuilder {
                         .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
-                                "Failed to add synthetic tokens to output: {:?}",
-                                e
+                                "Failed to add synthetic tokens to output: {e:?}"
                             ))
                         })?;
                     tx = tx.output(recipient_output);
@@ -1475,7 +1471,7 @@ impl HyperlaneTxBuilder {
             tx = tx
                 .mint_asset(message_nft_policy_bytes, asset_name.clone(), 1)
                 .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to mint message NFT: {:?}", e))
+                    TxBuilderError::TxBuild(format!("Failed to mint message NFT: {e:?}"))
                 })?;
 
             // Create message UTXO at recipient address with StoredMessageDatum and the NFT
@@ -1497,7 +1493,7 @@ impl HyperlaneTxBuilder {
             message_utxo_output = message_utxo_output
                 .add_asset(message_nft_policy_bytes, asset_name.clone(), 1)
                 .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {:?}", e))
+                    TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {e:?}"))
                 })?;
 
             tx = tx.output(message_utxo_output);
@@ -1527,7 +1523,7 @@ impl HyperlaneTxBuilder {
             // For now, we assume it's provided as a reference input along with the recipient script
             debug!(
                 "Added message UTXO for Deferred: message_id={}, policy={}",
-                hex::encode(&components.message_id),
+                hex::encode(components.message_id),
                 hex::encode(message_policy)
             );
         }
@@ -1576,7 +1572,7 @@ impl HyperlaneTxBuilder {
             let policy_bytes: Hash<28> = Hash::new(
                 hex::decode(policy_id)
                     .map_err(|e| {
-                        TxBuilderError::Encoding(format!("Invalid NFT policy ID hex: {}", e))
+                        TxBuilderError::Encoding(format!("Invalid NFT policy ID hex: {e}"))
                     })?
                     .try_into()
                     .map_err(|_| {
@@ -1590,9 +1586,7 @@ impl HyperlaneTxBuilder {
             // Add mint asset (policy_id, asset_name, amount=1)
             tx = tx
                 .mint_asset(policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to add mint asset: {:?}", e))
-                })?;
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add mint asset: {e:?}")))?;
 
             // Add the minted NFT to the processed marker output
             // This is where the minted NFT will live
@@ -1600,8 +1594,7 @@ impl HyperlaneTxBuilder {
                 .add_asset(policy_bytes, asset_name.clone(), 1)
                 .map_err(|e| {
                     TxBuilderError::TxBuild(format!(
-                        "Failed to add NFT to processed marker output: {:?}",
-                        e
+                        "Failed to add NFT to processed marker output: {e:?}"
                     ))
                 })?;
 
@@ -1615,20 +1608,20 @@ impl HyperlaneTxBuilder {
 
             // Add minting policy script to witness set
             let script_bytes = hex::decode(script_cbor).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid NFT script CBOR hex: {}", e))
+                TxBuilderError::Encoding(format!("Invalid NFT script CBOR hex: {e}"))
             })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
 
             debug!(
                 "Added NFT minting for message_id: {}",
-                hex::encode(&components.message_id)
+                hex::encode(components.message_id)
             );
         }
 
         tx = tx.output(processed_marker_output);
         debug!(
             "Added processed message marker output for message_id: {}",
-            hex::encode(&components.message_id)
+            hex::encode(components.message_id)
         );
 
         // 5. Change output back to payer
@@ -1675,14 +1668,18 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = components.recipient_utxo.lovelace();
                 let release_amount = components.token_release_amount.unwrap();
-                // Release output needs amount.max(recipient_output_cost), continuation needs continuation_min_lovelace
-                let release_needed = release_amount.max(recipient_output_cost);
-                let total_needed = release_needed + continuation_min_lovelace;
-                let shortfall = total_needed.saturating_sub(original_lovelace);
+                // Continuation keeps max(original - amount, continuation_min).
+                // Redemption needs amount + recipient_output_cost (relayer deposit).
+                // Shortfall = total warp outputs - warp input.
+                let continuation_actual = original_lovelace
+                    .saturating_sub(release_amount)
+                    .max(continuation_min_lovelace);
+                let total_outputs = continuation_actual + release_amount + recipient_output_cost;
+                let shortfall = total_outputs.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
-                        "Native recipient shortfall: warp_lovelace={}, release_needed={}, continuation_needed={}, total_needed={}, shortfall={}",
-                        original_lovelace, release_needed, continuation_min_lovelace, total_needed, shortfall
+                        "Native recipient shortfall: warp_lovelace={}, continuation_actual={}, redemption={}, total_outputs={}, shortfall={}",
+                        original_lovelace, continuation_actual, release_amount + recipient_output_cost, total_outputs, shortfall
                     );
                 }
                 shortfall
@@ -1740,7 +1737,7 @@ impl HyperlaneTxBuilder {
         } else if let Some(ref script_cbor_hex) = self.conf.mailbox_script_cbor {
             // Fall back to inline script witness (deprecated)
             let script_bytes = hex::decode(script_cbor_hex).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid mailbox script CBOR hex: {}", e))
+                TxBuilderError::Encoding(format!("Invalid mailbox script CBOR hex: {e}"))
             })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
             debug!("Added mailbox script to witness set (deprecated - use reference scripts)");
@@ -1761,7 +1758,7 @@ impl HyperlaneTxBuilder {
         } else if let Some(ref script_cbor_hex) = self.conf.ism_script_cbor {
             // Fall back to inline script witness (deprecated)
             let script_bytes = hex::decode(script_cbor_hex).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid ISM script CBOR hex: {}", e))
+                TxBuilderError::Encoding(format!("Invalid ISM script CBOR hex: {e}"))
             })?;
             tx = tx.script(ScriptKind::PlutusV3, script_bytes);
             debug!("Added ISM script to witness set (deprecated - use reference scripts)");
@@ -1778,9 +1775,9 @@ impl HyperlaneTxBuilder {
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
         // Build the transaction
-        let built = tx.build_conway_raw().map_err(|e| {
-            TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e))
-        })?;
+        let built = tx
+            .build_conway_raw()
+            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to build transaction: {e:?}")))?;
 
         Ok(built)
     }
@@ -1803,8 +1800,8 @@ impl HyperlaneTxBuilder {
 
         // Add the signature to the built transaction
         let signed = built
-            .add_signature(public_key.clone(), signature)
-            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add signature: {:?}", e)))?;
+            .add_signature(*public_key, signature)
+            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add signature: {e:?}")))?;
 
         // Return the serialized signed transaction
         // tx_bytes is Bytes which is a wrapper around Vec<u8>
@@ -1833,18 +1830,14 @@ impl HyperlaneTxBuilder {
                     debug!("  - Redeemers CBOR: {}", hex::encode(&redeemer_cbor));
                 }
                 info!("  - Success flag: {}", tx.success);
-                let has_aux = match &tx.auxiliary_data {
-                    pallas_codec::utils::Nullable::Some(_) => true,
-                    _ => false,
-                };
+                let has_aux = matches!(&tx.auxiliary_data, pallas_codec::utils::Nullable::Some(_));
                 info!("  - Has auxiliary_data: {}", has_aux);
             }
             Err(e) => {
                 tracing::error!("Transaction validation failed: {:?}", e);
                 tracing::error!("Transaction CBOR (full): {}", hex::encode(signed_tx));
                 return Err(TxBuilderError::TxBuild(format!(
-                    "Invalid transaction CBOR: {:?}",
-                    e
+                    "Invalid transaction CBOR: {e:?}"
                 )));
             }
         }
@@ -1891,7 +1884,7 @@ impl HyperlaneTxBuilder {
     ) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
         // Sort UTXOs by lovelace amount (largest first) for efficient selection
         let mut sorted: Vec<_> = utxos.iter().collect();
-        sorted.sort_by(|a, b| b.lovelace().cmp(&a.lovelace()));
+        sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
 
         let mut selected = Vec::new();
         let mut total: u64 = 0;
@@ -1990,7 +1983,7 @@ impl HyperlaneTxBuilder {
         let ism_utxos = self.provider.get_script_utxos(ism_policy_id).await?;
 
         let ism_utxo = ism_utxos.into_iter().next().ok_or_else(|| {
-            TxBuilderError::UtxoNotFound(format!("ISM UTXO not found at script {}", ism_policy_id))
+            TxBuilderError::UtxoNotFound(format!("ISM UTXO not found at script {ism_policy_id}"))
         })?;
         info!(
             "Found ISM UTXO: {}#{}",
@@ -2004,10 +1997,9 @@ impl HyperlaneTxBuilder {
 
         // Decode CBOR hex to PlutusData
         let datum_bytes = hex::decode(current_datum_hex)
-            .map_err(|e| TxBuilderError::Encoding(format!("Invalid datum hex: {}", e)))?;
-        let current_datum_plutus: PlutusData = minicbor::decode(&datum_bytes).map_err(|e| {
-            TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {:?}", e))
-        })?;
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid datum hex: {e}")))?;
+        let current_datum_plutus: PlutusData = minicbor::decode(&datum_bytes)
+            .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {e:?}")))?;
 
         // Debug: print raw structure
         info!("Raw decoded datum: {:?}", current_datum_plutus);
@@ -2051,7 +2043,7 @@ impl HyperlaneTxBuilder {
             _ => info!("Datum is: {:?}", current_datum_plutus),
         }
         let owner = extract_ism_owner(&current_datum_plutus)?;
-        info!("ISM owner: {}", hex::encode(&owner));
+        info!("ISM owner: {}", hex::encode(owner));
 
         // 3. Validate validators are 20 bytes (Ethereum addresses)
         // Note: Store them as-is without padding - Hyperlane validators are 20 bytes
@@ -2131,7 +2123,7 @@ impl HyperlaneTxBuilder {
         let ism_policy_hash = parse_policy_id(ism_policy_id)?;
         ism_output = ism_output
             .add_asset(ism_policy_hash, vec![], 1)
-            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add ISM NFT: {:?}", e)))?;
+            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add ISM NFT: {e:?}")))?;
 
         tx = tx.output(ism_output);
 
@@ -2150,9 +2142,9 @@ impl HyperlaneTxBuilder {
         let plutus_v3_cost_model: Vec<i64> = get_plutus_v3_cost_model();
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
-        let built_tx = tx.build_conway_raw().map_err(|e| {
-            TxBuilderError::TxBuild(format!("Failed to build transaction: {:?}", e))
-        })?;
+        let built_tx = tx
+            .build_conway_raw()
+            .map_err(|e| TxBuilderError::TxBuild(format!("Failed to build transaction: {e:?}")))?;
 
         let signed_tx = self.sign_transaction(built_tx, payer)?;
         let tx_hash = self.submit_transaction(&signed_tx).await?;
@@ -2226,7 +2218,7 @@ pub struct ProcessTxComponents {
 /// Convert a Utxo to a pallas-txbuilder Input
 fn utxo_to_input(utxo: &Utxo) -> Result<Input, TxBuilderError> {
     let tx_hash_bytes = hex::decode(&utxo.tx_hash)
-        .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {e}")))?;
 
     let tx_hash: Hash<32> = Hash::new(
         tx_hash_bytes
@@ -2240,13 +2232,13 @@ fn utxo_to_input(utxo: &Utxo) -> Result<Input, TxBuilderError> {
 /// Parse a bech32 address string into a pallas Address
 fn parse_address(address: &str) -> Result<Address, TxBuilderError> {
     Address::from_bech32(address)
-        .map_err(|e| TxBuilderError::InvalidAddress(format!("Invalid bech32 address: {:?}", e)))
+        .map_err(|e| TxBuilderError::InvalidAddress(format!("Invalid bech32 address: {e:?}")))
 }
 
 /// Parse a policy ID hex string into a Hash<28>
 fn parse_policy_id(policy_id: &str) -> Result<Hash<28>, TxBuilderError> {
     let bytes = hex::decode(policy_id)
-        .map_err(|e| TxBuilderError::Encoding(format!("Invalid policy ID hex: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Invalid policy ID hex: {e}")))?;
 
     let hash_bytes: [u8; 28] = bytes
         .try_into()
@@ -2260,8 +2252,7 @@ fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
     let parts: Vec<&str> = utxo_ref.split('#').collect();
     if parts.len() != 2 {
         return Err(TxBuilderError::Encoding(format!(
-            "Invalid UTXO reference format '{}'. Expected 'tx_hash#output_index'",
-            utxo_ref
+            "Invalid UTXO reference format '{utxo_ref}'. Expected 'tx_hash#output_index'"
         )));
     }
 
@@ -2271,7 +2262,7 @@ fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
     })?;
 
     let tx_hash_bytes = hex::decode(tx_hash_hex)
-        .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {e}")))?;
 
     let tx_hash: Hash<32> = Hash::new(
         tx_hash_bytes
@@ -2313,7 +2304,7 @@ fn credential_to_address(
     address_bytes.extend_from_slice(credential_bytes);
 
     Address::from_bytes(&address_bytes).map_err(|e| {
-        TxBuilderError::InvalidAddress(format!("Failed to create address from credential: {:?}", e))
+        TxBuilderError::InvalidAddress(format!("Failed to create address from credential: {e:?}"))
     })
 }
 
@@ -2337,10 +2328,7 @@ fn script_hash_to_address(
     address_bytes.extend_from_slice(script_hash);
 
     Address::from_bytes(&address_bytes).map_err(|e| {
-        TxBuilderError::InvalidAddress(format!(
-            "Failed to create script address from hash: {:?}",
-            e
-        ))
+        TxBuilderError::InvalidAddress(format!("Failed to create script address from hash: {e:?}"))
     })
 }
 
@@ -2387,15 +2375,15 @@ fn create_continuation_output(
 
             let policy_hash = parse_policy_id(policy_hex)?;
             let asset_name = hex::decode(asset_name_hex)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {e}")))?;
             let quantity: u64 = value
                 .quantity
                 .parse()
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
 
             output = output
                 .add_asset(policy_hash, asset_name, quantity)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {e:?}")))?;
         }
     }
 
@@ -2426,12 +2414,10 @@ fn create_warp_route_continuation_output(
     // (which may be higher than min_lovelace when it contains datum + tokens)
     let final_lovelace = match (&token_type, release_amount) {
         (Some(WarpTokenTypeInfo::Native), Some(amount)) => {
-            // Native: release amount IS the ADA being sent
-            // The release output uses amount.max(release_output_cost)
-            let release_lovelace = amount.max(release_output_cost);
-            original_lovelace
-                .saturating_sub(release_lovelace)
-                .max(min_lovelace)
+            // Native: release amount IS the ADA being sent.
+            // Only the transfer amount leaves the warp route;
+            // the relayer deposit (redemption_min_lovelace) comes from the payer.
+            original_lovelace.saturating_sub(amount).max(min_lovelace)
         }
         (Some(WarpTokenTypeInfo::Collateral { .. }), Some(_)) => {
             // Collateral: need to fund the release output with release_output_cost
@@ -2463,11 +2449,11 @@ fn create_warp_route_continuation_output(
 
             let policy_hash = parse_policy_id(policy_hex)?;
             let asset_name_bytes = hex::decode(asset_name_hex)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {e}")))?;
             let original_quantity: u64 = value
                 .quantity
                 .parse()
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
 
             // Check if this is the collateral token to be released
             let final_quantity = match (&token_type, release_amount) {
@@ -2493,9 +2479,7 @@ fn create_warp_route_continuation_output(
             if final_quantity > 0 {
                 output = output
                     .add_asset(policy_hash, asset_name_bytes, final_quantity)
-                    .map_err(|e| {
-                        TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e))
-                    })?;
+                    .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {e:?}")))?;
             }
         }
     }
@@ -2528,16 +2512,16 @@ fn create_ism_continuation_output(
 
             let policy_hash = parse_policy_id(policy_hex)?;
             let asset_name = hex::decode(asset_name_hex)
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {e}")))?;
 
             let quantity: u64 = value
                 .quantity
                 .parse()
-                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {}", e)))?;
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
 
             output = output
                 .add_asset(policy_hash, asset_name, quantity)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {:?}", e)))?;
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {e:?}")))?;
         }
     }
 
@@ -2578,7 +2562,7 @@ fn create_release_output(
     // Use bech32 crate v0.9 API
     use bech32::{ToBase32, Variant};
     let bech32_addr = bech32::encode("addr_test", address_bytes.to_base32(), Variant::Bech32)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {e}")))?;
 
     let address = parse_address(&bech32_addr)?;
 
@@ -2612,7 +2596,7 @@ fn create_token_release_output(
 
     use bech32::{ToBase32, Variant};
     let bech32_addr = bech32::encode("addr_test", address_bytes.to_base32(), Variant::Bech32)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode bech32 address: {e}")))?;
     let address = parse_address(&bech32_addr)?;
 
     match token_type {
@@ -2628,14 +2612,14 @@ fn create_token_release_output(
             // Collateral: Send native tokens to recipient with minimum ADA for UTXO
             let policy_hash = parse_policy_id(policy_id)?;
             let asset_name_bytes = hex::decode(asset_name).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid collateral asset name: {}", e))
+                TxBuilderError::Encoding(format!("Invalid collateral asset name: {e}"))
             })?;
 
             let mut output = Output::new(address, min_lovelace);
             output = output
                 .add_asset(policy_hash, asset_name_bytes, amount)
                 .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to add collateral token: {:?}", e))
+                    TxBuilderError::TxBuild(format!("Failed to add collateral token: {e:?}"))
                 })?;
             Ok(output)
         }
@@ -2790,9 +2774,8 @@ fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimal
     let datum_cbor = json_datum_to_cbor(datum_str)?;
 
     use pallas_codec::minicbor;
-    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
-        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
-    })?;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
     // Extract config from datum fields[0]
     let config = if let PlutusData::Constr(constr) = decoded {
@@ -2830,10 +2813,9 @@ fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimal
                 "Failed to extract decimals from warp route config (fields[1])".to_string(),
             )
         })?;
-        if local_decimals_i64 < 0 || local_decimals_i64 > 18 {
+        if !(0..=18).contains(&local_decimals_i64) {
             return Err(TxBuilderError::Encoding(format!(
-                "Invalid decimals value: {}",
-                local_decimals_i64
+                "Invalid decimals value: {local_decimals_i64}"
             )));
         }
 
@@ -2842,10 +2824,9 @@ fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimal
                 "Failed to extract remote_decimals from warp route config (fields[2])".to_string(),
             )
         })?;
-        if remote_decimals_i64 < 0 || remote_decimals_i64 > 18 {
+        if !(0..=18).contains(&remote_decimals_i64) {
             return Err(TxBuilderError::Encoding(format!(
-                "Invalid remote_decimals value: {}",
-                remote_decimals_i64
+                "Invalid remote_decimals value: {remote_decimals_i64}"
             )));
         }
 
@@ -2874,9 +2855,8 @@ fn extract_warp_route_token_type(
     let datum_cbor = json_datum_to_cbor(datum_str)?;
 
     use pallas_codec::minicbor;
-    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
-        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
-    })?;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
     // Extract config from datum fields[0]
     let config = if let PlutusData::Constr(constr) = decoded {
@@ -2991,9 +2971,8 @@ fn build_warp_route_continuation_datum(
     let datum_cbor = json_datum_to_cbor(datum_str)?;
 
     use pallas_codec::minicbor;
-    let decoded: PlutusData = minicbor::decode(&datum_cbor).map_err(|e| {
-        TxBuilderError::Encoding(format!("Failed to decode warp route datum: {}", e))
-    })?;
+    let decoded: PlutusData = minicbor::decode(&datum_cbor)
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
     // Extract fields from the existing datum
     // Structure: Constr 0 [config, owner, total_bridged]
@@ -3044,6 +3023,7 @@ fn build_warp_route_continuation_datum(
 
 /// Parse a recipient datum to extract the current state
 /// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_received: i64)
+#[allow(clippy::type_complexity)]
 fn parse_recipient_datum(
     datum_str: &str,
 ) -> Result<(Option<Vec<u8>>, Option<i64>, i64), TxBuilderError> {
@@ -3057,7 +3037,7 @@ fn parse_recipient_datum(
     // Try to decode with minicbor
     use pallas_codec::minicbor;
     let decoded: PlutusData = minicbor::decode(&datum_cbor)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {e}")))?;
 
     // Extract fields from the datum
     // Structure: Constr 0 [ism_opt, nonce_opt, inner]
@@ -3173,7 +3153,7 @@ fn json_datum_to_cbor(datum_str: &str) -> Result<Vec<u8>, TxBuilderError> {
     let hex_str = datum_str.trim_matches('"');
     if hex_str.chars().all(|c| c.is_ascii_hexdigit()) && !hex_str.is_empty() {
         let cbor_bytes = hex::decode(hex_str)
-            .map_err(|e| TxBuilderError::Encoding(format!("Invalid CBOR hex: {}", e)))?;
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid CBOR hex: {e}")))?;
         return Ok(cbor_bytes);
     }
 
@@ -3201,7 +3181,7 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
             if s.starts_with("0x") || s.chars().all(|c| c.is_ascii_hexdigit()) {
                 let hex_str = s.strip_prefix("0x").unwrap_or(s);
                 let bytes = hex::decode(hex_str)
-                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid hex string: {}", e)))?;
+                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid hex string: {e}")))?;
                 Ok(PlutusData::BoundedBytes(bytes.into()))
             } else {
                 // Treat as UTF-8 bytes
@@ -3227,9 +3207,9 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
 
                 // Convert constructor index to Plutus tag
                 let plutus_tag = if tag <= 6 {
-                    121 + tag as u64 // Alternative encoding for 0-6
+                    121 + tag // Alternative encoding for 0-6
                 } else {
-                    1280 + (tag - 7) as u64 // General encoding for 7+
+                    1280 + (tag - 7) // General encoding for 7+
                 };
 
                 Ok(PlutusData::Constr(Constr {
@@ -3243,7 +3223,7 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
                     .as_str()
                     .ok_or_else(|| TxBuilderError::Encoding("bytes must be string".to_string()))?;
                 let bytes = hex::decode(hex_str)
-                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid hex: {}", e)))?;
+                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid hex: {e}")))?;
                 Ok(PlutusData::BoundedBytes(bytes.into()))
             } else if let Some(int_val) = obj.get("int") {
                 // Blockfrost format: {"int": number}
@@ -3294,8 +3274,7 @@ fn json_to_plutus_data(json: &serde_json::Value) -> Result<PlutusData, TxBuilder
         }
 
         _ => Err(TxBuilderError::Encoding(format!(
-            "Unsupported JSON value type: {:?}",
-            json
+            "Unsupported JSON value type: {json:?}"
         ))),
     }
 }
@@ -3604,6 +3583,7 @@ fn build_deferred_datum_plutus(
 
 /// Parse a Deferred datum to extract the current state
 /// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_stored: i64, messages_processed: i64)
+#[allow(clippy::type_complexity)]
 fn parse_deferred_datum(
     datum_str: &str,
 ) -> Result<(Option<Vec<u8>>, Option<i64>, i64, i64), TxBuilderError> {
@@ -3611,7 +3591,7 @@ fn parse_deferred_datum(
 
     use pallas_codec::minicbor;
     let decoded: PlutusData = minicbor::decode(&datum_cbor)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {}", e)))?;
+        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {e}")))?;
 
     // Structure: Constr 0 [ism_opt, nonce_opt, inner]
     // inner: Constr 0 [messages_stored, messages_processed]
@@ -3625,7 +3605,7 @@ fn parse_deferred_datum(
             let (messages_stored, messages_processed) =
                 if let PlutusData::Constr(inner) = &fields[2] {
                     let inner_fields: Vec<_> = inner.fields.clone().to_vec();
-                    let stored = if inner_fields.len() > 0 {
+                    let stored = if !inner_fields.is_empty() {
                         extract_int(&inner_fields[0]).unwrap_or(0)
                     } else {
                         0
@@ -3669,7 +3649,7 @@ fn encode_message_as_plutus_data(msg: &Message) -> PlutusData {
 /// Encode PlutusData to CBOR bytes
 fn encode_plutus_data(data: &PlutusData) -> Result<Vec<u8>, TxBuilderError> {
     minicbor::to_vec(data)
-        .map_err(|e| TxBuilderError::Encoding(format!("CBOR encoding failed: {:?}", e)))
+        .map_err(|e| TxBuilderError::Encoding(format!("CBOR encoding failed: {e:?}")))
 }
 
 /// Extract owner from ISM datum PlutusData
@@ -3685,8 +3665,7 @@ fn extract_ism_owner(datum: &PlutusData) -> Result<[u8; 28], TxBuilderError> {
                 PlutusData::BoundedBytes(bytes) => bytes.as_ref(),
                 _ => {
                     return Err(TxBuilderError::Encoding(format!(
-                        "Owner field must be BoundedBytes, got: {:?}",
-                        owner_field
+                        "Owner field must be BoundedBytes, got: {owner_field:?}"
                     )))
                 }
             };
@@ -3700,8 +3679,7 @@ fn extract_ism_owner(datum: &PlutusData) -> Result<[u8; 28], TxBuilderError> {
             Ok(bytes)
         }
         _ => Err(TxBuilderError::Encoding(format!(
-            "Invalid ISM datum structure: expected Constr with 3 fields, got {:?}",
-            datum
+            "Invalid ISM datum structure: expected Constr with 3 fields, got {datum:?}"
         ))),
     }
 }
@@ -4059,29 +4037,29 @@ pub fn parse_multisig_metadata(
     // Compute the checkpoint hash that validators signed
     // Step 1: domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
     let mut domain_hasher = Keccak256::new();
-    domain_hasher.update(&origin.to_be_bytes());
-    domain_hasher.update(&origin_mailbox);
+    domain_hasher.update(origin.to_be_bytes());
+    domain_hasher.update(origin_mailbox);
     domain_hasher.update(b"HYPERLANE");
     let domain_hash: [u8; 32] = domain_hasher.finalize().into();
 
     // Step 2: checkpoint_digest = keccak256(domain_hash || merkle_root || merkle_index || message_id)
     let mut checkpoint_hasher = Keccak256::new();
-    checkpoint_hasher.update(&domain_hash);
-    checkpoint_hasher.update(&merkle_root);
-    checkpoint_hasher.update(&root_index.to_be_bytes());
+    checkpoint_hasher.update(domain_hash);
+    checkpoint_hasher.update(merkle_root);
+    checkpoint_hasher.update(root_index.to_be_bytes());
     checkpoint_hasher.update(message_id);
     let checkpoint_digest: [u8; 32] = checkpoint_hasher.finalize().into();
 
     // Step 3: eth_signed_message = keccak256("\x19Ethereum Signed Message:\n32" || checkpoint_digest)
     let mut eth_hasher = Keccak256::new();
     eth_hasher.update(b"\x19Ethereum Signed Message:\n32");
-    eth_hasher.update(&checkpoint_digest);
+    eth_hasher.update(checkpoint_digest);
     let eth_signed_message: [u8; 32] = eth_hasher.finalize().into();
 
     debug!("Recovering public keys from signatures");
-    debug!("  domain_hash: {}", hex::encode(&domain_hash));
-    debug!("  checkpoint_digest: {}", hex::encode(&checkpoint_digest));
-    debug!("  eth_signed_message: {}", hex::encode(&eth_signed_message));
+    debug!("  domain_hash: {}", hex::encode(domain_hash));
+    debug!("  checkpoint_digest: {}", hex::encode(checkpoint_digest));
+    debug!("  eth_signed_message: {}", hex::encode(eth_signed_message));
 
     // Parse signatures and recover public keys
     // Each signature is 65 bytes: r (32) || s (32) || v (1)
@@ -4141,7 +4119,7 @@ pub fn parse_multisig_metadata(
                                     validator_signatures.len() - 1,
                                     hex::encode(eth_address)
                                 );
-                                info!("    Compressed pubkey: {}", hex::encode(&compressed_pubkey));
+                                info!("    Compressed pubkey: {}", hex::encode(compressed_pubkey));
                             }
                             Err(e) => {
                                 debug!("  Failed to recover public key: {:?}", e);

@@ -89,13 +89,13 @@ impl Utxo {
 
     /// Check if this UTXO contains a specific asset
     pub fn has_asset(&self, policy_id: &str, asset_name: &str) -> bool {
-        let unit = format!("{}{}", policy_id, asset_name);
+        let unit = format!("{policy_id}{asset_name}");
         self.value.iter().any(|v| v.unit == unit)
     }
 
     /// Get the quantity of a specific asset
     pub fn asset_quantity(&self, policy_id: &str, asset_name: &str) -> u64 {
-        let unit = format!("{}{}", policy_id, asset_name);
+        let unit = format!("{policy_id}{asset_name}");
         self.value
             .iter()
             .find(|v| v.unit == unit)
@@ -165,7 +165,7 @@ impl BlockfrostProvider {
             let utxos = match self.api.addresses_utxos(address, pagination).await {
                 Ok(utxos) => utxos,
                 Err(e) => {
-                    let error_str = format!("{:?}", e);
+                    let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         tracing::debug!("Address {} has no UTXOs (404)", address);
                         return Ok(all_utxos); // Return what we have so far (or empty)
@@ -222,7 +222,7 @@ impl BlockfrostProvider {
         policy_id: &str,
         asset_name: &str,
     ) -> Result<Vec<Utxo>, BlockfrostProviderError> {
-        let asset_id = format!("{}{}", policy_id, asset_name);
+        let asset_id = format!("{policy_id}{asset_name}");
         let mut all_addresses = Vec::new();
         let mut page = 1;
         const PAGE_SIZE: usize = 100;
@@ -235,7 +235,7 @@ impl BlockfrostProvider {
             let addresses = match self.api.assets_addresses(&asset_id, pagination).await {
                 Ok(addrs) => addrs,
                 Err(e) => {
-                    let error_str = format!("{:?}", e);
+                    let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(Vec::new());
                     }
@@ -279,10 +279,7 @@ impl BlockfrostProvider {
     ) -> Result<Utxo, BlockfrostProviderError> {
         let utxos = self.get_utxos_by_asset(policy_id, asset_name).await?;
         utxos.into_iter().next().ok_or_else(|| {
-            BlockfrostProviderError::UtxoNotFound(format!(
-                "NFT {}{} not found",
-                policy_id, asset_name
-            ))
+            BlockfrostProviderError::UtxoNotFound(format!("NFT {policy_id}{asset_name} not found"))
         })
     }
 
@@ -437,7 +434,7 @@ impl BlockfrostProvider {
             let txs = match self.api.addresses_transactions(address, pagination).await {
                 Ok(txs) => txs,
                 Err(e) => {
-                    let error_str = format!("{:?}", e);
+                    let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(result);
                     }
@@ -608,7 +605,7 @@ impl BlockfrostProvider {
             let txs = match self.api.blocks_txs(block_hash, pagination).await {
                 Ok(txs) => txs,
                 Err(e) => {
-                    let error_str = format!("{:?}", e);
+                    let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(all_txs);
                     }

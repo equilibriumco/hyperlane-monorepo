@@ -33,7 +33,7 @@ impl Keypair {
 
         // Create ed25519-dalek signing key
         let secret_key =
-            SecretKey::try_from(secret_bytes).map_err(|e| format!("Invalid secret key: {}", e))?;
+            SecretKey::try_from(secret_bytes).map_err(|e| format!("Invalid secret key: {e}"))?;
         let signing_key = SigningKey::from_bytes(&secret_key);
         let verifying_key = signing_key.verifying_key();
 

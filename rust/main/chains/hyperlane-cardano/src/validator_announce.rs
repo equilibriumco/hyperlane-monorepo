@@ -49,7 +49,7 @@ impl CardanoValidatorAnnounce {
         }
 
         // Parse validator (20 or 32 bytes - pad 20-byte Ethereum addresses to 32 bytes)
-        let validator_hex = fields.get(0)?.get("bytes")?.as_str()?;
+        let validator_hex = fields.first()?.get("bytes")?.as_str()?;
         let validator_bytes = hex::decode(validator_hex).ok()?;
         let validator_bytes = Self::normalize_validator_bytes(validator_bytes)?;
 

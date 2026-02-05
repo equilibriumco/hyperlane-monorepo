@@ -443,13 +443,6 @@ pub fn build_redemption_claim_redeemer() -> Vec<u8> {
     builder.build()
 }
 
-/// Build a redemption expire redeemer (Expire = constructor 1)
-pub fn build_redemption_expire_redeemer() -> Vec<u8> {
-    let mut builder = CborBuilder::new();
-    builder.start_constr(1).end_constr();
-    builder.build()
-}
-
 /// Build a Registry AdminRegister redeemer (admin-only, bypasses script ownership check)
 /// Redeemer: AdminRegister { registration: RecipientRegistration }
 /// AdminRegister is constructor 4 in RegistryRedeemer

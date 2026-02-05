@@ -80,11 +80,22 @@ fn validate_claim(
   // 1. Check not expired
   expect is_before_expiry(tx.validity_range, datum.expiry_slot)
 
-  // 2. Recipient must receive the tokens
-  let recipient_receives =
-    when datum.token_info is {
-      RedemptionAda -> recipient_receives_ada(tx, datum.recipient, datum.amount)
-      RedemptionToken { policy_id, asset_name } ->
+  when datum.token_info is {
+    RedemptionAda -> {
+      // Native ADA: the redemption UTXO holds amount + relayer deposit.
+      // Recipient gets the transfer amount, relayer gets their deposit back.
+      expect recipient_receives_ada(tx, datum.recipient, datum.amount)
+      let relayer_deposit = own_lovelace - datum.amount
+      if relayer_deposit > 0 {
+        expect
+          return_address_receives_ada(tx, datum.return_address, relayer_deposit)
+        True
+      } else {
+        True
+      }
+    }
+    RedemptionToken { policy_id, asset_name } -> {
+      expect
         recipient_receives_tokens(
           tx,
           datum.recipient,
@@ -92,15 +103,10 @@ fn validate_claim(
           asset_name,
           datum.amount,
         )
+      expect return_address_receives_ada(tx, datum.return_address, own_lovelace)
+      True
     }
-  expect recipient_receives
-
-  // 3. Return address must receive back at least the full ADA from the
-  // redemption UTXO. This ensures the relayer's locked ADA is fully
-  // recovered and not leaked to the claimant.
-  expect return_address_receives_ada(tx, datum.return_address, own_lovelace)
-
-  True
+  }
 }
 
 /// Validate expiry reclaim by relayer

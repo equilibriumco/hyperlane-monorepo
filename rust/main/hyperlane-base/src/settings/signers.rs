@@ -335,8 +335,10 @@ impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
             SignerConf::HexKey { key } => {
                 // TODO: Implement proper Cardano key derivation from hex
                 Ok(
-                    hyperlane_cardano::Keypair::from_string(&hex::encode(key.as_bytes()))
-                        .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?,
+                    hyperlane_cardano::Keypair::from_string(&ethers::utils::hex::encode(
+                        key.as_bytes(),
+                    ))
+                    .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?,
                 )
             }
             SignerConf::CardanoKey { key } => {

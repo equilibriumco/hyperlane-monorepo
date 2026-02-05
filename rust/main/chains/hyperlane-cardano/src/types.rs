@@ -169,7 +169,7 @@ impl Serialize for Signature {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&hex::encode(&self.0))
+        serializer.serialize_str(&hex::encode(self.0))
     }
 }
 

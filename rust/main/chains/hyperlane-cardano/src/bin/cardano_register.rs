@@ -114,7 +114,7 @@ impl From<NetworkArg> for CardanoNetwork {
 }
 
 fn parse_script_hash(hex: &str) -> Result<ScriptHash, String> {
-    let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {}", e))?;
+    let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {e}"))?;
     if bytes.len() != 28 {
         return Err(format!("Script hash must be 28 bytes, got {}", bytes.len()));
     }

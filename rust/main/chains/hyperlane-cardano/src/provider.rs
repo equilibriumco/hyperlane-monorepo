@@ -49,10 +49,7 @@ impl HyperlaneProvider for CardanoProvider {
 
         if height > finalized {
             return Err(hyperlane_core::ChainCommunicationError::from_other_str(
-                &format!(
-                    "Block {} not yet finalized (current: {})",
-                    height, finalized
-                ),
+                &format!("Block {height} not yet finalized (current: {finalized})"),
             ));
         }
 

@@ -78,7 +78,7 @@ impl LanderError {
             | DbError(_) => true,
             NonRetryableError(_) | EstimationFailed | SimulationFailed(_) | PayloadNotFound
             | TxDropped(_) | TxGasCapReached | TxHashNotFound(_) | TxAlreadyExists
-            | EyreError(_) => false,
+            | EyreError(_) | ConfigError(_) => false,
         }
     }
 }

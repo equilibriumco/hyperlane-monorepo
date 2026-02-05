@@ -565,10 +565,9 @@ async fn deploy_collateral_route(
 
     // Build warp route datum
     println!("\n{}", "Step 3: Preparing warp route deployment...".cyan());
-    let token_asset_hex = hex::encode(token_asset.as_bytes());
     let warp_datum = build_warp_route_collateral_datum(
         token_policy,
-        &token_asset_hex,
+        token_asset,
         decimals as u32,
         remote_decimals as u32,
         &deploy_ctx.owner_pkh,
@@ -3471,7 +3470,13 @@ async fn claim_single_utxo(
     // Compute fee and optional change output
     let cost_model = client.get_plutusv3_cost_model().await?;
     let fee_estimate = 1_000_000u64;
-    let return_min_lovelace = redemption_utxo.lovelace;
+    // For native ADA claims, the redemption UTXO holds amount + relayer deposit.
+    // The relayer gets back own_lovelace - amount (i.e. their deposit).
+    let return_min_lovelace = if token_type_constructor == 0 {
+        redemption_utxo.lovelace.saturating_sub(amount as u64)
+    } else {
+        redemption_utxo.lovelace
+    };
 
     // For ADA claims the recipient output is max(min_lovelace, amount), not just min_lovelace
     let recipient_lovelace = if token_type_constructor == 0 {

@@ -52,10 +52,7 @@ async fn test_delivery_indexer_fetch_logs() {
     let range = 12618645..=12618650;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-                "program/test_mailbox.aleo/mapping/process_event_index/{}u32",
-                height
-            ),
+            format!("program/test_mailbox.aleo/mapping/process_event_index/{height}u32"),
             serde_json::Value::Null,
         );
     }
@@ -102,10 +99,7 @@ async fn test_delivery_indexer_fetch_empty() {
     let range = 12618645..=12618650;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-                "program/test_mailbox.aleo/mapping/process_event_index/{}u32",
-                height
-            ),
+            format!("program/test_mailbox.aleo/mapping/process_event_index/{height}u32"),
             serde_json::Value::Null,
         );
     }
@@ -153,10 +147,7 @@ async fn test_dispatch_indexer_fetch_logs() {
     let range = 12529863..=12529863;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-                "program/test_mailbox.aleo/mapping/dispatch_event_index/{}u32",
-                height
-            ),
+            format!("program/test_mailbox.aleo/mapping/dispatch_event_index/{height}u32"),
             serde_json::Value::Null,
         );
     }
@@ -228,9 +219,8 @@ async fn test_igp_indexer_fetch_logs() {
     let range = 12529863..=12529863;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-                "program/test_hook_manager.aleo/mapping/last_event_index/{{hook:aleo1479wmm58gcyg28z37dvua77l53dwrmwct80k4ruf906ulp7smupsyg6ak2,block_height:{}u32}}",
-                height
+            format!(
+                "program/test_hook_manager.aleo/mapping/last_event_index/{{hook:aleo1479wmm58gcyg28z37dvua77l53dwrmwct80k4ruf906ulp7smupsyg6ak2,block_height:{height}u32}}"
             ),
             serde_json::Value::Null,
         );
@@ -314,9 +304,8 @@ async fn test_merkle_tree_indexer_fetch_logs() {
     let range = 12529863..=12529863;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-        "program/test_hook_manager.aleo/mapping/last_event_index/{{hook:aleo18n8sg8cz6qc76vzflr8la98u0r4w8r96c9wdxee4wvetsvuz0vxs0r2hk8,block_height:{}u32}}",
-                height
+            format!(
+        "program/test_hook_manager.aleo/mapping/last_event_index/{{hook:aleo18n8sg8cz6qc76vzflr8la98u0r4w8r96c9wdxee4wvetsvuz0vxs0r2hk8,block_height:{height}u32}}"
             ),
             serde_json::Value::Null,
         );
@@ -421,10 +410,7 @@ async fn test_indexer_reverted_fetch_logs() {
     let range = 12640906..=12640906;
     for height in range.clone() {
         mock.register_value(
-            &format!(
-                "program/test_mailbox.aleo/mapping/dispatch_event_index/{}u32",
-                height
-            ),
+            format!("program/test_mailbox.aleo/mapping/dispatch_event_index/{height}u32"),
             serde_json::Value::Null,
         );
     }

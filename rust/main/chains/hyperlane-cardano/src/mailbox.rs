@@ -9,8 +9,8 @@ use hyperlane_core::accumulator::incremental::IncrementalMerkle;
 use hyperlane_core::accumulator::TREE_DEPTH;
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber, HyperlaneChain,
-    HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox, ReorgPeriod,
-    TxCostEstimate, TxOutcome, H256, U256,
+    HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox, Metadata,
+    ReorgPeriod, TxCostEstimate, TxOutcome, H256, U256,
 };
 use serde_json::Value;
 use std::fmt::{Debug, Formatter};
@@ -109,8 +109,7 @@ impl CardanoMailbox {
             .script_hash_to_address(&self.conf.mailbox_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Failed to compute mailbox script address: {}",
-                    e
+                    "Failed to compute mailbox script address: {e}"
                 ))
             })?;
 
@@ -125,8 +124,7 @@ impl CardanoMailbox {
             .await
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Failed to get UTXOs at mailbox address: {}",
-                    e
+                    "Failed to get UTXOs at mailbox address: {e}"
                 ))
             })?;
 
@@ -170,13 +168,12 @@ impl CardanoMailbox {
 
         debug!("Fetching datum JSON via data_hash: {}", data_hash);
         let datum_json_str = self.provider.get_datum(data_hash).await.map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!("Failed to fetch datum JSON: {}", e))
+            ChainCommunicationError::from_other_str(&format!("Failed to fetch datum JSON: {e}"))
         })?;
 
         let datum_json: Value = serde_json::from_str(&datum_json_str).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
-                "Failed to parse fetched datum JSON: {}",
-                e
+                "Failed to parse fetched datum JSON: {e}"
             ))
         })?;
 
@@ -205,7 +202,7 @@ impl CardanoMailbox {
 
         // Parse local_domain (field 0)
         let local_domain = fields
-            .get(0)
+            .first()
             .and_then(|f| f.get("int"))
             .and_then(|i| i.as_u64())
             .ok_or_else(|| {
@@ -221,7 +218,7 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid default_ism in mailbox datum")
             })?;
         let default_ism_bytes = hex::decode(default_ism_hex).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!("Failed to decode default_ism: {}", e))
+            ChainCommunicationError::from_other_str(&format!("Failed to decode default_ism: {e}"))
         })?;
         let default_ism: [u8; 28] = default_ism_bytes
             .try_into()
@@ -236,7 +233,7 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid owner in mailbox datum")
             })?;
         let owner_bytes = hex::decode(owner_hex).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {}", e))
+            ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {e}"))
         })?;
         let owner: [u8; 28] = owner_bytes
             .try_into()
@@ -286,7 +283,7 @@ impl CardanoMailbox {
 
         // Parse branches (field 0) - list of 32-byte hashes
         let branches_list = fields
-            .get(0)
+            .first()
             .and_then(|f| f.get("list"))
             .and_then(|l| l.as_array())
             .ok_or_else(|| {
@@ -302,20 +299,17 @@ impl CardanoMailbox {
                 .and_then(|b| b.as_str())
                 .ok_or_else(|| {
                     ChainCommunicationError::from_other_str(&format!(
-                        "Invalid merkle_tree: invalid branch at index {}",
-                        i
+                        "Invalid merkle_tree: invalid branch at index {i}"
                     ))
                 })?;
             let branch_bytes = hex::decode(branch_hex).map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Failed to decode branch {}: {}",
-                    i, e
+                    "Failed to decode branch {i}: {e}"
                 ))
             })?;
             let branch: [u8; 32] = branch_bytes.try_into().map_err(|_| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Invalid branch length at index {}",
-                    i
+                    "Invalid branch length at index {i}"
                 ))
             })?;
             branches.push(branch);
@@ -442,7 +436,7 @@ impl Mailbox for CardanoMailbox {
     async fn process(
         &self,
         message: &HyperlaneMessage,
-        metadata: &[u8],
+        metadata: &Metadata,
         _tx_gas_limit: Option<U256>,
     ) -> ChainResult<TxOutcome> {
         // Check if we have a payer keypair (required for signing)
@@ -476,7 +470,7 @@ impl Mailbox for CardanoMailbox {
     async fn process_estimate_costs(
         &self,
         _message: &HyperlaneMessage,
-        _metadata: &[u8],
+        _metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
         // Get protocol parameters to estimate fee
         let _params = self
@@ -501,7 +495,7 @@ impl Mailbox for CardanoMailbox {
     async fn process_calldata(
         &self,
         message: &HyperlaneMessage,
-        metadata: &[u8],
+        metadata: &Metadata,
     ) -> ChainResult<Vec<u8>> {
         // Encode the message in Hyperlane wire format
         let mut message_bytes = Vec::new();
@@ -522,8 +516,7 @@ impl Mailbox for CardanoMailbox {
 
         serde_json::to_vec(&calldata).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
-                "Failed to serialize CardanoTxCalldata: {}",
-                e
+                "Failed to serialize CardanoTxCalldata: {e}"
             ))
         })
     }

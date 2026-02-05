@@ -65,7 +65,7 @@ impl RecipientRegistry {
         // Build lookup map
         let mut by_script_hash = HashMap::new();
         for reg in &datum.registrations {
-            let hash_hex = hex::encode(&reg.script_hash);
+            let hash_hex = hex::encode(reg.script_hash);
             info!(
                 "Registry: parsed registration script_hash={}, recipient_type={:?}",
                 hash_hex, reg.recipient_type
@@ -187,7 +187,7 @@ impl RecipientRegistry {
             hex::decode(hex_str).map_err(|e| RegistryError::Deserialization(e.to_string()))?;
 
         let plutus_data: PlutusData = minicbor::decode(&cbor_bytes)
-            .map_err(|e| RegistryError::Deserialization(format!("CBOR decode error: {}", e)))?;
+            .map_err(|e| RegistryError::Deserialization(format!("CBOR decode error: {e}")))?;
 
         // Registry datum structure: Constr 0 [registrations_list, owner]
         let (tag, fields) = match &plutus_data {
@@ -202,8 +202,7 @@ impl RecipientRegistry {
         if tag != 121 {
             // Tag 121 = Constr 0
             return Err(RegistryError::InvalidDatum(format!(
-                "Registry datum has wrong constructor tag: {} (expected 121)",
-                tag
+                "Registry datum has wrong constructor tag: {tag} (expected 121)"
             )));
         }
 
@@ -216,10 +215,10 @@ impl RecipientRegistry {
         }
 
         // Parse registrations list (field 0)
-        let registrations = self.parse_registrations_from_plutus(&fields[0])?;
+        let registrations = self.parse_registrations_from_plutus(fields[0])?;
 
         // Parse owner (field 1): 28-byte pubkey hash
-        let owner = self.parse_owner_from_plutus(&fields[1])?;
+        let owner = self.parse_owner_from_plutus(fields[1])?;
 
         tracing::debug!(
             "Parsed registry datum: {} registrations",
@@ -327,10 +326,10 @@ impl RecipientRegistry {
         };
 
         // State locator (field 2)
-        let state_locator = self.parse_utxo_locator_from_plutus(&fields[2])?;
+        let state_locator = self.parse_utxo_locator_from_plutus(fields[2])?;
 
         // Reference script locator (field 3) - Option<UtxoLocator>
-        let reference_script_locator = self.parse_optional_locator_from_plutus(&fields[3])?;
+        let reference_script_locator = self.parse_optional_locator_from_plutus(fields[3])?;
 
         // Additional inputs (field 4)
         let additional_inputs = match &fields[4] {
@@ -347,7 +346,7 @@ impl RecipientRegistry {
         };
 
         // Recipient type (field 5) - Constr tag determines type
-        let recipient_type = self.parse_recipient_type_from_plutus(&fields[5])?;
+        let recipient_type = self.parse_recipient_type_from_plutus(fields[5])?;
 
         // Custom ISM (field 6)
         let custom_ism = match &fields[6] {
@@ -468,7 +467,7 @@ impl RecipientRegistry {
             }
         };
 
-        let locator = self.parse_utxo_locator_from_plutus(&fields[1])?;
+        let locator = self.parse_utxo_locator_from_plutus(fields[1])?;
 
         // must_be_spent is Constr 1 for True, Constr 0 for False
         let must_be_spent = match &fields[2] {
@@ -499,13 +498,13 @@ impl RecipientRegistry {
             121 => Ok(RecipientType::Generic), // Constr 0
             122 => {
                 // TokenReceiver - Constr 1 [vault_locator, minting_policy]
-                let vault_locator = if fields.len() > 0 {
-                    self.parse_optional_locator_from_plutus(&fields[0])?
+                let vault_locator = if !fields.is_empty() {
+                    self.parse_optional_locator_from_plutus(fields[0])?
                 } else {
                     None
                 };
                 let minting_policy = if fields.len() > 1 {
-                    self.parse_optional_script_hash_from_plutus(&fields[1])?
+                    self.parse_optional_script_hash_from_plutus(fields[1])?
                 } else {
                     None
                 };
@@ -639,7 +638,7 @@ impl RecipientRegistry {
 
         // Parse registrations list
         let registrations_json = fields
-            .get(0)
+            .first()
             .and_then(|r| r.get("list"))
             .and_then(|l| l.as_array())
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid registrations list".to_string()))?;
@@ -700,7 +699,7 @@ impl RecipientRegistry {
 
         // Field 0: Script hash
         let script_hash_hex = fields
-            .get(0)
+            .first()
             .and_then(|s| s.get("bytes"))
             .and_then(|b| b.as_str())
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid script_hash".to_string()))?;
@@ -784,7 +783,7 @@ impl RecipientRegistry {
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid locator structure".to_string()))?;
 
         let policy_id = fields
-            .get(0)
+            .first()
             .and_then(|p| p.get("bytes"))
             .and_then(|b| b.as_str())
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid policy_id".to_string()))?
@@ -811,7 +810,7 @@ impl RecipientRegistry {
             .ok_or_else(|| RegistryError::InvalidDatum("Invalid additional input".to_string()))?;
 
         let name = fields
-            .get(0)
+            .first()
             .and_then(|n| n.get("bytes"))
             .and_then(|b| b.as_str())
             .map(|s| String::from_utf8_lossy(&hex::decode(s).unwrap_or_default()).to_string())
@@ -853,7 +852,7 @@ impl RecipientRegistry {
                         RegistryError::InvalidDatum("Invalid TokenReceiver fields".to_string())
                     })?;
 
-                let vault_locator = if let Some(vault) = fields.get(0) {
+                let vault_locator = if let Some(vault) = fields.first() {
                     self.parse_optional_locator_json(vault)?
                 } else {
                     None
@@ -879,7 +878,7 @@ impl RecipientRegistry {
                     })?;
 
                 let message_policy_bytes = fields
-                    .get(0)
+                    .first()
                     .and_then(|v| v.get("bytes"))
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
@@ -887,7 +886,7 @@ impl RecipientRegistry {
                     })?;
 
                 let message_policy_vec = hex::decode(message_policy_bytes).map_err(|e| {
-                    RegistryError::InvalidDatum(format!("Invalid message_policy hex: {}", e))
+                    RegistryError::InvalidDatum(format!("Invalid message_policy hex: {e}"))
                 })?;
 
                 if message_policy_vec.len() != 28 {
@@ -902,8 +901,7 @@ impl RecipientRegistry {
                 Ok(RecipientType::Deferred { message_policy })
             }
             _ => Err(RegistryError::InvalidDatum(format!(
-                "Unknown recipient type constructor: {}",
-                constructor
+                "Unknown recipient type constructor: {constructor}"
             ))),
         }
     }
@@ -921,7 +919,7 @@ impl RecipientRegistry {
                 // Just
                 let fields = json.get("fields").and_then(|f| f.as_array());
                 if let Some(fields) = fields {
-                    if let Some(locator_json) = fields.get(0) {
+                    if let Some(locator_json) = fields.first() {
                         return Ok(Some(self.parse_utxo_locator_json(locator_json)?));
                     }
                 }
@@ -944,7 +942,7 @@ impl RecipientRegistry {
                 // Just
                 let fields = json.get("fields").and_then(|f| f.as_array());
                 if let Some(fields) = fields {
-                    if let Some(hash_json) = fields.get(0) {
+                    if let Some(hash_json) = fields.first() {
                         let hash_hex =
                             hash_json
                                 .get("bytes")

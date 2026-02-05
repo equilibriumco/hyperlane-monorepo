@@ -71,7 +71,7 @@ impl CardanoMailboxIndexer {
         }
 
         // Parse destination
-        let destination = fields.get(0)?.get("int")?.as_u64()? as u32;
+        let destination = fields.first()?.get("int")?.as_u64()? as u32;
 
         // Parse recipient (32 bytes)
         let recipient_hex = fields.get(1)?.get("bytes")?.as_str()?;
@@ -185,7 +185,7 @@ impl CardanoMailboxIndexer {
                                 first_input.tx_hash,
                                 first_input.output_index,
                                 first_input.address,
-                                hex::encode(&sender_bytes)
+                                hex::encode(sender_bytes)
                             );
 
                             return H256::from(sender_bytes);
@@ -275,7 +275,7 @@ impl CardanoMailboxIndexer {
         // ProcessedMessageDatum format:
         // { "constructor": 0, "fields": [message_id] }
         let fields = json.get("fields")?.as_array()?;
-        let message_id_hex = fields.get(0)?.get("bytes")?.as_str()?;
+        let message_id_hex = fields.first()?.get("bytes")?.as_str()?;
         let message_id_bytes = hex::decode(message_id_hex).ok()?;
         if message_id_bytes.len() != 32 {
             return None;
@@ -400,7 +400,7 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                         address: H256::zero(), // Cardano doesn't have contract addresses like EVM
                         block_number: tx_info.block_height,
                         block_hash: H256::from_slice(
-                            &hex::decode(&tx_info.tx_hash.get(0..64).unwrap_or(""))
+                            &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
                                 .unwrap_or_else(|_| vec![0u8; 32]),
                         ),
                         transaction_id: H512::from_slice(&{
@@ -505,7 +505,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
                                 address: H256::zero(),
                                 block_number: tx_info.block_height,
                                 block_hash: H256::from_slice(
-                                    &hex::decode(&tx_info.tx_hash.get(0..64).unwrap_or(""))
+                                    &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
                                         .unwrap_or_else(|_| vec![0u8; 32]),
                                 ),
                                 transaction_id: H512::from_slice(&{

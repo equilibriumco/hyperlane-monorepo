@@ -67,8 +67,7 @@ impl CardanoMultisigIsm {
             .script_hash_to_address(&self.conf.ism_script_hash)
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Failed to compute ISM script address: {}",
-                    e
+                    "Failed to compute ISM script address: {e}"
                 ))
             })?;
 
@@ -80,8 +79,7 @@ impl CardanoMultisigIsm {
             .await
             .map_err(|e| {
                 ChainCommunicationError::from_other_str(&format!(
-                    "Failed to get UTXOs at ISM address: {}",
-                    e
+                    "Failed to get UTXOs at ISM address: {e}"
                 ))
             })?;
 
@@ -135,16 +133,12 @@ impl CardanoMultisigIsm {
         use pallas_primitives::conway::PlutusData;
 
         let cbor_bytes = hex::decode(hex_str).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!(
-                "Failed to decode ISM datum hex: {}",
-                e
-            ))
+            ChainCommunicationError::from_other_str(&format!("Failed to decode ISM datum hex: {e}"))
         })?;
 
         let plutus_data: PlutusData = minicbor::decode(&cbor_bytes).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
-                "Failed to decode ISM datum CBOR: {}",
-                e
+                "Failed to decode ISM datum CBOR: {e}"
             ))
         })?;
 
@@ -161,8 +155,7 @@ impl CardanoMultisigIsm {
         if tag != 121 {
             // Tag 121 = Constr 0
             return Err(ChainCommunicationError::from_other_str(&format!(
-                "ISM datum has wrong constructor tag: {} (expected 121)",
-                tag
+                "ISM datum has wrong constructor tag: {tag} (expected 121)"
             )));
         }
 
@@ -175,13 +168,13 @@ impl CardanoMultisigIsm {
         }
 
         // Parse validators list (field 0): list of (domain, list of pubkeys)
-        let validators = self.parse_validators_from_plutus(&fields[0])?;
+        let validators = self.parse_validators_from_plutus(fields[0])?;
 
         // Parse thresholds list (field 1): list of (domain, threshold)
-        let thresholds = self.parse_thresholds_from_plutus(&fields[1])?;
+        let thresholds = self.parse_thresholds_from_plutus(fields[1])?;
 
         // Parse owner (field 2): 28-byte pubkey hash
-        let owner = self.parse_owner_from_plutus(&fields[2])?;
+        let owner = self.parse_owner_from_plutus(fields[2])?;
 
         tracing::debug!(
             "Parsed ISM datum: {} validator entries, {} threshold entries",
@@ -227,13 +220,10 @@ impl CardanoMultisigIsm {
 
             // Parse domain (BigInt)
             let domain = match &fields[0] {
-                PlutusData::BigInt(bi) => match bi {
-                    pallas_primitives::conway::BigInt::Int(i) => {
-                        let val: i128 = (*i).into();
-                        val as u32
-                    }
-                    _ => continue,
-                },
+                PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
+                    let val: i128 = (*i).into();
+                    val as u32
+                }
                 _ => continue,
             };
 
@@ -338,25 +328,19 @@ impl CardanoMultisigIsm {
 
             // Parse domain
             let domain = match &fields[0] {
-                PlutusData::BigInt(bi) => match bi {
-                    pallas_primitives::conway::BigInt::Int(i) => {
-                        let val: i128 = (*i).into();
-                        val as u32
-                    }
-                    _ => continue,
-                },
+                PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
+                    let val: i128 = (*i).into();
+                    val as u32
+                }
                 _ => continue,
             };
 
             // Parse threshold
             let threshold = match &fields[1] {
-                PlutusData::BigInt(bi) => match bi {
-                    pallas_primitives::conway::BigInt::Int(i) => {
-                        let val: i128 = (*i).into();
-                        val as u32
-                    }
-                    _ => continue,
-                },
+                PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
+                    let val: i128 = (*i).into();
+                    val as u32
+                }
                 _ => continue,
             };
 
@@ -410,7 +394,7 @@ impl CardanoMultisigIsm {
         // Format: list of (domain, list of validator pubkeys)
         let empty_vec = vec![];
         let validators_list = fields
-            .get(0)
+            .first()
             .and_then(|f| f.get("list"))
             .and_then(|l| l.as_array())
             .unwrap_or(&empty_vec);
@@ -420,7 +404,7 @@ impl CardanoMultisigIsm {
             let entry_fields = entry.get("fields").and_then(|f| f.as_array());
             if let Some(fields) = entry_fields {
                 let domain = fields
-                    .get(0)
+                    .first()
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
                     .unwrap_or(0) as u32;
@@ -477,7 +461,7 @@ impl CardanoMultisigIsm {
             let entry_fields = entry.get("fields").and_then(|f| f.as_array());
             if let Some(fields) = entry_fields {
                 let domain = fields
-                    .get(0)
+                    .first()
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
                     .unwrap_or(0) as u32;
@@ -499,7 +483,7 @@ impl CardanoMultisigIsm {
             .and_then(|b| b.as_str())
             .ok_or_else(|| ChainCommunicationError::from_other_str("Invalid owner in ISM datum"))?;
         let owner_bytes = hex::decode(owner_hex).map_err(|e| {
-            ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {}", e))
+            ChainCommunicationError::from_other_str(&format!("Failed to decode owner: {e}"))
         })?;
         let owner: [u8; 28] = owner_bytes
             .try_into()

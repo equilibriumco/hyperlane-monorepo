@@ -4,7 +4,8 @@ use async_trait::async_trait;
 
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract, HyperlaneDomain,
-    HyperlaneMessage, HyperlaneProvider, InterchainSecurityModule, ModuleType, H256, U256,
+    HyperlaneMessage, HyperlaneProvider, InterchainSecurityModule, Metadata, ModuleType, H256,
+    U256,
 };
 
 /// A reference to an InterchainSecurityModule contract on Cardano
@@ -53,7 +54,7 @@ impl InterchainSecurityModule for CardanoInterchainSecurityModule {
     async fn dry_run_verify(
         &self,
         _message: &HyperlaneMessage,
-        _metadata: &[u8],
+        _metadata: &Metadata,
     ) -> ChainResult<Option<U256>> {
         // dry_run_verify is primarily used for aggregation ISMs to estimate gas costs for verification.
         // Since Cardano doesn't support aggregation ISMs yet (only MessageIdMultisig),

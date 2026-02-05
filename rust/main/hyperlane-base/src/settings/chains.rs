@@ -1129,8 +1129,10 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
             }
-            ChainConnectionConf::Cardano(_) => {
-                let ism = Box::new(h_cardano::CardanoInterchainSecurityModule::new(locator));
+            ChainConnectionConf::Cardano(conf) => {
+                let ism = Box::new(h_cardano::CardanoInterchainSecurityModule::new(
+                    conf, locator,
+                ));
                 Ok(ism as Box<dyn InterchainSecurityModule>)
             }
         }

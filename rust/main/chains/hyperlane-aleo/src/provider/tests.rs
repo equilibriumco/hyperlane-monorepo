@@ -204,7 +204,7 @@ async fn test_estimate_tx_invalid_inputs() {
         )
         .await;
     assert!(
-        !result.is_ok(),
+        result.is_err(),
         "Estimate TX with invalid arguments should fail"
     );
 }
@@ -224,7 +224,7 @@ async fn test_estimate_tx_unknown_function() {
         )
         .await;
     assert!(
-        !result.is_ok(),
+        result.is_err(),
         "Estimate TX with unknown function should fail"
     );
 }
@@ -244,7 +244,7 @@ async fn test_estimate_tx_unknown_program() {
         )
         .await;
     assert!(
-        !result.is_ok(),
+        result.is_err(),
         "Estimate TX with unknown program should fail"
     );
 }
