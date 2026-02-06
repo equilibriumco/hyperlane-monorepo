@@ -81,59 +81,6 @@ fn int_to_bytes_helper(n: Int, remaining: Int, acc: ByteArray) -> ByteArray {
   }
 }
 
-/// How to locate a UTXO (by NFT marker)
-pub type UtxoLocator {
-  policy_id: PolicyId,
-  asset_name: AssetName,
-}
-
-/// Additional input required by recipient
-pub type AdditionalInput {
-  /// Human-readable identifier
-  name: ByteArray,
-  /// NFT marking the UTXO
-  locator: UtxoLocator,
-  /// True = must be spent, False = reference input only
-  must_be_spent: Bool,
-}
-
-/// Recipient type determines how relayer constructs outputs
-pub type RecipientType {
-  /// State in, state out, no other effects
-  Generic
-  /// Mints/releases tokens to address specified in message body
-  TokenReceiver {
-    vault_locator: Option<UtxoLocator>,
-    minting_policy: Option<ScriptHash>,
-  }
-  /// Defers message processing to a separate step
-  /// The relayer creates a message UTXO with an NFT proving legitimacy
-  /// Messages are processed separately (manually, via dApp, automated service, etc.)
-  Deferred {
-    /// Minting policy for message NFTs (proves message is legitimate)
-    /// The policy only allows minting when mailbox is in inputs
-    message_policy: ScriptHash,
-  }
-}
-
-/// Registry entry for a recipient
-pub type RecipientRegistration {
-  /// Script hash of the recipient validator
-  script_hash: ScriptHash,
-  /// Owner who can modify/remove this registration
-  /// This is the KEY security field - only this key can update the registration
-  owner: VerificationKeyHash,
-  /// NFT locator to find the state UTXO (contains datum)
-  state_locator: UtxoLocator,
-  /// NFT locator to find the reference script UTXO
-  /// None = script is embedded in state UTXO's reference_script field
-  reference_script_locator: Option<UtxoLocator>,
-  additional_inputs: List<AdditionalInput>,
-  recipient_type: RecipientType,
-  /// Override default ISM for this recipient
-  custom_ism: Option<ScriptHash>,
-}
-
 /// Standard wrapper for recipient datums
 /// Recipients should use this pattern to be compatible with the relayer
 pub type HyperlaneRecipientDatum<inner> {
@@ -345,50 +292,6 @@ pub type MultisigIsmRedeemer {
 }
 
 // ============================================================================
-// Registry Types
-// ============================================================================
-
-/// Registry datum
-pub type RegistryDatum {
-  registrations: List<RecipientRegistration>,
-  /// Registry admin (can pause, upgrade, etc.)
-  admin: VerificationKeyHash,
-}
-
-/// Registry redeemer actions
-pub type RegistryRedeemer {
-  /// Initial registration of a new recipient
-  /// Requires: owner signature AND state NFT in inputs
-  Register { registration: RecipientRegistration }
-
-  /// Update an existing registration (owner only)
-  /// Requires: current owner's signature
-  UpdateRegistration {
-    script_hash: ScriptHash,
-    new_state_locator: Option<UtxoLocator>,
-    new_reference_script_locator: Option<Option<UtxoLocator>>,
-    new_additional_inputs: Option<List<AdditionalInput>>,
-    new_recipient_type: Option<RecipientType>,
-    new_custom_ism: Option<Option<ScriptHash>>,
-  }
-
-  /// Remove a registration (owner only)
-  /// Requires: current owner's signature
-  Unregister { script_hash: ScriptHash }
-
-  /// Transfer registration ownership (both parties must sign)
-  /// Requires: current owner AND new owner signatures
-  TransferRegistrationOwnership {
-    script_hash: ScriptHash,
-    new_owner: VerificationKeyHash,
-  }
-
-  /// Admin-only registration (bypasses ownership check)
-  /// Requires: registry admin signature
-  AdminRegister { registration: RecipientRegistration }
-}
-
-// ============================================================================
 // IGP Types (Interchain Gas Paymaster)
 // ============================================================================
 
@@ -453,6 +356,8 @@ pub type WarpRouteDatum {
   owner: VerificationKeyHash,
   /// Total tokens bridged (for accounting)
   total_bridged: Int,
+  /// Override default ISM for this warp route
+  ism: Option<ScriptHash>,
 }
 
 /// Warp route redeemer

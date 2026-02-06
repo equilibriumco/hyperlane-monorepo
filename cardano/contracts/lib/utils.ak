@@ -92,6 +92,22 @@ pub fn script_hash_to_hyperlane_address(hash: ScriptHash) -> ByteArray {
   bytearray.concat(prefix, hash)
 }
 
+/// Convert a minting policy ID to a Hyperlane address
+/// Prefix: 0x01000000 for minting policy
+pub fn policy_id_to_hyperlane_address(policy_id: ByteArray) -> ByteArray {
+  let prefix = #"01000000"
+  bytearray.concat(prefix, policy_id)
+}
+
+/// Extract a policy ID from a Hyperlane address (if prefix is 0x01)
+pub fn hyperlane_address_to_policy_id(addr: ByteArray) -> Option<ByteArray> {
+  if bytearray.length(addr) == 32 && bytearray.at(addr, 0) == 1 {
+    Some(bytearray.slice(addr, 4, 31))
+  } else {
+    None
+  }
+}
+
 /// Verify that a list has at least n elements
 pub fn has_at_least(items: List<a>, n: Int) -> Bool {
   list.length(items) >= n

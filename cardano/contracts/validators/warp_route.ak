@@ -42,7 +42,6 @@ use utils.{assoc_find, find_input, is_signed_by}
 /// and relayer's ADA is a revolving float, not a gift.
 validator warp_route(
   mailbox_policy_id: PolicyId,
-  _state_nft_policy_id: PolicyId,
   processed_messages_nft_policy: PolicyId,
   redemption_script: ScriptHash,
 ) {
@@ -153,6 +152,7 @@ fn validate_transfer_remote(
   expect cont_datum.config == datum.config
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged + amount
+  expect cont_datum.ism == datum.ism
 
   True
 }
@@ -269,6 +269,7 @@ fn validate_receive_transfer(
   expect cont_datum.config == datum.config
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged - local_amount
+  expect cont_datum.ism == datum.ism
 
   True
 }
@@ -311,6 +312,7 @@ fn validate_enroll_remote_route(
   expect cont_datum.config == expected_config
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged
+  expect cont_datum.ism == datum.ism
 
   True
 }
