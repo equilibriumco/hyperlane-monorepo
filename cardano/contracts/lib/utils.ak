@@ -1,9 +1,10 @@
+use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
 use cardano/transaction.{Input, Output, OutputReference, Transaction}
-use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero}
+use cardano/assets.{Value, lovelace_of, merge, quantity_of, tokens, zero}
 
 /// Utility functions for Hyperlane Cardano contracts
 /// Script hash type alias
@@ -153,5 +154,17 @@ pub fn has_nft_in_inputs(
   list.any(
     tx.inputs,
     fn(input) { quantity_of(input.output.value, policy_id, asset_name) > 0 },
+  )
+}
+
+/// Check if any transaction input contains a token from the given policy
+/// Used for NFT policy-based recipient verification
+pub fn has_policy_in_inputs(tx: Transaction, policy_id: ByteArray) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) {
+      let policy_tokens = assets.tokens(input.output.value, policy_id)
+      !dict.is_empty(policy_tokens)
+    },
   )
 }

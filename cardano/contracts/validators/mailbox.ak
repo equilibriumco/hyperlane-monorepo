@@ -15,8 +15,9 @@ use types.{
   Dispatch, Process, SetDefaultIsm, TransferOwnership,
 }
 use utils.{
-  find_input, has_script_input, hyperlane_address_to_script_hash,
-  is_signed_by, value_preserved,
+  find_input, has_policy_in_inputs, has_script_input,
+  hyperlane_address_to_policy_id, hyperlane_address_to_script_hash,
+  is_signed_by, policy_id_to_hyperlane_address, value_preserved,
 }
 
 /// Mailbox Validator
@@ -224,21 +225,18 @@ fn validate_continuation(
   value_preserved(own_value, continuation.value)
 }
 
-/// Get the sender address from the transaction
-/// Returns the first script input's address that is NOT the mailbox, as a 32-byte Hyperlane address.
-/// This ensures that for TokenRouter/WarpRoute dispatches, the sender is the warp_route, not the mailbox.
+/// Get the sender address from the transaction.
+/// For script inputs with a state NFT, returns 0x01000000{nft_policy} (policy ID address).
+/// For verification key inputs, returns 0x00000000{vkh}.
+/// Falls back to 0x02000000{script_hash} for script inputs without a state NFT.
 fn get_sender_address(tx: Transaction, mailbox_ref: OutputReference) -> HyperlaneAddress {
-  // Find the first script input that is NOT the mailbox
-  // tx.inputs are already sorted in canonical order (by TxId, then output_index)
   let sender_input =
     list.find(
       tx.inputs,
       fn(input) {
-        // Skip the mailbox input - it's always present but not the "sender" for TokenRouter messages
         if input.output_reference == mailbox_ref {
           False
         } else {
-          // Only consider script addresses (Script credential)
           when input.output.address.payment_credential is {
             Script(_) -> True
             _ -> False
@@ -247,29 +245,48 @@ fn get_sender_address(tx: Transaction, mailbox_ref: OutputReference) -> Hyperlan
       },
     )
 
-  // Fall back to first input if no other script input found (e.g., simple dispatch from payment key)
-  let first_input =
+  let input =
     when sender_input is {
-      Some(input) -> input
+      Some(i) -> i
       None -> {
         expect Some(fallback) = list.head(tx.inputs)
         fallback
       }
     }
 
-  address_to_hyperlane(first_input.output.address)
+  when input.output.address.payment_credential is {
+    Credential.VerificationKey(hash) -> bytearray.concat(#"00000000", hash)
+    Script(hash) -> {
+      // Look for a state NFT (non-ADA policy with empty asset name, qty 1)
+      let nft_policy = find_state_nft_policy(input.output.value)
+      when nft_policy is {
+        Some(policy) -> policy_id_to_hyperlane_address(policy)
+        None -> bytearray.concat(#"02000000", hash)
+      }
+    }
+  }
 }
 
-/// Convert a Cardano address to a Hyperlane address (32 bytes)
-fn address_to_hyperlane(addr: Address) -> HyperlaneAddress {
-  when addr.payment_credential is {
-    Credential.VerificationKey(hash) ->
-      // Payment credential: prefix 0x00000000
-      bytearray.concat(#"00000000", hash)
-    Script(hash) ->
-      // Script credential: prefix 0x02000000
-      bytearray.concat(#"02000000", hash)
-  }
+/// Find a state NFT policy in a value: a non-ADA policy with empty asset name and quantity 1.
+fn find_state_nft_policy(value: assets.Value) -> Option<ByteArray> {
+  let flat = assets.flatten(value)
+  list.foldl(
+    flat,
+    None,
+    fn(item, acc) {
+      when acc is {
+        Some(_) -> acc
+        None -> {
+          let (policy, name, qty) = item
+          if policy != #"" && qty == 1 && name == #"" {
+            Some(policy)
+          } else {
+            None
+          }
+        }
+      }
+    },
+  )
 }
 
 /// Check if a message has already been processed
@@ -366,12 +383,18 @@ fn verify_ism_redeemer_message_id(
 }
 
 /// Verify that the recipient script is being called
+/// Handles both NFT policy addresses (0x01 prefix) and script hash addresses (0x00/0x02 prefix)
 fn recipient_called(recipient: HyperlaneAddress, tx: Transaction) -> Bool {
-  // Extract script hash from recipient address
-  expect Some(recipient_hash) = hyperlane_address_to_script_hash(recipient)
-
-  // Check that an input from recipient script is spent
-  has_script_input(tx, recipient_hash)
+  when hyperlane_address_to_policy_id(recipient) is {
+    Some(policy_id) ->
+      // NFT policy address: check that an input contains a token with this policy
+      has_policy_in_inputs(tx, policy_id)
+    None -> {
+      // Script hash address: check that an input from this script is spent
+      expect Some(script_hash) = hyperlane_address_to_script_hash(recipient)
+      has_script_input(tx, script_hash)
+    }
+  }
 }
 
 /// Verify that a processed message NFT is being minted with the message_id as asset name
