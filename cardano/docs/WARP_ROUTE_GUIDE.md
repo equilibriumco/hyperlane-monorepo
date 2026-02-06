@@ -433,7 +433,8 @@ WarpRouteDatum {
     remote_routes: List<(Domain, RouterAddress)>
   },
   owner: VerificationKeyHash,
-  total_bridged: Int
+  total_bridged: Int,
+  ism: Option<ScriptHash>
 }
 ```
 

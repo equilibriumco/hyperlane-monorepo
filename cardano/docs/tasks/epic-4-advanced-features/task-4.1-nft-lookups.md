@@ -1,247 +1,115 @@
-[← Epic 4: Advanced Features](./EPIC.md) | [Epics Overview](../README.md)
+[<- Epic 4: Advanced Features](./EPIC.md) | [Epics Overview](../README.md)
 
 # Task 4.1: State NFT Policy as Hyperlane Address
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Complexity:** High
 **Depends On:** None
 **Related:** [Task 4.4: NFT-Based Contract Identity](./task-4.4-nft-identity.md)
 
 ## Objective
 
-Use the state NFT policy ID as the canonical Hyperlane address for all Cardano recipients, replacing the current script hash-based addressing. This provides O(1) lookups, simplifies warp route parameterization, and aligns with Cardano's NFT-based identity patterns.
+Use the state NFT policy ID as the canonical Hyperlane address for all Cardano recipients, replacing script hash-based addressing. This provides O(1) lookups, removes the registry contract entirely, and aligns with Cardano's NFT-based identity patterns.
 
 ## Background
 
-### Current Approach
+### Previous Approach
 
-Currently, Cardano recipients use their **script hash** as their Hyperlane address:
+Cardano recipients used their **script hash** as their Hyperlane address:
 
-1. Remote chains enroll `script_hash` as the recipient address
-2. Messages arrive with `recipient = script_hash`
-3. Registry lookups iterate through entries to find `script_hash` (O(n))
-4. Warp routes require an unused `_state_nft_policy_id` parameter to force unique script hashes
+1. Remote chains enrolled `script_hash` as the recipient address
+2. Messages arrived with `recipient = script_hash`
+3. Registry contract lookups iterated through entries to find `script_hash` (O(n))
+4. Warp routes required an unused `_state_nft_policy_id` parameter to force unique script hashes
 
-### The Problem
+### Problems Solved
 
-**Script Hash Collision for Warp Routes:**
+- **Script hash collision**: Warp routes with identical bytecode produced identical script hashes. An unused parameter was needed to differentiate them.
+- **O(n) registry lookups**: The registry stored entries in a list, requiring iteration.
+- **Registry as bottleneck**: A shared on-chain registry was a contention point for all recipients.
 
-In Cardano, validators with identical bytecode produce identical script hashes. Warp routes are a template deployed multiple times with the same code. Without parameterization tricks, all warp routes would share the same address.
+## What Was Implemented
 
-Current workaround in `warp_route.ak`:
+### Addressing Scheme
 
-```aiken
-// _state_nft_policy_id is UNUSED in logic - only exists to make script hash unique
-validator warp_route(mailbox_policy_id: PolicyId, _state_nft_policy_id: PolicyId) {
-  // ...
-}
-```
+**Hyperlane address = `0x01000000 || state_nft_policy_id`** (32 bytes total)
 
-**O(n) Registry Lookups:**
+- `0x01` prefix byte distinguishes Cardano addresses from EVM (which use `0x000...` padding)
+- 3 zero-padded bytes follow the prefix
+- 28-byte state NFT policy ID (the natural unique identifier for each deployment)
 
-The registry stores entries in a list, requiring iteration to find a recipient:
+### Registry Removal
 
-```aiken
-list.find(datum.registrations, fn(r) { r.script_hash == script_hash })
-```
+The on-chain registry contract was **removed entirely**. Instead, the relayer uses a `RecipientResolver` that performs O(1) NFT queries directly against the chain indexer (Blockfrost). No registry contract is needed.
 
-**Inconsistent with Cardano Idioms:**
+The resolver detects **recipient kind from the datum structure**:
 
-Cardano uses NFTs as unique instance identifiers. Using script hash as identity fights against this pattern.
+- **WarpRoute**: Identified by warp route datum shape
+- **Generic**: Identified by generic recipient datum shape
 
-## Solution: State NFT Policy as Address
+### Warp Route Parameter Simplification
 
-Every Cardano recipient already has a **state NFT** to identify its state UTXO. The state NFT policy is:
-
-- Unique per deployment (one-shot minting from a specific UTXO)
-- Already required for registry registration
-- The natural "instance identifier" in Cardano's model
-
-### New Approach
-
-1. **Hyperlane address = `state_locator.policy_id`** (not `script_hash`)
-2. Remote chains enroll the state NFT policy as the recipient address
-3. Messages arrive with `recipient = state_nft_policy`
-4. Relayer queries UTXO by state NFT (O(1) via asset query)
-5. Warp routes no longer need `_state_nft_policy_id` parameter
-
-### Benefits
-
-| Aspect            | Before (script_hash)                           | After (state_nft_policy) |
-| ----------------- | ---------------------------------------------- | ------------------------ |
-| Lookup complexity | O(n) iteration                                 | O(1) asset query         |
-| Warp route params | Needs unused `_state_nft_policy_id`            | Only `mailbox_policy_id` |
-| Index NFTs        | Need separate index NFT (Task 4.1 original)    | State NFT IS the index   |
-| Cardano alignment | Fights UTXO model                              | Native pattern           |
-| Consistency       | Different for warp routes vs custom recipients | Same for all recipients  |
-
-### How It Works
-
-**Deployment Flow (same for all recipient types):**
-
-```
-1. Deploy recipient validator (warp route, generic, deferred, etc.)
-2. Mint state NFT (one-shot policy, unique per instance)
-3. Register in registry with state_locator
-4. Enroll on remote chains: address = state_nft_policy_id
-```
-
-**Message Delivery Flow:**
-
-```
-1. Message arrives: recipient = 0xabc123... (state NFT policy)
-2. Relayer queries: "UTXO containing NFT with policy 0xabc123..."
-3. Blockfrost/indexer returns the exact UTXO (O(1))
-4. Relayer gets script_hash from registry or UTXO address
-5. Relayer builds and submits transaction
-```
-
-## Implementation
-
-### 1. Registry Contract Changes
-
-Update `registry.ak` to use `state_locator.policy_id` as the lookup key:
-
-```aiken
-// BEFORE: lookup by script_hash
-expect Some(existing) =
-  list.find(datum.registrations, fn(r) { r.script_hash == script_hash })
-
-// AFTER: lookup by state NFT policy (the Hyperlane address)
-expect Some(existing) =
-  list.find(datum.registrations, fn(r) {
-    r.state_locator.policy_id == hyperlane_address
-  })
-```
-
-The `RecipientRegistration` type stays the same - `script_hash` is still needed for transaction building, but `state_locator.policy_id` becomes the lookup key.
-
-### 2. Warp Route Contract Changes
-
-Remove the unused `_state_nft_policy_id` parameter from `warp_route.ak`:
+Warp route validators went from 4 parameters to 3:
 
 ```aiken
 // BEFORE
-validator warp_route(mailbox_policy_id: PolicyId, _state_nft_policy_id: PolicyId) {
-  // ...
-}
+validator warp_route(
+  mailbox_policy_id: PolicyId,
+  _state_nft_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+  redemption_script: ScriptHash,
+)
 
 // AFTER
-validator warp_route(mailbox_policy_id: PolicyId) {
-  // ...
-}
+validator warp_route(
+  mailbox_policy_id: PolicyId,
+  processed_messages_nft_policy: PolicyId,
+  redemption_script: ScriptHash,
+)
 ```
 
-All warp routes now share the same script hash. Uniqueness comes from the state NFT, not the script address.
+All warp routes now share the **same script address**, identified by unique state NFTs.
 
-### 3. CLI Changes
+### Shared Reference Script UTXO
 
-Update warp route deployment in `cardano/cli/src/commands/warp.rs`:
+All warp routes share a single reference script UTXO, stored in the relayer config as `warp_route_reference_script_utxo`. This eliminates the need for per-warp-route reference scripts.
 
-```rust
-// BEFORE: Apply two parameters
-let warp_route_applied = apply_validator_params(
-    &ctx.contracts_dir,
-    "warp_route",
-    "warp_route",
-    &[
-        &hex::encode(&mailbox_param_cbor),
-        &hex::encode(&state_nft_param_cbor),  // Remove this
-    ],
-)?;
+### Custom ISM Support
 
-// AFTER: Apply only mailbox parameter
-let warp_route_applied = apply_validator_params(
-    &ctx.contracts_dir,
-    "warp_route",
-    "warp_route",
-    &[&hex::encode(&mailbox_param_cbor)],
-)?;
-```
+An `ism: Option<ScriptHash>` field was added to `WarpRouteDatum`, allowing per-warp-route ISM configuration.
 
-Update remote route enrollment to use state NFT policy:
+### Deferred Recipient Removal (Relayer)
 
-```rust
-// The Hyperlane address to enroll on remote chains
-let hyperlane_address = state_nft_policy_id;  // Not script_hash
-```
+The deferred recipient type was removed from the relayer. The contracts still exist, but the relayer no longer handles them as a distinct case.
 
-### 4. Relayer Changes
+## Files Changed
 
-Update `rust/main/chains/hyperlane-cardano/src/registry.rs` for O(1) lookups:
-
-```rust
-// BEFORE: Iterate through registry entries
-async fn get_recipient_info(&self, script_hash: &[u8]) -> Result<RecipientRegistration> {
-    let registry = self.fetch_registry_datum().await?;
-    registry.registrations
-        .iter()
-        .find(|r| r.script_hash == script_hash)
-        .ok_or(Error::NotFound)
-}
-
-// AFTER: Query by state NFT directly
-async fn get_recipient_utxo(&self, hyperlane_address: &[u8]) -> Result<Utxo> {
-    // hyperlane_address IS the state NFT policy ID
-    // Query Blockfrost for UTXO containing this NFT
-    self.blockfrost
-        .get_utxo_by_asset(hyperlane_address, "")  // Empty asset name for state NFT
-        .await
-}
-```
-
-### 5. Remote Route Enrollment
-
-When enrolling Cardano warp routes on other chains (EVM, etc.), use the state NFT policy:
-
-```solidity
-// On EVM side, enrolling Cardano warp route
-warpRoute.enrollRemoteRouter(
-    cardanoDomain,
-    bytes32(cardanoStateNftPolicyId)  // Not script hash
-);
-```
-
-## Files to Modify
-
-| File                                                    | Changes                                 |
-| ------------------------------------------------------- | --------------------------------------- |
-| `cardano/contracts/validators/warp_route.ak`            | Remove `_state_nft_policy_id` parameter |
-| `cardano/contracts/validators/registry.ak`              | Lookup by `state_locator.policy_id`     |
-| `cardano/cli/src/commands/warp.rs`                      | Update parameterization and enrollment  |
-| `cardano/cli/src/commands/registry.rs`                  | Update registration flow                |
-| `rust/main/chains/hyperlane-cardano/src/registry.rs`    | O(1) asset-based lookups                |
-| `rust/main/chains/hyperlane-cardano/src/mailbox.rs`     | Use state NFT policy as address         |
-| `rust/main/chains/hyperlane-cardano/src/trait_impls.rs` | Update address resolution               |
-
-## Testing
-
-| Test Case                  | Expected Result                                  |
-| -------------------------- | ------------------------------------------------ |
-| Deploy warp route (new)    | Only `mailbox_policy_id` parameter               |
-| Register recipient         | `state_locator.policy_id` used as key            |
-| Lookup by state NFT policy | O(1) - returns correct registration              |
-| Message delivery           | Relayer finds UTXO via asset query               |
-| Remote enrollment          | Uses state NFT policy, not script hash           |
-| Multiple warp routes       | All share same script hash, different state NFTs |
+| File                                                           | Change                                                   |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| `cardano/contracts/validators/warp_route.ak`                   | Removed `_state_nft_policy_id` parameter (4 -> 3 params) |
+| `cardano/contracts/lib/types.ak`                               | Added `ism` field to datum, removed registry types       |
+| `cardano/contracts/validators/registry.ak`                     | **Deleted**                                              |
+| `rust/main/chains/hyperlane-cardano/src/recipient_resolver.rs` | **New** - O(1) NFT-based recipient resolution            |
+| `rust/main/chains/hyperlane-cardano/src/registry.rs`           | **Deleted**                                              |
+| `rust/main/chains/hyperlane-cardano/src/tx_builder.rs`         | Updated for new addressing and shared reference script   |
+| `rust/main/chains/hyperlane-cardano/src/mailbox.rs`            | Uses `0x01` prefix addressing                            |
+| `rust/main/chains/hyperlane-cardano/src/types.rs`              | Updated types for new scheme                             |
+| `rust/main/chains/hyperlane-cardano/src/trait_builder.rs`      | Wired up `RecipientResolver`                             |
+| `rust/main/chains/hyperlane-cardano/src/connection_parser.rs`  | Updated config parsing                                   |
+| `cardano/cli/src/commands/warp.rs`                             | Deploy with 3 params, `0x01` prefix for sender address   |
+| `cardano/cli/src/commands/registry.rs`                         | **Deleted**                                              |
+| `cardano/cli/src/cbor.rs`                                      | Updated datum encoding with `ism` field                  |
 
 ## Definition of Done
 
-- [ ] `warp_route.ak` has single parameter (`mailbox_policy_id` only)
-- [ ] Registry lookups use `state_locator.policy_id` as key
-- [ ] Relayer performs O(1) lookups via asset queries
-- [ ] CLI uses state NFT policy for remote enrollments
-- [ ] All recipient types use consistent addressing pattern
-- [ ] E2E tests pass with new addressing scheme
-
-## Acceptance Criteria
-
-1. Warp routes deploy without `_state_nft_policy_id` parameter
-2. Multiple warp routes can coexist (same script hash, different state NFTs)
-3. Registry lookups are O(1) via state NFT policy
-4. Remote chains enroll state NFT policy as Cardano address
-5. Message delivery works end-to-end with new addressing
-6. Pattern is consistent across warp routes, generic, and deferred recipients
+- [x] `warp_route.ak` reduced to 3 parameters (`mailbox_policy_id`, `processed_messages_nft_policy`, `redemption_script`)
+- [x] Registry contract removed; relayer uses `RecipientResolver` with O(1) NFT queries
+- [x] Hyperlane address uses `0x01000000 || policy_id` format (32 bytes)
+- [x] All warp routes share the same script address, differentiated by state NFTs
+- [x] Shared reference script UTXO for all warp routes
+- [x] Custom ISM support via `ism: Option<ScriptHash>` in datum
+- [x] Recipient kind detection from datum structure (WarpRoute vs Generic)
+- [x] CLI updated for new deploy params and address format
 
 ## Relationship to Task 4.4
 

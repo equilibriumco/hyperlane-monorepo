@@ -68,10 +68,9 @@ Your signing key must control a wallet with sufficient ADA:
 | **state_nft**             | Unique NFT minting policy    | UTXO reference                | None                  |
 | **mailbox**               | Message dispatch/process hub | processed_messages_nft_policy | processed_message_nft |
 | **multisig_ism**          | Signature verification       | None                          | None                  |
-| **registry**              | Recipient metadata store     | None                          | None                  |
 | **processed_message_nft** | Replay prevention            | mailbox_policy_id             | mailbox (state NFT)   |
 
-> **Note**: The mailbox validator is parameterized with `processed_messages_nft_policy`, which is the minting policy for processed message NFTs. These NFTs provide replay protection by marking each message_id as processed. The `processed_message_nft` policy is parameterized by `mailbox_policy_id` (stable across upgrades) to ensure replay protection persists even when the mailbox code is updated. See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
+> **Note**: The mailbox validator is parameterized with `processed_messages_nft_policy`, which is the minting policy for processed message NFTs. These NFTs provide replay protection by marking each message_id as processed. The `processed_message_nft` policy is parameterized by `mailbox_policy_id` (stable across upgrades) to ensure replay protection persists even when the mailbox code is updated. Warp routes and recipients are identified by their state NFT policy ID (Hyperlane address = `0x01000000 || nft_policy_id` for pubkey addresses or `0x02000000 || script_hash` for script addresses). See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
 
 ### Recipient Contracts
 
@@ -88,20 +87,23 @@ Your signing key must control a wallet with sufficient ADA:
                  │   (Parameterized per contract instance)      │
                  └─────────────────────────────────────────────┘
                                       │
-          ┌───────────────────────────┼───────────────────────────┐
-          │                           │                           │
-          ▼                           ▼                           ▼
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│     MAILBOX     │         │   MULTISIG_ISM  │         │    REGISTRY     │
-│   (Validator)   │         │   (Validator)   │         │   (Validator)   │
-└────────┬────────┘         └─────────────────┘         └─────────────────┘
-         │                                                        │
-         │ mailbox_policy_id                                      │
-         ▼                                                        ▼
-┌─────────────────┐                                    ┌─────────────────────┐
-│ GENERIC_RECIPIENT│◄───────────────────────────────────│  REGISTRATION       │
-│ (Parameterized) │                                    │  (Recipient entry)  │
-└─────────────────┘                                    └─────────────────────┘
+                    ┌─────────────────┼─────────────────┐
+                    │                                   │
+                    ▼                                   ▼
+          ┌─────────────────┐                 ┌─────────────────┐
+          │     MAILBOX     │                 │   MULTISIG_ISM  │
+          │   (Validator)   │                 │   (Validator)   │
+          └────────┬────────┘                 └─────────────────┘
+                   │
+                   │ mailbox_policy_id
+                   │
+          ┌────────┴────────┐
+          │                 │
+          ▼                 ▼
+┌──────────────────┐ ┌──────────────────────────┐
+│ PROCESSED_MESSAGE│ │    GENERIC_RECIPIENT     │
+│ NFT (Mint)       │ │    (Parameterized)       │
+└──────────────────┘ └──────────────────────────┘
 ```
 
 ### Deployment Order
@@ -109,14 +111,13 @@ Your signing key must control a wallet with sufficient ADA:
 The contracts must be deployed in this order due to dependencies:
 
 1. **Extract all validators** from plutus.json
-2. **Initialize Core Contracts** - applies parameters, creates state NFTs, produces parameterized scripts
+2. **Initialize Core Contracts** (mailbox, ISM) - applies parameters, creates state NFTs, produces parameterized scripts
 3. **Deploy Reference Scripts** - deploy the parameterized scripts as on-chain reference scripts
 4. **Configure Mailbox** - set default ISM using ism_policy_id
 5. **Configure ISM** - set validators and thresholds for each origin domain
-6. **Deploy Recipients** - parameterized with mailbox_policy_id
-7. **Register Recipients** - add to registry
+6. **Deploy Recipients/Warp Routes** - parameterized with mailbox_policy_id
 
-> **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM, registry) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
+> **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
 
 ---
 
@@ -146,7 +147,6 @@ Expected output:
 ```
 "mailbox.mailbox.spend"
 "multisig_ism.multisig_ism.spend"
-"registry.registry.spend"
 "state_nft.state_nft.mint"
 "example_generic_recipient.example_generic_recipient.spend"
 "processed_message_nft.processed_message_nft.mint"
@@ -193,7 +193,6 @@ ls deployments/$NETWORK/
 # Expected files:
 # mailbox.plutus, mailbox.hash, mailbox.addr
 # multisig_ism.plutus, multisig_ism.hash, multisig_ism.addr
-# registry.plutus, registry.hash, registry.addr
 # state_nft.plutus (base, not parameterized)
 # ...
 ```
@@ -272,24 +271,6 @@ ISM initialized!
   UTXO: def456...#0
 ```
 
-#### Initialize Registry
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  init registry
-```
-
-Output:
-
-```
-Registry initialized!
-  State NFT Policy: b46f18719b2d20b87474eb9cd761d82f1d7f750548eed38e775d2caf
-  UTXO: ghi789...#0
-```
-
 ### 3.3 Verify Initialization
 
 ```bash
@@ -321,7 +302,6 @@ This deploys:
 
 - Mailbox validator (15 ADA minimum UTXO)
 - Multisig ISM validator (15 ADA minimum UTXO)
-- Registry validator (15 ADA minimum UTXO)
 
 ### 4.2 Deploy Individual Reference Script (Alternative)
 
@@ -352,7 +332,6 @@ The CLI automatically saves the reference script UTXOs to `deployment_info.json`
 # Check deployment_info.json for referenceScriptUtxo fields
 cat deployments/$NETWORK/deployment_info.json | jq '.mailbox.referenceScriptUtxo'
 cat deployments/$NETWORK/deployment_info.json | jq '.ism.referenceScriptUtxo'
-cat deployments/$NETWORK/deployment_info.json | jq '.registry.referenceScriptUtxo'
 ```
 
 When configuring the relayer, use these UTXO references in your agent configuration:
@@ -533,7 +512,7 @@ This command:
 
 #### Three-UTXO Pattern (Deferred Recipients)
 
-Deferred recipients require an additional reference script UTXO to provide the `stored_message_nft` minting policy. This allows the relayer to discover everything it needs from the registry without any additional configuration:
+Deferred recipients require an additional reference script UTXO to provide the `stored_message_nft` minting policy. This allows the relayer to discover everything it needs without any additional configuration:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -556,7 +535,7 @@ Deferred recipients require an additional reference script UTXO to provide the `
                                                     └──────────────────────┘
 ```
 
-All three NFTs share the same policy ID, which is the `reference_script_locator` stored in the registry. The relayer:
+All three NFTs share the same policy ID. The relayer:
 
 1. Looks up the "ref" NFT UTXO for the recipient script
 2. Looks up the "msg_ref" NFT UTXO for the `stored_message_nft` script
@@ -582,81 +561,14 @@ Message NFT Reference Script UTXO (output #2):
   NFT Asset Name: 6d73675f726566 ("msg_ref")
   Contains: stored_message_nft minting policy script
 
-To register this recipient with the Hyperlane registry, run:
-  hyperlane-cardano registry register \
-    --script-hash def456... \
-    --recipient-type deferred \
-    --message-policy abc123... \
-    --state-policy xyz789... \
-    --state-asset "" \
-    --ref-script-policy xyz789... \
-    --ref-script-asset 726566 \
-    --signing-key <path-to-owner-key>
 ```
 
-> **Important**: The `--message-policy` is required when registering deferred recipients. This is the `stored_message_nft` policy ID shown during deployment.
-
-> **Note**: The "msg_ref" NFT UTXO is automatically discovered by the relayer using the same policy ID as the reference_script_locator. No additional configuration is needed in the relayer config.
+> **Note**: The "msg_ref" NFT UTXO is automatically discovered by the relayer using the same policy ID as the state NFT. No additional configuration is needed in the relayer config.
 
 After deployment, you can:
 
 - List pending deferred messages: `hyperlane-cardano deferred list --recipient <address>`
 - Process a deferred message: `hyperlane-cardano deferred process --recipient <address> --message-utxo <utxo>`
-
-### 6.4 Register Recipient
-
-After deploying a recipient (built-in or custom), register it in the registry:
-
-**For generic recipients:**
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc \
-  --state-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --state-asset "" \
-  --ref-script-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --ref-script-asset 726566 \
-  --recipient-type generic
-```
-
-**For deferred recipients (requires `--message-policy`):**
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash d00c07baf0e1aa1d5b2362ad6d4acbd443367167517781e4d12ff6f4 \
-  --state-policy 90440110a4ff0daf3d8ba1fbe3178d6f5af03b8b09ebc144f6a10f52 \
-  --state-asset "" \
-  --ref-script-policy 90440110a4ff0daf3d8ba1fbe3178d6f5af03b8b09ebc144f6a10f52 \
-  --ref-script-asset 726566 \
-  --recipient-type deferred \
-  --message-policy 0a289423f18f05d5d0bc46176c3c09a4a626a81078f0ba5c59bbb47c
-```
-
-Parameters:
-
-- `--script-hash`: Recipient validator hash (28 bytes)
-- `--state-policy`: State NFT policy ID for finding the state UTXO
-- `--state-asset`: Asset name within policy (empty for unit token)
-- `--ref-script-policy`: Reference script NFT policy (optional)
-- `--ref-script-asset`: Reference script NFT asset name (optional)
-- `--recipient-type`: One of `generic`, `token-receiver`, `deferred`
-- `--message-policy`: Message NFT minting policy (**required for deferred recipients**)
-
-### 6.5 Verify Registration
-
-```bash
-./cli/target/release/hyperlane-cardano \
-  --network $NETWORK \
-  registry list
-```
 
 ---
 
@@ -831,79 +743,7 @@ Minting policy reference script deployed!
 
 > **Important**: This step is required for inbound synthetic token transfers to work. Without the minting reference script, the relayer cannot mint synthetic tokens.
 
-### 7.5 Register Warp Route in Registry
-
-After deployment, register the warp route in the Hyperlane registry so the relayer can discover it.
-
-#### Register Native Warp Route
-
-```bash
-# Values from native_warp_route.json
-SCRIPT_HASH="a09ef754bfd03a4b8c48576718c30bbdc140ed45ff467cbc05924920"
-NFT_POLICY="7c90fa689949238c5cb56c20caa92d50ae05074837e5006314e8a849"
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash $SCRIPT_HASH \
-  --state-policy $NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
-```
-
-**Parameters:**
-
-- `--state-asset ""`: Empty string for the state UTXO NFT
-- `--ref-script-asset 726566`: Hex encoding of "ref" for the reference script UTXO
-- `--recipient-type token-receiver`: Indicates this is a warp route (not a generic recipient)
-
-#### Register Collateral Warp Route
-
-```bash
-# Values from collateral_warp_route.json
-SCRIPT_HASH="a51328c262339f2860854c1f704ed7c43053587bb4d65393b4e468f8"
-NFT_POLICY="b6a3f69a99b75d852f689b5d1405c7cd76b298fc5ff7db36941b1dc1"
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash $SCRIPT_HASH \
-  --state-policy $NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
-```
-
-> **Note**: Collateral warp routes don't need additional inputs - tokens are held directly in the state UTXO.
-
-#### Register Synthetic Warp Route
-
-```bash
-# Values from synthetic_warp_route.json
-SCRIPT_HASH="2bc528ef916747a2f320107be4bade841fc114dfa8aa9ab473f8f9d9"
-NFT_POLICY="fc0d436644772ca43b9374f9e7a3dd298609099b4af7309f49bf60c1"
-
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash $SCRIPT_HASH \
-  --state-policy $NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
-```
-
-### 7.6 Enroll Remote Routers
+### 7.5 Enroll Remote Routers
 
 For bidirectional transfers, you must enroll the remote chain's warp route address on the Cardano side.
 
@@ -931,7 +771,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 > **Important**: You must also enroll the Cardano warp route on the remote chain. Use the Hyperlane address from the deployment output (e.g., `0x02000000a09ef754...`).
 
-### 7.7 Verify Warp Route Deployment
+### 7.6 Verify Warp Route Deployment
 
 ```bash
 # Show warp route configuration
@@ -947,7 +787,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --warp-policy $WARP_POLICY
 ```
 
-### 7.8 Test Warp Route Transfer (E2E Testing)
+### 7.7 Test Warp Route Transfer (E2E Testing)
 
 > **Prerequisites**: Before testing transfers, ensure the Hyperlane validator and relayer agents are running and properly configured. See [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements) for setup instructions, including how to extract required addresses from your deployment files.
 
@@ -1269,14 +1109,14 @@ cast call $TOKEN_ADDRESS "balanceOf(address)(uint256)" $FUJI_SIGNER_ADDRESS --rp
 
 **Common Issues:**
 
-| Error                         | Cause                                          | Solution                                                                      |
-| ----------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `MissingScriptWitnessesUTXOW` | Reference scripts not found                    | Deploy minting ref script (for synthetic) and verify registry entries         |
-| `BabbageNonDisjointRefInputs` | Same UTXO used as reference and spending input | Check registry `--ref-script-asset` is correct (should be `726566` for "ref") |
-| `RecipientNotFound`           | Registry entry not indexed yet                 | Wait for Blockfrost to index the registration transaction                     |
-| `InsufficientBalance`         | Not enough tokens/ADA                          | Check UTXO balances before transfer                                           |
-| `NoRelayerActivity`           | Relayer not detecting messages                 | Check relayer logs, verify domain configuration                               |
-| `GasPaymentFailed`            | Insufficient AVAX for gas                      | Ensure adequate AVAX balance for `--value` parameter                          |
+| Error                         | Cause                                          | Solution                                                                  |
+| ----------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------- |
+| `MissingScriptWitnessesUTXOW` | Reference scripts not found                    | Deploy minting ref script (for synthetic) and verify NFT policy IDs       |
+| `BabbageNonDisjointRefInputs` | Same UTXO used as reference and spending input | Check ref script NFT asset name is correct (should be `726566` for "ref") |
+| `RecipientNotFound`           | Recipient UTXO not indexed yet                 | Wait for Blockfrost to index the deployment transaction                   |
+| `InsufficientBalance`         | Not enough tokens/ADA                          | Check UTXO balances before transfer                                       |
+| `NoRelayerActivity`           | Relayer not detecting messages                 | Check relayer logs, verify domain configuration                           |
+| `GasPaymentFailed`            | Insufficient AVAX for gas                      | Ensure adequate AVAX balance for `--value` parameter                      |
 
 **Checking Message Status:**
 
@@ -1305,7 +1145,7 @@ Cardano warp routes support a maximum of 6 decimals due to the i64 token amount 
 
 Ensure your warp route is configured with correct `decimals` and `remote_decimals` values during deployment.
 
-### 7.9 Complete Warp Route Deployment Script
+### 7.8 Complete Warp Route Deployment Script
 
 ```bash
 #!/bin/bash
@@ -1340,21 +1180,7 @@ NATIVE_WARP=$(cat deployments/$NETWORK/native_warp_route.json)
 NATIVE_SCRIPT_HASH=$(echo $NATIVE_WARP | jq -r '.warp_route.script_hash')
 NATIVE_NFT_POLICY=$(echo $NATIVE_WARP | jq -r '.warp_route.nft_policy')
 
-# 3. Register in registry
-echo "Registering warp route..."
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
-  registry register \
-  --script-hash $NATIVE_SCRIPT_HASH \
-  --state-policy $NATIVE_NFT_POLICY \
-  --state-asset "" \
-  --ref-script-policy $NATIVE_NFT_POLICY \
-  --ref-script-asset 726566 \
-  --recipient-type token-receiver
-
-sleep 30
-
-# 4. Enroll remote router
+# 3. Enroll remote router
 echo "Enrolling remote router..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
@@ -1535,11 +1361,6 @@ After deployment, your `deployment_info.json` will contain addresses like:
     "hash": "02993c46cdcf8eb56ada209e277acc288dc0263b6a502d17b8cbfa56",
     "address": "addr_test1wp5n85yxm8u3addtdsn8n8hevcfzxcpxmd492z4hmzl7jkstj8kld",
     "state_nft_policy": "..."
-  },
-  "registry": {
-    "hash": "b46f18719b2d20b87474eb9cd761d82f1d7f750548eed38e775d2caf",
-    "address": "addr_test1wrg0vpes5mty9cup6wh8x6mpmpght0aw92fwda384za9e0sj95vw5",
-    "state_nft_policy": "..."
   }
 }
 ```
@@ -1578,7 +1399,6 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | ---------------- | ------------------------------- |
 | `init mailbox`   | Initialize mailbox contract     |
 | `init ism`       | Initialize multisig ISM         |
-| `init registry`  | Initialize registry             |
 | `init recipient` | Initialize a recipient contract |
 | `init all`       | Initialize all core contracts   |
 | `init status`    | Show initialization status      |
@@ -1599,15 +1419,6 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `ism show`             | Display configuration       |
 | `ism add-validator`    | Add a single validator      |
 | `ism remove-validator` | Remove a validator          |
-
-### Registry Commands
-
-| Command             | Description                     |
-| ------------------- | ------------------------------- |
-| `registry register` | Register a new recipient        |
-| `registry list`     | List all registered recipients  |
-| `registry show`     | Show specific recipient details |
-| `registry remove`   | Remove a registration           |
 
 ### Query Commands
 
@@ -1680,15 +1491,15 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
                                     │
                Creates unique NFT policy IDs for each contract
                                     │
-          ┌─────────────────────────┼─────────────────────────┐
-          │                         │                         │
-          ▼                         ▼                         ▼
-┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
-│  mailbox_policy_id  │  │   ism_policy_id     │  │ registry_policy_id  │
-│                     │  │                     │  │                     │
-│ Identifies mailbox  │  │ Identifies ISM      │  │ Identifies registry │
-│ state UTXO          │  │ state UTXO          │  │ state UTXO          │
-└──────────┬──────────┘  └─────────────────────┘  └─────────────────────┘
+                    ┌─────────────────┼─────────────────┐
+                    │                                   │
+                    ▼                                   ▼
+          ┌─────────────────────┐            ┌─────────────────────┐
+          │  mailbox_policy_id  │            │   ism_policy_id     │
+          │                     │            │                     │
+          │ Identifies mailbox  │            │ Identifies ISM      │
+          │ state UTXO          │            │ state UTXO          │
+          └──────────┬──────────┘            └─────────────────────┘
            │
            │ Used as parameter for:
            │
@@ -1739,7 +1550,6 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
 | `state_nft`                  | Mint  | `utxo_ref: OutputReference`                                   | Any unspent UTXO                                     | One-shot minting, ensures unique NFT       |
 | `mailbox`                    | Spend | `processed_messages_nft_policy: PolicyId`                     | Derived from `processed_message_nft`                 | Replay protection via NFT minting          |
 | `multisig_ism`               | Spend | (none)                                                        | -                                                    | No parameters needed                       |
-| `registry`                   | Spend | (none)                                                        | -                                                    | No parameters needed                       |
 | `processed_message_nft`      | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can trigger minting   |
 | `stored_message_nft`         | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint message NFTs |
 | `example_generic_recipient`  | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Verifies mailbox is calling                |
@@ -1808,7 +1618,7 @@ Step 4: Apply processed_message_nft_policy to mailbox
 Step 5: Deploy mailbox reference script
         └─ Uses mailbox_applied.plutus
 
-Step 6: Initialize other core contracts (ISM, Registry)
+Step 6: Initialize other core contracts (ISM)
         └─ Each gets its own state_nft policy
 
 Step 7: Deploy recipients
@@ -1827,7 +1637,7 @@ The Hyperlane CLI automates most parameterization steps. When you run:
 
 The CLI internally:
 
-1. Creates state NFT policies for mailbox, ISM, and registry
+1. Creates state NFT policies for mailbox and ISM
 2. Applies `mailbox_policy_id` to `processed_message_nft`
 3. Applies the resulting policy to `mailbox`
 4. Saves all parameterized scripts to `deployments/<network>/`
@@ -1886,7 +1696,6 @@ When configuring the Hyperlane agents (validator and relayer) for Cardano, sever
 | `CARDANO_ISM_SCRIPT_HASH`         | ISM validator script hash             | `.ism.hash`                               |
 | `CARDANO_ISM_STATE_NFT_POLICY_ID` | ISM state NFT policy                  | `.ism.stateNftPolicy`                     |
 | `CARDANO_ISM_REF_UTXO`            | ISM reference script UTXO             | `.ism.referenceScriptUtxo`                |
-| `CARDANO_REGISTRY_POLICY_ID`      | Registry state NFT policy             | `.registry.stateNftPolicy`                |
 | `CARDANO_PROCESSED_MSG_POLICY_ID` | Processed messages NFT policy         | `.mailbox.appliedParameters[0].value`     |
 | `CARDANO_VA_POLICY_ID`            | Validator announce policy ID          | `.validator_announce.hash`                |
 | `CARDANO_INDEX_FROM`              | Block height to start indexing        | See note below                            |
@@ -1929,7 +1738,6 @@ export CARDANO_MAILBOX_POLICY_ID=$(jq -r '.mailbox.stateNftPolicy' deployment_in
 export CARDANO_MAILBOX_SCRIPT_HASH=$(jq -r '.mailbox.hash' deployment_info.json)
 export CARDANO_ISM_SCRIPT_HASH=$(jq -r '.ism.hash' deployment_info.json)
 export CARDANO_ISM_STATE_NFT_POLICY_ID=$(jq -r '.ism.stateNftPolicy' deployment_info.json)
-export CARDANO_REGISTRY_POLICY_ID=$(jq -r '.registry.stateNftPolicy' deployment_info.json)
 export CARDANO_PROCESSED_MSG_POLICY_ID=$(jq -r '.mailbox.appliedParameters[0].value' deployment_info.json)
 export CARDANO_VA_POLICY_ID=$(jq -r '.validator_announce.hash' deployment_info.json)
 
@@ -1954,7 +1762,6 @@ eval $(jq -r '
   "export CARDANO_MAILBOX_SCRIPT_HASH=" + .mailbox.hash,
   "export CARDANO_ISM_SCRIPT_HASH=" + .ism.hash,
   "export CARDANO_ISM_STATE_NFT_POLICY_ID=" + .ism.stateNftPolicy,
-  "export CARDANO_REGISTRY_POLICY_ID=" + .registry.stateNftPolicy,
   "export CARDANO_PROCESSED_MSG_POLICY_ID=" + .mailbox.appliedParameters[0].value,
   "export CARDANO_VA_POLICY_ID=" + .validator_announce.hash,
   "export CARDANO_MAILBOX_REF_UTXO=" + (.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"),
@@ -2081,7 +1888,6 @@ To announce with the correct format:
         "ismPolicyId": "<ism_state_nft_policy_id>",
         "ismScriptHash": "<ism_script_hash>",
         "ismReferenceScriptUtxo": "<tx_hash>#0",
-        "registryPolicyId": "<registry_state_nft_policy_id>",
         "validatorAnnouncePolicyId": "<va_state_nft_policy_id>"
       },
       "index": {
@@ -2381,28 +2187,9 @@ Example: Sending 10 ADA to Fuji
               = 10.0 with 18 decimals
 ```
 
-### Registry Integration
+### Warp Route Identification
 
-The registry stores metadata for warp route discovery:
-
-```
-RegistryEntry {
-  script_hash: "a09ef754...",         // Warp route validator hash
-  recipient_type: TokenReceiver,       // Indicates token bridge
-  state_locator: {                     // How to find state UTXO
-    policy_id: "7c90fa68...",
-    asset_name: ""
-  },
-  reference_script_locator: Some({     // How to find ref script
-    policy_id: "7c90fa68...",
-    asset_name: "726566"               // "ref" in hex
-  }),
-  additional_inputs: [],               // No additional inputs needed
-  ism: None                            // Uses default ISM
-}
-```
-
-All warp route types (Native, Collateral, Synthetic) use the same registry entry format. Locked assets are held directly in the state UTXO, so no additional inputs are required.
+Warp routes are identified by their state NFT policy ID. The Hyperlane address is derived as `0x02000000 || script_hash` (for script addresses). No separate registry registration is needed -- the relayer discovers warp routes directly via their NFT policy.
 
 ### E2E Testing Scenarios
 

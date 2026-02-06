@@ -1,6 +1,6 @@
 # Hyperlane Cardano Recipient Deployment Guide
 
-This guide explains how to build, deploy, and register Hyperlane-compatible recipient scripts on Cardano.
+This guide explains how to build and deploy Hyperlane-compatible recipient scripts on Cardano.
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ Deploying a recipient involves three steps:
 
 1. **Build** - Compile and parameterize the Aiken contract
 2. **Deploy** - Create on-chain UTXOs with the script and initial state
-3. **Register** - Add the recipient to the Hyperlane registry
+3. **Enroll** - Remote chains enroll the state NFT policy as the Cardano recipient address
 
 ## 1. Building the Recipient Contract
 
@@ -64,6 +64,7 @@ validator my_recipient(mailbox_hash: ScriptHash) {
 ```
 
 Key requirements:
+
 - Use `HyperlaneRecipientDatum<YourInner>` wrapper for state
 - Use `HyperlaneRecipientRedeemer<YourActions>` for redeemers
 - Parameterize by `mailbox_hash` to verify caller
@@ -127,6 +128,7 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
 ```
 
 The CLI will output:
+
 - Recipient script hash
 - State NFT policy ID
 - Recipient script address
@@ -189,58 +191,42 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
 
 This creates a UTXO with the script in its `reference_script` field. Note the output UTXO reference for use in transactions.
 
-## 4. Registering the Recipient
+## 4. Enrolling the Recipient on Remote Chains
 
-Registration tells the relayer how to construct transactions for your recipient.
+No on-chain registration is needed on Cardano. The relayer discovers recipients via O(1) NFT queries using the state NFT policy ID.
 
-### 4.1 Using the CLI
+### 4.1 Determine the Hyperlane Address
+
+Your recipient's Hyperlane address is derived from the state NFT policy ID:
+
+```
+Hyperlane address = 0x01000000{state_nft_policy_id}
+```
+
+For example, if your state NFT policy is `f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7`, the Hyperlane address is:
+
+```
+0x01000000f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
+```
+
+### 4.2 Enroll on Remote Chains
+
+Remote chains must enroll this address as the Cardano recipient. For example, on an EVM chain, the router contract should store this address as the enrolled remote for the Cardano domain.
+
+### 4.3 Verify State UTXO
 
 ```bash
-BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
-  --signing-key path/to/payment.skey \
-  --network preview \
-  registry register \
-  --script-hash <recipient_script_hash> \
-  --state-policy <state_nft_policy_id> \
-  --state-asset "" \
-  --recipient-type generic
-```
-
-Parameters:
-- `--script-hash`: 28-byte recipient validator hash (56 hex chars)
-- `--state-policy`: State NFT policy ID (28 bytes)
-- `--state-asset`: Asset name within policy (empty for unit token)
-- `--recipient-type`: One of `generic`, `token-receiver`, `contract-caller`
-- `--custom-ism`: (Optional) ISM script hash to override default
-
-### 4.2 Verify Registration
-
-```bash
-BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
-  --network preview \
-  registry list
-```
-
-Expected output:
-```
-Registry UTXO:
-  abc123...#0
-
-Registered Recipients:
---------------------------------------------------------------------------------
-Script Hash                                                      Type
---------------------------------------------------------------------------------
-931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc         Generic
-...
+./cli/target/release/hyperlane-cardano --network preview query utxo \
+  --policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
 ```
 
 ## Recipient Types
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `Generic` | Simple state update | Message logging, counters |
-| `TokenReceiver` | Mints/releases tokens | Warp routes, token bridges |
-| `Deferred` | Stores messages for later | Complex DeFi interactions |
+| Type            | Description               | Use Case                   |
+| --------------- | ------------------------- | -------------------------- |
+| `Generic`       | Simple state update       | Message logging, counters  |
+| `TokenReceiver` | Mints/releases tokens     | Warp routes, token bridges |
+| `Deferred`      | Stores messages for later | Complex DeFi interactions  |
 
 ## 5. Deploying a Deferred Recipient
 
@@ -249,6 +235,7 @@ Deferred recipients require additional components compared to generic recipients
 ### 5.1 Components Required
 
 A deferred recipient deployment requires:
+
 1. **Deferred Recipient Validator** - Parameterized by mailbox hash and message NFT policy
 2. **Message NFT Minting Policy** - Parameterized by mailbox policy (for security)
 3. **State NFT Minting Policy** - Standard one-shot policy for state UTXO identification
@@ -261,6 +248,7 @@ aiken build
 ```
 
 The `plutus.json` will contain:
+
 - `example_deferred_recipient.spend` - The deferred recipient validator
 - `stored_message_nft.mint` - Message NFT policy (for message storage)
 - `state_nft.mint` - State NFT policy
@@ -325,6 +313,7 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
 ```
 
 **Output:**
+
 ```
 Deferred Recipient Deployment:
   Recipient Script Hash: 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc
@@ -351,33 +340,15 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --name "message_nft"
 ```
 
-### 5.6 Register the Deferred Recipient
+### 5.6 Enrolling the Deferred Recipient
 
-```bash
-BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
-  --signing-key path/to/payment.skey \
-  --network preview \
-  registry register \
-  --script-hash 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc \
-  --state-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --state-asset "" \
-  --recipient-type deferred \
-  --message-policy abc123... \
-  --ref-script-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --ref-script-asset "726566"
-```
+No on-chain registration is needed. The deferred recipient's Hyperlane address is `0x01000000{state_nft_policy_id}`, the same as any other recipient. Remote chains should enroll this address.
 
-**Key parameters for deferred registration:**
-- `--recipient-type deferred`: Tells the relayer to use the deferred message pattern
-- `--message-policy`: The message NFT policy ID (relayer will mint NFTs with this policy)
-- `--ref-script-policy` / `--ref-script-asset`: Locator for the reference script UTXO
+**Note:** The Deferred pattern exists in the on-chain contracts but is not currently integrated with the relayer's recipient resolver.
 
 ### 5.7 Verify Deployment
 
 ```bash
-# Check registration
-./cli/target/release/hyperlane-cardano --network preview registry list
-
 # Check state UTXO
 ./cli/target/release/hyperlane-cardano --network preview query utxo \
   --policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
@@ -462,6 +433,7 @@ done
 ```
 
 Run with cron:
+
 ```bash
 # Process every 5 minutes
 */5 * * * * /path/to/process_deferred_messages.sh >> /var/log/deferred_processor.log 2>&1
@@ -491,39 +463,29 @@ cd contracts && aiken build && cd ..
 # Recipient Script Hash: 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc
 # State NFT Policy: f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
 
-# 3. Register with registry
-./cli/target/release/hyperlane-cardano \
-  --signing-key $SIGNING_KEY \
-  --network $NETWORK \
-  registry register \
-  --script-hash 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc \
-  --state-policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7 \
-  --state-asset "" \
-  --recipient-type generic
+# 3. Enroll on remote chains
+# The Hyperlane address is: 0x01000000f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
+# Enroll this address as the Cardano recipient on your remote chain's router contract.
 
-# 4. Verify
-./cli/target/release/hyperlane-cardano --network $NETWORK registry list
+# 4. Verify state UTXO
+./cli/target/release/hyperlane-cardano --network $NETWORK query utxo \
+  --policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
 ```
 
 ## Troubleshooting
 
-### "Registry UTXO not found"
-The registry hasn't been initialized. Deploy core contracts first:
-```bash
-./cli/target/release/hyperlane-cardano init registry
-```
-
-### "PlutusFailure" on registration
-Common causes:
-- **Wrong owner**: Signing key must match registry datum owner
-- **Already registered**: Script hash is already in registry
-- **Invalid hashes**: Script hash or policy ID is wrong length (must be 28 bytes / 56 hex)
-
 ### "BadInputsUTxO" error
+
 Blockfrost cache may be stale. Wait 30 seconds and retry.
 
 ### Script hash mismatch
+
 Ensure you're using the parameterized script, not the raw blueprint validator.
+
+### State UTXO not found by relayer
+
+- Verify the state NFT policy ID matches the Hyperlane address enrolled on the remote chain
+- Confirm the state UTXO exists on-chain and contains the NFT
 
 ## Contract Addresses
 

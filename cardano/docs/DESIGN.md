@@ -84,7 +84,6 @@ flowchart TB
     end
 
     subgraph RefInputs["Reference Inputs"]
-        RegRef[/"Registry UTXO<br/>(lookup recipient config)"/]
         MBScript[/"Mailbox Reference Script"/]
         ISMScript[/"ISM Reference Script"/]
         RecScript[/"Recipient Reference Script"/]
@@ -117,7 +116,6 @@ flowchart TB
 
     PMNFT --> PMO
 
-    RegRef -.-> MR
     MBScript -.-> MI
     ISMScript -.-> II
     RecScript -.-> RI
@@ -307,7 +305,6 @@ flowchart TB
 |----------|-------------|
 | Mailbox | Identifies the single mailbox state UTXO |
 | ISM | Identifies the ISM configuration UTXO |
-| Registry | Identifies the recipient registry UTXO |
 | Warp Route | Identifies each warp route's state UTXO |
 | Vault | Identifies token vault UTXOs |
 | Recipients | Each registered recipient has a state NFT |
@@ -346,6 +343,7 @@ flowchart TB
 ```
 
 **Benefits:**
+
 - O(1) lookup via Blockfrost asset query
 - Immutable proof of processing
 - No state bloat in mailbox datum
@@ -355,10 +353,10 @@ flowchart TB
 
 The `processed_message_nft` minting policy is parameterized by `mailbox_policy_id` (the one-shot NFT policy that identifies the mailbox state UTXO) rather than `mailbox_script_hash`. This is critical for upgrade safety:
 
-| Parameter | Stability | Effect on Replay Protection |
-|-----------|-----------|----------------------------|
-| `mailbox_script_hash` | Changes with every code update | ❌ Old NFTs under different policy, replay possible |
-| `mailbox_policy_id` | Fixed at initialization | ✅ Same policy forever, replay protection maintained |
+| Parameter             | Stability                      | Effect on Replay Protection                          |
+| --------------------- | ------------------------------ | ---------------------------------------------------- |
+| `mailbox_script_hash` | Changes with every code update | ❌ Old NFTs under different policy, replay possible  |
+| `mailbox_policy_id`   | Fixed at initialization        | ✅ Same policy forever, replay protection maintained |
 
 The `mailbox_policy_id` is determined once during mailbox initialization and never changes. This ensures that all processed message NFTs, regardless of when they were minted, are under the same policy and can be found during replay checks.
 
@@ -391,48 +389,22 @@ flowchart TB
     PROCESS --> BURN
 ```
 
+**Note:** The stored message / deferred processing flow exists in the contracts but the relayer does not currently handle deferred recipients directly. It processes messages using the standard (non-deferred) flow.
+
 **Security Properties:**
+
 - Only mailbox can mint the NFT (parameterized minting policy)
 - NFT presence proves message authenticity
 - Burning prevents double-processing
 
-### 4. Recipient Registration Ownership
-
-**Problem**: Prove ownership of a recipient script when registering/modifying.
-
-**Solution**: The script must be spent in the same transaction as the registry update.
-
-```mermaid
-flowchart TB
-    subgraph Registration["Recipient Registration"]
-        REG["Registry UTXO"]
-        REC["Recipient UTXO<br/>(with state NFT)"]
-        SPEND["Both spent in same tx"]
-        PROOF["Spending recipient = proof of ownership"]
-    end
-
-    subgraph Update["Registration Update"]
-        OWNER["Owner signature required<br/>(stored in registration)"]
-        OR["OR"]
-        SCRIPT["Spend recipient script"]
-    end
-
-    REG --> SPEND
-    REC --> SPEND
-    SPEND --> PROOF
-
-    OWNER --> OR
-    SCRIPT --> OR
-```
-
 ### NFT Summary Table
 
-| NFT Type | Purpose | Minting Policy | When Minted | When Burned |
-|----------|---------|----------------|-------------|-------------|
-| State NFT | Identify state UTXOs | One-shot (tied to UTXO) | Contract deployment | Never |
-| Processed Message NFT | Replay protection | Mailbox-controlled | Message processing | Never |
-| Stored Message NFT | Message authentication | Mailbox-controlled | Deferred store | Deferred process |
-| Synthetic Token | Bridged token representation | Warp route-controlled | Token receive | Token send |
+| NFT Type              | Purpose                      | Minting Policy          | When Minted         | When Burned      |
+| --------------------- | ---------------------------- | ----------------------- | ------------------- | ---------------- |
+| State NFT             | Identify state UTXOs         | One-shot (tied to UTXO) | Contract deployment | Never            |
+| Processed Message NFT | Replay protection            | Mailbox-controlled      | Message processing  | Never            |
+| Stored Message NFT    | Message authentication       | Mailbox-controlled      | Deferred store      | Deferred process |
+| Synthetic Token       | Bridged token representation | Warp route-controlled   | Token receive       | Token send       |
 
 ---
 
@@ -478,6 +450,7 @@ flowchart TB
 **Mailbox ensures the TRUSTED ISM verifies THIS specific message:**
 
 The mailbox performs two critical checks:
+
 1. **Trust check**: Only an ISM with the exact script hash stored in `datum.default_ism` is accepted
 2. **Message binding**: The ISM's redeemer must contain a checkpoint for THIS specific `message_id`
 
@@ -506,6 +479,7 @@ list.any(tx.inputs, fn(input) {
 ```
 
 This prevents two attack vectors:
+
 - **Untrusted ISM**: An attacker cannot use an arbitrary ISM contract
 - **Signature replay**: An attacker cannot reuse valid signatures from a different message
 
@@ -523,6 +497,7 @@ let mailbox_spent = list.any(tx.inputs, fn(input) {
 ```
 
 **Why this works:**
+
 1. All validators in a transaction run against the **same transaction context**
 2. If ANY validator fails, the **entire transaction fails**
 3. By checking that required contracts are spent, we ensure their validators run
@@ -530,11 +505,13 @@ let mailbox_spent = list.any(tx.inputs, fn(input) {
 5. Each validator enforces its own invariants (ISM checks signatures, mailbox checks message binding, recipient checks mailbox presence)
 
 This is fundamentally different from EVM where:
+
 - Contract A calls Contract B, passing control flow
 - Contract B can modify state and return values to A
 - Execution is sequential
 
 In Cardano:
+
 - All contracts validate the same transaction simultaneously
 - No control flow between contracts
 - Coordination via "I see you're being spent, so I know your rules passed"
@@ -548,7 +525,6 @@ flowchart TB
     subgraph Core["Core Contracts"]
         MB["Mailbox<br/>dispatch() / process()"]
         ISM["Multisig ISM<br/>verify()"]
-        REG["Registry<br/>register() / lookup()"]
     end
 
     subgraph Tokens["Token Contracts"]
@@ -559,7 +535,6 @@ flowchart TB
 
     subgraph Recipients["Recipient Contracts"]
         GEN["Generic Recipient<br/>handleMessage()"]
-        DEF["Deferred Recipient<br/>storeMessage() / processMessage()"]
     end
 
     subgraph NFTs["NFT Policies"]
@@ -569,9 +544,7 @@ flowchart TB
     end
 
     MB -->|"verifies"| ISM
-    MB -->|"looks up"| REG
     MB -->|"invokes"| GEN
-    MB -->|"invokes"| DEF
     MB -->|"invokes"| WR
 
     WR -->|"uses"| VAULT
@@ -579,13 +552,13 @@ flowchart TB
 
     MB -->|"mints"| PROC
     MB -->|"mints"| STORED
-    DEF -->|"burns"| STORED
 
     STATE -.->|"identifies"| MB
     STATE -.->|"identifies"| ISM
-    STATE -.->|"identifies"| REG
     STATE -.->|"identifies"| WR
 ```
+
+The relayer resolves recipients via O(1) NFT queries using the state NFT policy as Hyperlane address. No registry contract is needed.
 
 ### Recipient Types
 
@@ -594,12 +567,11 @@ flowchart TB
     subgraph Types["Recipient Types"]
         GEN["Generic<br/>Simple state update"]
         TOK["TokenReceiver<br/>Releases/mints tokens"]
-        DEF["Deferred<br/>Two-phase processing"]
     end
 
     subgraph Generic["Generic Flow"]
         G1["Relayer builds full tx"]
-        G2["State in → State out"]
+        G2["State in -> State out"]
         G3["No extra outputs"]
     end
 
@@ -609,16 +581,8 @@ flowchart TB
         T3["Sends to recipient address"]
     end
 
-    subgraph Deferred["Deferred Flow"]
-        D1["Phase 1: Store message"]
-        D2["Mint message NFT"]
-        D3["Phase 2: Process later"]
-        D4["Burn message NFT"]
-    end
-
     GEN --> G1 --> G2 --> G3
     TOK --> T1 --> T2 --> T3
-    DEF --> D1 --> D2 --> D3 --> D4
 ```
 
 ---
@@ -670,16 +634,17 @@ New validator address: addr_test1w_NEW_HASH...
 
 The design does preserve **replay protection** across mailbox deployments:
 
-| Component | Stability | Notes |
-|-----------|-----------|-------|
-| `mailbox_policy_id` (state NFT) | Fixed at init | Determined by seed UTXO |
-| `processed_messages_nft_policy` | Stable | Parameterized by `mailbox_policy_id` |
-| `mailbox_script_hash` | **Changes** | Hash of validator code |
-| Mailbox address | **Changes** | Derived from script hash |
-| Merkle tree state | **Lost** | Locked at old address |
-| Pending messages | **Orphaned** | Cannot be relayed |
+| Component                       | Stability     | Notes                                |
+| ------------------------------- | ------------- | ------------------------------------ |
+| `mailbox_policy_id` (state NFT) | Fixed at init | Determined by seed UTXO              |
+| `processed_messages_nft_policy` | Stable        | Parameterized by `mailbox_policy_id` |
+| `mailbox_script_hash`           | **Changes**   | Hash of validator code               |
+| Mailbox address                 | **Changes**   | Derived from script hash             |
+| Merkle tree state               | **Lost**      | Locked at old address                |
+| Pending messages                | **Orphaned**  | Cannot be relayed                    |
 
 This means if a new mailbox is deployed with the **same seed UTXO** (same `mailbox_policy_id`), the processed message NFTs remain valid. However, this is not practically useful since:
+
 1. The merkle tree state cannot be migrated
 2. In-flight outbound messages cannot be relayed (wrong merkle root)
 3. In-flight inbound messages cannot be processed (wrong mailbox address)
@@ -726,6 +691,7 @@ Block N+2: Message 3 spends Mailbox v3 → creates Mailbox v4
 ```
 
 **Impact:**
+
 - Maximum throughput: ~1 message per block (~3 messages/minute)
 - Messages to different recipients still sequential (mailbox contention)
 - Relayer queue grows during traffic spikes
@@ -746,16 +712,19 @@ Multiple dispatches cannot be included in the same block unless batched into a s
 #### Mitigation Strategies
 
 **Current:**
+
 - Retry with backoff on UTXO contention errors
 - Sequential processing with queue management
 
 **Future optimization:**
+
 - Convert Mailbox and ISM to minting policies (eliminates their contention)
 - See [FUTURE_OPTIMIZATIONS.md](./FUTURE_OPTIMIZATIONS.md) for detailed design
 
 #### When This Matters
 
 The limitation becomes relevant when:
+
 - Sustained message volume exceeds ~100/hour
 - Multiple applications share the same mailbox
 - Low-latency delivery is required
@@ -768,24 +737,34 @@ For most initial deployments, this limitation is acceptable.
 
 ### Hyperlane Address Format
 
-Cardano script hashes (28 bytes) are padded to 32 bytes for Hyperlane compatibility:
+Cardano uses 28-byte identifiers (script hashes and policy IDs) that must be padded to 32 bytes for Hyperlane compatibility. Two prefix types distinguish the identifier kind:
+
+- `0x01000000` -- NFT minting policy ID (used by warp routes and new recipients)
+- `0x02000000` -- Script hash credential (used by mailbox, ISM)
 
 ```
-Cardano Script Hash: 0x1234567890abcdef... (28 bytes)
-Hyperlane Address:   0x020000001234567890abcdef... (32 bytes)
-                       ^^^^^^^^
-                       Prefix: 0x02000000 = Script credential
+Cardano Script Hash:        0x1234567890abcdef... (28 bytes)
+Hyperlane Address (script): 0x020000001234567890abcdef... (32 bytes)
+                              ^^^^^^^^
+                              Prefix: 0x02000000 = Script credential
+
+State NFT Policy ID:        0xabcdef1234567890... (28 bytes)
+Hyperlane Address (NFT):    0x01000000abcdef1234567890... (32 bytes)
+                              ^^^^^^^^
+                              Prefix: 0x01000000 = NFT policy (warp routes)
 ```
+
+Warp routes and other recipients that use state NFTs are identified by their NFT policy ID with the `0x01000000` prefix. Core protocol contracts (mailbox, ISM) use the script hash with the `0x02000000` prefix.
 
 ### Domain IDs
 
-| Chain | Domain ID |
-|-------|-----------|
-| Cardano Preview | 2003 |
-| Fuji (Avalanche) | 43113 |
-| Ethereum Mainnet | 1 |
-| Ethereum Sepolia | 11155111 |
+| Chain            | Domain ID |
+| ---------------- | --------- |
+| Cardano Preview  | 2003      |
+| Fuji (Avalanche) | 43113     |
+| Ethereum Mainnet | 1         |
+| Ethereum Sepolia | 11155111  |
 
 ---
 
-*Last Updated: January 2025*
+_Last Updated: February 2025_

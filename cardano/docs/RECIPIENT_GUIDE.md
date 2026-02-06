@@ -1,6 +1,6 @@
 # Hyperlane Cardano Recipient Developer Guide
 
-This guide explains how to build a Hyperlane-compatible recipient contract on Cardano and register it with the Hyperlane relayer network.
+This guide explains how to build a Hyperlane-compatible recipient contract on Cardano.
 
 ## Overview
 
@@ -95,97 +95,29 @@ validator my_recipient(mailbox_hash: ScriptHash) {
 ## State UTXO Pattern
 
 Your recipient must have a **state UTXO** that:
+
 1. Is at your script address
 2. Contains an NFT marker for unique identification
 3. Stores your contract state in an inline datum
 
 The NFT marker pattern:
+
 - Mint a unique NFT (policy ID + asset name)
 - The NFT stays in the state UTXO
 - The relayer uses this NFT to find your state UTXO
 
-## Registration
+## Recipient Addressing
 
-To receive messages, you must register your recipient in the Hyperlane Registry.
+On Cardano, there is no separate registry contract. A recipient's Hyperlane address is derived directly from its state NFT policy ID.
 
-### Registration Data
+### How It Works
 
-```rust
-struct RecipientRegistration {
-    // Your script hash (28 bytes)
-    script_hash: ScriptHash,
+1. Your recipient deploys with a unique state NFT (minted via a one-shot policy).
+2. The recipient's Hyperlane address is `0x01000000{state_nft_policy_id}` (the policy ID prefixed with `0x01000000`).
+3. The relayer discovers recipients via an O(1) NFT query -- it finds the state UTXO by looking up the NFT policy on-chain.
+4. Remote chains enroll `0x01000000{state_nft_policy_id}` as the Cardano recipient address.
 
-    // How to find your state UTXO
-    state_locator: UtxoLocator {
-        policy_id: String,   // NFT policy ID
-        asset_name: String,  // NFT asset name
-    },
-
-    // Additional UTXOs needed for your contract
-    additional_inputs: Vec<AdditionalInput>,
-
-    // What type of recipient
-    recipient_type: RecipientType,
-
-    // Optional custom ISM
-    custom_ism: Option<ScriptHash>,
-}
-```
-
-### Using the Registration CLI
-
-```bash
-# Set your Blockfrost API key
-export BLOCKFROST_API_KEY=your_api_key
-
-# Register a generic handler
-cardano_register \
-    --script-hash "your_script_hash_hex" \
-    --state-policy "your_nft_policy_id" \
-    --state-asset "your_nft_asset_name" \
-    --recipient-type generic \
-    --network preprod \
-    --dry-run
-
-# Register a token receiver
-cardano_register \
-    --script-hash "your_script_hash_hex" \
-    --state-policy "your_nft_policy_id" \
-    --state-asset "your_nft_asset_name" \
-    --recipient-type token-receiver \
-    --vault-policy "vault_policy_id" \
-    --vault-asset "vault_asset_name" \
-    --network preprod
-
-# Register a deferred recipient (for deferred processing)
-cardano_register \
-    --script-hash "your_script_hash_hex" \
-    --state-policy "your_nft_policy_id" \
-    --state-asset "your_nft_asset_name" \
-    --recipient-type deferred-recipient \
-    --message-policy "message_nft_policy_id" \
-    --network preprod
-
-# With additional inputs
-cardano_register \
-    --script-hash "your_script_hash_hex" \
-    --state-policy "your_nft_policy_id" \
-    --state-asset "your_nft_asset_name" \
-    --additional-input "oracle:oracle_policy:price_feed:false" \
-    --recipient-type generic \
-    --network preprod
-```
-
-### Recipient Types
-
-1. **Generic**: Basic state-in, state-out pattern. The relayer builds a transaction that spends your state UTXO and creates a continuation output.
-
-2. **TokenReceiver**: For warp routes and token bridges. Can include:
-   - `vault_locator`: UTXO holding locked tokens
-   - `minting_policy`: For synthetic token minting
-
-3. **Deferred**: For complex recipients where the relayer cannot know how to build outputs. Messages are stored on-chain for later processing:
-   - `message_policy`: The minting policy for message NFTs (proves message legitimacy)
+No registration transaction is needed. The act of deploying your contract with a state NFT is sufficient for the relayer to find it.
 
 ## Transaction Flow
 
@@ -213,11 +145,14 @@ When a message is delivered to your recipient:
 
 ## Deferred Pattern (Deferred Message Processing)
 
+**Note:** The Deferred pattern exists in the on-chain contracts but is not currently integrated with the relayer's recipient resolver. The contracts are available for use, but the relayer does not handle Deferred recipients specially at this time.
+
 The Deferred pattern is designed for complex recipients where the Hyperlane relayer cannot know how to build the transaction outputs. Instead of processing messages immediately, they are stored on-chain for later processing by a separate process (which could be an automated service, a dApp, manual intervention, or any other mechanism operated by the recipient team).
 
 ### When to Use Deferred
 
 Use Deferred when your recipient needs to:
+
 - Create complex or variable output UTXOs that the relayer can't predict
 - Interact with external protocols in ways that require custom transaction building
 - Implement business logic that requires off-chain computation
@@ -387,20 +322,6 @@ validator deferred_recipient(mailbox_policy_id: PolicyId, message_nft_policy: Po
 }
 ```
 
-#### 3. Register the Deferred Recipient
-
-```bash
-# Register your Deferred recipient
-hyperlane-cardano registry register \
-    --script-hash "your_deferred_recipient_hash" \
-    --state-policy "your_state_nft_policy" \
-    --state-asset "your_state_nft_name" \
-    --recipient-type deferred-recipient \
-    --message-policy "your_message_nft_policy" \
-    --signing-key your_key.skey \
-    --network preprod
-```
-
 ### Processing Stored Messages
 
 To process stored messages, you need to:
@@ -439,6 +360,7 @@ hyperlane-cardano deferred list \
 ```
 
 Example output:
+
 ```
 Listing pending deferred messages...
   Recipient: addr_test1wz...
@@ -462,6 +384,7 @@ hyperlane-cardano deferred show \
 ```
 
 Example output:
+
 ```
 Fetching message details...
 
@@ -506,6 +429,7 @@ hyperlane-cardano deferred process \
 ```
 
 **Parameters:**
+
 - `--message-utxo`: The UTXO containing the stored message (format: `txhash#index`)
 - `--recipient-state-policy`: Policy ID of the recipient's state NFT (used to find the state UTXO)
 - `--recipient-state-asset`: Asset name of the state NFT (default: empty for unit token)
@@ -560,6 +484,7 @@ async fn process_pending_messages(
 ```
 
 Example query (using Blockfrost API directly):
+
 ```bash
 # Find message UTXOs with your NFT policy
 curl "https://cardano-preprod.blockfrost.io/api/v0/addresses/${DEFERRED_RECIPIENT_ADDRESS}/utxos/${MESSAGE_NFT_POLICY}" \
@@ -592,6 +517,7 @@ fn handle_message(..., mailbox_hash: ScriptHash) -> Bool {
 ```
 
 This ensures:
+
 1. The message was validated by the ISM
 2. A processed message marker will be created (preventing replay)
 3. The full Hyperlane security guarantees apply
@@ -631,9 +557,6 @@ type MyDatum = HyperlaneRecipientDatum<MyState> {
 ### Integration Testing
 
 ```bash
-# Query the registry to verify your registration
-# (Use Blockfrost or cardano-cli)
-
 # Send a test message through Hyperlane
 # (From an EVM testnet or other connected chain)
 
@@ -642,19 +565,19 @@ type MyDatum = HyperlaneRecipientDatum<MyState> {
 
 ## Common Issues
 
-### "Recipient not registered"
-- Ensure your registration is in the registry
-- Verify the script hash matches exactly
-
 ### "State UTXO not found"
-- Check that your state NFT exists
-- Verify the policy ID and asset name in registration
+
+- Check that your state NFT exists on-chain
+- Verify the NFT policy ID matches the Hyperlane address enrolled on the remote chain
+- Ensure the state UTXO contains the NFT with the expected policy ID
 
 ### "Mailbox validation failed"
+
 - Ensure you're checking `has_script_input(tx, mailbox_hash)`
 - The mailbox hash must be the correct one for the network
 
 ### "ISM verification failed"
+
 - Check that your custom ISM (if any) is correctly configured
 - Ensure the relayer has access to validator signatures
 
@@ -663,14 +586,17 @@ type MyDatum = HyperlaneRecipientDatum<MyState> {
 See the `contracts/validators/` directory for example implementations:
 
 ### Example Recipients
+
 - `example_generic_recipient.ak` - Basic Generic recipient example (immediate processing)
 - `example_deferred_recipient.ak` - Deferred recipient example (deferred processing)
 
 ### Core Contracts
+
 - `mailbox.ak` - The mailbox contract (for understanding the message flow)
 - `multisig_ism.ak` - The default multisig ISM (signature verification)
 
 ### Deferred Components
+
 - `deferred_recipient.ak` - Production Deferred recipient validator
 - `stored_message_nft.ak` - Message NFT minting policy for Deferred
 
