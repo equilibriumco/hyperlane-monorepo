@@ -36,10 +36,9 @@ pub struct ConnectionConf {
     /// When set, the transaction will use this as a reference input instead of including
     /// the script in the witness set. This is the preferred method.
     pub mailbox_reference_script_utxo: Option<String>,
-    /// Registry policy ID (hex)
-    pub registry_policy_id: String,
-    /// Registry asset name hex - the asset name for the state NFT (e.g., "5265676973747279205374617465" for "Registry State")
-    pub registry_asset_name_hex: String,
+    /// Warp route reference script UTXO (format: "tx_hash#output_index")
+    /// Shared reference script for all warp routes on this mailbox
+    pub warp_route_reference_script_utxo: Option<String>,
     /// ISM policy ID (hex) - state NFT minting policy for NFT lookups
     pub ism_policy_id: String,
     /// ISM asset name hex - the asset name for the state NFT (e.g., "49534d205374617465" for "ISM State")
@@ -75,8 +74,7 @@ pub struct RawConnectionConf {
     processed_messages_nft_script_cbor: Option<String>,
     mailbox_script_cbor: Option<String>,
     mailbox_reference_script_utxo: Option<String>,
-    registry_policy_id: Option<String>,
-    registry_asset_name_hex: Option<String>,
+    warp_route_reference_script_utxo: Option<String>,
     ism_policy_id: Option<String>,
     ism_asset_name_hex: Option<String>,
     ism_script_hash: Option<String>,
@@ -174,13 +172,8 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .processed_messages_script_hash
             .unwrap_or_else(|| mailbox_script_hash.clone());
 
-        let registry_policy_id = raw
-            .registry_policy_id
-            .ok_or(MissingPolicyId("registry"))
-            .into_config_result(|| cwp.join("registry_policy_id"))?;
-
-        // Registry asset name hex defaults to empty string for backwards compatibility
-        let registry_asset_name_hex = raw.registry_asset_name_hex.unwrap_or_default();
+        // Warp route shared reference script UTXO (optional)
+        let warp_route_reference_script_utxo = raw.warp_route_reference_script_utxo;
 
         let ism_policy_id = raw
             .ism_policy_id
@@ -233,8 +226,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             processed_messages_nft_script_cbor,
             mailbox_script_cbor,
             mailbox_reference_script_utxo,
-            registry_policy_id,
-            registry_asset_name_hex,
+            warp_route_reference_script_utxo,
             ism_policy_id,
             ism_asset_name_hex,
             ism_script_hash,

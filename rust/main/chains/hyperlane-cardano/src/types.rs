@@ -273,50 +273,6 @@ pub enum MultisigIsmRedeemer {
     },
 }
 
-/// Additional input specification (matches Aiken AdditionalInput)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdditionalInput {
-    pub name: String,
-    pub locator: UtxoLocator,
-    pub must_be_spent: bool,
-}
-
-/// Recipient type (matches Aiken RecipientType)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RecipientType {
-    Generic,
-    TokenReceiver {
-        vault_locator: Option<UtxoLocator>,
-        minting_policy: Option<ScriptHash>,
-    },
-    /// Defer message processing to a separate bot
-    Deferred {
-        /// Minting policy for message NFTs (proves message is legitimate)
-        message_policy: ScriptHash,
-    },
-}
-
-/// Recipient registration (matches Aiken RecipientRegistration)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipientRegistration {
-    pub script_hash: ScriptHash,
-    /// Owner verification key hash (who can update/remove this registration)
-    pub owner: [u8; 28],
-    pub state_locator: UtxoLocator,
-    /// NFT locator for reference script UTXO (None = script embedded in state UTXO)
-    pub reference_script_locator: Option<UtxoLocator>,
-    pub additional_inputs: Vec<AdditionalInput>,
-    pub recipient_type: RecipientType,
-    pub custom_ism: Option<ScriptHash>,
-}
-
-/// Registry datum (matches Aiken RegistryDatum)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegistryDatum {
-    pub registrations: Vec<RecipientRegistration>,
-    pub owner: [u8; 28], // VerificationKeyHash
-}
-
 /// Hyperlane recipient datum wrapper (matches Aiken HyperlaneRecipientDatum)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HyperlaneRecipientDatum<T> {
@@ -344,55 +300,6 @@ pub enum HyperlaneRecipientRedeemer<T> {
     },
 }
 
-// ============================================================================
-// Deferred Recipient Types (for complex recipients with deferred processing)
-// ============================================================================
-
-/// Stored message datum for Deferred recipient pattern (matches Aiken StoredMessageDatum)
-/// This is stored in the message UTXO created by the relayer
-/// A bot later processes this UTXO and burns the message NFT
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredMessageDatum {
-    /// Source chain domain
-    pub origin: Domain,
-    /// Sender address on origin chain (32 bytes)
-    pub sender: HyperlaneAddress,
-    /// Message payload
-    pub body: Vec<u8>,
-    /// Message ID (32 bytes) - used as NFT asset name
-    pub message_id: [u8; 32],
-    /// Nonce from the original message (for ordering)
-    pub nonce: u32,
-}
-
-/// Redeemer for message NFT minting policy (matches Aiken MessageNftRedeemer)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MessageNftRedeemer {
-    /// Mint a message NFT when storing a message
-    MintMessage,
-    /// Burn a message NFT when processing a stored message
-    BurnMessage,
-}
-
-/// Contract-specific redeemer for Deferred recipients (matches Aiken DeferredAction)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DeferredAction {
-    /// Process a stored message (called by bot)
-    ProcessStoredMessage {
-        /// The message ID being processed (must match NFT asset name)
-        message_id: [u8; 32],
-    },
-}
-
-/// Inner state for deferred recipient (matches Aiken DeferredInner)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeferredInner {
-    /// Count of messages received (for tracking)
-    pub messages_stored: u64,
-    /// Count of messages processed by bot
-    pub messages_processed: u64,
-}
-
 /// Convert a Cardano script hash to Hyperlane address
 pub fn script_hash_to_hyperlane_address(hash: &ScriptHash) -> HyperlaneAddress {
     let mut addr = [0u8; 32];
@@ -404,6 +311,44 @@ pub fn script_hash_to_hyperlane_address(hash: &ScriptHash) -> HyperlaneAddress {
     // Copy the 28-byte script hash
     addr[4..32].copy_from_slice(hash);
     addr
+}
+
+/// Convert a minting policy ID to Hyperlane address (0x01 prefix)
+pub fn policy_id_to_hyperlane_address(id: &[u8; 28]) -> HyperlaneAddress {
+    let mut addr = [0u8; 32];
+    addr[0] = 0x01;
+    addr[4..32].copy_from_slice(id);
+    addr
+}
+
+/// Extract policy ID from Hyperlane address (if 0x01 prefix)
+pub fn hyperlane_address_to_policy_id(addr: &HyperlaneAddress) -> Option<[u8; 28]> {
+    if addr[0] == 0x01 && addr[1] == 0x00 && addr[2] == 0x00 && addr[3] == 0x00 {
+        let mut id = [0u8; 28];
+        id.copy_from_slice(&addr[4..32]);
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// Convert policy ID to H256 (with 0x01 prefix)
+pub fn policy_id_to_h256(id: &[u8; 28]) -> H256 {
+    let mut h = [0u8; 32];
+    h[0] = 0x01;
+    h[4..32].copy_from_slice(id);
+    H256(h)
+}
+
+/// Extract policy ID from H256 (if 0x01 prefix)
+pub fn h256_to_policy_id(h: &H256) -> Option<[u8; 28]> {
+    if h.0[0] == 0x01 && h.0[1] == 0x00 && h.0[2] == 0x00 && h.0[3] == 0x00 {
+        let mut id = [0u8; 28];
+        id.copy_from_slice(&h.0[4..32]);
+        Some(id)
+    } else {
+        None
+    }
 }
 
 /// Convert a Hyperlane address to Cardano script hash
@@ -476,6 +421,7 @@ pub struct WarpRouteDatum {
     pub config: WarpRouteConfig,
     pub owner: [u8; 28], // VerificationKeyHash
     pub total_bridged: i64,
+    pub ism: Option<ScriptHash>,
 }
 
 /// Warp route redeemer (matches Aiken WarpRouteRedeemer)
@@ -605,17 +551,47 @@ mod tests {
 
     #[test]
     fn test_hyperlane_address_to_script_hash_invalid() {
-        // Not a script credential - use 0x01 prefix which is invalid
-        // Valid prefixes are 0x02000000 (canonical) and 0x00000000 (legacy/compat)
+        // 0x01 prefix is now a valid policy ID prefix, not a script hash
         let mut addr: HyperlaneAddress = [0x00; 32];
-        addr[0] = 0x01; // Invalid prefix
+        addr[0] = 0x01;
         assert!(hyperlane_address_to_script_hash(&addr).is_none());
 
-        // Also test with non-zero bytes in positions 1-3
+        // Non-zero bytes in positions 1-3 also invalid
         let mut addr2: HyperlaneAddress = [0x00; 32];
         addr2[0] = 0x02;
         addr2[1] = 0x01; // Invalid: must be 0x02000000
         assert!(hyperlane_address_to_script_hash(&addr2).is_none());
+    }
+
+    #[test]
+    fn test_policy_id_conversion() {
+        let id: [u8; 28] = [0xab; 28];
+        let addr = policy_id_to_hyperlane_address(&id);
+
+        assert_eq!(addr[0..4], [0x01, 0x00, 0x00, 0x00]);
+
+        let recovered = hyperlane_address_to_policy_id(&addr).unwrap();
+        assert_eq!(recovered, id);
+    }
+
+    #[test]
+    fn test_policy_id_h256_conversion() {
+        let id: [u8; 28] = [0xcd; 28];
+        let h = policy_id_to_h256(&id);
+
+        assert_eq!(h.0[0], 0x01);
+        assert_eq!(&h.0[4..32], &id);
+
+        let recovered = h256_to_policy_id(&h).unwrap();
+        assert_eq!(recovered, id);
+    }
+
+    #[test]
+    fn test_policy_id_from_script_hash_returns_none() {
+        let hash: ScriptHash = [0x12; 28];
+        let addr = script_hash_to_hyperlane_address(&hash);
+        // 0x02 prefix should not parse as policy ID
+        assert!(hyperlane_address_to_policy_id(&addr).is_none());
     }
 
     #[test]

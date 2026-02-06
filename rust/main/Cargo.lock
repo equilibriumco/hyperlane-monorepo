@@ -6016,7 +6016,6 @@ dependencies = [
  "blake2",
  "blockfrost",
  "ciborium",
- "clap",
  "derive-new",
  "ed25519-dalek",
  "hex 0.4.3",
