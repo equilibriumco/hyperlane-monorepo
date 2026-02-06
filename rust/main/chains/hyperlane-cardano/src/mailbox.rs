@@ -1,8 +1,11 @@
 use crate::blockfrost_provider::{BlockfrostProvider, Utxo};
 use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
+use crate::recipient_resolver::RecipientResolver;
 use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents};
-use crate::types::{MailboxDatum, MerkleTreeState};
+use crate::types::{
+    hyperlane_address_to_policy_id, script_hash_to_h256, MailboxDatum, MerkleTreeState,
+};
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use hyperlane_core::accumulator::incremental::IncrementalMerkle;
@@ -26,6 +29,7 @@ pub struct CardanoMailbox {
     conf: ConnectionConf,
     payer: Option<Keypair>,
     tx_builder: HyperlaneTxBuilder,
+    resolver: RecipientResolver,
 }
 
 impl CardanoMailbox {
@@ -36,6 +40,10 @@ impl CardanoMailbox {
     ) -> ChainResult<Self> {
         let provider = Arc::new(BlockfrostProvider::new(&conf.api_key, conf.network));
         let tx_builder = HyperlaneTxBuilder::new(conf, provider.clone());
+        let resolver = RecipientResolver::new(
+            BlockfrostProvider::new(&conf.api_key, conf.network),
+            conf.warp_route_reference_script_utxo.clone(),
+        );
 
         Ok(CardanoMailbox {
             domain: locator.domain.clone(),
@@ -44,6 +52,7 @@ impl CardanoMailbox {
             conf: conf.clone(),
             payer,
             tx_builder,
+            resolver,
         })
     }
 
@@ -427,9 +436,20 @@ impl Mailbox for CardanoMailbox {
         Ok(H256(h))
     }
 
-    async fn recipient_ism(&self, _recipient: H256) -> ChainResult<H256> {
-        // TODO: Query the registry to get recipient-specific ISM
-        // For now, return the default ISM
+    async fn recipient_ism(&self, recipient: H256) -> ChainResult<H256> {
+        let recipient_bytes: [u8; 32] = recipient.into();
+        if hyperlane_address_to_policy_id(&recipient_bytes).is_some() {
+            match self.resolver.resolve(&recipient_bytes).await {
+                Ok(resolved) => {
+                    if let Some(ism_hash) = resolved.ism {
+                        return Ok(script_hash_to_h256(&ism_hash));
+                    }
+                }
+                Err(e) => {
+                    debug!("Could not resolve recipient ISM, using default: {e}");
+                }
+            }
+        }
         self.default_ism().await
     }
 

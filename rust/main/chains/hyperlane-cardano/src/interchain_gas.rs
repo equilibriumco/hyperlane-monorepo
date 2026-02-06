@@ -464,6 +464,8 @@ mod tests {
             inline_datum: None,
             data_hash: None,
             reference_script_hash: None,
+            collateral: false,
+            reference: false,
         }
     }
 

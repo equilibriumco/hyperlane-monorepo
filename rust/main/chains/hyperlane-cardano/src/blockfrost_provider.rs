@@ -283,6 +283,25 @@ impl BlockfrostProvider {
         })
     }
 
+    /// Fetch a specific UTXO by transaction hash and output index
+    #[instrument(skip(self))]
+    pub async fn get_utxo(
+        &self,
+        tx_hash: &str,
+        output_index: u32,
+    ) -> Result<Utxo, BlockfrostProviderError> {
+        let tx_utxos = self.get_transaction_utxos(tx_hash).await?;
+        tx_utxos
+            .outputs
+            .into_iter()
+            .find(|o| o.output_index == output_index)
+            .ok_or_else(|| {
+                BlockfrostProviderError::UtxoNotFound(format!(
+                    "Output #{output_index} not found in tx {tx_hash}"
+                ))
+            })
+    }
+
     /// Get script datum by hash (returns JSON representation)
     #[instrument(skip(self))]
     pub async fn get_datum(&self, datum_hash: &str) -> Result<String, BlockfrostProviderError> {

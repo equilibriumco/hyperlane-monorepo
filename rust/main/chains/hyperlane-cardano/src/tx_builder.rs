@@ -8,11 +8,8 @@ use crate::blockfrost_provider::{
     BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo,
 };
 use crate::cardano::Keypair;
-use crate::registry::RecipientRegistry;
-use crate::types::{
-    hyperlane_address_to_script_hash, HyperlaneRecipientRedeemer, MailboxRedeemer, Message,
-    ProcessedMessageDatum,
-};
+use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
+use crate::types::{HyperlaneRecipientRedeemer, MailboxRedeemer, Message, ProcessedMessageDatum};
 use crate::ConnectionConf;
 use hyperlane_core::{
     ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256,
@@ -34,8 +31,8 @@ use tracing::{debug, info, instrument, warn};
 pub enum TxBuilderError {
     #[error("Blockfrost error: {0}")]
     Blockfrost(#[from] BlockfrostProviderError),
-    #[error("Registry error: {0}")]
-    Registry(#[from] crate::registry::RegistryError),
+    #[error("Resolver error: {0}")]
+    Resolver(#[from] ResolverError),
     #[error("Invalid recipient: {0}")]
     InvalidRecipient(String),
     #[error("UTXO not found: {0}")]
@@ -110,7 +107,7 @@ impl From<TxBuilderError> for ChainCommunicationError {
 /// Transaction builder for Hyperlane Cardano operations
 pub struct HyperlaneTxBuilder {
     provider: Arc<BlockfrostProvider>,
-    registry: RecipientRegistry,
+    resolver: RecipientResolver,
     conf: ConnectionConf,
     /// Cached protocol parameter: lovelace cost per UTXO byte
     coins_per_utxo_byte: OnceCell<u64>,
@@ -119,15 +116,14 @@ pub struct HyperlaneTxBuilder {
 impl HyperlaneTxBuilder {
     /// Create a new transaction builder
     pub fn new(conf: &ConnectionConf, provider: Arc<BlockfrostProvider>) -> Self {
-        let registry = RecipientRegistry::new(
+        let resolver = RecipientResolver::new(
             BlockfrostProvider::new(&conf.api_key, conf.network),
-            conf.registry_policy_id.clone(),
-            conf.registry_asset_name_hex.clone(),
+            conf.warp_route_reference_script_utxo.clone(),
         );
 
         Self {
             provider,
-            registry,
+            resolver,
             conf: conf.clone(),
             coins_per_utxo_byte: OnceCell::new(),
         }
@@ -302,100 +298,49 @@ impl HyperlaneTxBuilder {
             mailbox_utxo.tx_hash, mailbox_utxo.output_index
         );
 
-        // 2. Get recipient registration from registry
-        let recipient_script_hash =
-            hyperlane_address_to_script_hash(&msg.recipient).ok_or_else(|| {
-                TxBuilderError::InvalidRecipient("Not a script recipient".to_string())
-            })?;
+        // 2. Resolve recipient via NFT policy ID query (replaces registry lookup)
+        let resolved = self.resolver.resolve(&msg.recipient).await?;
+        let recipient_utxo = resolved.state_utxo;
         info!(
-            "Looking up recipient registration for script hash: {}",
-            hex::encode(recipient_script_hash)
+            "Resolved recipient: script_hash={}, kind={:?}",
+            hex::encode(resolved.script_hash),
+            resolved.recipient_kind
         );
 
-        let registration = self
-            .registry
-            .get_registration(&recipient_script_hash)
-            .await?;
-        info!("Registration found for script_hash={}: state_locator.policy_id={}, state_locator.asset_name={}, recipient_type={:?}",
-              hex::encode(recipient_script_hash),
-              registration.state_locator.policy_id,
-              registration.state_locator.asset_name,
-              registration.recipient_type);
-
-        // 3. Find recipient state UTXO
-        let recipient_utxo = self
-            .provider
-            .find_utxo_by_nft(
-                &registration.state_locator.policy_id,
-                &registration.state_locator.asset_name,
-            )
-            .await?;
-        info!(
-            "Found recipient state UTXO: {}#{}",
-            recipient_utxo.tx_hash, recipient_utxo.output_index
-        );
-
-        // 3b. Find recipient reference script UTXO (if separate from state UTXO)
-        let recipient_ref_script_utxo =
-            if let Some(ref ref_locator) = registration.reference_script_locator {
-                let ref_utxo = self
-                    .provider
-                    .find_utxo_by_nft(&ref_locator.policy_id, &ref_locator.asset_name)
-                    .await?;
-                info!(
-                    "Found recipient reference script UTXO: {}#{}",
-                    ref_utxo.tx_hash, ref_utxo.output_index
-                );
-                Some(ref_utxo)
-            } else {
-                debug!("No separate reference script UTXO, script embedded in state UTXO");
-                None
-            };
-
-        // 3c. For deferred recipients, find the stored_message_nft reference script UTXO
-        // The CLI deploys this with asset name "msg_ref" (hex: 6d73675f726566) at the same policy ID
-        let message_nft_ref_script_utxo = if matches!(
-            registration.recipient_type,
-            crate::types::RecipientType::Deferred { .. }
-        ) {
-            if let Some(ref ref_locator) = registration.reference_script_locator {
-                // Look up using the same policy ID but with "msg_ref" asset name
-                let msg_ref_asset_name = "6d73675f726566".to_string(); // "msg_ref" in hex
-                match self
-                    .provider
-                    .find_utxo_by_nft(&ref_locator.policy_id, &msg_ref_asset_name)
-                    .await
-                {
-                    Ok(msg_ref_utxo) => {
+        // 3. Find recipient reference script UTXO from shared config
+        let recipient_ref_script_utxo = if let Some(ref ref_utxo_str) =
+            self.conf.warp_route_reference_script_utxo
+        {
+            let parts: Vec<&str> = ref_utxo_str.split('#').collect();
+            if parts.len() == 2 {
+                let tx_hash = parts[0].to_string();
+                let output_index: u32 = parts[1].parse().map_err(|e| {
+                    TxBuilderError::Encoding(format!("Invalid ref script UTXO output index: {e}"))
+                })?;
+                match self.provider.get_utxo(&tx_hash, output_index).await {
+                    Ok(utxo) => {
                         info!(
-                            "Found message NFT reference script UTXO: {}#{}",
-                            msg_ref_utxo.tx_hash, msg_ref_utxo.output_index
+                            "Found shared reference script UTXO: {}#{}",
+                            utxo.tx_hash, utxo.output_index
                         );
-                        Some(msg_ref_utxo)
+                        Some(utxo)
                     }
                     Err(e) => {
-                        // This might happen for legacy deployments without the msg_ref NFT
-                        warn!(
-                            "Could not find msg_ref NFT for deferred recipient (policy: {}): {}. \
-                             The stored_message_nft script may need to be in the relayer config.",
-                            ref_locator.policy_id, e
-                        );
+                        warn!("Could not fetch shared ref script UTXO: {e}");
                         None
                     }
                 }
             } else {
-                debug!(
-                    "No reference_script_locator for deferred recipient, cannot look up msg_ref"
-                );
+                warn!("Invalid warp_route_reference_script_utxo format: {ref_utxo_str}");
                 None
             }
         } else {
+            debug!("No shared reference script UTXO configured");
             None
         };
 
-        // 4. Find ISM UTXO (either custom or default)
-        // For custom ISM, use empty asset name; for default ISM, use config asset name
-        let (ism_policy_id, ism_asset_name) = match &registration.custom_ism {
+        // 4. Find ISM UTXO (either custom from datum or default)
+        let (ism_policy_id, ism_asset_name) = match &resolved.ism {
             Some(ism) => (hex::encode(ism), String::new()),
             None => (
                 self.conf.ism_policy_id.clone(),
@@ -411,27 +356,8 @@ impl HyperlaneTxBuilder {
             ism_utxo.tx_hash, ism_utxo.output_index
         );
 
-        // 5. Find additional inputs required by recipient
-        let mut additional_utxos = Vec::new();
-        info!(
-            "Looking for {} additional inputs from registration",
-            registration.additional_inputs.len()
-        );
-        for input in &registration.additional_inputs {
-            info!(
-                "Finding additional input: name={}, policy_id={}, asset_name={}, must_be_spent={}",
-                input.name, input.locator.policy_id, input.locator.asset_name, input.must_be_spent
-            );
-            let utxo = self
-                .provider
-                .find_utxo_by_nft(&input.locator.policy_id, &input.locator.asset_name)
-                .await?;
-            info!(
-                "Found additional input UTXO: {}#{}, reference_script_hash={:?}",
-                utxo.tx_hash, utxo.output_index, utxo.reference_script_hash
-            );
-            additional_utxos.push((utxo, input.must_be_spent));
-        }
+        // 5. No additional inputs in new architecture (derived from datum)
+        let additional_utxos: Vec<(Utxo, bool)> = Vec::new();
 
         // 6. Encode redeemers
         let mailbox_redeemer = MailboxRedeemer::Process {
@@ -456,12 +382,12 @@ impl HyperlaneTxBuilder {
             expiry
         };
 
-        // Build recipient redeemer based on recipient type
-        // TokenReceiver (warp routes) use WarpRouteRedeemer::ReceiveTransfer
-        // Generic/Deferred use HyperlaneRecipientRedeemer::HandleMessage
-        let recipient_redeemer_cbor = match &registration.recipient_type {
-            crate::types::RecipientType::TokenReceiver { .. } => {
-                info!("TokenReceiver recipient - using WarpRouteRedeemer::ReceiveTransfer with redemption");
+        // Build recipient redeemer based on recipient kind
+        // WarpRoute uses WarpRouteRedeemer::ReceiveTransfer
+        // Generic uses HyperlaneRecipientRedeemer::HandleMessage
+        let recipient_redeemer_cbor = match &resolved.recipient_kind {
+            RecipientKind::WarpRoute => {
+                info!("WarpRoute recipient - using WarpRouteRedeemer::ReceiveTransfer with redemption");
 
                 // Log the original TokenMessage for debugging
                 let token_msg = parse_token_message(&msg.body)?;
@@ -503,40 +429,9 @@ impl HyperlaneTxBuilder {
             }
         };
 
-        // 7. Build recipient continuation datum based on recipient type
-        // For Deferred, we also need to build the stored message datum and NFT mint redeemer
-        let (
-            recipient_continuation_datum_cbor,
-            stored_message_datum_cbor,
-            message_nft_redeemer_cbor,
-        ) = match &registration.recipient_type {
-            crate::types::RecipientType::Deferred { .. } => {
-                info!("Processing Deferred recipient - will store message for later processing");
-
-                // Build Deferred recipient continuation datum (increments messages_stored counter)
-                let continuation_datum = build_deferred_continuation_datum(&recipient_utxo)?;
-
-                // Build StoredMessageDatum for the message UTXO
-                let stored_msg_datum = crate::types::StoredMessageDatum {
-                    origin: msg.origin,
-                    sender: msg.sender,
-                    body: msg.body.clone(),
-                    message_id,
-                    nonce: msg.nonce,
-                };
-                let stored_msg_datum_cbor = encode_stored_message_datum(&stored_msg_datum)?;
-
-                // Build message NFT mint redeemer
-                let nft_redeemer = crate::types::MessageNftRedeemer::MintMessage;
-                let nft_redeemer_cbor = encode_message_nft_redeemer(&nft_redeemer)?;
-
-                (
-                    continuation_datum,
-                    Some(stored_msg_datum_cbor),
-                    Some(nft_redeemer_cbor),
-                )
-            }
-            crate::types::RecipientType::TokenReceiver { .. } => {
+        // 7. Build recipient continuation datum based on recipient kind
+        let recipient_continuation_datum_cbor = match &resolved.recipient_kind {
+            RecipientKind::WarpRoute => {
                 // TokenReceiver (warp routes) need special continuation datum handling
                 // Parse TokenMessage and convert amount for the WarpRouteDatum update
                 let token_msg = parse_token_message(&msg.body)?;
@@ -558,15 +453,11 @@ impl HyperlaneTxBuilder {
                 );
 
                 // Build warp route continuation datum with updated total_bridged
-                let continuation_datum =
-                    build_warp_route_continuation_datum(&recipient_utxo, local_amount)?;
-                (continuation_datum, None, None)
+                build_warp_route_continuation_datum(&recipient_utxo, local_amount)?
             }
-            crate::types::RecipientType::Generic => {
+            RecipientKind::Generic => {
                 // Generic recipients use the standard recipient continuation datum
-                let continuation_datum =
-                    build_recipient_continuation_datum(&recipient_utxo, &msg.body)?;
-                (continuation_datum, None, None)
+                build_recipient_continuation_datum(&recipient_utxo, &msg.body)?
             }
         };
 
@@ -631,7 +522,7 @@ impl HyperlaneTxBuilder {
             ism_redeemer_cbor.len()
         );
 
-        // 11. Handle TokenReceiver - extract release amount, recipient, and token type
+        // 11. Handle WarpRoute - extract release amount, recipient, and token type
         // Funds are released directly from the warp_route UTXO (no separate vault)
         // If redemption is enabled, build redemption datum
         let (
@@ -640,10 +531,7 @@ impl HyperlaneTxBuilder {
             warp_token_type,
             redemption_datum_cbor,
             redemption_script_hash,
-        ) = if matches!(
-            &registration.recipient_type,
-            crate::types::RecipientType::TokenReceiver { .. }
-        ) {
+        ) = if matches!(&resolved.recipient_kind, RecipientKind::WarpRoute) {
             info!("TokenReceiver - preparing release from warp route UTXO");
 
             // Parse TokenMessage format: recipient (32 bytes) || amount (32 bytes uint256)
@@ -779,10 +667,7 @@ impl HyperlaneTxBuilder {
             metadata: metadata.to_vec(),
             message: msg_for_ism,
             ism_redeemer_cbor,
-            recipient_type: registration.recipient_type.clone(),
-            stored_message_datum_cbor,
-            message_nft_redeemer_cbor,
-            message_nft_ref_script_utxo,
+            recipient_kind: resolved.recipient_kind.clone(),
             token_release_amount,
             token_release_recipient,
             warp_token_type,
@@ -1066,17 +951,6 @@ impl HyperlaneTxBuilder {
             debug!(
                 "Added recipient reference script UTXO: {}#{}",
                 ref_utxo.tx_hash, ref_utxo.output_index
-            );
-        }
-
-        // Add message NFT reference script UTXO as reference input (for deferred recipients)
-        // This provides the stored_message_nft minting policy script via reference
-        if let Some(ref msg_ref_utxo) = components.message_nft_ref_script_utxo {
-            let msg_ref_input = utxo_to_input(msg_ref_utxo)?;
-            tx = tx.reference_input(msg_ref_input);
-            debug!(
-                "Added message NFT reference script UTXO: {}#{}",
-                msg_ref_utxo.tx_hash, msg_ref_utxo.output_index
             );
         }
 
@@ -1455,79 +1329,6 @@ impl HyperlaneTxBuilder {
             }
         }
 
-        // 2b. Deferred-specific: Create message UTXO and mint message NFT
-        // This is the UTXO that stores the message on-chain for later processing by a bot
-        if let crate::types::RecipientType::Deferred { message_policy } = &components.recipient_type
-        {
-            info!("Creating Deferred message UTXO with message NFT");
-
-            // Get message NFT policy bytes
-            let message_nft_policy_bytes: Hash<28> = Hash::new(*message_policy);
-
-            // Asset name is the 32-byte message_id
-            let asset_name: Vec<u8> = components.message_id.to_vec();
-
-            // Mint the message NFT (proves message is legitimate)
-            tx = tx
-                .mint_asset(message_nft_policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to mint message NFT: {e:?}"))
-                })?;
-
-            // Create message UTXO at recipient address with StoredMessageDatum and the NFT
-            let recipient_address = parse_address(&components.recipient_utxo.address)?;
-            let stored_datum_cbor =
-                components
-                    .stored_message_datum_cbor
-                    .as_ref()
-                    .ok_or_else(|| {
-                        TxBuilderError::MissingInput(
-                            "Deferred missing stored_message_datum_cbor".to_string(),
-                        )
-                    })?;
-
-            let mut message_utxo_output = Output::new(recipient_address, min_lovelace)
-                .set_inline_datum(stored_datum_cbor.clone());
-
-            // Add the message NFT to this output
-            message_utxo_output = message_utxo_output
-                .add_asset(message_nft_policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| {
-                    TxBuilderError::TxBuild(format!("Failed to add message NFT to output: {e:?}"))
-                })?;
-
-            tx = tx.output(message_utxo_output);
-
-            // Add mint redeemer for message NFT (MintMessage = Constr 0 [])
-            let mint_redeemer_cbor =
-                components
-                    .message_nft_redeemer_cbor
-                    .as_ref()
-                    .ok_or_else(|| {
-                        TxBuilderError::MissingInput(
-                            "Deferred missing message_nft_redeemer_cbor".to_string(),
-                        )
-                    })?;
-            let ex_units_mint = ExUnits {
-                mem: DEFAULT_MEM_UNITS,
-                steps: DEFAULT_STEP_UNITS,
-            };
-            tx = tx.add_mint_redeemer(
-                message_nft_policy_bytes,
-                mint_redeemer_cbor.clone(),
-                Some(ex_units_mint),
-            );
-
-            // Note: The message NFT minting policy script needs to be added as a reference script
-            // This should be configured in ConnectionConf with message_nft_reference_script_utxo
-            // For now, we assume it's provided as a reference input along with the recipient script
-            debug!(
-                "Added message UTXO for Deferred: message_id={}, policy={}",
-                hex::encode(components.message_id),
-                hex::encode(message_policy)
-            );
-        }
-
         // 3. ISM continuation output (same address, same datum, same value)
         // The ISM is spent for verification but must continue with unchanged state
         let ism_output = create_ism_continuation_output(&components.ism_utxo, min_lovelace)?;
@@ -1629,15 +1430,6 @@ impl HyperlaneTxBuilder {
         // (mailbox and recipient continuation outputs return the same value they consume)
         let fee = ESTIMATED_FEE_LOVELACE;
         let processed_marker_cost = processed_marker_min_lovelace;
-        // For Deferred, we also create a message UTXO which needs min_lovelace
-        let message_utxo_cost = if matches!(
-            &components.recipient_type,
-            crate::types::RecipientType::Deferred { .. }
-        ) {
-            min_lovelace
-        } else {
-            0
-        };
 
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
         // to fund both the continuation output AND the recipient/redemption output, payer covers the difference.
@@ -1703,11 +1495,11 @@ impl HyperlaneTxBuilder {
         };
 
         debug!(
-            "Change calculation: total_input={}, fee={}, processed_marker={}, message_utxo={}, recipient_shortfall={}",
-            total_input, fee, processed_marker_cost, message_utxo_cost, recipient_shortfall
+            "Change calculation: total_input={}, fee={}, processed_marker={}, recipient_shortfall={}",
+            total_input, fee, processed_marker_cost, recipient_shortfall
         );
-        let change_amount = total_input
-            .saturating_sub(fee + processed_marker_cost + message_utxo_cost + recipient_shortfall);
+        let change_amount =
+            total_input.saturating_sub(fee + processed_marker_cost + recipient_shortfall);
 
         if change_amount >= min_lovelace {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
@@ -2184,17 +1976,8 @@ pub struct ProcessTxComponents {
     pub message: crate::types::Message,
     /// ISM Verify redeemer CBOR (pre-encoded)
     pub ism_redeemer_cbor: Vec<u8>,
-    /// Recipient type for this message
-    pub recipient_type: crate::types::RecipientType,
-    /// Deferred-specific: Encoded stored message datum (CBOR)
-    /// Only set when recipient_type is Deferred
-    pub stored_message_datum_cbor: Option<Vec<u8>>,
-    /// Deferred-specific: Encoded message NFT mint redeemer (CBOR)
-    /// Only set when recipient_type is Deferred
-    pub message_nft_redeemer_cbor: Option<Vec<u8>>,
-    /// Deferred-specific: Reference script UTXO for stored_message_nft minting policy
-    /// Discovered via the same policy ID as reference_script_locator but with asset name "msg_ref"
-    pub message_nft_ref_script_utxo: Option<Utxo>,
+    /// Recipient kind for this message
+    pub recipient_kind: RecipientKind,
     /// TokenReceiver (warp routes): Transfer amount in local decimals
     /// Funds are released from the warp_route UTXO directly
     pub token_release_amount: Option<u64>,
@@ -2975,12 +2758,14 @@ fn build_warp_route_continuation_datum(
         .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
     // Extract fields from the existing datum
-    // Structure: Constr 0 [config, owner, total_bridged]
-    let (config_field, owner, old_total_bridged) = if let PlutusData::Constr(constr) = decoded {
+    // Structure: Constr 0 [config, owner, total_bridged, ism]
+    let (config_field, owner, old_total_bridged, ism_field) = if let PlutusData::Constr(constr) =
+        decoded
+    {
         let fields: Vec<_> = constr.fields.clone().to_vec();
-        if fields.len() < 3 {
+        if fields.len() < 4 {
             return Err(TxBuilderError::Encoding(
-                "Warp route datum has insufficient fields".to_string(),
+                "Warp route datum has insufficient fields (need 4)".to_string(),
             ));
         }
 
@@ -2993,7 +2778,10 @@ fn build_warp_route_continuation_datum(
 
         let total_bridged = extract_int(&fields[2]).unwrap_or(0);
 
-        (config, owner_bytes, total_bridged)
+        // Preserve ism field as-is (Option<ScriptHash>)
+        let ism = fields[3].clone();
+
+        (config, owner_bytes, total_bridged, ism)
     } else {
         return Err(TxBuilderError::Encoding(
             "Warp route datum is not a Constr".to_string(),
@@ -3007,7 +2795,7 @@ fn build_warp_route_continuation_datum(
         old_total_bridged, new_total_bridged, transfer_amount
     );
 
-    // Build the new warp route datum with same config, owner, and updated total_bridged
+    // Build the new warp route datum with same config, owner, updated total_bridged, and preserved ism
     let plutus_data = PlutusData::Constr(Constr {
         tag: 121, // WarpRouteDatum = constructor 0
         any_constructor: None,
@@ -3015,6 +2803,7 @@ fn build_warp_route_continuation_datum(
             config_field, // Preserve config as-is
             PlutusData::BoundedBytes(owner.into()),
             PlutusData::BigInt(BigInt::Int(new_total_bridged.into())),
+            ism_field, // Preserve ism as-is
         ]),
     });
 
@@ -3409,49 +3198,6 @@ pub fn encode_processed_message_datum(
 }
 
 // ============================================================================
-// Deferred Recipient Encoding Functions
-// ============================================================================
-
-/// Encode a StoredMessageDatum as Plutus Data CBOR
-/// Structure: Constr 0 [origin: Int, sender: ByteArray, body: ByteArray, message_id: ByteArray, nonce: Int]
-pub fn encode_stored_message_datum(
-    datum: &crate::types::StoredMessageDatum,
-) -> Result<Vec<u8>, TxBuilderError> {
-    let plutus_data = PlutusData::Constr(Constr {
-        tag: 121, // Constructor 0
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![
-            PlutusData::BigInt(BigInt::Int((datum.origin as i64).into())),
-            PlutusData::BoundedBytes(datum.sender.to_vec().into()),
-            PlutusData::BoundedBytes(datum.body.clone().into()),
-            PlutusData::BoundedBytes(datum.message_id.to_vec().into()),
-            PlutusData::BigInt(BigInt::Int((datum.nonce as i64).into())),
-        ]),
-    });
-
-    encode_plutus_data(&plutus_data)
-}
-
-/// Encode a MessageNftRedeemer as Plutus Data CBOR
-/// MintMessage = Constr 0 [], BurnMessage = Constr 1 []
-pub fn encode_message_nft_redeemer(
-    redeemer: &crate::types::MessageNftRedeemer,
-) -> Result<Vec<u8>, TxBuilderError> {
-    let tag = match redeemer {
-        crate::types::MessageNftRedeemer::MintMessage => 121, // Constructor 0
-        crate::types::MessageNftRedeemer::BurnMessage => 122, // Constructor 1
-    };
-
-    let plutus_data = PlutusData::Constr(Constr {
-        tag,
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![]),
-    });
-
-    encode_plutus_data(&plutus_data)
-}
-
-// ============================================================================
 // Token Redemption Encoding Functions
 // ============================================================================
 
@@ -3501,131 +3247,6 @@ pub fn encode_redemption_datum(
     });
 
     encode_plutus_data(&plutus_data)
-}
-
-/// Build Deferred continuation datum with updated counters
-/// Structure: HyperlaneRecipientDatum { ism: Option, last_processed_nonce: Option, inner: DeferredInner }
-/// DeferredInner: { messages_stored: Int, messages_processed: Int }
-fn build_deferred_continuation_datum(recipient_utxo: &Utxo) -> Result<Vec<u8>, TxBuilderError> {
-    // Parse the existing datum to extract current state
-    let (ism_opt, old_nonce, messages_stored, messages_processed) =
-        if let Some(datum_str) = &recipient_utxo.inline_datum {
-            parse_deferred_datum(datum_str)?
-        } else {
-            (None, None, 0, 0)
-        };
-
-    // Increment messages_stored (messages_processed stays the same - that's for bot processing)
-    // IMPORTANT: last_processed_nonce must remain unchanged - the validator preserves it
-    let new_messages_stored = messages_stored + 1;
-
-    let plutus_data = build_deferred_datum_plutus(
-        ism_opt.as_deref(),
-        old_nonce, // Keep the same nonce - validator expects it unchanged
-        new_messages_stored,
-        messages_processed,
-    );
-
-    encode_plutus_data(&plutus_data)
-}
-
-/// Build Deferred datum as PlutusData
-fn build_deferred_datum_plutus(
-    ism: Option<&[u8]>,
-    nonce: Option<i64>,
-    messages_stored: i64,
-    messages_processed: i64,
-) -> PlutusData {
-    // HyperlaneRecipientDatum { ism, last_processed_nonce, inner }
-    let ism_field = match ism {
-        Some(hash) => PlutusData::Constr(Constr {
-            tag: 121, // Some = constructor 0
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(hash.to_vec().into())]),
-        }),
-        None => PlutusData::Constr(Constr {
-            tag: 122, // None = constructor 1
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![]),
-        }),
-    };
-
-    let nonce_field = match nonce {
-        Some(n) => PlutusData::Constr(Constr {
-            tag: 121, // Some = constructor 0
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![PlutusData::BigInt(BigInt::Int(n.into()))]),
-        }),
-        None => PlutusData::Constr(Constr {
-            tag: 122, // None = constructor 1
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![]),
-        }),
-    };
-
-    // DeferredInner { messages_stored, messages_processed }
-    let inner_field = PlutusData::Constr(Constr {
-        tag: 121, // DeferredInner = constructor 0
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![
-            PlutusData::BigInt(BigInt::Int(messages_stored.into())),
-            PlutusData::BigInt(BigInt::Int(messages_processed.into())),
-        ]),
-    });
-
-    // HyperlaneRecipientDatum = constructor 0
-    PlutusData::Constr(Constr {
-        tag: 121,
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![ism_field, nonce_field, inner_field]),
-    })
-}
-
-/// Parse a Deferred datum to extract the current state
-/// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_stored: i64, messages_processed: i64)
-#[allow(clippy::type_complexity)]
-fn parse_deferred_datum(
-    datum_str: &str,
-) -> Result<(Option<Vec<u8>>, Option<i64>, i64, i64), TxBuilderError> {
-    let datum_cbor = json_datum_to_cbor(datum_str)?;
-
-    use pallas_codec::minicbor;
-    let decoded: PlutusData = minicbor::decode(&datum_cbor)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {e}")))?;
-
-    // Structure: Constr 0 [ism_opt, nonce_opt, inner]
-    // inner: Constr 0 [messages_stored, messages_processed]
-    if let PlutusData::Constr(constr) = decoded {
-        let fields: Vec<_> = constr.fields.clone().to_vec();
-        if fields.len() >= 3 {
-            let ism = extract_option_bytes(&fields[0]);
-            let nonce = extract_option_int(&fields[1]);
-
-            // Extract inner.messages_stored and inner.messages_processed
-            let (messages_stored, messages_processed) =
-                if let PlutusData::Constr(inner) = &fields[2] {
-                    let inner_fields: Vec<_> = inner.fields.clone().to_vec();
-                    let stored = if !inner_fields.is_empty() {
-                        extract_int(&inner_fields[0]).unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    let processed = if inner_fields.len() > 1 {
-                        extract_int(&inner_fields[1]).unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    (stored, processed)
-                } else {
-                    (0, 0)
-                };
-
-            return Ok((ism, nonce, messages_stored, messages_processed));
-        }
-    }
-
-    // Default values if parsing fails
-    Ok((None, None, 0, 0))
 }
 
 /// Encode a Message as Plutus Data

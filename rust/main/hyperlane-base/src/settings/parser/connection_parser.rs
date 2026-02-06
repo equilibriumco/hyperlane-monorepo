@@ -955,21 +955,12 @@ pub fn build_cardano_connection_conf(
         .end()
         .map(|s| s.to_string());
 
-    let registry_policy_id = conn
+    let warp_route_reference_script_utxo = conn
         .chain(&mut local_err)
-        .get_opt_key("registryPolicyId")
+        .get_opt_key("warpRouteReferenceScriptUtxo")
         .parse_string()
         .end()
-        .unwrap_or_default();
-
-    // Registry asset name hex for NFT lookup (defaults to empty for backwards compat)
-    let registry_asset_name_hex = conn
-        .chain(&mut local_err)
-        .get_opt_key("registryAssetNameHex")
-        .parse_string()
-        .end()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+        .map(|s| s.to_string());
 
     let ism_policy_id = conn
         .chain(&mut local_err)
@@ -1072,8 +1063,7 @@ pub fn build_cardano_connection_conf(
         processed_messages_nft_script_cbor,
         mailbox_script_cbor,
         mailbox_reference_script_utxo,
-        registry_policy_id: registry_policy_id.to_string(),
-        registry_asset_name_hex,
+        warp_route_reference_script_utxo,
         ism_policy_id: ism_policy_id.to_string(),
         ism_asset_name_hex,
         ism_script_hash: ism_script_hash.to_string(),
