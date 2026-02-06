@@ -77,7 +77,7 @@ enum QueryCommands {
 
     /// Query generic recipient state and received messages
     Recipient {
-        /// Recipient script hash (28 bytes hex, as shown in registry)
+        /// Recipient script hash (28 bytes hex)
         #[arg(long)]
         script_hash: Option<String>,
 

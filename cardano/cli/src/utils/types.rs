@@ -211,8 +211,6 @@ pub struct DeploymentInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ism: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry: Option<ScriptInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub igp: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_announce: Option<ScriptInfo>,
@@ -228,51 +226,11 @@ impl DeploymentInfo {
             tx_id: None,
             mailbox: None,
             ism: None,
-            registry: None,
             igp: None,
             validator_announce: None,
             warp_routes: Vec::new(),
         }
     }
-}
-
-/// Additional input info for warp routes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdditionalInputInfo {
-    pub name: String,
-    pub policy_id: String,
-    pub asset_name: String,
-    pub must_be_spent: bool,
-}
-
-/// Registry recipient info
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecipientInfo {
-    pub script_hash: String,
-    /// Owner who can modify/remove this registration (verification key hash)
-    pub owner: String,
-    pub state_policy_id: String,
-    pub state_asset_name: String,
-    pub recipient_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_ism: Option<String>,
-    /// Reference script NFT policy ID (for reference script UTXO lookup)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ref_script_policy_id: Option<String>,
-    /// Reference script NFT asset name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ref_script_asset_name: Option<String>,
-    /// For Deferred recipients: the message NFT minting policy
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deferred_message_policy: Option<String>,
-    /// For TokenReceiver (synthetic warp routes): the token minting policy
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub minting_policy: Option<String>,
-    /// Additional inputs (e.g., vault for warp routes)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub additional_inputs: Vec<AdditionalInputInfo>,
 }
 
 /// Protocol parameters (subset we need)

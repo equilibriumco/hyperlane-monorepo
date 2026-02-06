@@ -148,7 +148,6 @@ impl ExtractedValidator {
 pub struct HyperlaneValidators {
     pub mailbox: ExtractedValidator,
     pub ism: ExtractedValidator,
-    pub registry: ExtractedValidator,
     pub igp: Option<ExtractedValidator>,
     pub validator_announce: Option<ExtractedValidator>,
     pub warp_route: Option<ExtractedValidator>,
@@ -176,7 +175,6 @@ impl HyperlaneValidators {
         Ok(Self {
             mailbox: find("mailbox")?,
             ism: find("multisig_ism")?,
-            registry: find("registry")?,
             igp: find_opt("igp", "spend"),
             validator_announce: find_opt("validator_announce", "spend"),
             warp_route: find_opt("warp_route", "spend"),

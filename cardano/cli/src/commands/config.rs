@@ -288,37 +288,6 @@ async fn update_relayer(
         chain_updates.push(("interchainSecurityModule".to_string(), json!(hyperlane_ism.clone()), hyperlane_ism));
     }
 
-    // Update registry info
-    if let Some(ref registry) = deployment.registry {
-        if let Some(ref nft) = registry.state_nft {
-            let old = get_old_value(connection, "registryPolicyId");
-            connection_updates.push((
-                "registryPolicyId".to_string(),
-                json!(nft.policy_id.clone()),
-                old,
-                nft.policy_id.clone(),
-            ));
-
-            // Add registry asset name hex for NFT lookup
-            let old = get_old_value(connection, "registryAssetNameHex");
-            connection_updates.push((
-                "registryAssetNameHex".to_string(),
-                json!(nft.asset_name_hex.clone()),
-                old,
-                nft.asset_name_hex.clone(),
-            ));
-        }
-
-        // The registry script hash is also used as processedMessagesScriptHash
-        let old = get_old_value(connection, "processedMessagesScriptHash");
-        connection_updates.push((
-            "processedMessagesScriptHash".to_string(),
-            json!(registry.hash.clone()),
-            old,
-            registry.hash.clone(),
-        ));
-    }
-
     // Generate processed_message_nft policy (parameterized with mailbox_policy_id)
     // This is used for efficient O(1) processed message lookups
     // IMPORTANT: We use mailbox_policy_id (state NFT policy, stable) NOT mailbox.hash (script hash, changes with code)
@@ -557,15 +526,6 @@ async fn update_validator(
     // Add ISM reference script UTXO
     if let Some(ref ref_utxo) = ism.reference_script_utxo {
         connection["ismReferenceScriptUtxo"] = json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
-    }
-
-    // Add registry info
-    if let Some(ref registry) = deployment.registry {
-        connection["processedMessagesScriptHash"] = json!(registry.hash);
-        if let Some(ref nft) = registry.state_nft {
-            connection["registryPolicyId"] = json!(nft.policy_id);
-            connection["registryAssetNameHex"] = json!(nft.asset_name_hex);
-        }
     }
 
     // Add processed messages NFT policy (for O(1) lookups)

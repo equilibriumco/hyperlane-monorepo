@@ -31,7 +31,6 @@ enum InitCommands {
 
         /// Processed messages script hash (28 bytes hex)
         /// This is the address where processed message markers are stored.
-        /// Defaults to the registry script hash if not provided.
         #[arg(long)]
         processed_messages_hash: Option<String>,
 
@@ -58,17 +57,6 @@ enum InitCommands {
         #[arg(long)]
         thresholds: Option<String>,
 
-        /// UTXO to use for minting state NFT
-        #[arg(long)]
-        utxo: Option<String>,
-
-        /// Dry run
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Initialize the Registry contract
-    Registry {
         /// UTXO to use for minting state NFT
         #[arg(long)]
         utxo: Option<String>,
@@ -216,7 +204,6 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             utxo,
             dry_run,
         } => init_ism(ctx, &domains, validators, thresholds, utxo, dry_run).await,
-        InitCommands::Registry { utxo, dry_run } => init_registry(ctx, utxo, dry_run).await,
         InitCommands::Recipient {
             mailbox_hash,
             custom_ism,
@@ -676,176 +663,6 @@ async fn init_ism_internal(
         // Legacy fields
         ism.utxo = Some(state_utxo_ref);
         ism.state_nft_policy = Some(applied.policy_id.clone());
-    }
-    ctx.save_deployment_info(&deployment)?;
-    println!("\n{}", "✓ Deployment info updated".green());
-
-    // Return the spent UTXO reference
-    Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))
-}
-
-async fn init_registry(ctx: &CliContext, utxo: Option<String>, dry_run: bool) -> Result<()> {
-    init_registry_internal(ctx, utxo, dry_run, &[]).await?;
-    Ok(())
-}
-
-/// Internal registry init that excludes already-spent UTXOs
-async fn init_registry_internal(
-    ctx: &CliContext,
-    utxo: Option<String>,
-    dry_run: bool,
-    exclude_utxos: &[String],
-) -> Result<Option<String>> {
-    println!("{}", "Initializing Registry contract...".cyan());
-
-    let api_key = ctx.require_api_key()?;
-    let keypair = ctx.load_signing_key()?;
-    let owner_pkh = keypair.verification_key_hash_hex();
-
-    println!("  Owner: {}", owner_pkh);
-
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-    let address = keypair.address_bech32(ctx.pallas_network());
-
-    // Get UTXOs and filter out already-spent ones
-    let all_utxos = client.get_utxos(&address).await?;
-    let utxos: Vec<_> = all_utxos
-        .into_iter()
-        .filter(|u| {
-            let utxo_ref = format!("{}#{}", u.tx_hash, u.output_index);
-            !exclude_utxos.contains(&utxo_ref)
-        })
-        .collect();
-    println!("  Found {} UTXOs at wallet (excluding {} spent)", utxos.len(), exclude_utxos.len());
-
-    // Find input UTXO
-    let input_utxo = match &utxo {
-        Some(u) => {
-            let utxo_ref = crate::utils::types::UtxoRef::parse(u)
-                .ok_or_else(|| anyhow!("Invalid UTXO format. Use tx_hash#index"))?;
-            utxos
-                .iter()
-                .find(|u| u.tx_hash == utxo_ref.tx_hash && u.output_index == utxo_ref.output_index)
-                .cloned()
-                .ok_or_else(|| anyhow!("UTXO not found"))?
-        }
-        None => {
-            utxos
-                .iter()
-                .find(|u| u.lovelace >= 10_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-                .cloned()
-                .ok_or_else(|| anyhow!("No suitable UTXO found (need >= 10 ADA without assets or reference scripts)"))?
-        }
-    };
-
-    // Find collateral UTXO (must not have reference script)
-    let collateral_utxo = utxos
-        .iter()
-        .find(|u| {
-            u.lovelace >= 5_000_000
-                && u.assets.is_empty()
-                && u.reference_script.is_none()
-                && !(u.tx_hash == input_utxo.tx_hash && u.output_index == input_utxo.output_index)
-        })
-        .cloned()
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO found (without reference scripts)"))?;
-
-    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-
-    // Encode output reference for state NFT parameter
-    let output_ref_cbor = encode_output_reference(&input_utxo.tx_hash, input_utxo.output_index)?;
-    let output_ref_hex = hex::encode(&output_ref_cbor);
-    println!("  OutputRef CBOR: {}", output_ref_hex.yellow());
-
-    // Apply parameter to state_nft minting policy
-    println!("\n{}", "Applying state_nft parameter...".cyan());
-    let applied = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
-    println!("  State NFT Policy ID: {}", applied.policy_id.green());
-
-    // Get Registry script address
-    let deployment = ctx.load_deployment_info()
-        .with_context(|| "Run 'deploy extract' first")?;
-    let registry_addr = deployment
-        .registry
-        .as_ref()
-        .map(|m| m.address.clone())
-        .ok_or_else(|| anyhow!("Registry address not found in deployment info"))?;
-    println!("  Registry Address: {}", registry_addr);
-
-    // Empty registry datum
-    let datum_cbor = crate::utils::cbor::build_registry_datum(&[], &owner_pkh)?;
-    println!("  Datum CBOR: {}...", hex::encode(&datum_cbor[..32.min(datum_cbor.len())]));
-
-    if dry_run {
-        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
-        println!("\nTransaction would:");
-        println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        println!("  - Mint state NFT with policy {}", applied.policy_id);
-        println!("  - Create output at {} with 5 ADA + NFT + datum", registry_addr);
-        return Ok(None);
-    }
-
-    // Build and submit transaction
-    println!("\n{}", "Building transaction...".cyan());
-    let mint_script_cbor = hex::decode(&applied.compiled_code)
-        .with_context(|| "Invalid script CBOR")?;
-
-    // State NFT asset name for Registry
-    let registry_asset_name = "Registry State";
-
-    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
-    let built_tx = tx_builder
-        .build_init_tx(
-            &keypair,
-            &input_utxo,
-            &collateral_utxo,
-            &mint_script_cbor,
-            &registry_addr,
-            &datum_cbor,
-            5_000_000, // 5 ADA output
-            Some(registry_asset_name),
-        )
-        .await?;
-
-    println!("  TX Hash: {}", hex::encode(&built_tx.tx_hash.0));
-
-    // Sign transaction
-    println!("{}", "Signing transaction...".cyan());
-    let signed_tx = tx_builder.sign_tx(built_tx, &keypair)?;
-    println!("  Signed TX size: {} bytes", signed_tx.len());
-
-    // Submit transaction
-    println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
-    println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
-    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
-
-    // State UTXO reference (first output is the state UTXO)
-    let state_utxo_ref = format!("{}#0", tx_hash);
-
-    // Update deployment info with complete initialization details
-    let mut deployment = deployment;
-    if let Some(ref mut registry) = deployment.registry {
-        // Registry is not parameterized, so no applied_parameters
-
-        // Record state NFT info
-        registry.state_nft = Some(StateNftInfo {
-            policy_id: applied.policy_id.clone(),
-            asset_name_hex: hex::encode(registry_asset_name.as_bytes()),
-            asset_name: registry_asset_name.to_string(),
-            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
-        });
-
-        // Record initialization details
-        registry.init_tx_hash = Some(tx_hash.clone());
-        registry.state_utxo = Some(state_utxo_ref.clone());
-        registry.initialized = true;
-
-        // Legacy fields
-        registry.utxo = Some(state_utxo_ref);
-        registry.state_nft_policy = Some(applied.policy_id.clone());
     }
     ctx.save_deployment_info(&deployment)?;
     println!("\n{}", "✓ Deployment info updated".green());
@@ -1329,27 +1146,6 @@ async fn init_recipient(
             println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
             println!("  - Create ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
         }
-        println!("\nTo register this recipient, run:");
-        println!("  hyperlane-cardano registry register \\");
-        println!("    --script-hash {} \\", recipient_hash);
-        if deferred {
-            println!("    --recipient-type deferred \\");
-            if let Some(ref policy) = msg_nft_policy {
-                println!("    --message-policy {} \\", policy);
-            }
-        } else {
-            println!("    --recipient-type <RECIPIENT_TYPE> \\");
-        }
-        println!("    --state-policy {} \\", nft_policy_id);
-        println!("    --state-asset \"\" \\");
-        println!("    --ref-script-policy {} \\", nft_policy_id);
-        println!("    --ref-script-asset {} \\", ref_asset_name);
-        println!("    --signing-key <path-to-owner-key>");
-        println!("\nNote: The signing key's public key hash becomes the registration owner.");
-        println!("Only the owner can update or remove this registration.");
-        if !deferred {
-            println!("RECIPIENT_TYPE can be: generic, token-receiver, deferred");
-        }
         return Ok(());
     }
 
@@ -1446,32 +1242,6 @@ async fn init_recipient(
         println!("  Contains: stored_message_nft minting policy script");
     }
     println!();
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
-    println!("{}", "To register this recipient with the Hyperlane registry, run:".yellow());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
-    println!();
-    println!("  hyperlane-cardano registry register \\");
-    println!("    --script-hash {} \\", recipient_hash);
-    if deferred {
-        println!("    --recipient-type deferred \\");
-        if let Some(ref policy) = msg_nft_policy {
-            println!("    --message-policy {} \\", policy);
-        }
-    } else {
-        println!("    --recipient-type <RECIPIENT_TYPE> \\");
-    }
-    println!("    --state-policy {} \\", nft_policy_id);
-    println!("    --state-asset \"\" \\");
-    println!("    --ref-script-policy {} \\", nft_policy_id);
-    println!("    --ref-script-asset {} \\", ref_asset_name);
-    println!("    --signing-key <path-to-owner-key>");
-    println!();
-    println!("{}", "Note: The signing key's public key hash becomes the registration owner.".cyan());
-    println!("{}", "Only the owner can update or remove this registration.".cyan());
-    if !deferred {
-        println!("{}", "RECIPIENT_TYPE can be: generic, token-receiver, deferred".cyan());
-    }
-    println!();
 
     Ok(())
 }
@@ -1537,9 +1307,6 @@ async fn init_all(
         }
     }
 
-    println!("\n{}", "3. Initializing Registry...".cyan());
-    init_registry_internal(ctx, None, dry_run, &spent_utxos).await?;
-
     println!("\n{}", "✓ All contracts initialized successfully!".green().bold());
 
     Ok(())
@@ -1600,7 +1367,6 @@ async fn show_status(ctx: &CliContext) -> Result<()> {
     for (name, script_opt) in [
         ("Mailbox", &deployment.mailbox),
         ("ISM", &deployment.ism),
-        ("Registry", &deployment.registry),
         ("IGP", &deployment.igp),
     ] {
         if let Some(script) = script_opt {
@@ -1701,20 +1467,6 @@ async fn generate_datums(
         serde_json::to_string_pretty(&ism_json)?,
     )?;
 
-    // Registry datum (empty)
-    let registry_json = serde_json::json!({
-        "constructor": 0,
-        "fields": [
-            {"list": []},
-            {"bytes": owner_pkh}
-        ]
-    });
-
-    std::fs::write(
-        output_dir.join("registry_datum.json"),
-        serde_json::to_string_pretty(&registry_json)?,
-    )?;
-
     // Mint redeemer
     let mint_redeemer = serde_json::json!({
         "constructor": 0,
@@ -1729,7 +1481,6 @@ async fn generate_datums(
     println!("{}", "✓ Datums generated:".green());
     println!("  {:?}/mailbox_datum.json", output_dir);
     println!("  {:?}/ism_datum.json", output_dir);
-    println!("  {:?}/registry_datum.json", output_dir);
     println!("  {:?}/mint_redeemer.json", output_dir);
 
     Ok(())

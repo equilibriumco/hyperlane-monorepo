@@ -43,7 +43,7 @@ enum DeferredCommands {
     /// This command queries for UTXOs containing message NFTs,
     /// which represent messages waiting to be processed.
     List {
-        /// Recipient script hash (28 bytes hex, as shown in registry)
+        /// Recipient script hash (28 bytes hex)
         #[arg(long)]
         recipient_hash: String,
 

@@ -373,7 +373,7 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     println!("  State NFT Policy: {}", warp_nft_applied.policy_id.green());
 
     // Compute warp_route script hash
-    // The warp_route validator takes 4 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy, redemption_script
+    // The warp_route validator takes 3 params: mailbox_policy_id, processed_messages_nft_policy, redemption_script
     let processed_messages_nft_policy = deployment
         .mailbox
         .as_ref()
@@ -393,7 +393,6 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     );
 
     let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-    let state_nft_param_cbor = encode_script_hash_param(&warp_nft_applied.policy_id)?;
     let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
     let redemption_param_cbor = encode_script_hash_param(&redemption_validator.hash)?;
     let warp_route_applied = apply_validator_params(
@@ -402,7 +401,6 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
         "warp_route",
         &[
             &hex::encode(&mailbox_param_cbor),
-            &hex::encode(&state_nft_param_cbor),
             &hex::encode(&pm_nft_param_cbor),
             &hex::encode(&redemption_param_cbor),
         ],
@@ -1155,7 +1153,7 @@ fn parse_warp_datum(
         datum.clone()
     };
 
-    // WarpRouteDatum { config, owner, total_bridged }
+    // WarpRouteDatum { config, owner, total_bridged, ism }
     let fields = parsed_datum
         .get("fields")
         .and_then(|f| f.as_array())
@@ -1166,9 +1164,9 @@ fn parse_warp_datum(
             )
         })?;
 
-    if fields.len() < 3 {
+    if fields.len() < 4 {
         return Err(anyhow!(
-            "Invalid datum: expected 3 fields, got {}",
+            "Invalid datum: expected 4 fields, got {}",
             fields.len()
         ));
     }
@@ -1616,8 +1614,8 @@ async fn transfer(
         warp_utxo.tx_hash, warp_utxo.output_index, warp_script_hash
     );
 
-    // Build sender address (32 bytes: 0x02000000 + script_hash for script credential)
-    let sender_hex = format!("02000000{}", warp_script_hash);
+    // Build sender address (32 bytes: 0x01000000 + nft_policy for policy ID credential)
+    let sender_hex = format!("01000000{}", warp_route_info.nft_policy);
 
     // Compute message ID
     // NOTE: The message recipient is the remote warp route contract, not the user's final recipient
@@ -1851,7 +1849,7 @@ async fn transfer(
         .and_then(|w| w.reference_script_utxo.as_ref());
 
     // Load warp script only if no reference UTXO available
-    // The warp_route validator takes 3 params: mailbox_policy_id, state_nft_policy_id, processed_messages_nft_policy
+    // The warp_route validator takes 3 params: mailbox_policy_id, processed_messages_nft_policy, redemption_script
     let warp_script = if warp_ref_utxo.is_none() {
         let processed_messages_nft_policy = deployment
             .mailbox
@@ -1859,17 +1857,22 @@ async fn transfer(
             .and_then(|m| m.applied_parameters.first())
             .map(|p| p.value.clone())
             .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
+        let blueprint_path = ctx.contracts_dir.join("plutus.json");
+        let blueprint = crate::utils::plutus::PlutusBlueprint::from_file(&blueprint_path)?;
+        let redemption_validator = blueprint
+            .find_validator("token_redemption")
+            .ok_or_else(|| anyhow!("token_redemption validator not found in blueprint"))?;
         let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-        let state_nft_param_cbor = encode_script_hash_param(&warp_policy_id)?;
         let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
+        let redemption_param_cbor = encode_script_hash_param(&redemption_validator.hash)?;
         let warp_route_applied = apply_validator_params(
             &ctx.contracts_dir,
             "warp_route",
             "warp_route",
             &[
                 &hex::encode(&mailbox_param_cbor),
-                &hex::encode(&state_nft_param_cbor),
                 &hex::encode(&pm_nft_param_cbor),
+                &hex::encode(&redemption_param_cbor),
             ],
         )?;
         Some(hex::decode(&warp_route_applied.compiled_code)?)
@@ -3009,16 +3012,6 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
         "{}",
         "═══════════════════════════════════════════════════════════════".green()
     );
-    println!();
-    println!("1. Update the registry to include this as an additional_input:");
-    println!("   hyperlane-cardano registry update \\");
-    println!("     --script-hash {} \\", warp_route_hash);
-    println!(
-        "     --additional-input mint_ref:{}:6d696e745f726566:false",
-        nft_policy_id
-    );
-    println!();
-    println!("   The 'false' means must_spend=false (use as reference input).");
     println!();
 
     Ok(())

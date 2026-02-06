@@ -42,7 +42,7 @@ enum DeployCommands {
     /// Deploy a script as a reference script UTXO on-chain
     /// This allows the script to be referenced by other transactions without including it in the witness set
     ReferenceScript {
-        /// Name of the script to deploy (mailbox, multisig_ism, registry, or path to .plutus file)
+        /// Name of the script to deploy (mailbox, multisig_ism, or path to .plutus file)
         #[arg(long)]
         script: String,
 
@@ -55,7 +55,7 @@ enum DeployCommands {
         dry_run: bool,
     },
 
-    /// Deploy all core reference scripts (mailbox, ism, registry)
+    /// Deploy all core reference scripts (mailbox, ism)
     ReferenceScriptsAll {
         /// Output lovelace per script (if not specified, calculates minimum for each script)
         #[arg(long)]
@@ -134,7 +134,6 @@ async fn extract(
     let all_validators = vec![
         ("mailbox", Some(&validators.mailbox)),
         ("multisig_ism", Some(&validators.ism)),
-        ("registry", Some(&validators.registry)),
         ("igp", validators.igp.as_ref()),
         ("validator_announce", validators.validator_announce.as_ref()),
         ("warp_route", validators.warp_route.as_ref()),
@@ -222,7 +221,6 @@ async fn extract(
         tx_id: None,
         mailbox: Some(to_script_info(&validators.mailbox)),
         ism: Some(to_script_info(&validators.ism)),
-        registry: Some(to_script_info(&validators.registry)),
         igp: validators.igp.as_ref().map(to_script_info),
         validator_announce: validators.validator_announce.as_ref().map(to_script_info),
         warp_routes: Vec::new(),
@@ -328,7 +326,6 @@ async fn generate_config(ctx: &CliContext, output: Option<String>) -> Result<()>
 
     info.mailbox = Some(to_script_info(&validators.mailbox));
     info.ism = Some(to_script_info(&validators.ism));
-    info.registry = Some(to_script_info(&validators.registry));
 
     if let Some(igp) = &validators.igp {
         info.igp = Some(to_script_info(igp));
@@ -511,11 +508,6 @@ async fn deploy_reference_script_internal(
                     ism.reference_script_utxo = Some(ref_utxo);
                 }
             }
-            "registry" => {
-                if let Some(ref mut registry) = deployment.registry {
-                    registry.reference_script_utxo = Some(ref_utxo);
-                }
-            }
             "igp" => {
                 if let Some(ref mut igp) = deployment.igp {
                     igp.reference_script_utxo = Some(ref_utxo);
@@ -545,7 +537,7 @@ async fn deploy_reference_script_internal(
     Ok(Some((format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index), tx_hash)))
 }
 
-/// Deploy all core reference scripts (mailbox, ism, registry)
+/// Deploy all core reference scripts (mailbox, ism)
 async fn deploy_all_reference_scripts(
     ctx: &CliContext,
     lovelace: Option<u64>,
@@ -553,7 +545,7 @@ async fn deploy_all_reference_scripts(
 ) -> Result<()> {
     println!("{}", "Deploying all core reference scripts...".cyan());
 
-    let scripts = ["mailbox", "multisig_ism", "registry"];
+    let scripts = ["mailbox", "multisig_ism"];
 
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
@@ -645,7 +637,6 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
     let title = match script_name {
         "mailbox" => "mailbox.mailbox.spend",
         "multisig_ism" | "ism" => "multisig_ism.multisig_ism.spend",
-        "registry" => "registry.registry.spend",
         "igp" => "igp.igp.spend",
         "validator_announce" => "validator_announce.validator_announce.spend",
         "warp_route" => "warp_route.warp_route.spend",

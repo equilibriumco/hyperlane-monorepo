@@ -261,174 +261,6 @@ pub fn build_ism_datum(
     Ok(builder.build())
 }
 
-/// Build a Registry datum
-/// Note: admin_pkh is the registry admin, while each registration has its own owner
-pub fn build_registry_datum(
-    registrations: &[RegistrationData],
-    admin_pkh: &str,
-) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    builder.start_constr(0);
-
-    // Registrations list
-    builder.start_list();
-    for reg in registrations {
-        builder.start_constr(0);
-
-        // script_hash
-        builder.bytes_hex(&reg.script_hash)?;
-
-        // owner (VerificationKeyHash - the registration owner)
-        builder.bytes_hex(&reg.owner)?;
-
-        // state_locator (policy_id, asset_name)
-        builder.start_constr(0);
-        builder.bytes_hex(&reg.state_policy_id)?;
-        builder.bytes_hex(&reg.state_asset_name)?;
-        builder.end_constr();
-
-        // reference_script_locator: Option<UtxoLocator>
-        match (&reg.ref_script_policy_id, &reg.ref_script_asset_name) {
-            (Some(policy), Some(asset)) => {
-                // Some(locator) = Constr 0 [locator]
-                builder.start_constr(0);
-                builder.start_constr(0);
-                builder.bytes_hex(policy)?;
-                builder.bytes_hex(asset)?;
-                builder.end_constr();
-                builder.end_constr();
-            }
-            _ => {
-                // None = Constr 1 []
-                builder.start_constr(1).end_constr();
-            }
-        }
-
-        // additional_inputs: List<AdditionalInput>
-        // AdditionalInput = { name: ByteArray, locator: UtxoLocator, must_be_spent: Bool }
-        builder.start_list();
-        for input in &reg.additional_inputs {
-            builder.start_constr(0);
-            // name (as bytes)
-            builder.bytes_hex(&hex::encode(input.name.as_bytes()))?;
-            // locator: UtxoLocator = { policy_id, asset_name }
-            builder.start_constr(0);
-            builder.bytes_hex(&input.policy_id)?;
-            builder.bytes_hex(&input.asset_name)?;
-            builder.end_constr();
-            // must_be_spent: Bool - Constr 1 [] for True, Constr 0 [] for False
-            if input.must_be_spent {
-                builder.start_constr(1).end_constr();
-            } else {
-                builder.start_constr(0).end_constr();
-            }
-            builder.end_constr();
-        }
-        builder.end_list();
-
-        // recipient_type encoding:
-        // - Generic = Constr 0 [] (empty)
-        // - TokenReceiver = Constr 1 [vault_locator: Option, minting_policy: Option]
-        // - Deferred = Constr 2 [message_policy: ScriptHash]
-        match reg.recipient_type.to_lowercase().as_str() {
-            "generic" => {
-                builder.start_constr(0).end_constr();
-            }
-            "tokenreceiver" | "token-receiver" | "token_receiver" => {
-                // TokenReceiver { vault_locator: Option<UtxoLocator>, minting_policy: Option<ScriptHash> }
-                builder.start_constr(1);
-                builder.start_constr(1).end_constr(); // vault_locator: None (for now)
-                                                      // minting_policy: Option<ScriptHash>
-                match &reg.minting_policy {
-                    Some(policy) => {
-                        // Some = constructor 0
-                        builder.start_constr(0);
-                        builder.bytes_hex(policy)?;
-                        builder.end_constr();
-                    }
-                    None => {
-                        // None = constructor 1
-                        builder.start_constr(1).end_constr();
-                    }
-                }
-                builder.end_constr();
-            }
-            "deferred" => {
-                // Deferred { message_policy: ScriptHash }
-                builder.start_constr(2);
-                if let Some(msg_policy) = &reg.deferred_message_policy {
-                    builder.bytes_hex(msg_policy)?;
-                } else {
-                    return Err(anyhow!("Deferred recipient requires message_policy (deferred_message_policy field)"));
-                }
-                builder.end_constr();
-            }
-            _ => {
-                builder.start_constr(0).end_constr(); // Default to Generic
-            }
-        }
-
-        // custom_ism: Option<ScriptHash>
-        match &reg.custom_ism {
-            Some(ism_hash) => {
-                // Some = constructor 0
-                builder.start_constr(0);
-                builder.bytes_hex(ism_hash)?;
-                builder.end_constr();
-            }
-            None => {
-                // None = constructor 1
-                builder.start_constr(1).end_constr();
-            }
-        }
-
-        builder.end_constr();
-    }
-    builder.end_list();
-
-    // Admin (registry admin, not registration owner)
-    builder.bytes_hex(admin_pkh)?;
-
-    builder.end_constr();
-
-    Ok(builder.build())
-}
-
-/// Additional input for warp routes and other complex recipients
-#[derive(Clone, Debug)]
-pub struct AdditionalInputData {
-    pub name: String,
-    pub policy_id: String,
-    pub asset_name: String,
-    pub must_be_spent: bool,
-}
-
-/// Registration data for building registry datums
-#[derive(Clone)]
-pub struct RegistrationData {
-    pub script_hash: String,
-    /// Owner who can modify/remove this registration (verification key hash, 28 bytes hex)
-    pub owner: String,
-    pub state_policy_id: String,
-    pub state_asset_name: String,
-    /// Reference script locator (optional)
-    /// If Some, contains (policy_id, asset_name) for the reference script NFT
-    pub ref_script_policy_id: Option<String>,
-    pub ref_script_asset_name: Option<String>,
-    /// Recipient type: "Generic" (0), "TokenReceiver" (1), or "Deferred" (2)
-    pub recipient_type: String,
-    /// Custom ISM script hash (optional)
-    pub custom_ism: Option<String>,
-    /// For Deferred recipients: the message NFT minting policy
-    /// Required when recipient_type is "Deferred"
-    pub deferred_message_policy: Option<String>,
-    /// For TokenReceiver (synthetic warp routes): the token minting policy
-    pub minting_policy: Option<String>,
-    /// Additional inputs required for this recipient (e.g., vault for warp routes)
-    pub additional_inputs: Vec<AdditionalInputData>,
-}
-
 /// Build a mint redeemer (empty constructor 0)
 pub fn build_mint_redeemer() -> Vec<u8> {
     let mut builder = CborBuilder::new();
@@ -441,142 +273,6 @@ pub fn build_redemption_claim_redeemer() -> Vec<u8> {
     let mut builder = CborBuilder::new();
     builder.start_constr(0).end_constr();
     builder.build()
-}
-
-/// Build a Registry AdminRegister redeemer (admin-only, bypasses script ownership check)
-/// Redeemer: AdminRegister { registration: RecipientRegistration }
-/// AdminRegister is constructor 4 in RegistryRedeemer
-pub fn build_registry_admin_register_redeemer(reg: &RegistrationData) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // AdminRegister is constructor 4 (Register=0, UpdateRegistration=1, Unregister=2, TransferRegistrationOwnership=3, AdminRegister=4)
-    builder.start_constr(4);
-
-    // RecipientRegistration structure
-    builder.start_constr(0);
-
-    // script_hash
-    builder.bytes_hex(&reg.script_hash)?;
-
-    // owner (VerificationKeyHash)
-    builder.bytes_hex(&reg.owner)?;
-
-    // state_locator (policy_id, asset_name)
-    builder.start_constr(0);
-    builder.bytes_hex(&reg.state_policy_id)?;
-    builder.bytes_hex(&reg.state_asset_name)?;
-    builder.end_constr();
-
-    // reference_script_locator: Option<UtxoLocator>
-    match (&reg.ref_script_policy_id, &reg.ref_script_asset_name) {
-        (Some(policy), Some(asset)) => {
-            // Some(locator) = Constr 0 [locator]
-            builder.start_constr(0);
-            builder.start_constr(0);
-            builder.bytes_hex(policy)?;
-            builder.bytes_hex(asset)?;
-            builder.end_constr();
-            builder.end_constr();
-        }
-        _ => {
-            // None = Constr 1 []
-            builder.start_constr(1).end_constr();
-        }
-    }
-
-    // additional_inputs: List<AdditionalInput>
-    builder.start_list();
-    for input in &reg.additional_inputs {
-        builder.start_constr(0);
-        // name (as bytes)
-        builder.bytes_hex(&hex::encode(input.name.as_bytes()))?;
-        // locator: UtxoLocator = { policy_id, asset_name }
-        builder.start_constr(0);
-        builder.bytes_hex(&input.policy_id)?;
-        builder.bytes_hex(&input.asset_name)?;
-        builder.end_constr();
-        // must_be_spent: Bool - Constr 1 [] for True, Constr 0 [] for False
-        if input.must_be_spent {
-            builder.start_constr(1).end_constr();
-        } else {
-            builder.start_constr(0).end_constr();
-        }
-        builder.end_constr();
-    }
-    builder.end_list();
-
-    // recipient_type encoding:
-    // - Generic = Constr 0 [] (empty)
-    // - TokenReceiver = Constr 1 [vault_locator: Option, minting_policy: Option]
-    // - Deferred = Constr 2 [message_policy: ScriptHash]
-    match reg.recipient_type.to_lowercase().as_str() {
-        "generic" => {
-            builder.start_constr(0).end_constr();
-        }
-        "tokenreceiver" | "token-receiver" | "token_receiver" => {
-            builder.start_constr(1);
-            builder.start_constr(1).end_constr(); // vault_locator: None
-                                                  // minting_policy: Option<ScriptHash>
-            match &reg.minting_policy {
-                Some(policy) => {
-                    // Some(policy) = Constr 0 [policy]
-                    builder.start_constr(0);
-                    builder.bytes_hex(policy)?;
-                    builder.end_constr();
-                }
-                None => {
-                    // None = Constr 1 []
-                    builder.start_constr(1).end_constr();
-                }
-            }
-            builder.end_constr();
-        }
-        "deferred" => {
-            builder.start_constr(2);
-            if let Some(msg_policy) = &reg.deferred_message_policy {
-                builder.bytes_hex(msg_policy)?;
-            } else {
-                return Err(anyhow!(
-                    "Deferred recipient requires message_policy (deferred_message_policy field)"
-                ));
-            }
-            builder.end_constr();
-        }
-        _ => {
-            builder.start_constr(0).end_constr();
-        }
-    }
-
-    // custom_ism: Option<ScriptHash>
-    match &reg.custom_ism {
-        Some(ism_hash) => {
-            builder.start_constr(0);
-            builder.bytes_hex(ism_hash)?;
-            builder.end_constr();
-        }
-        None => {
-            builder.start_constr(1).end_constr();
-        }
-    }
-
-    builder.end_constr(); // End RecipientRegistration
-    builder.end_constr(); // End AdminRegister
-
-    Ok(builder.build())
-}
-
-/// Build a Registry Unregister redeemer
-/// Redeemer: Unregister { script_hash: ScriptHash }
-/// Unregister is constructor 2 (Register=0, UpdateRegistration=1, Unregister=2, TransferRegistrationOwnership=3, AdminRegister=4)
-pub fn build_registry_unregister_redeemer(script_hash: &str) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    // Unregister is constructor 2
-    builder.start_constr(2);
-    builder.bytes_hex(script_hash)?;
-    builder.end_constr();
-
-    Ok(builder.build())
 }
 
 /// Build a Mailbox SetDefaultIsm redeemer
@@ -1066,6 +762,7 @@ pub enum WarpTokenType<'a> {
 ///   },
 ///   owner: VerificationKeyHash,
 ///   total_bridged: Int,
+///   ism: Option<ScriptHash>,
 /// }
 /// ```
 fn build_warp_route_datum(
@@ -1123,6 +820,10 @@ fn build_warp_route_datum(
 
     // total_bridged: Int - starts at 0
     builder.int(0);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
 
     builder.end_constr(); // end WarpRouteDatum
 
@@ -1294,6 +995,10 @@ pub fn build_warp_route_collateral_datum_with_routes(
     // total_bridged: Int
     builder.int(total_bridged);
 
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
+
     builder.end_constr(); // end WarpRouteDatum
 
     Ok(builder.build())
@@ -1346,6 +1051,10 @@ pub fn build_warp_route_synthetic_datum_with_routes(
 
     // total_bridged: Int
     builder.int(total_bridged);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
 
     builder.end_constr();
 
@@ -1400,6 +1109,10 @@ pub fn build_warp_route_native_datum_with_routes(
 
     // total_bridged: Int
     builder.int(total_bridged);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
 
     builder.end_constr(); // end WarpRouteDatum
 
