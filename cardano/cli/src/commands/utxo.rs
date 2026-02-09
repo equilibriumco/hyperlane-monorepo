@@ -275,12 +275,8 @@ async fn split(
     let tx_cbor = signed.tx_bytes.0.clone();
 
     println!("\n{}", "Submitting transaction...".cyan());
-    let submitted_hash = client.submit_tx(&tx_cbor).await?;
-    println!("{}", format!("Transaction submitted: {}", submitted_hash).green());
-
-    println!("\n{}", "Waiting for confirmation...".cyan());
-    client.wait_for_tx(&submitted_hash, 120).await?;
-    println!("{}", format!("Confirmed! Created {} UTXOs of {} lovelace each", count, per_output).green());
+    client.submit_and_confirm(&tx_cbor, ctx.no_wait).await?;
+    println!("{}", format!("Created {} UTXOs of {} lovelace each", count, per_output).green());
 
     Ok(())
 }
@@ -357,12 +353,8 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
     let tx_cbor = signed.tx_bytes.0.clone();
 
     println!("\n{}", "Submitting consolidation transaction...".cyan());
-    let submitted_hash = client.submit_tx(&tx_cbor).await?;
-    println!("{}", format!("Transaction submitted: {}", submitted_hash).green());
-
-    println!("\n{}", "Waiting for confirmation...".cyan());
-    client.wait_for_tx(&submitted_hash, 120).await?;
-    println!("{}", format!("Confirmed! Consolidated {} UTXOs into {} lovelace", pure_ada.len(), output_amount).green());
+    client.submit_and_confirm(&tx_cbor, ctx.no_wait).await?;
+    println!("{}", format!("Consolidated {} UTXOs into {} lovelace", pure_ada.len(), output_amount).green());
 
     Ok(())
 }

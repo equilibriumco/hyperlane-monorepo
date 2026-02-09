@@ -455,9 +455,8 @@ async fn deploy_reference_script_internal(
 
     // Submit transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     // Save reference script info

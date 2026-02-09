@@ -571,10 +571,9 @@ async fn receive_message(
     println!("  Transaction signed ({} bytes)", signed_tx.len());
 
     println!("\n{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
 
     println!("\n{}", "Message received successfully!".green());
-    println!("  TX Hash: {}", tx_hash);
     println!("  View on explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     Ok(())
@@ -702,10 +701,9 @@ async fn expire_message(
     println!("  Transaction signed ({} bytes)", signed_tx.len());
 
     println!("\n{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
 
     println!("\n{}", "Message expired successfully!".green());
-    println!("  TX Hash: {}", tx_hash);
     println!("  View on explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     Ok(())

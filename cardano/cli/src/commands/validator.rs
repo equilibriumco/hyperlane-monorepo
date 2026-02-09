@@ -397,10 +397,9 @@ async fn announce_validator(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Validator Address: 0x{}", hex::encode(&eth_address));
     println!("  Storage Location: {}", storage_location);
@@ -846,7 +845,7 @@ async fn create_seed_utxo(
     let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign seed transaction: {:?}", e))?;
 
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
     Ok(SeedCreationResult {
         tx_hash,
         spent_utxo_hash: fee_utxo.tx_hash.clone(),

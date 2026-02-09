@@ -415,10 +415,9 @@ async fn init_mailbox_internal(
 
     // Submit transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
-    println!("  Explorer: https://preview.cardanoscan.io/transaction/{}", tx_hash);
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     // State UTXO reference (first output is the state UTXO)
     let state_utxo_ref = format!("{}#0", tx_hash);
@@ -652,9 +651,8 @@ async fn init_ism_internal(
 
     // Submit transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     // State UTXO reference (first output is the state UTXO)
@@ -838,9 +836,8 @@ async fn init_igp(
 
     // Submit transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     // State UTXO reference (first output is the state UTXO)
@@ -1100,9 +1097,8 @@ async fn init_recipient(
     println!("  Signed TX size: {} bytes", signed_tx.len());
 
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
     println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
@@ -1147,9 +1143,6 @@ async fn init_all(
         .map(|i| i.hash.clone())
         .ok_or_else(|| anyhow!("ISM hash not found in deployment info"))?;
 
-    let api_key = ctx.require_api_key()?;
-    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
-
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
 
@@ -1159,70 +1152,15 @@ async fn init_all(
         spent_utxos.push(utxo);
     }
 
-    if !dry_run {
-        // Wait for ISM transaction to be confirmed before proceeding
-        // Re-load deployment info to get the tx hash
-        let deployment = ctx.load_deployment_info()?;
-        if let Some(ref ism) = deployment.ism {
-            if let Some(ref tx_hash) = ism.init_tx_hash {
-                println!("\n{}", "Waiting for ISM transaction confirmation...".yellow());
-                wait_for_tx_confirmation(&client, tx_hash).await?;
-            }
-        }
-    }
-
     println!("\n{}", "2. Initializing Mailbox...".cyan());
     let mailbox_spent = init_mailbox_internal(ctx, domain, &ism_hash, None, dry_run, &spent_utxos).await?;
     if let Some(utxo) = mailbox_spent {
         spent_utxos.push(utxo);
     }
 
-    if !dry_run {
-        // Wait for Mailbox transaction to be confirmed before proceeding
-        let deployment = ctx.load_deployment_info()?;
-        if let Some(ref mailbox) = deployment.mailbox {
-            if let Some(ref tx_hash) = mailbox.init_tx_hash {
-                println!("\n{}", "Waiting for Mailbox transaction confirmation...".yellow());
-                wait_for_tx_confirmation(&client, tx_hash).await?;
-            }
-        }
-    }
-
     println!("\n{}", "✓ All contracts initialized successfully!".green().bold());
 
     Ok(())
-}
-
-/// Wait for a specific transaction to be confirmed on-chain.
-async fn wait_for_tx_confirmation(client: &BlockfrostClient, tx_hash: &str) -> Result<()> {
-    use std::time::Duration;
-    use tokio::time::sleep;
-
-    // Cardano block time is ~20 seconds, but transactions often appear within a few seconds
-    // We'll poll every 5 seconds for up to 120 seconds
-    let max_attempts = 24;
-    let delay = Duration::from_secs(5);
-
-    println!("  Waiting for tx: {}...", &tx_hash[..16]);
-
-    for attempt in 1..=max_attempts {
-        // Try to fetch the transaction
-        match client.get_tx(tx_hash).await {
-            Ok(_tx) => {
-                println!("  {} (attempt {})", "✓ Transaction confirmed!".green(), attempt);
-                return Ok(());
-            }
-            Err(_) => {
-                // Transaction not yet confirmed, wait and retry
-                print!("  Checking... (attempt {}/{})   \r", attempt, max_attempts);
-                std::io::Write::flush(&mut std::io::stdout())?;
-                sleep(delay).await;
-            }
-        }
-    }
-
-    // If we get here, the transaction wasn't confirmed in time
-    Err(anyhow!("Transaction {} was not confirmed within 120 seconds. Please check the explorer and try again.", tx_hash))
 }
 
 async fn show_status(ctx: &CliContext) -> Result<()> {

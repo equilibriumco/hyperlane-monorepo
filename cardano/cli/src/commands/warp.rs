@@ -475,12 +475,8 @@ async fn finalize_warp_deployment(
 
     let warp_signed = tx_builder.sign_tx(warp_tx, &deploy_ctx.keypair)?;
     println!("  Submitting warp route transaction...");
-    let warp_tx_hash = deploy_ctx.client.submit_tx(&warp_signed).await?;
-    println!("  ✓ Warp route deployed: {}", warp_tx_hash.green());
-
-    println!("\n{}", "Waiting for confirmation...".cyan());
-    deploy_ctx.client.wait_for_tx(&warp_tx_hash, 120).await?;
-    println!("  ✓ Warp route confirmed");
+    let warp_tx_hash = deploy_ctx.client.submit_and_confirm(&warp_signed, ctx.no_wait).await?;
+    println!("  ✓ Warp route deployed");
 
     // Update deployment_info.json
     if let Ok(mut deployment) = ctx.load_deployment_info() {
@@ -1107,7 +1103,7 @@ async fn enroll_router(
 
     let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
     println!("  Submitting transaction...");
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
 
     println!(
         "\n{}",
@@ -1121,7 +1117,6 @@ async fn enroll_router(
     println!();
     println!("  Domain: {}", domain);
     println!("  Router: 0x{}", router);
-    println!("  TX: {}", tx_hash);
     println!();
 
     Ok(())
@@ -2212,7 +2207,7 @@ async fn transfer(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!(
         "\n{}",
@@ -2224,7 +2219,6 @@ async fn transfer(
         "═══════════════════════════════════════════════════════════════".green()
     );
     println!();
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!();
     println!("{}", "Message Details:".cyan());
@@ -2946,13 +2940,8 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
 
     // Submit the transaction
     println!("  Submitting transaction...");
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
-    println!("  ✓ Transaction submitted: {}", tx_hash.green());
-
-    // Wait for confirmation
-    println!("\n{}", "Waiting for confirmation...".cyan());
-    client.wait_for_tx(&tx_hash, 120).await?;
-    println!("  ✓ Transaction confirmed");
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    println!("  ✓ Transaction submitted");
 
     // Build reference script UTXO info
     let mint_ref_utxo = format!("{}#0", tx_hash);
@@ -3544,10 +3533,10 @@ async fn claim_single_utxo(
     // Sign and submit
     let tx_builder = HyperlaneTxBuilder::new(client, pallas_network);
     let signed_tx = tx_builder.sign_tx(tx, keypair)?;
-    let submitted_tx_hash = client.submit_tx(&signed_tx).await?;
+    client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
 
     println!(
-        "  {} Claimed {} {} - TX: {}",
+        "  {} Claimed {} {}",
         "ok".green(),
         amount,
         if token_type_constructor == 0 {
@@ -3555,7 +3544,6 @@ async fn claim_single_utxo(
         } else {
             "tokens"
         },
-        submitted_tx_hash
     );
 
     Ok(())

@@ -423,10 +423,9 @@ async fn dispatch(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n{}", "Message Dispatched:".cyan());
     println!("  Message ID: 0x{}", message_id);
@@ -847,10 +846,9 @@ async fn set_default_ism(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Old ISM: {}", mailbox_data.default_ism);
     println!("  New ISM: {}", new_ism_hash);

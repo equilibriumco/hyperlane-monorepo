@@ -262,7 +262,7 @@ impl IgpTxContext {
 
         // Submit the transaction
         println!("{}", "Submitting transaction...".cyan());
-        let tx_hash = self.client.submit_tx(&signed_tx.tx_bytes.0).await?;
+        let tx_hash = self.client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
         Ok(tx_hash)
     }

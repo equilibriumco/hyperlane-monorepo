@@ -364,10 +364,9 @@ async fn build_payment(
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
-    let tx_hash = client.submit_tx(&signed_tx).await?;
+    client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
 
     println!("\n{}", "Payment submitted!".green().bold());
-    println!("  TX Hash: {}", tx_hash);
     println!(
         "  Amount: {} lovelace ({:.6} ADA)",
         amount,

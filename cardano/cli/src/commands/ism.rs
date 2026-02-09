@@ -429,10 +429,9 @@ async fn set_validators(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Domain: {}", domain);
     println!("  Validators: {} (threshold {})", validators.len(), threshold.unwrap_or(0));
@@ -709,10 +708,9 @@ async fn set_threshold(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_tx(&signed_tx.tx_bytes.0).await?;
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
-    println!("  Transaction Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Domain: {}", domain);
     println!("  New threshold: {}", threshold);
