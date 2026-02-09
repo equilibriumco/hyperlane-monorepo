@@ -57,6 +57,18 @@ Your signing key must control a wallet with sufficient ADA:
 | Contract initialization     | ~10 ADA per contract |
 | Total recommended           | ~100 ADA             |
 
+### Transaction Confirmation
+
+By default, the CLI waits for transaction confirmation before returning. This prevents errors from consumed UTXOs when chaining commands. Use `--no-wait` to skip confirmation waiting:
+
+```bash
+# Default: waits for confirmation (recommended for scripted deployments)
+./cli/target/release/hyperlane-cardano --network $NETWORK init mailbox --domain 2003
+
+# Skip waiting (faster for exploratory use)
+./cli/target/release/hyperlane-cardano --no-wait --network $NETWORK init mailbox --domain 2003
+```
+
 ---
 
 ## Contract Overview & Dependencies
@@ -220,6 +232,33 @@ Parameters:
 - `--domain`: Local Cardano domain ID (2003 for preview, 2002 for preprod)
 - `--origin-domains`: Comma-separated list of origin chain domain IDs to configure
 
+#### Optional: Configure ISM and Validator Announce in One Command
+
+`init all` supports optional flags to configure ISM validators, thresholds, and perform the validator announcement in a single command:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init all \
+  --domain 2003 \
+  --origin-domains "43113,11155111" \
+  --validators "43113:d8154f73d04cc7f7f0c332793692e6e6f6b2402e,895ae30bc83ff1493b9cf7781b0b813d23659857" \
+  --thresholds "43113:1,11155111:1" \
+  --storage-location "s3://my-bucket/my-region/my-folder" \
+  --validator-key "0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764"
+```
+
+Optional parameters:
+
+- `--validators`: ISM validators per domain. Format: `"domain:addr1,addr2;domain2:addr3"`
+- `--thresholds`: ISM threshold per domain. Format: `"domain:threshold,domain2:threshold"`
+- `--storage-location`: S3 URL for validator checkpoint storage announcement
+- `--validator-key`: ECDSA hex key for validator announce signature
+
+Each step waits for on-chain confirmation before proceeding to the next.
+
 ### 3.2 Initialize Individually (Alternative)
 
 #### Initialize Mailbox
@@ -346,6 +385,8 @@ chains:
 ---
 
 ## Phase 5: Configure Contracts
+
+> **Note**: If you used `init all` with `--validators` and `--thresholds` flags in Phase 3, the ISM validators and thresholds are already configured. You only need to perform Phase 5 if you initialized contracts individually or need to reconfigure.
 
 ### 5.1 Update Mailbox Default ISM
 
@@ -686,8 +727,6 @@ For the warp route to release tokens on inbound transfers, its state UTXO must h
 
 The synthetic warp route mints/burns synthetic tokens representing assets from other chains.
 
-#### Step 1: Deploy the Warp Route
-
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
@@ -715,12 +754,17 @@ Warp route deployed!
   Reference Script UTXO: eca38472b3d7f97201dfe62df753b1ac47a4fc6b31ae81dd139e4e8bdb35844d#1
   Hyperlane Address: 0x020000002bc528ef916747a2f320107be4bade841fc114dfa8aa9ab473f8f9d9
 
+Auto-deploying minting policy reference script...
+  Minting ref UTXO: 5678efgh...#0
+
 Deployment saved to: deployments/preview/synthetic_warp_route.json
 ```
 
-#### Step 2: Deploy Synthetic Minting Reference Script
+The CLI automatically deploys the minting policy reference script after the synthetic warp route. This reference script is required for the relayer to mint synthetic tokens on inbound transfers.
 
-For the relayer to mint synthetic tokens when processing inbound messages, the minting policy must be deployed as a reference script:
+#### Manual Minting Ref Deployment (if needed)
+
+If you need to redeploy the minting reference script separately:
 
 ```bash
 WARP_POLICY="fc0d436644772ca43b9374f9e7a3dd298609099b4af7309f49bf60c1"
@@ -732,16 +776,6 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   warp deploy-minting-ref \
   --warp-policy $WARP_POLICY
 ```
-
-**Output:**
-
-```
-Minting policy reference script deployed!
-  UTXO: 5678efgh...#0
-  NFT: fc0d436644772ca43b9374f9e7a3dd298609099b4af7309f49bf60c1.6d696e745f726566
-```
-
-> **Important**: This step is required for inbound synthetic token transfers to work. Without the minting reference script, the relayer cannot mint synthetic tokens.
 
 ### 7.5 Enroll Remote Routers
 
@@ -1164,7 +1198,7 @@ FUJI_WARP_ROUTE="0x0000000000000000000000001ac0c9eeb284b7ddf83c973662abc0d20e3ae
 
 echo "=== Warp Route Deployment ==="
 
-# 1. Deploy Native ADA warp route
+# 1. Deploy Native ADA warp route (waits for confirmation automatically)
 echo "Deploying native ADA warp route..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
@@ -1172,8 +1206,6 @@ $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   --token-type native \
   --decimals 6 \
   --remote-decimals 18
-
-sleep 30
 
 # 2. Get deployed warp route info
 NATIVE_WARP=$(cat deployments/$NETWORK/native_warp_route.json)
@@ -1273,7 +1305,7 @@ curl -sSfL https://install.aiken-lang.org | bash
 
 ## Complete Deployment Script
 
-Here's a complete script for deploying all contracts:
+Here's a complete script for deploying all contracts. The CLI waits for TX confirmation by default, so no manual sleep/polling is needed between steps:
 
 ```bash
 #!/bin/bash
@@ -1285,6 +1317,10 @@ export BLOCKFROST_API_KEY="your_api_key_here"
 export CARDANO_SIGNING_KEY="./keys/payment.skey"
 export LOCAL_DOMAIN=2003
 export ORIGIN_DOMAINS="43113,11155111"  # Fuji, Sepolia
+
+# ISM configuration (optional for init all)
+export VALIDATORS="43113:d8154f73d04cc7f7f0c332793692e6e6f6b2402e"
+export THRESHOLDS="43113:1,11155111:1"
 
 CLI="./cli/target/release/hyperlane-cardano"
 DEPLOY_DIR="./deployments/$NETWORK"
@@ -1302,25 +1338,21 @@ cd contracts && aiken build && cd ..
 echo "Step 2: Extracting validators..."
 $CLI --network $NETWORK deploy extract --output $DEPLOY_DIR
 
-# Step 3: Initialize core contracts (applies parameters)
+# Step 3: Initialize core contracts + configure ISM (applies parameters)
 echo "Step 3: Initializing core contracts..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   init all \
   --domain $LOCAL_DOMAIN \
-  --origin-domains "$ORIGIN_DOMAINS"
-
-echo "Waiting for confirmation..."
-sleep 30
+  --origin-domains "$ORIGIN_DOMAINS" \
+  --validators "$VALIDATORS" \
+  --thresholds "$THRESHOLDS"
 
 # Step 4: Deploy reference scripts (must be after init to use parameterized scripts)
 echo "Step 4: Deploying reference scripts..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   deploy reference-scripts-all
-
-echo "Waiting for confirmation..."
-sleep 30
 
 # Step 5: Configure mailbox with ISM
 echo "Step 5: Configuring mailbox..."
@@ -1329,10 +1361,18 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   mailbox set-default-ism --ism-hash $ISM_HASH
 
-sleep 30
+# Step 6: Generate relayer configuration
+echo "Step 6: Generating agent configs..."
+$CLI --network $NETWORK \
+  config update-relayer --dry-run
 
-# Step 6: Verify deployment
-echo "Step 6: Verifying deployment..."
+# Step 7: Generate .env file
+echo "Step 7: Generating .env file..."
+$CLI --network $NETWORK \
+  config generate-env --output $DEPLOY_DIR/.env.generated
+
+# Step 8: Verify deployment
+echo "Step 8: Verifying deployment..."
 $CLI --network $NETWORK init status
 $CLI --network $NETWORK mailbox show
 $CLI --network $NETWORK ism show
@@ -1340,6 +1380,7 @@ $CLI --network $NETWORK ism show
 echo ""
 echo "=== Deployment Complete ==="
 echo "Deployment info saved to: $DEPLOY_DIR/deployment_info.json"
+echo "Environment file: $DEPLOY_DIR/.env.generated"
 ```
 
 ---
@@ -1383,6 +1424,14 @@ After deployment, your `deployment_info.json` will contain addresses like:
 
 ## Appendix: CLI Command Reference
 
+### Global Flags
+
+| Flag             | Description                                    |
+| ---------------- | ---------------------------------------------- |
+| `--network`      | Cardano network (preview, preprod, mainnet)    |
+| `--signing-key`  | Path to Ed25519 signing key                    |
+| `--no-wait`      | Skip TX confirmation waiting (default: waits)  |
+
 ### Deploy Commands
 
 | Command                        | Description                         |
@@ -1395,13 +1444,13 @@ After deployment, your `deployment_info.json` will contain addresses like:
 
 ### Init Commands
 
-| Command          | Description                     |
-| ---------------- | ------------------------------- |
-| `init mailbox`   | Initialize mailbox contract     |
-| `init ism`       | Initialize multisig ISM         |
-| `init recipient` | Initialize a recipient contract |
-| `init all`       | Initialize all core contracts   |
-| `init status`    | Show initialization status      |
+| Command          | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `init mailbox`   | Initialize mailbox contract                                              |
+| `init ism`       | Initialize multisig ISM                                                  |
+| `init recipient` | Initialize a recipient contract                                          |
+| `init all`       | Initialize all core contracts (optionally configure ISM + validator too)  |
+| `init status`    | Show initialization status                                               |
 
 ### Mailbox Commands
 
@@ -1419,6 +1468,15 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `ism show`             | Display configuration       |
 | `ism add-validator`    | Add a single validator      |
 | `ism remove-validator` | Remove a validator          |
+
+### Config Commands
+
+| Command                 | Description                                              |
+| ----------------------- | -------------------------------------------------------- |
+| `config update-relayer` | Generate relayer config with all fields from deployment   |
+| `config update-validator` | Generate validator config from deployment               |
+| `config generate-env`   | Generate .env file with all deployment values            |
+| `config show`           | Show current Cardano config from relayer config          |
 
 ### Query Commands
 
@@ -1679,6 +1737,42 @@ aiken blueprint apply \
 
 When configuring the Hyperlane agents (validator and relayer) for Cardano, several environment variables must be set correctly. This section documents all required variables and how to extract them from your deployment.
 
+### Automated Configuration (Recommended)
+
+The CLI can generate all agent configuration files and environment variables automatically:
+
+```bash
+cd cardano
+
+# Generate relayer config (derives all parameterized values automatically)
+./cli/target/release/hyperlane-cardano --network $NETWORK \
+  config update-relayer --config-path config/relayer-config.json
+
+# Generate validator config
+./cli/target/release/hyperlane-cardano --network $NETWORK \
+  config update-validator \
+  --validator-key 0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764
+
+# Generate .env file with all deployment values
+./cli/target/release/hyperlane-cardano --network $NETWORK \
+  config generate-env --output deployments/$NETWORK/.env.generated
+```
+
+`config update-relayer` derives and sets all required fields including:
+- Mailbox, ISM, IGP, VA policy IDs and script hashes
+- Reference script UTXOs
+- Processed messages NFT policy + script CBOR
+- Stored message NFT policy + script CBOR
+- Message redemption script hash
+- Token redemption script hash
+- Warp route reference script UTXO
+
+Use `--dry-run` to preview without writing changes.
+
+### Manual Configuration
+
+If you need to extract values manually, see the sections below.
+
 ### Environment Variables Overview
 
 #### Variables Used by Both Validator and Relayer
@@ -1721,6 +1815,8 @@ When configuring the Hyperlane agents (validator and relayer) for Cardano, sever
 ---
 
 ### Extracting Variables from deployment_info.json
+
+> **Tip**: Use `config generate-env` to auto-generate all these values. The manual extraction below is for reference only.
 
 After deploying Cardano contracts, extract the required values:
 
@@ -1866,6 +1962,8 @@ To announce with the correct format:
 
 ### Example Complete Relayer Config for Cardano
 
+> **Tip**: Use `config update-relayer` to generate this automatically. The command derives all parameterized values (processed messages NFT, stored message NFT, message redemption) from the Plutus blueprint.
+
 ```json
 {
   "chains": {
@@ -1881,22 +1979,29 @@ To announce with the correct format:
         "network": "preview",
         "mailboxPolicyId": "<mailbox_state_nft_policy_id>",
         "mailboxScriptHash": "<mailbox_script_hash>",
+        "mailboxAssetNameHex": "<mailbox_nft_asset_name>",
         "mailboxReferenceScriptUtxo": "<tx_hash>#0",
         "processedMessagesNftPolicyId": "<processed_msg_nft_policy_id>",
         "processedMessagesNftScriptCbor": "<cbor_hex_from_applied_script>",
-        "processedMessagesScriptHash": "<mailbox_script_hash>",
         "ismPolicyId": "<ism_state_nft_policy_id>",
         "ismScriptHash": "<ism_script_hash>",
+        "ismAssetNameHex": "<ism_nft_asset_name>",
         "ismReferenceScriptUtxo": "<tx_hash>#0",
-        "validatorAnnouncePolicyId": "<va_state_nft_policy_id>"
+        "igpPolicyId": "<igp_state_nft_policy_id>",
+        "validatorAnnouncePolicyId": "<va_state_nft_policy_id>",
+        "storedMessageNftPolicyId": "<stored_msg_nft_policy_id>",
+        "storedMessageNftScriptCbor": "<cbor_hex_from_applied_script>",
+        "messageRedemptionScriptHash": "<message_redemption_hash>",
+        "redemptionScriptHash": "<token_redemption_hash>",
+        "warpRouteReferenceScriptUtxo": "<tx_hash>#1"
       },
       "index": {
         "from": 3936000
       },
-      "mailbox": "0x00000000<mailbox_state_nft_policy_id>",
+      "mailbox": "0x02000000<mailbox_script_hash>",
       "validatorAnnounce": "0x00000000<va_state_nft_policy_id>",
       "merkleTreeHook": "0x00000000<mailbox_state_nft_policy_id>",
-      "interchainSecurityModule": "0x00000000<ism_script_hash>"
+      "interchainSecurityModule": "0x02000000<ism_script_hash>"
     }
   }
 }
