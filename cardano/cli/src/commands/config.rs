@@ -77,6 +77,17 @@ enum ConfigCommands {
         #[arg(long)]
         chain_name: Option<String>,
     },
+
+    /// Generate .env file from deployment state
+    GenerateEnv {
+        /// Output file path (default: e2e-docker/.env.generated)
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Dry run - print to stdout without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub async fn execute(ctx: &CliContext, args: ConfigArgs) -> Result<()> {
@@ -100,6 +111,10 @@ pub async fn execute(ctx: &CliContext, args: ConfigArgs) -> Result<()> {
             config_path,
             chain_name,
         } => show_config(ctx, config_path, chain_name).await,
+        ConfigCommands::GenerateEnv {
+            output,
+            dry_run,
+        } => generate_env(ctx, output, dry_run).await,
     }
 }
 
@@ -850,4 +865,188 @@ fn create_default_cardano_chain(chain_name: &str, network: &str) -> Value {
             "from": 0
         }
     })
+}
+
+async fn generate_env(
+    ctx: &CliContext,
+    output: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Generating .env file from deployment info...".cyan());
+
+    let deployment = ctx.load_deployment_info()?;
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push("# Auto-generated from deployment_info.json".to_string());
+    lines.push(format!("# Network: {}", deployment.network));
+    lines.push(String::new());
+
+    // Secrets (placeholders)
+    lines.push("# Secrets - fill in manually".to_string());
+    lines.push("BLOCKFROST_API_KEY=<your-key>".to_string());
+    lines.push("CARDANO_SIGNER_KEY=<path-to-signing-key>".to_string());
+    lines.push(String::new());
+
+    // Mailbox
+    if let Some(ref mailbox) = deployment.mailbox {
+        lines.push("# Mailbox".to_string());
+        lines.push(format!("CARDANO_MAILBOX_SCRIPT_HASH={}", mailbox.hash));
+        lines.push(format!("CARDANO_MAILBOX_ADDRESS={}", mailbox.address));
+        if let Some(ref nft) = mailbox.state_nft {
+            lines.push(format!("CARDANO_MAILBOX_POLICY_ID={}", nft.policy_id));
+        } else if let Some(ref pid) = mailbox.state_nft_policy {
+            lines.push(format!("CARDANO_MAILBOX_POLICY_ID={}", pid));
+        }
+        if let Some(ref ref_utxo) = mailbox.reference_script_utxo {
+            lines.push(format!("CARDANO_MAILBOX_REF_UTXO={}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+        }
+        lines.push(String::new());
+    }
+
+    // ISM
+    if let Some(ref ism) = deployment.ism {
+        lines.push("# ISM".to_string());
+        lines.push(format!("CARDANO_ISM_SCRIPT_HASH={}", ism.hash));
+        lines.push(format!("CARDANO_ISM_ADDRESS={}", ism.address));
+        if let Some(ref nft) = ism.state_nft {
+            lines.push(format!("CARDANO_ISM_POLICY_ID={}", nft.policy_id));
+        }
+        if let Some(ref ref_utxo) = ism.reference_script_utxo {
+            lines.push(format!("CARDANO_ISM_REF_UTXO={}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+        }
+        lines.push(String::new());
+    }
+
+    // IGP
+    if let Some(ref igp) = deployment.igp {
+        lines.push("# IGP".to_string());
+        if let Some(ref nft) = igp.state_nft {
+            lines.push(format!("CARDANO_IGP_POLICY_ID={}", nft.policy_id));
+        }
+        lines.push(String::new());
+    }
+
+    // Validator Announce
+    if let Some(ref va) = deployment.validator_announce {
+        lines.push("# Validator Announce".to_string());
+        if let Some(ref nft) = va.state_nft {
+            lines.push(format!("CARDANO_VA_POLICY_ID={}", nft.policy_id));
+        }
+        lines.push(String::new());
+    }
+
+    // Derived parameterized values
+    if let Some(ref mailbox) = deployment.mailbox {
+        let mailbox_policy_id = mailbox.state_nft.as_ref()
+            .map(|nft| nft.policy_id.clone())
+            .or_else(|| mailbox.state_nft_policy.clone());
+
+        if let Some(ref pid) = mailbox_policy_id {
+            let param = encode_script_hash_param(pid)?;
+            let param_hex = hex::encode(&param);
+
+            // Processed messages NFT
+            if let Ok(applied) = apply_validator_param_with_purpose(
+                &ctx.contracts_dir, "processed_message_nft", "processed_message_nft",
+                Some("mint"), &param_hex,
+            ) {
+                lines.push("# Processed Messages NFT".to_string());
+                lines.push(format!("CARDANO_PROCESSED_MSG_POLICY_ID={}", applied.policy_id));
+                lines.push(String::new());
+            }
+
+            // Stored message NFT
+            if let Ok(stored_applied) = apply_validator_param_with_purpose(
+                &ctx.contracts_dir, "stored_message_nft", "stored_message_nft",
+                Some("mint"), &param_hex,
+            ) {
+                lines.push("# Stored Message NFT".to_string());
+                lines.push(format!("CARDANO_STORED_MSG_POLICY_ID={}", stored_applied.policy_id));
+                lines.push(String::new());
+
+                // Message redemption
+                let stored_param = encode_script_hash_param(&stored_applied.policy_id)?;
+                let stored_param_hex = hex::encode(&stored_param);
+                if let Ok(mr_applied) = apply_validator_param_with_purpose(
+                    &ctx.contracts_dir, "message_redemption", "message_redemption",
+                    Some("spend"), &stored_param_hex,
+                ) {
+                    lines.push("# Message Redemption".to_string());
+                    lines.push(format!("CARDANO_MSG_REDEMPTION_HASH={}", mr_applied.policy_id));
+                    lines.push(String::new());
+                }
+            }
+        }
+    }
+
+    // Token redemption
+    if let Ok(bp) = ctx.load_blueprint() {
+        if let Some(validator) = bp.find_validator("token_redemption.token_redemption.spend") {
+            lines.push("# Token Redemption".to_string());
+            lines.push(format!("CARDANO_REDEMPTION_HASH={}", validator.hash));
+            lines.push(String::new());
+        }
+    }
+
+    // Warp routes
+    for (i, warp) in deployment.warp_routes.iter().enumerate() {
+        let label = warp.warp_type.to_uppercase();
+        let prefix = if deployment.warp_routes.len() > 1 {
+            format!("CARDANO_{}_WARP_{}", label, i)
+        } else {
+            format!("CARDANO_{}_WARP", label)
+        };
+        lines.push(format!("# Warp Route: {} ({})", warp.warp_type, warp.address));
+        lines.push(format!("{}_NFT_POLICY={}", prefix, warp.nft_policy));
+        lines.push(format!("{}_SCRIPT_HASH={}", prefix, warp.script_hash));
+        lines.push(format!("{}_ADDRESS={}", prefix, warp.address));
+        if let Some(ref ref_utxo) = warp.reference_script_utxo {
+            lines.push(format!("{}_REF_UTXO={}#{}", prefix, ref_utxo.tx_hash, ref_utxo.output_index));
+        }
+        if let Some(ref tp) = warp.token_policy {
+            lines.push(format!("{}_TOKEN_POLICY={}", prefix, tp));
+        }
+        if let Some(ref ta) = warp.token_asset {
+            lines.push(format!("{}_TOKEN_ASSET={}", prefix, ta));
+        }
+        if let Some(ref mp) = warp.minting_policy {
+            lines.push(format!("{}_MINTING_POLICY={}", prefix, mp));
+        }
+        lines.push(String::new());
+    }
+
+    // Index from placeholder
+    lines.push("# Indexing".to_string());
+    lines.push("CARDANO_INDEX_FROM=<block-number>".to_string());
+
+    let content = lines.join("\n") + "\n";
+
+    if dry_run {
+        println!("\n{}", "[Dry run - generated .env content:]".yellow());
+        print!("{}", content);
+    } else {
+        let output_path = output.unwrap_or_else(|| {
+            ctx.deployments_dir
+                .parent()
+                .unwrap_or(&ctx.deployments_dir)
+                .join("e2e-docker")
+                .join(".env.generated")
+                .to_string_lossy()
+                .to_string()
+        });
+
+        if let Some(parent) = std::path::Path::new(&output_path).parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+        }
+
+        std::fs::write(&output_path, &content)
+            .with_context(|| format!("Failed to write .env file: {}", output_path))?;
+
+        println!("\n{}", "Environment file generated!".green().bold());
+        println!("  File: {}", output_path);
+        println!("  Variables: {}", lines.iter().filter(|l| l.contains('=') && !l.starts_with('#')).count());
+    }
+
+    Ok(())
 }
