@@ -14,11 +14,7 @@ use types.{
   MerkleTreeState, MultisigIsmRedeemer, PolicyId, ScriptHash, Verify, encode_message,
   Dispatch, Process, SetDefaultIsm, TransferOwnership,
 }
-use utils.{
-  find_input, has_policy_in_inputs, has_script_input,
-  hyperlane_address_to_policy_id, hyperlane_address_to_script_hash,
-  is_signed_by, policy_id_to_hyperlane_address, value_preserved,
-}
+use utils.{find_input, is_signed_by, policy_id_to_hyperlane_address, value_preserved}
 
 /// Mailbox Validator
 /// Core Hyperlane contract that dispatches and processes messages
@@ -36,7 +32,10 @@ use utils.{
 /// The processed_messages_nft_policy is itself parameterized by mailbox_policy_id
 /// (the one-shot NFT policy), making it stable across mailbox upgrades. This ensures
 /// that replay protection continues to work even after the mailbox code is updated.
-validator mailbox(processed_messages_nft_policy: PolicyId) {
+validator mailbox(
+  processed_messages_nft_policy: PolicyId,
+  stored_message_nft_policy: PolicyId,
+) {
   spend(
     datum: Option<MailboxDatum>,
     redeemer: MailboxRedeemer,
@@ -65,6 +64,7 @@ validator mailbox(processed_messages_nft_policy: PolicyId) {
           tx,
           own_ref,
           processed_messages_nft_policy,
+          stored_message_nft_policy,
         )
 
       SetDefaultIsm { new_ism } ->
@@ -136,6 +136,7 @@ fn validate_process(
   tx: Transaction,
   own_ref: OutputReference,
   processed_messages_nft_policy: PolicyId,
+  stored_message_nft_policy: PolicyId,
 ) -> Bool {
   // 1. Verify message is for this domain
   expect message.destination == datum.local_domain
@@ -149,17 +150,15 @@ fn validate_process(
   expect !is_message_processed(message_id, tx, processed_messages_nft_policy)
 
   // 4. Verify ISM approves the message
-  // Get the TRUSTED ISM hash (from recipient's custom ISM or mailbox's default_ism)
-  // Then verify an input with that EXACT script hash is spent with a Verify redeemer
-  // containing a checkpoint for THIS specific message_id
   let ism_hash = get_recipient_ism(message.recipient, datum.default_ism, tx)
   expect verify_ism_for_message(ism_hash, message_id, tx, metadata)
 
-  // 5. Verify recipient is called (recipient UTXO must be spent)
-  expect recipient_called(message.recipient, tx)
-
-  // 6. Verify processed message NFT is being minted with this message_id
+  // 5. Verify processed message NFT is being minted with this message_id
   expect processed_nft_minted(message_id, tx, processed_messages_nft_policy)
+
+  // 6. Verify stored message NFT is being minted with this message_id
+  // This NFT goes into the message redemption UTXO for later claim/expire
+  expect stored_nft_minted(message_id, tx, stored_message_nft_policy)
 
   // 7. Validate mailbox continuation (datum unchanged for process)
   validate_continuation(datum, datum, tx, own_ref)
@@ -382,18 +381,16 @@ fn verify_ism_redeemer_message_id(
   }
 }
 
-/// Verify that the recipient script is being called
-/// Handles both NFT policy addresses (0x01 prefix) and script hash addresses (0x00/0x02 prefix)
-fn recipient_called(recipient: HyperlaneAddress, tx: Transaction) -> Bool {
-  when hyperlane_address_to_policy_id(recipient) is {
-    Some(policy_id) ->
-      // NFT policy address: check that an input contains a token with this policy
-      has_policy_in_inputs(tx, policy_id)
-    None -> {
-      // Script hash address: check that an input from this script is spent
-      expect Some(script_hash) = hyperlane_address_to_script_hash(recipient)
-      has_script_input(tx, script_hash)
-    }
+/// Verify that a stored message NFT is being minted with the message_id as asset name
+fn stored_nft_minted(
+  message_id: ByteArray,
+  tx: Transaction,
+  stored_message_nft_policy: PolicyId,
+) -> Bool {
+  let policy_mints = assets.tokens(tx.mint, stored_message_nft_policy)
+  when dict.get(policy_mints, message_id) is {
+    Some(quantity) -> quantity == 1
+    None -> False
   }
 }
 

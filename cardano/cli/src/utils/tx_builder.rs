@@ -355,148 +355,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
         Ok(tx)
     }
 
-    /// Build a deferred recipient initialization transaction with three-UTXO pattern
-    ///
-    /// This creates:
-    /// 1. State UTXO: script_address + state_NFT (empty name) + datum
-    /// 2. Recipient Reference Script UTXO: payer_address + ref_NFT ("ref") + recipient script
-    /// 3. Message NFT Reference Script UTXO: payer_address + msg_ref_NFT ("msg_ref") + stored_message_nft script
-    ///
-    /// All three NFTs use the same policy ID, enabling the relayer to discover
-    /// both reference script UTXOs by scanning for the ref NFTs.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn build_init_recipient_three_utxo_tx(
-        &self,
-        payer: &Keypair,
-        input_utxo: &Utxo,
-        collateral_utxo: &Utxo,
-        mint_script_cbor: &[u8],      // state_nft minting policy
-        recipient_script_cbor: &[u8], // recipient validator to attach as reference script
-        msg_nft_script_cbor: &[u8],   // stored_message_nft policy to attach as reference script
-        script_address: &str,         // recipient script address
-        datum_cbor: &[u8],            // initial datum for state UTXO
-        state_output_lovelace: u64,   // ADA for state UTXO
-        ref_output_lovelace: u64,     // ADA for recipient reference script UTXO
-        msg_ref_output_lovelace: u64, // ADA for message NFT reference script UTXO
-    ) -> Result<BuiltTransaction> {
-        // Get current slot for validity
-        let current_slot = self.client.get_latest_slot().await?;
-        let validity_end = current_slot + 7200; // ~2 hours
-
-        // Get PlutusV3 cost model
-        let cost_model = self.client.get_plutusv3_cost_model().await?;
-
-        // Calculate policy ID from mint script
-        let policy_id = super::crypto::script_hash(mint_script_cbor);
-
-        // Parse tx hashes
-        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid input tx hash"))?;
-
-        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
-
-        let payer_address = payer.address_bech32(self.network);
-        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
-            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
-
-        // Build inputs
-        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
-        let collateral = Input::new(
-            Hash::new(collateral_tx_hash),
-            collateral_utxo.output_index as u64,
-        );
-
-        // Asset names: state NFT (empty), ref NFT ("ref"), msg_ref NFT ("msg_ref")
-        let state_asset_name: Vec<u8> = vec![];
-        let ref_asset_name: Vec<u8> = b"ref".to_vec(); // 0x726566
-        let msg_ref_asset_name: Vec<u8> = b"msg_ref".to_vec(); // 0x6d73675f726566
-
-        // Output 1: State UTXO at script address with state NFT + datum
-        let state_output = Output::new(
-            pallas_addresses::Address::from_bech32(script_address)
-                .map_err(|e| anyhow!("Invalid script address: {}", e))?,
-            state_output_lovelace,
-        )
-        .set_inline_datum(datum_cbor.to_vec())
-        .add_asset(Hash::new(policy_id), state_asset_name.clone(), 1)
-        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
-
-        // Output 2: Recipient Reference Script UTXO at payer address
-        let ref_script_output = Output::new(payer_addr.clone(), ref_output_lovelace)
-            .add_asset(Hash::new(policy_id), ref_asset_name.clone(), 1)
-            .map_err(|e| anyhow!("Failed to add ref NFT: {:?}", e))?
-            .set_inline_script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec());
-
-        // Output 3: Message NFT Reference Script UTXO at payer address
-        let msg_ref_script_output = Output::new(payer_addr.clone(), msg_ref_output_lovelace)
-            .add_asset(Hash::new(policy_id), msg_ref_asset_name.clone(), 1)
-            .map_err(|e| anyhow!("Failed to add msg_ref NFT: {:?}", e))?
-            .set_inline_script(ScriptKind::PlutusV3, msg_nft_script_cbor.to_vec());
-
-        // Build mint redeemer
-        let mint_redeemer = build_mint_redeemer();
-
-        // Fee estimate (larger due to two reference scripts)
-        let fee_estimate = 4_000_000u64;
-        let total_outputs = state_output_lovelace + ref_output_lovelace + msg_ref_output_lovelace;
-        let change = input_utxo
-            .lovelace
-            .saturating_sub(total_outputs)
-            .saturating_sub(fee_estimate);
-
-        // Build staging transaction - mint all three NFTs
-        let mut staging = StagingTransaction::new()
-            .input(input)
-            .collateral_input(collateral)
-            .output(state_output)
-            .output(ref_script_output)
-            .output(msg_ref_script_output)
-            // Mint state NFT (empty name)
-            .mint_asset(Hash::new(policy_id), state_asset_name, 1)
-            .map_err(|e| anyhow!("Failed to add state NFT mint: {:?}", e))?
-            // Mint ref NFT ("ref")
-            .mint_asset(Hash::new(policy_id), ref_asset_name, 1)
-            .map_err(|e| anyhow!("Failed to add ref NFT mint: {:?}", e))?
-            // Mint msg_ref NFT ("msg_ref")
-            .mint_asset(Hash::new(policy_id), msg_ref_asset_name, 1)
-            .map_err(|e| anyhow!("Failed to add msg_ref NFT mint: {:?}", e))?
-            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
-            .add_mint_redeemer(
-                Hash::new(policy_id),
-                mint_redeemer,
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
-            )
-            .language_view(ScriptKind::PlutusV3, cost_model)
-            .fee(fee_estimate)
-            .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) {
-                0
-            } else {
-                1
-            });
-
-        if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
-        }
-
-        // Add required signer
-        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
-        staging = staging.disclosed_signer(signer_hash);
-
-        // Build the transaction
-        let tx = staging
-            .build_conway_raw()
-            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
-
-        Ok(tx)
-    }
-
     /// Build a token minting transaction
     ///
     /// This mints fungible tokens using a one-shot minting policy and sends them
@@ -609,42 +467,39 @@ impl<'a> HyperlaneTxBuilder<'a> {
         Ok(tx)
     }
 
-    /// Build a deferred message processing transaction
+    /// Build a message receive transaction
     ///
     /// This transaction:
-    /// 1. Spends the message UTXO (with ProcessStoredMessage redeemer)
-    /// 2. Spends the recipient state UTXO (with same redeemer)
-    /// 3. Burns the message NFT (with BurnMessage redeemer)
-    /// 4. Creates updated state UTXO with incremented messages_processed
-    ///
-    /// This is for the example_deferred_recipient pattern.
+    /// 1. Spends the message redemption UTXO (ClaimMessage redeemer)
+    /// 2. Includes the recipient state UTXO as input (proves authorization)
+    /// 3. Burns the stored message NFT
+    /// 4. Sends ADA back to the relayer (return_address from datum)
     #[allow(clippy::too_many_arguments)]
-    pub async fn build_deferred_process_tx(
+    pub async fn build_message_receive_tx(
         &self,
         payer: &Keypair,
         fee_utxo: &Utxo,
         message_utxo: &Utxo,
-        state_utxo: &Utxo,
+        recipient_state_utxo: &Utxo,
         message_nft_policy: &str,
-        message_id: &str, // Asset name (the message ID)
-        recipient_redeemer: &[u8],
+        message_id: &str,
+        return_address_hex: &str,
+        receive_redeemer: &[u8],
         nft_burn_redeemer: &[u8],
-        new_state_datum: &[u8],
-        recipient_ref_script: Option<&str>,
+        redemption_ref_script: Option<&str>,
         nft_ref_script: Option<&str>,
+        recipient_redeemer: Option<&[u8]>,
+        new_state_datum: Option<&[u8]>,
+        recipient_ref_script: Option<&str>,
     ) -> Result<BuiltTransaction> {
-        // Get current slot for validity
         let current_slot = self.client.get_latest_slot().await?;
-        let validity_end = current_slot + 7200; // ~2 hours
-
-        // Get PlutusV3 cost model
+        let validity_end = current_slot + 7200;
         let cost_model = self.client.get_plutusv3_cost_model().await?;
 
         let payer_address = payer.address_bech32(self.network);
         let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
             .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
 
-        // Parse tx hashes
         let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
             .try_into()
             .map_err(|_| anyhow!("Invalid fee tx hash"))?;
@@ -653,7 +508,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .try_into()
             .map_err(|_| anyhow!("Invalid message tx hash"))?;
 
-        let state_tx_hash: [u8; 32] = hex::decode(&state_utxo.tx_hash)?
+        let state_tx_hash: [u8; 32] = hex::decode(&recipient_state_utxo.tx_hash)?
             .try_into()
             .map_err(|_| anyhow!("Invalid state tx hash"))?;
 
@@ -667,63 +522,93 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let fee_input = Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64);
         let message_input =
             Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
-        let state_input = Input::new(Hash::new(state_tx_hash), state_utxo.output_index as u64);
+        let state_input = Input::new(
+            Hash::new(state_tx_hash),
+            recipient_state_utxo.output_index as u64,
+        );
 
-        // Get state NFT from state UTXO
-        let state_nft = state_utxo
-            .assets
-            .iter()
-            .find(|a| a.quantity == 1)
-            .ok_or_else(|| anyhow!("State UTXO has no state NFT"))?;
+        // Build return output to relayer (return_address is a pkh)
+        let return_addr_bytes = hex::decode(return_address_hex)?;
+        if return_addr_bytes.len() != 28 {
+            return Err(anyhow!(
+                "Invalid return_address: expected 28 bytes, got {}",
+                return_addr_bytes.len()
+            ));
+        }
 
-        let state_nft_policy: [u8; 28] = hex::decode(&state_nft.policy_id)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid state NFT policy ID"))?;
+        // Build relayer return address from pkh
+        let return_addr = pallas_addresses::Address::Shelley(
+            pallas_addresses::ShelleyAddress::new(
+                if matches!(self.network, Network::Testnet) {
+                    pallas_addresses::Network::Testnet
+                } else {
+                    pallas_addresses::Network::Mainnet
+                },
+                pallas_addresses::ShelleyPaymentPart::key_hash(
+                    return_addr_bytes.as_slice().into(),
+                ),
+                pallas_addresses::ShelleyDelegationPart::Null,
+            ),
+        );
 
-        let state_nft_asset_name = hex::decode(&state_nft.asset_name).unwrap_or_default();
+        // Return the message UTXO's lovelace to the relayer
+        let return_output = Output::new(return_addr, message_utxo.lovelace);
 
-        // Build state output (continuation) with updated datum
-        let state_addr = pallas_addresses::Address::from_bech32(&state_utxo.address)
+        // Recipient state UTXO continuation (same datum, same address)
+        let state_addr = pallas_addresses::Address::from_bech32(&recipient_state_utxo.address)
             .map_err(|e| anyhow!("Invalid state address: {}", e))?;
 
-        let state_output = Output::new(state_addr, state_utxo.lovelace)
-            .set_inline_datum(new_state_datum.to_vec())
-            .add_asset(Hash::new(state_nft_policy), state_nft_asset_name, 1)
-            .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+        let mut state_output = Output::new(state_addr, recipient_state_utxo.lovelace);
+        if let Some(datum) = new_state_datum {
+            state_output = state_output.set_inline_datum(datum.to_vec());
+        } else if let Some(datum_json) = &recipient_state_utxo.inline_datum {
+            let datum_cbor = super::cbor::json_datum_to_cbor(datum_json)?;
+            state_output = state_output.set_inline_datum(datum_cbor);
+        }
+        for asset in &recipient_state_utxo.assets {
+            let policy: [u8; 28] = hex::decode(&asset.policy_id)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid policy ID: {}", asset.policy_id))?;
+            let asset_name = hex::decode(&asset.asset_name).unwrap_or_default();
+            state_output = state_output
+                .add_asset(Hash::new(policy), asset_name, asset.quantity)
+                .map_err(|e| anyhow!("Failed to add state asset: {:?}", e))?;
+        }
 
-        // Fee estimate
         let fee_estimate = 2_000_000u64;
-        let total_input = fee_utxo.lovelace + message_utxo.lovelace;
-        let change = total_input.saturating_sub(fee_estimate);
+        let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
-        // Build staging transaction
         let mut staging = StagingTransaction::new()
             .input(fee_input.clone())
             .input(message_input.clone())
             .input(state_input.clone())
-            .collateral_input(fee_input) // Use fee input as collateral
+            .collateral_input(fee_input)
+            .output(return_output)
             .output(state_output)
-            // Burn the message NFT (-1)
-            .mint_asset(Hash::new(nft_policy), message_id_bytes.clone(), -1)
+            .mint_asset(Hash::new(nft_policy), message_id_bytes, -1)
             .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?
-            // Add spend redeemers for both script inputs
             .add_spend_redeemer(
                 message_input,
-                recipient_redeemer.to_vec(),
+                receive_redeemer.to_vec(),
                 Some(ExUnits {
                     mem: 1_000_000,
                     steps: 500_000_000,
                 }),
-            )
-            .add_spend_redeemer(
+            );
+
+        // Add spend redeemer for recipient state (required for script-based recipients)
+        if let Some(redeemer) = recipient_redeemer {
+            staging = staging.add_spend_redeemer(
                 state_input,
-                recipient_redeemer.to_vec(),
+                redeemer.to_vec(),
                 Some(ExUnits {
                     mem: 1_000_000,
                     steps: 500_000_000,
                 }),
-            )
-            // Add mint redeemer for burning
+            );
+        }
+
+        staging = staging
             .add_mint_redeemer(
                 Hash::new(nft_policy),
                 nft_burn_redeemer.to_vec(),
@@ -741,8 +626,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 1
             });
 
-        // Add reference scripts if provided
-        if let Some(ref_script) = recipient_ref_script {
+        if let Some(ref_script) = redemption_ref_script {
             let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
             let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
                 .try_into()
@@ -758,16 +642,160 @@ impl<'a> HyperlaneTxBuilder<'a> {
             staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
         }
 
-        // Add change output if there's enough
+        if let Some(ref_script) = recipient_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid recipient reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        }
+
         if change > 1_500_000 {
             staging = staging.output(Output::new(payer_addr, change));
         }
 
-        // Add required signer
         let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
         staging = staging.disclosed_signer(signer_hash);
 
-        // Build the transaction
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a message expire transaction
+    ///
+    /// After the expiry slot, the relayer can reclaim everything without
+    /// the recipient being involved.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_message_expire_tx(
+        &self,
+        payer: &Keypair,
+        fee_utxo: &Utxo,
+        message_utxo: &Utxo,
+        message_nft_policy: &str,
+        message_id: &str,
+        return_address_hex: &str,
+        expire_redeemer: &[u8],
+        nft_burn_redeemer: &[u8],
+        expiry_slot: u64,
+        redemption_ref_script: Option<&str>,
+        nft_ref_script: Option<&str>,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+
+        let message_tx_hash: [u8; 32] = hex::decode(&message_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid message tx hash"))?;
+
+        let nft_policy: [u8; 28] = hex::decode(message_nft_policy)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid NFT policy ID"))?;
+
+        let message_id_bytes = hex::decode(message_id).unwrap_or_default();
+
+        let fee_input = Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64);
+        let message_input =
+            Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
+
+        // Build return output to relayer
+        let return_addr_bytes = hex::decode(return_address_hex)?;
+        if return_addr_bytes.len() != 28 {
+            return Err(anyhow!(
+                "Invalid return_address: expected 28 bytes, got {}",
+                return_addr_bytes.len()
+            ));
+        }
+
+        let return_addr = pallas_addresses::Address::Shelley(
+            pallas_addresses::ShelleyAddress::new(
+                if matches!(self.network, Network::Testnet) {
+                    pallas_addresses::Network::Testnet
+                } else {
+                    pallas_addresses::Network::Mainnet
+                },
+                pallas_addresses::ShelleyPaymentPart::key_hash(
+                    return_addr_bytes.as_slice().into(),
+                ),
+                pallas_addresses::ShelleyDelegationPart::Null,
+            ),
+        );
+
+        let return_output = Output::new(return_addr, message_utxo.lovelace);
+
+        let fee_estimate = 2_000_000u64;
+        let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+        // For expire, validity_start must be AFTER expiry_slot
+        let validity_start = expiry_slot;
+
+        let mut staging = StagingTransaction::new()
+            .input(fee_input.clone())
+            .input(message_input.clone())
+            .collateral_input(fee_input)
+            .output(return_output)
+            .mint_asset(Hash::new(nft_policy), message_id_bytes, -1)
+            .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?
+            .add_spend_redeemer(
+                message_input,
+                expire_redeemer.to_vec(),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
+            )
+            .add_mint_redeemer(
+                Hash::new(nft_policy),
+                nft_burn_redeemer.to_vec(),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 200_000_000,
+                }),
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .valid_from_slot(validity_start)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if let Some(ref_script) = redemption_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        }
+
+        if let Some(ref_script) = nft_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid NFT reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        }
+
+        if change > 1_500_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;

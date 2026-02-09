@@ -58,6 +58,15 @@ pub struct ConnectionConf {
     /// Token Redemption script hash (hex) - optional, enables two-phase token claiming
     /// When set, warp route transfers create redemption UTXOs instead of direct transfers
     pub redemption_script_hash: Option<String>,
+    /// Stored message NFT policy ID (hex) - minting policy for stored message NFTs.
+    /// Required for the unified message redemption pattern.
+    pub stored_message_nft_policy_id: Option<String>,
+    /// Stored message NFT script CBOR (hex) - the minting policy script bytes.
+    /// Required if stored_message_nft_policy_id is set.
+    pub stored_message_nft_script_cbor: Option<String>,
+    /// Message redemption script hash (hex) - where message redemption UTXOs are created.
+    /// Required for the unified message redemption pattern.
+    pub message_redemption_script_hash: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -83,6 +92,9 @@ pub struct RawConnectionConf {
     igp_policy_id: Option<String>,
     validator_announce_policy_id: Option<String>,
     redemption_script_hash: Option<String>,
+    stored_message_nft_policy_id: Option<String>,
+    stored_message_nft_script_cbor: Option<String>,
+    message_redemption_script_hash: Option<String>,
 }
 
 /// An error type when parsing a connection configuration.
@@ -214,6 +226,13 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         // Token redemption script (optional - enables two-phase token claiming)
         let redemption_script_hash = raw.redemption_script_hash;
 
+        // Stored message NFT policy (optional - enables message redemption pattern)
+        let stored_message_nft_policy_id = raw.stored_message_nft_policy_id;
+        let stored_message_nft_script_cbor = raw.stored_message_nft_script_cbor;
+
+        // Message redemption script (optional - where message escrow UTXOs are created)
+        let message_redemption_script_hash = raw.message_redemption_script_hash;
+
         Ok(Self {
             url,
             api_key,
@@ -235,6 +254,9 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             igp_policy_id,
             validator_announce_policy_id,
             redemption_script_hash,
+            stored_message_nft_policy_id,
+            stored_message_nft_script_cbor,
+            message_redemption_script_hash,
         })
     }
 }

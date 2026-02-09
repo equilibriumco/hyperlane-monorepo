@@ -309,87 +309,6 @@ pub fn build_mailbox_dispatch_redeemer(
     Ok(builder.build())
 }
 
-/// Build a GenericRecipient datum
-/// Structure: HyperlaneRecipientDatum<GenericRecipientInner>
-/// HyperlaneRecipientDatum { ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: GenericRecipientInner }
-/// GenericRecipientInner { messages_received: Int, last_message: Option<ByteArray> }
-pub fn build_generic_recipient_datum(
-    custom_ism: Option<&str>,
-    messages_received: u32,
-) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    builder.start_constr(0);
-
-    // ism: Option<ScriptHash>
-    match custom_ism {
-        Some(ism_hash) => {
-            // Some = constructor 0 with value
-            builder.start_constr(0);
-            builder.bytes_hex(ism_hash)?;
-            builder.end_constr();
-        }
-        None => {
-            // None = constructor 1 with no fields
-            builder.start_constr(1).end_constr();
-        }
-    }
-
-    // last_processed_nonce: Option<Int> - start with None
-    builder.start_constr(1).end_constr();
-
-    // inner: GenericRecipientInner
-    builder.start_constr(0);
-    builder.uint(messages_received as u64); // messages_received: Int
-    builder.start_constr(1).end_constr(); // last_message: None
-    builder.end_constr();
-
-    builder.end_constr();
-
-    Ok(builder.build())
-}
-
-/// Build a DeferredRecipient datum for initialization
-/// Structure: HyperlaneRecipientDatum<DeferredInner>
-/// HyperlaneRecipientDatum { ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: DeferredInner }
-/// DeferredInner { messages_stored: Int, messages_processed: Int }
-pub fn build_deferred_recipient_datum(
-    custom_ism: Option<&str>,
-    messages_stored: u64,
-    messages_processed: u64,
-) -> Result<Vec<u8>> {
-    let mut builder = CborBuilder::new();
-
-    builder.start_constr(0);
-
-    // ism: Option<ScriptHash>
-    match custom_ism {
-        Some(ism_hash) => {
-            // Some = constructor 0 with value
-            builder.start_constr(0);
-            builder.bytes_hex(ism_hash)?;
-            builder.end_constr();
-        }
-        None => {
-            // None = constructor 1 with no fields
-            builder.start_constr(1).end_constr();
-        }
-    }
-
-    // last_processed_nonce: Option<Int> - start with None
-    builder.start_constr(1).end_constr();
-
-    // inner: DeferredInner = constructor 0 [messages_stored, messages_processed]
-    builder.start_constr(0);
-    builder.uint(messages_stored);
-    builder.uint(messages_processed);
-    builder.end_constr();
-
-    builder.end_constr();
-
-    Ok(builder.build())
-}
-
 /// Build IGP (Interchain Gas Paymaster) datum CBOR
 ///
 /// Structure from types.ak:
@@ -725,6 +644,52 @@ pub fn normalize_datum(datum: &Value) -> Result<Value> {
         // It's already a JSON object
         Ok(datum.clone())
     }
+}
+
+/// Convert a Blockfrost inline datum (JSON Value) back to CBOR bytes.
+/// If it's a hex string, decode it directly. If it's JSON schema, encode it.
+pub fn json_datum_to_cbor(datum: &Value) -> Result<Vec<u8>> {
+    if let Some(hex_str) = datum.as_str() {
+        // It's hex-encoded CBOR
+        Ok(hex::decode(hex_str)?)
+    } else {
+        // JSON schema format — encode back to CBOR
+        json_schema_to_cbor(datum)
+    }
+}
+
+fn json_schema_to_cbor(value: &Value) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+    encode_json_value(&mut builder, value)?;
+    Ok(builder.build())
+}
+
+fn encode_json_value(builder: &mut CborBuilder, value: &Value) -> Result<()> {
+    if let Some(int_val) = value.get("int").and_then(|i| i.as_i64()) {
+        builder.int(int_val);
+    } else if let Some(bytes_hex) = value.get("bytes").and_then(|b| b.as_str()) {
+        builder.bytes_hex(bytes_hex)?;
+    } else if let Some(items) = value.get("list").and_then(|l| l.as_array()) {
+        builder.start_list();
+        for item in items {
+            encode_json_value(builder, item)?;
+        }
+        builder.end_list();
+    } else if let Some(constructor) = value.get("constructor").and_then(|c| c.as_u64()) {
+        let fields = value
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .map(|f| f.as_slice())
+            .unwrap_or(&[]);
+        builder.start_constr(constructor as u32);
+        for field in fields {
+            encode_json_value(builder, field)?;
+        }
+        builder.end_constr();
+    } else {
+        return Err(anyhow!("Unknown datum JSON structure: {}", value));
+    }
+    Ok(())
 }
 
 // ============================================================================

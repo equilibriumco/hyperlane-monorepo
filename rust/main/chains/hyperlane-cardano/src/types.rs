@@ -479,6 +479,24 @@ impl WarpTransferBody {
 }
 
 // ============================================================================
+// Message Redemption Types (Unified Message Escrow)
+// ============================================================================
+
+/// Message redemption datum stored in the escrow UTXO (matches Aiken MessageRedemptionDatum).
+/// The relayer creates this during mailbox Process; the user claims it later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageRedemptionDatum {
+    pub origin: Domain,
+    pub sender: HyperlaneAddress,
+    pub body: Vec<u8>,
+    pub message_id: [u8; 32],
+    pub nonce: u32,
+    pub recipient_policy: [u8; 28],
+    pub return_address: [u8; 28],
+    pub expiry_slot: u64,
+}
+
+// ============================================================================
 // Token Redemption Types (Two-Phase Token Claiming)
 // ============================================================================
 

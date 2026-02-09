@@ -111,26 +111,6 @@ pub type HyperlaneRecipientRedeemer<contract_redeemer> {
   ContractAction { action: contract_redeemer }
 }
 
-// ============================================================================
-// Deferred Recipient Types (for complex recipients with deferred processing)
-// ============================================================================
-
-/// Stored message datum for Deferred recipient pattern
-/// This is stored in the message UTXO created by the relayer
-/// The message is later processed and the message NFT burned
-pub type StoredMessageDatum {
-  /// Source chain domain
-  origin: Domain,
-  /// Sender address on origin chain (32 bytes)
-  sender: HyperlaneAddress,
-  /// Message payload
-  body: ByteArray,
-  /// Message ID (32 bytes) - used as NFT asset name
-  message_id: ByteArray,
-  /// Nonce from the original message (for ordering)
-  nonce: Int,
-}
-
 /// Redeemer for message NFT minting policy
 pub type MessageNftRedeemer {
   /// Mint a message NFT when storing a message
@@ -140,14 +120,28 @@ pub type MessageNftRedeemer {
   BurnMessage
 }
 
-/// Contract-specific redeemer for Deferred recipients
-pub type DeferredAction {
-  /// Process a stored message
-  /// Consumes the message UTXO, burns the NFT, creates custom outputs
-  ProcessStoredMessage {
-    /// The message ID being processed (must match NFT asset name)
-    message_id: ByteArray,
-  }
+// ============================================================================
+// Message Redemption Types (unified message escrow pattern)
+// ============================================================================
+
+/// Datum stored in the message redemption UTXO.
+/// The relayer creates this during Process (Phase 1), and the user claims
+/// it later (Phase 2) by spending their recipient contract.
+pub type MessageRedemptionDatum {
+  origin: Domain,
+  sender: HyperlaneAddress,
+  body: ByteArray,
+  message_id: ByteArray,
+  nonce: Int,
+  recipient_policy: PolicyId,
+  return_address: VerificationKeyHash,
+  expiry_slot: Int,
+}
+
+/// Redeemer for message redemption validator
+pub type MessageRedemptionRedeemer {
+  ClaimMessage
+  ExpireMessage
 }
 
 // ============================================================================

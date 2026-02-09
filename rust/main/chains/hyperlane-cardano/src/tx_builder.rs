@@ -9,7 +9,7 @@ use crate::blockfrost_provider::{
 };
 use crate::cardano::Keypair;
 use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
-use crate::types::{HyperlaneRecipientRedeemer, MailboxRedeemer, Message, ProcessedMessageDatum};
+use crate::types::{MailboxRedeemer, Message, ProcessedMessageDatum};
 use crate::ConnectionConf;
 use hyperlane_core::{
     ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256,
@@ -300,44 +300,48 @@ impl HyperlaneTxBuilder {
 
         // 2. Resolve recipient via NFT policy ID query (replaces registry lookup)
         let resolved = self.resolver.resolve(&msg.recipient).await?;
-        let recipient_utxo = resolved.state_utxo;
         info!(
             "Resolved recipient: script_hash={}, kind={:?}",
             hex::encode(resolved.script_hash),
             resolved.recipient_kind
         );
 
-        // 3. Find recipient reference script UTXO from shared config
-        let recipient_ref_script_utxo = if let Some(ref ref_utxo_str) =
-            self.conf.warp_route_reference_script_utxo
-        {
-            let parts: Vec<&str> = ref_utxo_str.split('#').collect();
-            if parts.len() == 2 {
-                let tx_hash = parts[0].to_string();
-                let output_index: u32 = parts[1].parse().map_err(|e| {
-                    TxBuilderError::Encoding(format!("Invalid ref script UTXO output index: {e}"))
-                })?;
-                match self.provider.get_utxo(&tx_hash, output_index).await {
-                    Ok(utxo) => {
-                        info!(
-                            "Found shared reference script UTXO: {}#{}",
-                            utxo.tx_hash, utxo.output_index
-                        );
-                        Some(utxo)
-                    }
-                    Err(e) => {
-                        warn!("Could not fetch shared ref script UTXO: {e}");
+        // 3. Find recipient reference script UTXO from shared config (WarpRoute only)
+        let recipient_ref_script_utxo =
+            if matches!(resolved.recipient_kind, RecipientKind::WarpRoute) {
+                if let Some(ref ref_utxo_str) = self.conf.warp_route_reference_script_utxo {
+                    let parts: Vec<&str> = ref_utxo_str.split('#').collect();
+                    if parts.len() == 2 {
+                        let tx_hash = parts[0].to_string();
+                        let output_index: u32 = parts[1].parse().map_err(|e| {
+                            TxBuilderError::Encoding(format!(
+                                "Invalid ref script UTXO output index: {e}"
+                            ))
+                        })?;
+                        match self.provider.get_utxo(&tx_hash, output_index).await {
+                            Ok(utxo) => {
+                                info!(
+                                    "Found shared reference script UTXO: {}#{}",
+                                    utxo.tx_hash, utxo.output_index
+                                );
+                                Some(utxo)
+                            }
+                            Err(e) => {
+                                warn!("Could not fetch shared ref script UTXO: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        warn!("Invalid warp_route_reference_script_utxo format: {ref_utxo_str}");
                         None
                     }
+                } else {
+                    debug!("No shared reference script UTXO configured");
+                    None
                 }
             } else {
-                warn!("Invalid warp_route_reference_script_utxo format: {ref_utxo_str}");
                 None
-            }
-        } else {
-            debug!("No shared reference script UTXO configured");
-            None
-        };
+            };
 
         // 4. Find ISM UTXO (either custom from datum or default)
         let (ism_policy_id, ism_asset_name) = match &resolved.ism {
@@ -383,13 +387,12 @@ impl HyperlaneTxBuilder {
         };
 
         // Build recipient redeemer based on recipient kind
-        // WarpRoute uses WarpRouteRedeemer::ReceiveTransfer
-        // Generic uses HyperlaneRecipientRedeemer::HandleMessage
+        // WarpRoute uses WarpRouteRedeemer::ReceiveTransfer (recipient script is spent)
+        // MessageRedemption: no recipient script spent - message goes to escrow UTXO
         let recipient_redeemer_cbor = match &resolved.recipient_kind {
             RecipientKind::WarpRoute => {
                 info!("WarpRoute recipient - using WarpRouteRedeemer::ReceiveTransfer with redemption");
 
-                // Log the original TokenMessage for debugging
                 let token_msg = parse_token_message(&msg.body)?;
                 info!(
                     "TokenMessage: recipient={}, wire_amount={}",
@@ -397,48 +400,32 @@ impl HyperlaneTxBuilder {
                     token_msg.amount
                 );
 
-                // Get payer's payment credential hash for return_address
                 let return_address = *payer.payment_credential_hash();
                 let expiry_slot = redemption_expiry;
 
-                // SECURITY: Pass the ORIGINAL message body to the warp route
-                // The on-chain contract will:
-                // 1. Parse the TokenMessage format (32 bytes recipient + 32 bytes amount)
-                // 2. Extract the 28-byte Cardano credential
-                // 3. Convert wire amount to local amount using remote_decimals/decimals
-                // 4. Create a redemption UTXO with the tokens for the recipient to claim
-                // This ensures the amount conversion is validated on-chain
                 let warp_redeemer = crate::types::WarpRouteRedeemer::ReceiveTransfer {
                     message: msg.clone(),
                     message_id,
                     return_address,
                     expiry_slot,
                 };
-                encode_warp_route_redeemer(&warp_redeemer)?
+                Some(encode_warp_route_redeemer(&warp_redeemer)?)
             }
-            _ => {
-                // SECURITY: Pass the full message and message_id to recipient
-                // The recipient MUST verify: keccak256(encode_message(message)) == message_id
-                // This ensures the data is cryptographically linked to what the ISM validated
-                let recipient_redeemer: HyperlaneRecipientRedeemer<()> =
-                    HyperlaneRecipientRedeemer::HandleMessage {
-                        message: msg.clone(),
-                        message_id,
-                    };
-                encode_recipient_redeemer(&recipient_redeemer)?
+            RecipientKind::MessageRedemption => {
+                info!("MessageRedemption recipient - no recipient script spent in Phase 1");
+                None
             }
         };
 
         // 7. Build recipient continuation datum based on recipient kind
         let recipient_continuation_datum_cbor = match &resolved.recipient_kind {
             RecipientKind::WarpRoute => {
-                // TokenReceiver (warp routes) need special continuation datum handling
-                // Parse TokenMessage and convert amount for the WarpRouteDatum update
+                let recipient_utxo = resolved.state_utxo.as_ref().ok_or_else(|| {
+                    TxBuilderError::MissingInput("WarpRoute requires state UTXO".to_string())
+                })?;
                 let token_msg = parse_token_message(&msg.body)?;
-                let decimals = extract_warp_route_decimals(&recipient_utxo)?;
+                let decimals = extract_warp_route_decimals(recipient_utxo)?;
 
-                // Convert wire amount to local amount using both decimal values
-                // This MUST match the on-chain conversion for the contract to validate
                 let local_amount = convert_wire_to_local_amount(
                     token_msg.amount,
                     decimals.remote_decimals,
@@ -452,13 +439,12 @@ impl HyperlaneTxBuilder {
                     decimals.local_decimals
                 );
 
-                // Build warp route continuation datum with updated total_bridged
-                build_warp_route_continuation_datum(&recipient_utxo, local_amount)?
+                Some(build_warp_route_continuation_datum(
+                    recipient_utxo,
+                    local_amount,
+                )?)
             }
-            RecipientKind::Generic => {
-                // Generic recipients use the standard recipient continuation datum
-                build_recipient_continuation_datum(&recipient_utxo, &msg.body)?
-            }
+            RecipientKind::MessageRedemption => None,
         };
 
         // 8. Encode processed message marker datum
@@ -532,20 +518,20 @@ impl HyperlaneTxBuilder {
             redemption_datum_cbor,
             redemption_script_hash,
         ) = if matches!(&resolved.recipient_kind, RecipientKind::WarpRoute) {
+            let recipient_utxo = resolved.state_utxo.as_ref().ok_or_else(|| {
+                TxBuilderError::MissingInput("WarpRoute requires state UTXO".to_string())
+            })?;
             info!("TokenReceiver - preparing release from warp route UTXO");
 
-            // Parse TokenMessage format: recipient (32 bytes) || amount (32 bytes uint256)
             let token_msg = parse_token_message(&msg.body)?;
 
-            // Convert from wire format to local token decimals
-            let decimals = extract_warp_route_decimals(&recipient_utxo)?;
+            let decimals = extract_warp_route_decimals(recipient_utxo)?;
             let local_amount = convert_wire_to_local_amount(
                 token_msg.amount,
                 decimals.remote_decimals,
                 decimals.local_decimals,
             );
 
-            // Extract 28-byte Cardano credential hash from bytes32 recipient
             info!(
                 "TokenMessage recipient (32 bytes): {}",
                 hex::encode(token_msg.recipient)
@@ -556,8 +542,7 @@ impl HyperlaneTxBuilder {
                 hex::encode(cardano_credential)
             );
 
-            // Extract token type from warp route datum
-            let token_type = extract_warp_route_token_type(&recipient_utxo)?;
+            let token_type = extract_warp_route_token_type(recipient_utxo)?;
             info!("Token release: wire_amount={}, local_amount={} (remote={}, local={}), credential={}, token_type={:?}",
                     token_msg.amount, local_amount, decimals.remote_decimals, decimals.local_decimals,
                     hex::encode(cardano_credential), token_type);
@@ -566,7 +551,6 @@ impl HyperlaneTxBuilder {
             let (redemption_datum, redemption_hash) = if let Some(ref redemption_hash_hex) =
                 self.conf.redemption_script_hash
             {
-                // Parse the redemption script hash
                 let hash_bytes = hex::decode(redemption_hash_hex).map_err(|e| {
                     TxBuilderError::Encoding(format!("Invalid redemption_script_hash hex: {e}"))
                 })?;
@@ -574,11 +558,9 @@ impl HyperlaneTxBuilder {
                     TxBuilderError::Encoding("redemption_script_hash must be 28 bytes".to_string())
                 })?;
 
-                // Use the same expiry as the redeemer for datum consistency
                 let return_address = *payer.payment_credential_hash();
                 let expiry_slot = redemption_expiry;
 
-                // Build token_info based on warp route token type
                 let token_info = match &token_type {
                     WarpTokenTypeInfo::Native => crate::types::RedemptionTokenInfo::Ada,
                     WarpTokenTypeInfo::Collateral {
@@ -614,12 +596,11 @@ impl HyperlaneTxBuilder {
                             })?;
                         crate::types::RedemptionTokenInfo::Token {
                             policy_id: policy_bytes,
-                            asset_name: vec![], // Empty asset name for synthetic
+                            asset_name: vec![],
                         }
                     }
                 };
 
-                // Build the redemption datum
                 let datum = crate::types::RedemptionDatum {
                     recipient: cardano_credential.to_vec(),
                     token_info,
@@ -653,10 +634,51 @@ impl HyperlaneTxBuilder {
             (None, None, None, None, None)
         };
 
+        // 12. Build message redemption datum for MessageRedemption recipients
+        let message_redemption_datum_cbor = if matches!(
+            &resolved.recipient_kind,
+            RecipientKind::MessageRedemption
+        ) {
+            let msg_redemption_hash_hex = self
+                .conf
+                .message_redemption_script_hash
+                .as_ref()
+                .ok_or_else(|| {
+                    TxBuilderError::MissingInput(
+                        "message_redemption_script_hash required for MessageRedemption recipients"
+                            .to_string(),
+                    )
+                })?;
+            let return_address = *payer.payment_credential_hash();
+
+            let datum = crate::types::MessageRedemptionDatum {
+                origin: message.origin,
+                sender: message.sender.into(),
+                body: message.body.clone(),
+                message_id,
+                nonce: message.nonce,
+                recipient_policy: resolved.recipient_policy,
+                return_address,
+                expiry_slot: redemption_expiry,
+            };
+            let datum_cbor = encode_message_redemption_datum(&datum)?;
+
+            info!(
+                "Built message redemption datum: message_id={}, recipient_policy={}, return_address={}, expiry_slot={}",
+                hex::encode(message_id),
+                hex::encode(resolved.recipient_policy),
+                hex::encode(return_address),
+                redemption_expiry
+            );
+            Some((datum_cbor, msg_redemption_hash_hex.clone()))
+        } else {
+            None
+        };
+
         Ok(ProcessTxComponents {
             mailbox_utxo,
             mailbox_redeemer_cbor,
-            recipient_utxo,
+            recipient_utxo: resolved.state_utxo,
             recipient_ref_script_utxo,
             recipient_redeemer_cbor,
             recipient_continuation_datum_cbor,
@@ -673,6 +695,7 @@ impl HyperlaneTxBuilder {
             warp_token_type,
             redemption_datum_cbor,
             redemption_script_hash,
+            message_redemption_datum_cbor,
         })
     }
 
@@ -768,24 +791,29 @@ impl HyperlaneTxBuilder {
         };
 
         // Calculate the actual minUTxO for the warp route continuation output
-        // The continuation output has an NFT (state token) + inline datum, so it needs
-        // more than the simple min_lovelace
-        let continuation_min_lovelace = if components.warp_token_type.is_some() {
-            // Warp route continuation has NFT + datum
-            // NFT asset name is ~13 bytes ("Mailbox State" or similar)
-            let nft_asset_name_len = 13;
-            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                asset_name_len: nft_asset_name_len,
-                datum_size: components.recipient_continuation_datum_cbor.len(),
-            })
-            .await
-        } else {
-            min_lovelace
-        };
+        let continuation_min_lovelace =
+            if let Some(ref cont_datum) = components.recipient_continuation_datum_cbor {
+                if components.warp_token_type.is_some() {
+                    let nft_asset_name_len = 13;
+                    self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                        asset_name_len: nft_asset_name_len,
+                        datum_size: cont_datum.len(),
+                    })
+                    .await
+                } else {
+                    min_lovelace
+                }
+            } else {
+                min_lovelace
+            };
         info!(
             "Continuation minUTxO: {} lovelace (datum_size={})",
             continuation_min_lovelace,
-            components.recipient_continuation_datum_cbor.len()
+            components
+                .recipient_continuation_datum_cbor
+                .as_ref()
+                .map(|d| d.len())
+                .unwrap_or(0)
         );
 
         // Get payer address and UTXOs for fee payment
@@ -804,21 +832,25 @@ impl HyperlaneTxBuilder {
             min_lovelace
         };
 
+        // warp_route_lovelace() helper - only called for WarpRoute where state_utxo is always Some
+        let warp_route_lovelace = components
+            .recipient_utxo
+            .as_ref()
+            .map(|u| u.lovelace())
+            .unwrap_or(0);
+
         let payer_extra = match &components.warp_token_type {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
-                let original_lovelace = components.recipient_utxo.lovelace();
+                let original_lovelace = warp_route_lovelace;
                 let extra = if original_lovelace > continuation_min_lovelace + recipient_output_cost
                 {
-                    0 // Warp route has enough
+                    0
                 } else if original_lovelace > continuation_min_lovelace {
-                    // Warp route has some but not full amount
                     recipient_output_cost
                         .saturating_sub(original_lovelace.saturating_sub(continuation_min_lovelace))
                 } else {
-                    // Warp route below continuation minimum, payer covers full recipient
-                    // cost plus the continuation gap
                     recipient_output_cost
                         + continuation_min_lovelace.saturating_sub(original_lovelace)
                 };
@@ -829,11 +861,8 @@ impl HyperlaneTxBuilder {
                 extra
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
-                let original_lovelace = components.recipient_utxo.lovelace();
+                let original_lovelace = warp_route_lovelace;
                 let release_amount = components.token_release_amount.unwrap();
-                // Continuation keeps max(original - amount, continuation_min).
-                // Redemption needs amount + recipient_output_cost (relayer deposit).
-                // Payer covers any deficit between warp outputs and warp input.
                 let continuation_actual = original_lovelace
                     .saturating_sub(release_amount)
                     .max(continuation_min_lovelace);
@@ -850,9 +879,8 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Collateral { .. })
                 if components.token_release_amount.is_some() =>
             {
-                let original_lovelace = components.recipient_utxo.lovelace();
-                // Collateral releases need recipient_output_cost for the token output
-                let total_needed = continuation_min_lovelace + recipient_output_cost; // continuation + release output
+                let original_lovelace = warp_route_lovelace;
+                let total_needed = continuation_min_lovelace + recipient_output_cost;
                 let extra = total_needed.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
@@ -883,10 +911,26 @@ impl HyperlaneTxBuilder {
                 .await
             };
 
+        // Calculate message redemption UTXO cost if applicable
+        let message_redemption_min_lovelace =
+            if let Some((ref datum_cbor, _)) = components.message_redemption_datum_cbor {
+                // Output has inline datum + stored message NFT (asset name = 32-byte message_id)
+                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                    asset_name_len: 32,
+                    datum_size: datum_cbor.len(),
+                })
+                .await
+            } else {
+                0
+            };
+
         // Total extra the payer needs to cover:
         // - payer_extra: shortfall from warp route for redemption output
         // - processed_marker: the processed marker NFT output
-        let total_payer_extra = payer_extra + processed_marker_min_lovelace_for_selection;
+        // - message_redemption: the message escrow UTXO (MessageRedemption only)
+        let total_payer_extra = payer_extra
+            + processed_marker_min_lovelace_for_selection
+            + message_redemption_min_lovelace;
 
         // Find payer UTXOs for fee payment (coin selection)
         let payer_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
@@ -903,14 +947,15 @@ impl HyperlaneTxBuilder {
         // Start building the transaction
         let mut tx = StagingTransaction::new();
 
-        // We need to track input indices for redeemers
-        // Add script inputs (mailbox and recipient)
+        // Add script inputs (mailbox and optionally recipient)
         let mailbox_input = utxo_to_input(&components.mailbox_utxo)?;
         tx = tx.input(mailbox_input);
 
-        // Add recipient input
-        let recipient_input = utxo_to_input(&components.recipient_utxo)?;
-        tx = tx.input(recipient_input);
+        // Add recipient input (WarpRoute only - MessageRedemption has no recipient in Phase 1)
+        if let Some(ref recipient_utxo) = components.recipient_utxo {
+            let recipient_input = utxo_to_input(recipient_utxo)?;
+            tx = tx.input(recipient_input);
+        }
 
         // Add additional inputs if they must be spent
         info!(
@@ -1015,18 +1060,23 @@ impl HyperlaneTxBuilder {
             Some(ex_units_mailbox),
         );
 
-        // Add recipient redeemer
-        let recipient_input_for_redeemer = utxo_to_input(&components.recipient_utxo)?;
-        let ex_units_recipient = ExUnits {
-            mem: DEFAULT_MEM_UNITS,
-            steps: DEFAULT_STEP_UNITS,
-        };
+        // Add recipient redeemer (WarpRoute only)
+        if let (Some(ref recipient_utxo), Some(ref redeemer_cbor)) = (
+            &components.recipient_utxo,
+            &components.recipient_redeemer_cbor,
+        ) {
+            let recipient_input_for_redeemer = utxo_to_input(recipient_utxo)?;
+            let ex_units_recipient = ExUnits {
+                mem: DEFAULT_MEM_UNITS,
+                steps: DEFAULT_STEP_UNITS,
+            };
 
-        tx = tx.add_spend_redeemer(
-            recipient_input_for_redeemer,
-            components.recipient_redeemer_cbor.clone(),
-            Some(ex_units_recipient),
-        );
+            tx = tx.add_spend_redeemer(
+                recipient_input_for_redeemer,
+                redeemer_cbor.clone(),
+                Some(ex_units_recipient),
+            );
+        }
 
         // Add ISM Verify redeemer (for signature verification)
         let ism_input_for_redeemer = utxo_to_input(&components.ism_utxo)?;
@@ -1055,20 +1105,21 @@ impl HyperlaneTxBuilder {
         )?;
         tx = tx.output(mailbox_output);
 
-        // 2. Recipient continuation output (same address, UPDATED datum)
-        // For TokenReceiver (warp routes), reduce tokens based on token type:
-        // - Native: reduce lovelace
-        // - Collateral: reduce collateral token quantity
-        // - Synthetic: no reduction (tokens minted elsewhere)
-        let recipient_output = create_warp_route_continuation_output(
+        // 2. Recipient continuation output (WarpRoute only)
+        if let (Some(ref recipient_utxo), Some(ref cont_datum_cbor)) = (
             &components.recipient_utxo,
             &components.recipient_continuation_datum_cbor,
-            components.token_release_amount,
-            components.warp_token_type.as_ref(),
-            continuation_min_lovelace,
-            recipient_output_cost,
-        )?;
-        tx = tx.output(recipient_output);
+        ) {
+            let recipient_output = create_warp_route_continuation_output(
+                recipient_utxo,
+                cont_datum_cbor,
+                components.token_release_amount,
+                components.warp_token_type.as_ref(),
+                continuation_min_lovelace,
+                recipient_output_cost,
+            )?;
+            tx = tx.output(recipient_output);
+        }
 
         // 2a. For TokenReceiver (warp routes): Create release output to recipient
         // The release output contains ADA (for Native) or tokens (for Collateral)
@@ -1425,9 +1476,104 @@ impl HyperlaneTxBuilder {
             hex::encode(components.message_id)
         );
 
+        // 4c. Message redemption output + stored message NFT (MessageRedemption only)
+        if let Some((ref msg_redemption_datum_cbor, ref msg_redemption_hash_hex)) =
+            components.message_redemption_datum_cbor
+        {
+            let msg_redemption_hash: [u8; 28] = hex::decode(msg_redemption_hash_hex)
+                .map_err(|e| {
+                    TxBuilderError::Encoding(format!(
+                        "Invalid message_redemption_script_hash hex: {e}"
+                    ))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    TxBuilderError::Encoding(
+                        "message_redemption_script_hash must be 28 bytes".to_string(),
+                    )
+                })?;
+
+            let pallas_network = match self.conf.network {
+                CardanoNetwork::Mainnet => Network::Mainnet,
+                CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
+            };
+
+            let msg_redemption_address =
+                script_hash_to_address(&msg_redemption_hash, pallas_network)?;
+
+            let mut msg_redemption_output =
+                Output::new(msg_redemption_address, message_redemption_min_lovelace)
+                    .set_inline_datum(msg_redemption_datum_cbor.clone());
+
+            // Mint stored message NFT and add to redemption output
+            if let (Some(ref stored_nft_policy_id), Some(ref stored_nft_script_cbor)) = (
+                &self.conf.stored_message_nft_policy_id,
+                &self.conf.stored_message_nft_script_cbor,
+            ) {
+                let stored_policy_bytes: Hash<28> = Hash::new(
+                    hex::decode(stored_nft_policy_id)
+                        .map_err(|e| {
+                            TxBuilderError::Encoding(format!(
+                                "Invalid stored_message_nft_policy_id hex: {e}"
+                            ))
+                        })?
+                        .try_into()
+                        .map_err(|_| {
+                            TxBuilderError::Encoding(
+                                "stored_message_nft_policy_id must be 28 bytes".to_string(),
+                            )
+                        })?,
+                );
+
+                let stored_nft_asset_name: Vec<u8> = components.message_id.to_vec();
+
+                tx = tx
+                    .mint_asset(stored_policy_bytes, stored_nft_asset_name.clone(), 1)
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!("Failed to mint stored message NFT: {e:?}"))
+                    })?;
+
+                msg_redemption_output = msg_redemption_output
+                    .add_asset(stored_policy_bytes, stored_nft_asset_name.clone(), 1)
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!(
+                            "Failed to add stored message NFT to redemption output: {e:?}"
+                        ))
+                    })?;
+
+                // MintMessage = Constr 0 []
+                let stored_nft_mint_redeemer = vec![0xd8, 0x79, 0x9f, 0xff];
+                let ex_units_stored_nft = ExUnits {
+                    mem: DEFAULT_MEM_UNITS,
+                    steps: DEFAULT_STEP_UNITS,
+                };
+                tx = tx.add_mint_redeemer(
+                    stored_policy_bytes,
+                    stored_nft_mint_redeemer,
+                    Some(ex_units_stored_nft),
+                );
+
+                let stored_script_bytes = hex::decode(stored_nft_script_cbor).map_err(|e| {
+                    TxBuilderError::Encoding(format!(
+                        "Invalid stored_message_nft_script_cbor hex: {e}"
+                    ))
+                })?;
+                tx = tx.script(ScriptKind::PlutusV3, stored_script_bytes);
+
+                info!(
+                    "Minted stored message NFT for message_id: {}",
+                    hex::encode(components.message_id)
+                );
+            }
+
+            tx = tx.output(msg_redemption_output);
+            info!(
+                "Added message redemption output at script {}",
+                msg_redemption_hash_hex
+            );
+        }
+
         // 5. Change output back to payer
-        // The payer's input funds: fee + processed marker output + (optional) message UTXO
-        // (mailbox and recipient continuation outputs return the same value they consume)
         let fee = ESTIMATED_FEE_LOVELACE;
         let processed_marker_cost = processed_marker_min_lovelace;
 
@@ -1439,7 +1585,7 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
-                let original_lovelace = components.recipient_utxo.lovelace();
+                let original_lovelace = warp_route_lovelace;
                 let warp_contribution =
                     if original_lovelace > continuation_min_lovelace + recipient_output_cost {
                         recipient_output_cost
@@ -1458,11 +1604,8 @@ impl HyperlaneTxBuilder {
                 shortfall
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
-                let original_lovelace = components.recipient_utxo.lovelace();
+                let original_lovelace = warp_route_lovelace;
                 let release_amount = components.token_release_amount.unwrap();
-                // Continuation keeps max(original - amount, continuation_min).
-                // Redemption needs amount + recipient_output_cost (relayer deposit).
-                // Shortfall = total warp outputs - warp input.
                 let continuation_actual = original_lovelace
                     .saturating_sub(release_amount)
                     .max(continuation_min_lovelace);
@@ -1479,8 +1622,7 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Collateral { .. })
                 if components.token_release_amount.is_some() =>
             {
-                let original_lovelace = components.recipient_utxo.lovelace();
-                // Continuation needs continuation_min_lovelace, recipient/redemption needs recipient_output_cost
+                let original_lovelace = warp_route_lovelace;
                 let total_needed = continuation_min_lovelace + recipient_output_cost;
                 let shortfall = total_needed.saturating_sub(original_lovelace);
                 if shortfall > 0 {
@@ -1495,11 +1637,12 @@ impl HyperlaneTxBuilder {
         };
 
         debug!(
-            "Change calculation: total_input={}, fee={}, processed_marker={}, recipient_shortfall={}",
-            total_input, fee, processed_marker_cost, recipient_shortfall
+            "Change calculation: total_input={}, fee={}, processed_marker={}, recipient_shortfall={}, message_redemption={}",
+            total_input, fee, processed_marker_cost, recipient_shortfall, message_redemption_min_lovelace
         );
-        let change_amount =
-            total_input.saturating_sub(fee + processed_marker_cost + recipient_shortfall);
+        let change_amount = total_input.saturating_sub(
+            fee + processed_marker_cost + recipient_shortfall + message_redemption_min_lovelace,
+        );
 
         if change_amount >= min_lovelace {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
@@ -1953,15 +2096,14 @@ pub struct ProcessTxComponents {
     pub mailbox_utxo: Utxo,
     /// Encoded mailbox redeemer (CBOR)
     pub mailbox_redeemer_cbor: Vec<u8>,
-    /// Recipient state UTXO to spend (contains datum)
-    pub recipient_utxo: Utxo,
-    /// Recipient reference script UTXO (contains the validator script)
-    /// If None, the script is embedded in the recipient_utxo's reference_script field
+    /// Recipient state UTXO to spend (WarpRoute only; None for MessageRedemption)
+    pub recipient_utxo: Option<Utxo>,
+    /// Recipient reference script UTXO (WarpRoute only)
     pub recipient_ref_script_utxo: Option<Utxo>,
-    /// Encoded recipient redeemer (CBOR)
-    pub recipient_redeemer_cbor: Vec<u8>,
-    /// Encoded recipient continuation datum (CBOR) - with updated state
-    pub recipient_continuation_datum_cbor: Vec<u8>,
+    /// Encoded recipient redeemer (CBOR) - WarpRoute only; None for MessageRedemption
+    pub recipient_redeemer_cbor: Option<Vec<u8>>,
+    /// Encoded recipient continuation datum (CBOR) - WarpRoute only
+    pub recipient_continuation_datum_cbor: Option<Vec<u8>>,
     /// ISM UTXO (to be spent for verification)
     pub ism_utxo: Utxo,
     /// Additional inputs (UTXO, must_be_spent)
@@ -1979,19 +2121,17 @@ pub struct ProcessTxComponents {
     /// Recipient kind for this message
     pub recipient_kind: RecipientKind,
     /// TokenReceiver (warp routes): Transfer amount in local decimals
-    /// Funds are released from the warp_route UTXO directly
     pub token_release_amount: Option<u64>,
     /// TokenReceiver (warp routes): Transfer recipient (28-byte credential)
     pub token_release_recipient: Option<Vec<u8>>,
     /// TokenReceiver (warp routes): Token type for release handling
-    /// Native releases ADA, Collateral releases native tokens
     pub warp_token_type: Option<WarpTokenTypeInfo>,
     /// TokenReceiver (warp routes): Redemption datum CBOR (pre-encoded)
-    /// Only set when redemption_script_hash is configured
     pub redemption_datum_cbor: Option<Vec<u8>>,
     /// TokenReceiver (warp routes): Redemption script hash (28 bytes)
-    /// Only set when redemption_script_hash is configured
     pub redemption_script_hash: Option<[u8; 28]>,
+    /// MessageRedemption: datum CBOR + script hash hex for message escrow
+    pub message_redemption_datum_cbor: Option<(Vec<u8>, String)>,
 }
 
 // ============================================================================
@@ -2419,111 +2559,6 @@ fn create_token_release_output(
 
 /// Build the updated recipient datum for the continuation output
 ///
-/// The GenericRecipient expects:
-/// - HyperlaneRecipientDatum { ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: GenericRecipientInner }
-/// - GenericRecipientInner { messages_received: Int, last_message: Option<ByteArray> }
-///
-/// Updates:
-/// - messages_received += 1
-/// - last_message = Some(body)
-/// - last_processed_nonce = old_nonce + 1 (or Some(1) if was None)
-fn build_recipient_continuation_datum(
-    recipient_utxo: &Utxo,
-    message_body: &[u8],
-) -> Result<Vec<u8>, TxBuilderError> {
-    // Parse the existing datum to extract current state
-    let (ism_opt, old_nonce, old_messages_received) =
-        if let Some(datum_str) = &recipient_utxo.inline_datum {
-            parse_recipient_datum(datum_str)?
-        } else {
-            // Default values if no datum
-            (None, None, 0)
-        };
-
-    // Compute new values
-    let new_messages_received = old_messages_received + 1;
-    let new_nonce = match old_nonce {
-        Some(n) => Some(n + 1),
-        None => Some(1),
-    };
-
-    // Build the new datum CBOR
-    // Structure: Constr 0 [ism: Option, nonce: Option, inner: Constr 0 [messages_received, last_message: Option]]
-    let plutus_data = build_generic_recipient_datum_plutus(
-        ism_opt.as_deref(),
-        new_nonce,
-        new_messages_received,
-        Some(message_body),
-    );
-
-    encode_plutus_data(&plutus_data)
-}
-
-/// Build GenericRecipient datum as PlutusData
-fn build_generic_recipient_datum_plutus(
-    ism: Option<&[u8]>,
-    nonce: Option<i64>,
-    messages_received: i64,
-    last_message: Option<&[u8]>,
-) -> PlutusData {
-    // HyperlaneRecipientDatum { ism, last_processed_nonce, inner }
-    let ism_field = match ism {
-        Some(hash) => PlutusData::Constr(Constr {
-            tag: 121, // Some = constructor 0
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(hash.to_vec().into())]),
-        }),
-        None => PlutusData::Constr(Constr {
-            tag: 122, // None = constructor 1
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![]),
-        }),
-    };
-
-    let nonce_field = match nonce {
-        Some(n) => PlutusData::Constr(Constr {
-            tag: 121, // Some = constructor 0
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![PlutusData::BigInt(BigInt::Int(n.into()))]),
-        }),
-        None => PlutusData::Constr(Constr {
-            tag: 122, // None = constructor 1
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![]),
-        }),
-    };
-
-    // GenericRecipientInner { messages_received, last_message }
-    let last_message_field = match last_message {
-        Some(msg) => PlutusData::Constr(Constr {
-            tag: 121, // Some = constructor 0
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(msg.to_vec().into())]),
-        }),
-        None => PlutusData::Constr(Constr {
-            tag: 122, // None = constructor 1
-            any_constructor: None,
-            fields: MaybeIndefArray::Def(vec![]),
-        }),
-    };
-
-    let inner_field = PlutusData::Constr(Constr {
-        tag: 121, // GenericRecipientInner = constructor 0
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![
-            PlutusData::BigInt(BigInt::Int(messages_received.into())),
-            last_message_field,
-        ]),
-    });
-
-    // HyperlaneRecipientDatum = constructor 0
-    PlutusData::Constr(Constr {
-        tag: 121,
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![ism_field, nonce_field, inner_field]),
-    })
-}
-
 /// Warp route token type extracted from datum
 #[derive(Debug, Clone)]
 pub enum WarpTokenTypeInfo {
@@ -2810,86 +2845,6 @@ fn build_warp_route_continuation_datum(
     encode_plutus_data(&plutus_data)
 }
 
-/// Parse a recipient datum to extract the current state
-/// Returns (ism: Option<Vec<u8>>, nonce: Option<i64>, messages_received: i64)
-#[allow(clippy::type_complexity)]
-fn parse_recipient_datum(
-    datum_str: &str,
-) -> Result<(Option<Vec<u8>>, Option<i64>, i64), TxBuilderError> {
-    // Try to parse as CBOR hex first
-    let datum_cbor = json_datum_to_cbor(datum_str)?;
-
-    // Decode the CBOR to extract values
-    // This is a simplified parser - in production you'd want a proper CBOR decoder
-    // For now, we'll use default values and increment from there
-
-    // Try to decode with minicbor
-    use pallas_codec::minicbor;
-    let decoded: PlutusData = minicbor::decode(&datum_cbor)
-        .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode datum CBOR: {e}")))?;
-
-    // Extract fields from the datum
-    // Structure: Constr 0 [ism_opt, nonce_opt, inner]
-    // inner: Constr 0 [messages_received, last_message_opt]
-    if let PlutusData::Constr(constr) = decoded {
-        let fields: Vec<_> = constr.fields.clone().to_vec();
-        if fields.len() >= 3 {
-            // Extract ISM (Option<ScriptHash>)
-            let ism = extract_option_bytes(&fields[0]);
-
-            // Extract nonce (Option<Int>)
-            let nonce = extract_option_int(&fields[1]);
-
-            // Extract inner.messages_received
-            let messages_received = if let PlutusData::Constr(inner) = &fields[2] {
-                let inner_fields: Vec<_> = inner.fields.clone().to_vec();
-                if !inner_fields.is_empty() {
-                    extract_int(&inner_fields[0]).unwrap_or(0)
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            return Ok((ism, nonce, messages_received));
-        }
-    }
-
-    // Default values if parsing fails
-    Ok((None, None, 0))
-}
-
-/// Extract Option<ByteArray> from PlutusData
-fn extract_option_bytes(data: &PlutusData) -> Option<Vec<u8>> {
-    if let PlutusData::Constr(constr) = data {
-        if constr.tag == 121 {
-            // Some
-            let fields: Vec<_> = constr.fields.clone().to_vec();
-            if !fields.is_empty() {
-                if let PlutusData::BoundedBytes(bytes) = &fields[0] {
-                    return Some(bytes.to_vec());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract Option<Int> from PlutusData
-fn extract_option_int(data: &PlutusData) -> Option<i64> {
-    if let PlutusData::Constr(constr) = data {
-        if constr.tag == 121 {
-            // Some
-            let fields: Vec<_> = constr.fields.clone().to_vec();
-            if !fields.is_empty() {
-                return extract_int(&fields[0]);
-            }
-        }
-    }
-    None
-}
-
 /// Extract Int from PlutusData
 fn extract_int(data: &PlutusData) -> Option<i64> {
     if let PlutusData::BigInt(bigint) = data {
@@ -3132,54 +3087,6 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
     encode_plutus_data(&plutus_data)
 }
 
-/// Encode a HyperlaneRecipientRedeemer as Plutus Data CBOR
-pub fn encode_recipient_redeemer<T>(
-    redeemer: &HyperlaneRecipientRedeemer<T>,
-) -> Result<Vec<u8>, TxBuilderError> {
-    let plutus_data = match redeemer {
-        HyperlaneRecipientRedeemer::HandleMessage {
-            message,
-            message_id,
-        } => {
-            // Constructor 0: HandleMessage { message: Message, message_id: ByteArray }
-            //
-            // Message is Constructor 0 with fields:
-            // [version: Int, nonce: Int, origin: Int, sender: ByteArray,
-            //  destination: Int, recipient: ByteArray, body: ByteArray]
-            let message_data = PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![
-                    PlutusData::BigInt(BigInt::Int((message.version as i64).into())),
-                    PlutusData::BigInt(BigInt::Int((message.nonce as i64).into())),
-                    PlutusData::BigInt(BigInt::Int((message.origin as i64).into())),
-                    PlutusData::BoundedBytes(message.sender.to_vec().into()),
-                    PlutusData::BigInt(BigInt::Int((message.destination as i64).into())),
-                    PlutusData::BoundedBytes(message.recipient.to_vec().into()),
-                    PlutusData::BoundedBytes(message.body.clone().into()),
-                ]),
-            });
-
-            PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0 for HandleMessage
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![
-                    message_data,
-                    PlutusData::BoundedBytes(message_id.to_vec().into()),
-                ]),
-            })
-        }
-        HyperlaneRecipientRedeemer::ContractAction { .. } => {
-            // Constructor 1: ContractAction - not supported in generic encoding
-            return Err(TxBuilderError::Encoding(
-                "ContractAction requires custom encoding".to_string(),
-            ));
-        }
-    };
-
-    encode_plutus_data(&plutus_data)
-}
-
 /// Encode a ProcessedMessageDatum as Plutus Data CBOR
 pub fn encode_processed_message_datum(
     datum: &ProcessedMessageDatum,
@@ -3241,6 +3148,29 @@ pub fn encode_redemption_datum(
             PlutusData::BoundedBytes(datum.recipient.clone().into()),
             token_info_data,
             PlutusData::BigInt(BigInt::Int(datum.amount.into())),
+            PlutusData::BoundedBytes(datum.return_address.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((datum.expiry_slot as i64).into())),
+        ]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
+/// Encode a MessageRedemptionDatum as Plutus Data CBOR
+/// MessageRedemptionDatum { origin, sender, body, message_id, nonce, recipient_policy, return_address, expiry_slot }
+pub fn encode_message_redemption_datum(
+    datum: &crate::types::MessageRedemptionDatum,
+) -> Result<Vec<u8>, TxBuilderError> {
+    let plutus_data = PlutusData::Constr(Constr {
+        tag: 121,
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            PlutusData::BigInt(BigInt::Int((datum.origin as i64).into())),
+            PlutusData::BoundedBytes(datum.sender.to_vec().into()),
+            PlutusData::BoundedBytes(datum.body.clone().into()),
+            PlutusData::BoundedBytes(datum.message_id.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((datum.nonce as i64).into())),
+            PlutusData::BoundedBytes(datum.recipient_policy.to_vec().into()),
             PlutusData::BoundedBytes(datum.return_address.to_vec().into()),
             PlutusData::BigInt(BigInt::Int((datum.expiry_slot as i64).into())),
         ]),

@@ -22,21 +22,25 @@ pub enum ResolverError {
 pub enum RecipientKind {
     /// Datum parses as WarpRouteDatum - use WarpRouteRedeemer
     WarpRoute,
-    /// Default - use HyperlaneRecipientRedeemer::HandleMessage
-    Generic,
+    /// Default - store message in redemption UTXO for later claim
+    MessageRedemption,
 }
 
 /// Resolved recipient information (replaces registry)
 #[derive(Debug, Clone)]
 pub struct ResolvedRecipient {
-    /// The state UTXO holding the recipient's NFT and datum
-    pub state_utxo: Utxo,
-    /// Script hash extracted from the UTXO's address
+    /// The state UTXO holding the recipient's NFT and datum.
+    /// Present for WarpRoute; None for MessageRedemption (no state UTXO needed in Phase 1).
+    pub state_utxo: Option<Utxo>,
+    /// Script hash extracted from the UTXO's address (for WarpRoute)
+    /// or the recipient's NFT policy ID (for MessageRedemption)
     pub script_hash: ScriptHash,
     /// What kind of recipient this is
     pub recipient_kind: RecipientKind,
     /// Custom ISM override (from datum)
     pub ism: Option<ScriptHash>,
+    /// Recipient's NFT policy ID (28 bytes) - used for message redemption
+    pub recipient_policy: [u8; 28],
 }
 
 /// Resolves recipient info by querying the state NFT directly.
@@ -101,10 +105,14 @@ impl RecipientResolver {
         );
 
         Ok(ResolvedRecipient {
-            state_utxo,
+            state_utxo: match recipient_kind {
+                RecipientKind::WarpRoute => Some(state_utxo),
+                RecipientKind::MessageRedemption => None,
+            },
             script_hash,
             recipient_kind,
             ism,
+            recipient_policy: policy_id,
         })
     }
 }
@@ -141,7 +149,7 @@ fn detect_recipient_kind_and_ism(
 ) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
     let inline_datum = match &utxo.inline_datum {
         Some(d) => d,
-        None => return Ok((RecipientKind::Generic, None)),
+        None => return Ok((RecipientKind::MessageRedemption, None)),
     };
 
     // Try CBOR hex first (Blockfrost returns raw CBOR for inline datums)
@@ -157,7 +165,7 @@ fn detect_recipient_kind_and_ism(
         return detect_from_json(&json);
     }
 
-    Ok((RecipientKind::Generic, None))
+    Ok((RecipientKind::MessageRedemption, None))
 }
 
 /// Detect from PlutusData (CBOR-decoded).
@@ -170,12 +178,12 @@ fn detect_from_plutus_data(
 ) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
     let (tag, fields) = match data {
         PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
-        _ => return Ok((RecipientKind::Generic, None)),
+        _ => return Ok((RecipientKind::MessageRedemption, None)),
     };
 
     // Constr 0 (tag 121) with 4 fields = WarpRouteDatum
     if tag != 121 || fields.len() < 4 {
-        return Ok((RecipientKind::Generic, None));
+        return Ok((RecipientKind::MessageRedemption, None));
     }
 
     // Check field 0 is config (Constr 0 with 4 fields including token_type)
@@ -185,7 +193,7 @@ fn detect_from_plutus_data(
     };
 
     if !is_warp {
-        return Ok((RecipientKind::Generic, None));
+        return Ok((RecipientKind::MessageRedemption, None));
     }
 
     // Extract ISM from field 3 (Option<ScriptHash>)
@@ -221,12 +229,12 @@ fn detect_from_json(
 ) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
     let fields = match json.get("fields").and_then(|f| f.as_array()) {
         Some(f) => f,
-        None => return Ok((RecipientKind::Generic, None)),
+        None => return Ok((RecipientKind::MessageRedemption, None)),
     };
 
     // WarpRouteDatum has 4 fields
     if fields.len() < 4 {
-        return Ok((RecipientKind::Generic, None));
+        return Ok((RecipientKind::MessageRedemption, None));
     }
 
     // Check field 0 is config (has constructor 0 with 4 sub-fields)
@@ -237,7 +245,7 @@ fn detect_from_json(
         .unwrap_or(false);
 
     if !is_warp {
-        return Ok((RecipientKind::Generic, None));
+        return Ok((RecipientKind::MessageRedemption, None));
     }
 
     // Extract ISM from field 3

@@ -5,9 +5,9 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::{build_deferred_recipient_datum, build_generic_recipient_datum, build_igp_datum, build_ism_datum, build_mailbox_datum};
+use crate::utils::cbor::{build_igp_datum, build_ism_datum, build_mailbox_datum};
 use crate::utils::context::CliContext;
-use crate::utils::plutus::{apply_validator_param, apply_validator_params, encode_output_reference, encode_script_hash_param, script_hash_to_address};
+use crate::utils::plutus::{apply_validator_param, encode_output_reference, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 use crate::utils::types::{AppliedParameter, StateNftInfo};
 
@@ -66,14 +66,11 @@ enum InitCommands {
         dry_run: bool,
     },
 
-    /// Initialize a recipient contract
+    /// Initialize a custom recipient contract
     ///
     /// Creates the two-UTXO pattern required for reference scripts:
     /// - State UTXO: at script address with state NFT + datum
     /// - Reference Script UTXO: at deployer address with ref NFT + script attached
-    ///
-    /// By default, deploys the built-in example_generic_recipient.
-    /// For custom recipients, use --custom-contracts, --custom-module, and --custom-validator.
     Recipient {
         /// Mailbox policy ID (required to parameterize the recipient)
         #[arg(long)]
@@ -83,23 +80,17 @@ enum InitCommands {
         #[arg(long)]
         custom_ism: Option<String>,
 
-        /// Deploy example_deferred_recipient instead of example_generic_recipient
-        /// This also deploys the stored_message_nft policy for deferred processing
-        #[arg(long)]
-        deferred: bool,
-
         /// Path to custom Aiken contracts directory (containing plutus.json)
-        /// If not specified, uses the built-in example_generic_recipient (or example_deferred_recipient with --deferred)
         #[arg(long = "custom-contracts")]
-        custom_contracts: Option<String>,
+        custom_contracts: String,
 
-        /// Module name in the blueprint (required with --custom-contracts)
+        /// Module name in the blueprint
         #[arg(long = "custom-module")]
-        custom_module: Option<String>,
+        custom_module: String,
 
-        /// Validator name in the blueprint (required with --custom-contracts)
+        /// Validator name in the blueprint
         #[arg(long = "custom-validator")]
-        custom_validator: Option<String>,
+        custom_validator: String,
 
         /// UTXO to use for minting state NFT
         #[arg(long)]
@@ -121,6 +112,10 @@ enum InitCommands {
         /// Pre-applied recipient script file (bypasses aiken)
         #[arg(long)]
         recipient_script: Option<String>,
+
+        /// Initial datum CBOR (hex-encoded, for custom contracts)
+        #[arg(long)]
+        datum_cbor: Option<String>,
 
         /// Dry run
         #[arg(long)]
@@ -207,7 +202,6 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         InitCommands::Recipient {
             mailbox_hash,
             custom_ism,
-            deferred,
             custom_contracts,
             custom_module,
             custom_validator,
@@ -216,8 +210,9 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             ref_script_lovelace,
             nft_script,
             recipient_script,
+            datum_cbor,
             dry_run,
-        } => init_recipient(ctx, mailbox_hash, custom_ism, deferred, custom_contracts, custom_module, custom_validator, utxo, output_lovelace, ref_script_lovelace, nft_script, recipient_script, dry_run).await,
+        } => init_recipient(ctx, mailbox_hash, custom_ism, custom_contracts, custom_module, custom_validator, utxo, output_lovelace, ref_script_lovelace, nft_script, recipient_script, datum_cbor, dry_run).await,
         InitCommands::Igp {
             beneficiary,
             default_gas_limit,
@@ -889,35 +884,18 @@ async fn init_recipient(
     ctx: &CliContext,
     mailbox_hash: Option<String>,
     custom_ism: Option<String>,
-    deferred: bool,
-    custom_contracts: Option<String>,
-    custom_module: Option<String>,
-    custom_validator: Option<String>,
+    custom_contracts: String,
+    custom_module: String,
+    custom_validator: String,
     utxo: Option<String>,
     output_lovelace: u64,
     ref_script_lovelace: u64,
     nft_script: Option<String>,
     recipient_script: Option<String>,
+    datum_cbor_hex: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    // Determine if using custom contracts or built-in
-    let (use_custom, custom_contracts_path, module_name, validator_name) = match (&custom_contracts, &custom_module, &custom_validator) {
-        (Some(dir), Some(m), Some(v)) => (true, dir.clone(), m.clone(), v.clone()),
-        (None, None, None) => (false, String::new(), String::new(), String::new()),
-        _ => {
-            return Err(anyhow!(
-                "--custom-contracts, --custom-module, and --custom-validator must all be specified together for custom recipients"
-            ));
-        }
-    };
-
-    if use_custom {
-        println!("{}", format!("Initializing custom recipient '{}' (two-UTXO pattern)...", validator_name).cyan());
-    } else if deferred {
-        println!("{}", "Initializing Deferred Recipient contract (two-UTXO pattern)...".cyan());
-    } else {
-        println!("{}", "Initializing Generic Recipient contract (two-UTXO pattern)...".cyan());
-    }
+    println!("{}", format!("Initializing custom recipient '{}' (two-UTXO pattern)...", custom_validator).cyan());
     println!("{}", "This will create:".cyan());
     println!("  - State UTXO: script address + state NFT + datum");
     println!("  - Reference Script UTXO: deployer address + ref NFT + script");
@@ -925,12 +903,9 @@ async fn init_recipient(
     let api_key = ctx.require_api_key()?;
     let keypair = ctx.load_signing_key()?;
 
-    // Load deployment info to get mailbox policy ID if not provided
     let deployment = ctx.load_deployment_info()
         .with_context(|| "Run 'deploy extract' first")?;
 
-    // The recipient needs the mailbox NFT policy ID (not the script hash)
-    // to verify the mailbox is calling it
     let mailbox_policy_id = match mailbox_hash {
         Some(h) => h,
         None => deployment
@@ -952,14 +927,11 @@ async fn init_recipient(
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let address = keypair.address_bech32(ctx.pallas_network());
 
-    // Get UTXOs
     let utxos = client.get_utxos(&address).await?;
     println!("  Found {} UTXOs at wallet", utxos.len());
 
-    // Calculate minimum required lovelace
-    let min_required = output_lovelace + ref_script_lovelace + 5_000_000; // +5 ADA for fees
+    let min_required = output_lovelace + ref_script_lovelace + 5_000_000;
 
-    // Find input UTXO
     let input_utxo = match &utxo {
         Some(u) => {
             let utxo_ref = crate::utils::types::UtxoRef::parse(u)
@@ -979,7 +951,6 @@ async fn init_recipient(
         }
     };
 
-    // Find collateral UTXO (must not have reference script)
     let collateral_utxo = utxos
         .iter()
         .find(|u| {
@@ -994,11 +965,8 @@ async fn init_recipient(
     println!("  Input UTXO: {}#{} ({} ADA)", input_utxo.tx_hash, input_utxo.output_index, input_utxo.lovelace / 1_000_000);
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
 
-    // Get applied scripts - either from files or by running aiken
-    // For deferred recipients, we also get the stored_message_nft compiled code for reference script deployment
-    let (nft_policy_id, nft_compiled_code, recipient_hash, recipient_compiled_code, msg_nft_policy, msg_nft_compiled_code) =
+    let (nft_policy_id, nft_compiled_code, recipient_hash, recipient_compiled_code) =
         if let (Some(nft_file), Some(recipient_file)) = (&nft_script, &recipient_script) {
-            // Load pre-applied scripts from files
             println!("\n{}", "Loading pre-applied scripts...".cyan());
 
             let nft_content = std::fs::read_to_string(nft_file)
@@ -1021,135 +989,65 @@ async fn init_recipient(
             println!("  Recipient Script: {}", recipient_file);
             println!("  Recipient Script Hash: {}", recipient_hash_hex.green());
 
-            // Pre-applied scripts don't have msg_nft_policy tracking
-            (nft_policy_hex, nft_cbor.to_string(), recipient_hash_hex, recipient_cbor.to_string(), None, None)
+            (nft_policy_hex, nft_cbor.to_string(), recipient_hash_hex, recipient_cbor.to_string())
         } else {
-            // Apply parameters using aiken
             let output_ref_cbor = encode_output_reference(&input_utxo.tx_hash, input_utxo.output_index)?;
             let output_ref_hex = hex::encode(&output_ref_cbor);
             println!("  OutputRef CBOR: {}", output_ref_hex.yellow());
 
-            // State NFT is always from the Hyperlane contracts
             println!("\n{}", "Applying state_nft parameter...".cyan());
             let nft_applied = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
             println!("  State NFT Policy ID: {}", nft_applied.policy_id.green());
 
-            // Recipient can be from custom contracts or built-in
             let mailbox_policy_cbor = encode_script_hash_param(&mailbox_policy_id)?;
             let mailbox_policy_cbor_hex = hex::encode(&mailbox_policy_cbor);
 
-            // Returns (recipient_applied, msg_nft_policy, msg_nft_compiled_code)
-            let (recipient_applied, msg_nft_policy, msg_nft_compiled_code) = if use_custom {
-                println!("\n{}", format!("Applying {}.{} parameter from custom contracts...", module_name, validator_name).cyan());
-                let custom_path = std::path::Path::new(&custom_contracts_path);
-                let applied = apply_validator_param(
-                    custom_path,
-                    &module_name,
-                    &validator_name,
-                    &mailbox_policy_cbor_hex,
-                )?;
-                (applied, None, None)
-            } else if deferred {
-                // Deferred recipient requires two steps:
-                // 1. Apply stored_message_nft with mailbox_policy_id to get message NFT policy
-                // 2. Apply example_deferred_recipient with both mailbox_policy_id and message_nft_policy
-                println!("\n{}", "Applying stored_message_nft parameter...".cyan());
-                let stored_msg_nft = apply_validator_param(
-                    &ctx.contracts_dir,
-                    "stored_message_nft",
-                    "stored_message_nft",
-                    &mailbox_policy_cbor_hex,
-                )?;
-                println!("  Stored Message NFT Policy: {}", stored_msg_nft.policy_id.green());
+            println!("\n{}", format!("Applying {}.{} parameter from custom contracts...", custom_module, custom_validator).cyan());
+            let custom_path = std::path::Path::new(&custom_contracts);
+            let applied = apply_validator_param(
+                custom_path,
+                &custom_module,
+                &custom_validator,
+                &mailbox_policy_cbor_hex,
+            )?;
+            println!("  Recipient Script Hash: {}", applied.policy_id.green());
 
-                // Encode the message NFT policy as CBOR for second parameter
-                let msg_nft_cbor = encode_script_hash_param(&stored_msg_nft.policy_id)?;
-                let msg_nft_cbor_hex = hex::encode(&msg_nft_cbor);
-
-                println!("\n{}", "Applying example_deferred_recipient parameters...".cyan());
-                println!("  Parameter 1: mailbox_policy_id = {}", mailbox_policy_id);
-                println!("  Parameter 2: message_nft_policy = {}", stored_msg_nft.policy_id);
-
-                let applied = apply_validator_params(
-                    &ctx.contracts_dir,
-                    "example_deferred_recipient",
-                    "example_deferred_recipient",
-                    &[&mailbox_policy_cbor_hex, &msg_nft_cbor_hex],
-                )?;
-                // Return the stored_message_nft compiled code for reference script deployment
-                (applied, Some(stored_msg_nft.policy_id), Some(stored_msg_nft.compiled_code))
-            } else {
-                // Generic recipient now requires processed_messages_nft_policy parameter
-                // to verify message chain of trust (commit 2d925e3b0)
-                let processed_nft_policy = deployment
-                    .mailbox
-                    .as_ref()
-                    .and_then(|m| m.applied_parameters.iter()
-                        .find(|p| p.name == "processed_messages_nft_policy")
-                        .map(|p| p.value.clone()))
-                    .ok_or_else(|| anyhow!("processed_messages_nft_policy not found in deployment info. Initialize mailbox first."))?;
-
-                let processed_nft_cbor = encode_script_hash_param(&processed_nft_policy)?;
-                let processed_nft_cbor_hex = hex::encode(&processed_nft_cbor);
-
-                println!("\n{}", "Applying example_generic_recipient parameters...".cyan());
-                println!("  Parameter 1: mailbox_policy_id = {}", mailbox_policy_id);
-                println!("  Parameter 2: processed_messages_nft_policy = {}", processed_nft_policy);
-
-                let applied = apply_validator_params(
-                    &ctx.contracts_dir,
-                    "example_generic_recipient",
-                    "example_generic_recipient",
-                    &[&mailbox_policy_cbor_hex, &processed_nft_cbor_hex],
-                )?;
-                (applied, None, None)
-            };
-            println!("  Recipient Script Hash: {}", recipient_applied.policy_id.green());
-
-            (nft_applied.policy_id, nft_applied.compiled_code, recipient_applied.policy_id, recipient_applied.compiled_code, msg_nft_policy, msg_nft_compiled_code)
+            (nft_applied.policy_id, nft_applied.compiled_code, applied.policy_id, applied.compiled_code)
         };
 
-    // Compute recipient address
     let recipient_addr = crate::utils::plutus::script_hash_to_address(
         &recipient_hash,
         ctx.pallas_network(),
     )?;
     println!("  Recipient Address: {}", recipient_addr);
 
-    // Build recipient datum (different structure for deferred vs generic)
-    let datum_cbor = if deferred {
-        build_deferred_recipient_datum(custom_ism.as_deref(), 0, 0)?
-    } else {
-        build_generic_recipient_datum(custom_ism.as_deref(), 0)?
+    // Datum: use provided CBOR or default empty Constr 0 []
+    let datum_cbor = match datum_cbor_hex {
+        Some(hex_str) => hex::decode(&hex_str)
+            .with_context(|| "Invalid datum CBOR hex")?,
+        None => {
+            // Default: Constr 0 with no fields
+            let mut builder = crate::utils::cbor::CborBuilder::new();
+            builder.start_constr(0).end_constr();
+            builder.build()
+        }
     };
     println!("  Datum CBOR: {}...", hex::encode(&datum_cbor[..32.min(datum_cbor.len())]));
 
-    // Reference script NFT asset name is "ref" (726566 in hex)
     let ref_asset_name = "726566";
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTransaction would:");
         println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        if msg_nft_compiled_code.is_some() {
-            println!("  - Mint THREE NFTs with policy {}:", nft_policy_id);
-            println!("    - State NFT (empty asset name) -> script address");
-            println!("    - Ref NFT (asset name 'ref') -> deployer address");
-            println!("    - Msg Ref NFT (asset name 'msg_ref') -> deployer address");
-            println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
-            println!("  - Create recipient ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
-            println!("  - Create message NFT ref script UTXO at {} with 20 ADA + msg_ref NFT + stored_message_nft script", address);
-        } else {
-            println!("  - Mint TWO NFTs with policy {}:", nft_policy_id);
-            println!("    - State NFT (empty asset name) -> script address");
-            println!("    - Ref NFT (asset name 'ref') -> deployer address");
-            println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
-            println!("  - Create ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
-        }
+        println!("  - Mint TWO NFTs with policy {}:", nft_policy_id);
+        println!("    - State NFT (empty asset name) -> script address");
+        println!("    - Ref NFT (asset name 'ref') -> deployer address");
+        println!("  - Create state UTXO at {} with {} ADA + state NFT + datum", recipient_addr, output_lovelace / 1_000_000);
+        println!("  - Create ref script UTXO at {} with {} ADA + ref NFT + script", address, ref_script_lovelace / 1_000_000);
         return Ok(());
     }
 
-    // Build and submit transaction
     let mint_script_cbor = hex::decode(&nft_compiled_code)
         .with_context(|| "Invalid NFT script CBOR")?;
     let recipient_script_cbor = hex::decode(&recipient_compiled_code)
@@ -1157,71 +1055,40 @@ async fn init_recipient(
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
 
-    // Use three-UTXO pattern for deferred recipients (includes stored_message_nft reference script)
-    // Use two-UTXO pattern for generic/token recipients
-    let built_tx = if let Some(ref msg_nft_code) = msg_nft_compiled_code {
-        println!("\n{}", "Building three-UTXO transaction (deferred recipient)...".cyan());
-        let msg_nft_script_cbor = hex::decode(msg_nft_code)
-            .with_context(|| "Invalid message NFT script CBOR")?;
-        let msg_ref_lovelace = 20_000_000u64; // 20 ADA for stored_message_nft reference script
-        tx_builder
-            .build_init_recipient_three_utxo_tx(
-                &keypair,
-                &input_utxo,
-                &collateral_utxo,
-                &mint_script_cbor,
-                &recipient_script_cbor,
-                &msg_nft_script_cbor,
-                &recipient_addr,
-                &datum_cbor,
-                output_lovelace,
-                ref_script_lovelace,
-                msg_ref_lovelace,
-            )
-            .await?
-    } else {
-        println!("\n{}", "Building two-UTXO transaction...".cyan());
-        tx_builder
-            .build_init_recipient_two_utxo_tx(
-                &keypair,
-                &input_utxo,
-                &collateral_utxo,
-                &mint_script_cbor,
-                &recipient_script_cbor,
-                &recipient_addr,
-                &datum_cbor,
-                output_lovelace,
-                ref_script_lovelace,
-            )
-            .await?
-    };
+    println!("\n{}", "Building two-UTXO transaction...".cyan());
+    let built_tx = tx_builder
+        .build_init_recipient_two_utxo_tx(
+            &keypair,
+            &input_utxo,
+            &collateral_utxo,
+            &mint_script_cbor,
+            &recipient_script_cbor,
+            &recipient_addr,
+            &datum_cbor,
+            output_lovelace,
+            ref_script_lovelace,
+        )
+        .await?;
 
     println!("  TX Hash: {}", hex::encode(&built_tx.tx_hash.0));
 
-    // Sign transaction
     println!("{}", "Signing transaction...".cyan());
     let signed_tx = tx_builder.sign_tx(built_tx, &keypair)?;
     println!("  Signed TX size: {} bytes", signed_tx.len());
 
-    // Submit transaction
     println!("{}", "Submitting transaction...".cyan());
     let tx_hash = client.submit_tx(&signed_tx).await?;
     println!("\n{}", "✓ Transaction submitted!".green().bold());
     println!("  TX Hash: {}", tx_hash);
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
 
-    // Output deployment info
-    let pattern_name = if msg_nft_compiled_code.is_some() { "Three-UTXO" } else { "Two-UTXO" };
     println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
-    println!("{}", format!("Recipient Deployment Summary ({} Pattern)", pattern_name).green().bold());
+    println!("{}", "Recipient Deployment Summary (Two-UTXO Pattern)".green().bold());
     println!("{}", "═══════════════════════════════════════════════════════════════".green());
     println!();
     println!("{}", "Script Info:".cyan());
     println!("  Script Hash: {}", recipient_hash.green());
     println!("  Address: {}", recipient_addr);
-    if let Some(ref policy) = msg_nft_policy {
-        println!("  Message NFT Policy: {}", policy.green());
-    }
     println!();
     println!("{}", "State UTXO (output #0):".cyan());
     println!("  NFT Policy: {}", nft_policy_id.green());
@@ -1232,15 +1099,6 @@ async fn init_recipient(
     println!("  NFT Policy: {}", nft_policy_id.green());
     println!("  NFT Asset Name: {} (\"ref\")", ref_asset_name);
     println!("  Location: {}", address);
-    if msg_nft_compiled_code.is_some() {
-        println!();
-        let msg_ref_asset_name = "6d73675f726566"; // "msg_ref" in hex
-        println!("{}", "Message NFT Reference Script UTXO (output #2):".cyan());
-        println!("  NFT Policy: {}", nft_policy_id.green());
-        println!("  NFT Asset Name: {} (\"msg_ref\")", msg_ref_asset_name);
-        println!("  Location: {}", address);
-        println!("  Contains: stored_message_nft minting policy script");
-    }
     println!();
 
     Ok(())
