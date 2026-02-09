@@ -12,6 +12,47 @@
   },
   "validators": [
     {
+      "title": "greeting.greeting.spend",
+      "datum": {
+        "title": "datum",
+        "schema": {
+          "$ref": "#/definitions/greeting~1GreetingDatum"
+        }
+      },
+      "redeemer": {
+        "title": "redeemer",
+        "schema": {
+          "$ref": "#/definitions/greeting~1GreetingRedeemer"
+        }
+      },
+      "parameters": [
+        {
+          "title": "_mailbox_policy_id",
+          "schema": {
+            "$ref": "#/definitions/types~1PolicyId"
+          }
+        }
+      ],
+      "compiledCode": "5901e3010100229800aba2aba1aba0aab9faab9eaab9dab9a9bae0024888888896600264653001300900198049805000cc0240092225980099b8748008c020dd500144ca6002601a003300d300e0019b874800122259800980098061baa007899192cc004c04c00a2b30013003300e37540091323259800980298081baa0018991991192cc004c024c050dd5000c4c96600266e1d200430153754003132598009805980b1baa0018991919912cc004c07c00e2b30013371e6eb8c078c06cdd500299b8a4890748656c6c6f2c2000375c603c60366ea8056266e1cdd69805180d9baa005337006eb4c028c06cdd5180f180d9baa0104800a294101945901c1bad301c001375c60380046038002602e6ea80062c80a8c064c058dd5000c590141801180a9baa30183015375400316404c6600a6eb0c004c050dd5006119baf301830153754002006602a60246ea8c004c048dd5180a98091baa00223016301730170012301530160018b201e330013758602660206ea80208cdd7980a18089baa0010072232330010010032259800800c5300103d87a80008992cc004c010006266e952000330160014bd7044cc00c00cc060009012180b000a0288b201a8b2020375c6022002601a6ea801e2c805860126ea800a2c8038601200260086ea802629344d9590021",
+      "hash": "d451ebf4d05977ed5c0bb43f30ba19909a0568f63346e9d811a5c5e6"
+    },
+    {
+      "title": "greeting.greeting.else",
+      "redeemer": {
+        "schema": {}
+      },
+      "parameters": [
+        {
+          "title": "_mailbox_policy_id",
+          "schema": {
+            "$ref": "#/definitions/types~1PolicyId"
+          }
+        }
+      ],
+      "compiledCode": "5901e3010100229800aba2aba1aba0aab9faab9eaab9dab9a9bae0024888888896600264653001300900198049805000cc0240092225980099b8748008c020dd500144ca6002601a003300d300e0019b874800122259800980098061baa007899192cc004c04c00a2b30013003300e37540091323259800980298081baa0018991991192cc004c024c050dd5000c4c96600266e1d200430153754003132598009805980b1baa0018991919912cc004c07c00e2b30013371e6eb8c078c06cdd500299b8a4890748656c6c6f2c2000375c603c60366ea8056266e1cdd69805180d9baa005337006eb4c028c06cdd5180f180d9baa0104800a294101945901c1bad301c001375c60380046038002602e6ea80062c80a8c064c058dd5000c590141801180a9baa30183015375400316404c6600a6eb0c004c050dd5006119baf301830153754002006602a60246ea8c004c048dd5180a98091baa00223016301730170012301530160018b201e330013758602660206ea80208cdd7980a18089baa0010072232330010010032259800800c5300103d87a80008992cc004c010006266e952000330160014bd7044cc00c00cc060009012180b000a0288b201a8b2020375c6022002601a6ea801e2c805860126ea800a2c8038601200260086ea802629344d9590021",
+      "hash": "d451ebf4d05977ed5c0bb43f30ba19909a0568f63346e9d811a5c5e6"
+    },
+    {
       "title": "igp.igp.spend",
       "datum": {
         "title": "datum",
@@ -672,6 +713,42 @@
             {
               "title": "output_index",
               "$ref": "#/definitions/Int"
+            }
+          ]
+        }
+      ]
+    },
+    "greeting/GreetingDatum": {
+      "title": "GreetingDatum",
+      "anyOf": [
+        {
+          "title": "GreetingDatum",
+          "dataType": "constructor",
+          "index": 0,
+          "fields": [
+            {
+              "title": "last_greeting",
+              "$ref": "#/definitions/ByteArray"
+            },
+            {
+              "title": "greeting_count",
+              "$ref": "#/definitions/Int"
+            }
+          ]
+        }
+      ]
+    },
+    "greeting/GreetingRedeemer": {
+      "title": "GreetingRedeemer",
+      "anyOf": [
+        {
+          "title": "HandleMessage",
+          "dataType": "constructor",
+          "index": 0,
+          "fields": [
+            {
+              "title": "body",
+              "$ref": "#/definitions/ByteArray"
             }
           ]
         }
