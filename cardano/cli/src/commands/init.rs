@@ -155,6 +155,22 @@ enum InitCommands {
         #[arg(long)]
         origin_domains: String,
 
+        /// ISM validators per domain: "domain:addr1,addr2;domain2:addr3"
+        #[arg(long)]
+        validators: Option<String>,
+
+        /// ISM threshold per domain: "domain:threshold;domain2:threshold"
+        #[arg(long)]
+        thresholds: Option<String>,
+
+        /// Validator announce S3/storage URL
+        #[arg(long)]
+        storage_location: Option<String>,
+
+        /// Validator ECDSA secp256k1 private key (hex) for announce
+        #[arg(long)]
+        validator_key: Option<String>,
+
         /// Dry run
         #[arg(long)]
         dry_run: bool,
@@ -223,8 +239,12 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         InitCommands::All {
             domain,
             origin_domains,
+            validators,
+            thresholds,
+            storage_location,
+            validator_key,
             dry_run,
-        } => init_all(ctx, domain, &origin_domains, dry_run).await,
+        } => init_all(ctx, domain, &origin_domains, validators, thresholds, storage_location, validator_key, dry_run).await,
         InitCommands::Status => show_status(ctx).await,
         InitCommands::GenerateDatums {
             domain,
@@ -1127,6 +1147,10 @@ async fn init_all(
     ctx: &CliContext,
     domain: u32,
     origin_domains: &str,
+    validators: Option<String>,
+    thresholds: Option<String>,
+    storage_location: Option<String>,
+    validator_key: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
     println!("{}", "Initializing all core contracts...".cyan());
@@ -1146,16 +1170,75 @@ async fn init_all(
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
 
-    println!("\n{}", "1. Initializing ISM...".cyan());
+    let mut step = 1;
+
+    println!("\n{}", format!("{}. Initializing ISM...", step).cyan());
     let ism_spent = init_ism_internal(ctx, origin_domains, None, None, None, dry_run, &spent_utxos).await?;
     if let Some(utxo) = ism_spent {
         spent_utxos.push(utxo);
     }
+    step += 1;
 
-    println!("\n{}", "2. Initializing Mailbox...".cyan());
+    println!("\n{}", format!("{}. Initializing Mailbox...", step).cyan());
     let mailbox_spent = init_mailbox_internal(ctx, domain, &ism_hash, None, dry_run, &spent_utxos).await?;
     if let Some(utxo) = mailbox_spent {
         spent_utxos.push(utxo);
+    }
+    step += 1;
+
+    // Optional: set ISM validators per domain
+    if let Some(ref validators_str) = validators {
+        println!("\n{}", format!("{}. Setting ISM validators...", step).cyan());
+        // Parse "domain:addr1,addr2;domain2:addr3" format
+        for domain_block in validators_str.split(';') {
+            let parts: Vec<&str> = domain_block.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("Invalid validators format: '{}'. Expected 'domain:addr1,addr2'", domain_block));
+            }
+            let d: u32 = parts[0].parse()
+                .with_context(|| format!("Invalid domain in validators: '{}'", parts[0]))?;
+            let addrs: Vec<String> = parts[1].split(',').map(|s| s.trim().to_string()).collect();
+
+            // Parse threshold for this domain if provided
+            let thresh = thresholds.as_ref().and_then(|t| {
+                t.split(';').find_map(|tb| {
+                    let tp: Vec<&str> = tb.splitn(2, ':').collect();
+                    if tp.len() == 2 && tp[0].parse::<u32>().ok() == Some(d) {
+                        tp[1].parse::<u32>().ok()
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            super::ism::set_validators(ctx, d, addrs, thresh, None, None, dry_run).await?;
+        }
+        step += 1;
+    }
+
+    // Optional: set ISM thresholds for domains not covered by validators
+    if let Some(ref thresholds_str) = thresholds {
+        if validators.is_none() {
+            println!("\n{}", format!("{}. Setting ISM thresholds...", step).cyan());
+            for threshold_block in thresholds_str.split(';') {
+                let parts: Vec<&str> = threshold_block.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    return Err(anyhow!("Invalid thresholds format: '{}'. Expected 'domain:threshold'", threshold_block));
+                }
+                let d: u32 = parts[0].parse()
+                    .with_context(|| format!("Invalid domain in thresholds: '{}'", parts[0]))?;
+                let t: u32 = parts[1].parse()
+                    .with_context(|| format!("Invalid threshold: '{}'", parts[1]))?;
+                super::ism::set_threshold(ctx, d, t, None, None, dry_run).await?;
+            }
+            step += 1;
+        }
+    }
+
+    // Optional: validator announce
+    if let (Some(ref location), Some(ref key)) = (&storage_location, &validator_key) {
+        println!("\n{}", format!("{}. Announcing validator...", step).cyan());
+        super::validator::announce_validator(ctx, location, key, None, dry_run).await?;
     }
 
     println!("\n{}", "✓ All contracts initialized successfully!".green().bold());

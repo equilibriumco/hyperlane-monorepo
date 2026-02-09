@@ -151,7 +151,7 @@ pub async fn execute(ctx: &CliContext, args: IsmArgs) -> Result<()> {
     }
 }
 
-async fn set_validators(
+pub(crate) async fn set_validators(
     ctx: &CliContext,
     domain: u32,
     validators: Vec<String>,
@@ -439,7 +439,7 @@ async fn set_validators(
     Ok(())
 }
 
-async fn set_threshold(
+pub(crate) async fn set_threshold(
     ctx: &CliContext,
     domain: u32,
     threshold: u32,

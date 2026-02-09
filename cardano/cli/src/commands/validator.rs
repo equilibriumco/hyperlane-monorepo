@@ -77,7 +77,7 @@ pub async fn execute(ctx: &CliContext, args: ValidatorArgs) -> Result<()> {
 }
 
 /// Announce validator storage location using ECDSA secp256k1 signature
-async fn announce_validator(
+pub(crate) async fn announce_validator(
     ctx: &CliContext,
     storage_location: &str,
     validator_key_hex: &str,
