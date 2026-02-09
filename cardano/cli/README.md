@@ -101,30 +101,6 @@ hyperlane-cardano ism remove-validator \
   --validator 0x1234...
 ```
 
-### Registry
-
-Manage recipient registrations.
-
-```bash
-# List registered recipients
-hyperlane-cardano registry list
-
-# Show recipient details
-hyperlane-cardano registry show --script-hash <hash>
-
-# Register a new recipient (dry run)
-hyperlane-cardano registry register \
-  --script-hash <hash> \
-  --state-policy <policy_id> \
-  --recipient-type generic \
-  --dry-run
-
-# Generate registration JSON
-hyperlane-cardano registry generate-json \
-  --script-hash <hash> \
-  --state-policy <policy_id>
-```
-
 ### Warp (Token Bridges)
 
 Manage warp routes for cross-chain token transfers.
@@ -305,7 +281,6 @@ cardano/deployments/<network>/
 ├── multisig_ism.plutus    # ISM validator script
 ├── multisig_ism.hash      # ISM script hash
 ├── multisig_ism.addr      # ISM script address
-├── registry.plutus        # Registry validator script
 ├── mailbox_datum.json     # Initial mailbox datum
 ├── ism_datum.json         # Initial ISM datum
 └── mint_redeemer.json     # State NFT mint redeemer

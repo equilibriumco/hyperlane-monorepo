@@ -50,7 +50,7 @@ cat deployments/preview/deployment_info.json | jq '.mailbox.stateNftPolicy'
 
 ### Cardano Preview Testnet
 
-- **Domain ID:** 1000 (example, check actual deployment)
+- **Domain ID:** 2003
 - **Network:** Preview
 
 ### Fuji (Avalanche Testnet)

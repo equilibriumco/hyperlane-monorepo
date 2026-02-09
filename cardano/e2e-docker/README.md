@@ -73,14 +73,14 @@ See `.env.example` for all required variables. Key configurations:
 
 ### Contract Addresses
 
-Cardano addresses use H256 format with `0x00000000` prefix:
-```
-0x00000000<28-byte-policy-id-hex>
-```
+Cardano uses 28-byte identifiers padded to 32 bytes for Hyperlane. Two prefix types:
 
-For example, if your mailbox policy ID is `789ca889...`, the H256 address is:
+- `0x01000000` -- NFT minting policy ID (warp routes, recipients)
+- `0x02000000` -- Script hash credential (mailbox, ISM)
+
 ```
-0x00000000789ca889...
+State NFT Policy:  789ca889... (28 bytes)
+Hyperlane Address: 0x01000000789ca889... (32 bytes)
 ```
 
 ## Services

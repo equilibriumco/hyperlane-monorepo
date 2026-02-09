@@ -4,25 +4,26 @@ This document describes the current state of the Hyperlane-Cardano integration, 
 
 ## Executive Summary
 
-The Hyperlane-Cardano integration is **substantially complete for incoming messages** (other chains → Cardano). The on-chain contracts (Aiken) and off-chain infrastructure (Rust) are mature and have been deployed to Preview testnet. However, **outgoing message flow** (Cardano → other chains) and some auxiliary features require additional work.
+The Hyperlane-Cardano integration is **complete for bidirectional messaging and token bridging**. The on-chain contracts (Aiken) and off-chain infrastructure (Rust) are mature and have been deployed and tested end-to-end on Preview testnet with Avalanche Fuji.
 
-| Component                                  | Status         | Notes                                      |
-| ------------------------------------------ | -------------- | ------------------------------------------ |
-| Incoming Messages (Fuji → Cardano)         | ✅ Tested      | End-to-end working                         |
-| Outgoing Messages (Cardano → other chains) | ⚠️ Partial     | Contracts ready, agent integration needed  |
-| Multisig ISM                               | ✅ Complete    | ECDSA secp256k1 signatures verified        |
-| Validator Agent                            | ⚠️ Partial     | Not integrated with Cardano                |
-| Warp Routes                                | ⚠️ Untested    | Contracts implemented, not deployed/tested |
-| Interchain Gas Paymaster                   | ⚠️ Untested    | Contract implemented, indexer stub         |
-| Per-recipient ISM                          | ✅ Implemented | Relayer reads ISM from WarpRouteDatum      |
+| Component                                  | Status         | Notes                                        |
+| ------------------------------------------ | -------------- | -------------------------------------------- |
+| Incoming Messages (Fuji -> Cardano)        | Tested         | End-to-end working                           |
+| Outgoing Messages (Cardano -> Fuji)        | Tested         | Validator + relayer delivering to Fuji       |
+| Multisig ISM                               | Complete       | ECDSA secp256k1 signatures verified          |
+| Validator Agent                            | Tested         | Signing checkpoints, storing in S3           |
+| Warp Routes (Native, Collateral, Synth)    | Tested         | All 6 directions verified end-to-end         |
+| Interchain Gas Paymaster                   | Untested       | Contract implemented, indexer stub           |
+| Per-recipient ISM                          | Implemented    | Relayer reads ISM from WarpRouteDatum        |
+| NFT Policy Addressing                      | Complete       | O(1) lookups, no registry contract needed    |
 
 ---
 
-## 1. Incoming Message Flow (Other Chains → Cardano)
+## 1. Incoming Message Flow (Other Chains -> Cardano)
 
-**Status: ✅ Tested and Working**
+**Status: Tested and Working**
 
-This is the most mature part of the integration and has been tested end-to-end with messages from Fuji (Avalanche testnet) to Cardano Preview.
+This flow is mature and has been tested end-to-end with messages from Fuji (Avalanche testnet) to Cardano Preview.
 
 ### What's Implemented
 
@@ -88,24 +89,19 @@ This is the most mature part of the integration and has been tested end-to-end w
 
 - Deployed to Cardano Preview testnet (domain 2003)
 - Connected to Fuji (domain 43113) for bidirectional testing
-- Relayer configuration in `cardano/config/relayer-config.json`
+- Relayer configuration in `cardano/e2e-docker/config/relayer-cardano-fuji.json`
 
 ---
 
-## 2. Outgoing Message Flow (Cardano → Other Chains)
+## 2. Outgoing Message Flow (Cardano -> Other Chains)
 
-**Status: ⚠️ Contracts Implemented, Agent Integration Needed**
+**Status: Tested and Working**
 
 ### What's Implemented
 
 #### On-Chain (Aiken)
 
-- **Mailbox Dispatch** (`contracts/validators/mailbox.ak:72-114`): Complete implementation
-
-  ```aiken
-  Dispatch { destination, recipient, body } ->
-    validate_dispatch(mailbox_datum, destination, recipient, body, tx, own_ref)
-  ```
+- **Mailbox Dispatch** (`contracts/validators/mailbox.ak`): Complete implementation
 
   - Message construction with version, nonce, origin, sender
   - Merkle tree update with message hash (keccak256)
@@ -124,82 +120,38 @@ This is the most mature part of the integration and has been tested end-to-end w
   - Indexes dispatched messages from Cardano
   - Extracts nonce from transaction outputs
 
-- **Dispatch Redeemer Support** (`rust/main/chains/hyperlane-cardano/src/types.rs:120`)
-  ```rust
-  pub enum MailboxRedeemer {
-      Dispatch { destination: u32, recipient: [u8; 32], body: Vec<u8> },
-      // ...
-  }
-  ```
+- **Validator Agent**: Fully integrated
+  - Signs checkpoints for Cardano-originated messages
+  - Stores signed checkpoints in AWS S3
+  - Relayer fetches checkpoints and delivers to destination
 
-### What's Missing
+### Tested Flows
 
-1. **Validator Agent for Cardano**
-
-   - The Hyperlane validator agent signs checkpoints for dispatched messages
-   - Current code explicitly notes: "Cardano validator reorg reporting not yet implemented" (`rust/main/agents/validator/src/reorg_reporter.rs:205`)
-   - No Cardano-specific checkpoint signing flow
-
-2. **CLI Commands for Dispatch**
-
-   - Need `dispatch` command in CLI to send test messages
-   - Currently only `process` flow is exercised
-
-3. **End-to-End Testing**
-   - No verified test of Cardano → Fuji (or other chain) message delivery
-   - Merkle tree indexing on the Cardano side needs validation
-
-### Architecture Gap
-
-```
-Current Flow (Working):
-Fuji Mailbox → Dispatch → Hyperlane Validators → Sign Checkpoint →
-Relayer → Cardano Mailbox.process() ✅
-
-Missing Flow:
-Cardano Mailbox → Dispatch → ??? Validator Agent → Sign Checkpoint →
-Relayer → Fuji Mailbox.process() ❌
-```
-
-The Hyperlane validator agent needs to:
-
-1. Index dispatched messages from Cardano mailbox
-2. Build merkle tree from dispatched message hashes
-3. Sign checkpoints (merkle root + index + message ID)
-4. Store signed checkpoints for relayer retrieval
+- Cardano -> Fuji: Messages dispatched from Cardano mailbox are indexed, signed by the validator, and delivered to Fuji by the relayer.
 
 ---
 
 ## 3. Validator Agent for Cardano
 
-**Status: ⚠️ Not Integrated**
+**Status: Integrated and Working**
 
-### What Exists
+### What's Implemented
 
 - `CardanoValidatorAnnounce` implementation (`rust/main/chains/hyperlane-cardano/src/validator_announce.rs`)
 - Validator announcement on-chain contract (`contracts/validators/validator_announce.ak`)
+- Validator agent signs checkpoints for Cardano-originated messages
+- Checkpoints stored in AWS S3
+- CLI `validator announce` command for on-chain announcement
 
-### What's Missing
+### Known Limitations
 
-1. **Validator agent Cardano support**
-
-   - The main validator agent (`rust/main/agents/validator/`) doesn't have Cardano-specific handlers
-   - Checkpoint signing for Cardano-originated messages not implemented
-
-2. **Merkle Tree Hook Indexer**
-
-   - `CardanoMerkleTreeHook` exists but is mostly stubs
-   - Needs to track merkle tree state from dispatched messages
-
-3. **Reorg Reporter**
-   - Explicitly marked as not implemented for Cardano
-   - Low priority for testnet but needed for production
+- **Reorg Reporter**: Not yet implemented for Cardano (`rust/main/agents/validator/src/reorg_reporter.rs:205`). Low priority for testnet but needed for production.
 
 ---
 
 ## 4. Interchain Gas Paymaster (IGP)
 
-**Status: ⚠️ Contract Implemented, Off-Chain Partial**
+**Status: Contract Implemented, Off-Chain Partial**
 
 ### What's Implemented
 
@@ -238,7 +190,9 @@ The Hyperlane validator agent needs to:
 
 ## 5. Warp Routes (Token Bridge)
 
-**Status: ⚠️ Contracts Implemented, Not Tested**
+**Status: Tested End-to-End**
+
+All three warp route types have been deployed and tested bidirectionally between Cardano Preview and Avalanche Fuji.
 
 ### What's Implemented
 
@@ -252,38 +206,36 @@ The Hyperlane validator agent needs to:
 
 - **Token Types Supported**:
 
-  - **Collateral**: Lock native Cardano tokens in vault
-  - **Synthetic**: Mint/burn synthetic tokens
-  - **Native**: Lock ADA in vault
+  - **Native**: Lock ADA in vault, mint wADA on remote
+  - **Collateral**: Lock Cardano native tokens in vault, mint wrapped tokens on remote
+  - **Synthetic**: Mint/burn synthetic tokens on Cardano for tokens originating elsewhere
 
 - **Vault** (`contracts/validators/vault.ak`): Collateral management
 
 - **Synthetic Token** (`contracts/validators/synthetic_token.ak`): Minting policy
 
-### What's Missing
+#### Off-Chain (Rust)
 
-1. **Deployment and Configuration**
+- Transaction builder handles all warp route operations (lock, release, mint, burn)
+- Redemption pattern: relayer creates redemption UTXO, recipient claims with own ADA
+- Decimal conversion between Cardano (0/6 decimals) and EVM (6/18 decimals)
 
-   - No deployed warp route instances
-   - No enrolled remote routes
+### Test Results
 
-2. **CLI Commands**
-
-   - Commands exist in `cardano/cli/src/commands/warp.rs` but untested
-
-3. **End-to-End Testing**
-
-   - Token transfer Cardano → Other chain
-   - Token receive Other chain → Cardano
-
-4. **Minor Code TODO**
-   - `get_minted_amount()` in `warp_route.ak:484-488` returns placeholder
+| Direction                           | Status | Notes                              |
+| ----------------------------------- | ------ | ---------------------------------- |
+| Native ADA Cardano -> Fuji wADA    | Pass   | ADA locked, wADA minted on Fuji   |
+| Fuji wADA -> Cardano Native ADA    | Pass   | wADA burned, ADA released + claim |
+| Collateral TEST Cardano -> Fuji    | Pass   | TEST locked, wCTEST minted        |
+| Fuji wCTEST -> Cardano Collateral  | Pass   | wCTEST burned, TEST released      |
+| Fuji FTEST -> Cardano Synthetic    | Pass   | FTEST locked, synthetic minted    |
+| Cardano Synthetic -> Fuji FTEST    | Pass   | Synthetic burned, FTEST released  |
 
 ---
 
 ## 6. Per-Recipient Custom ISM
 
-**Status: ✅ Implemented (relayer-side)**
+**Status: Implemented (relayer-side)**
 
 ### What's Implemented
 
@@ -297,7 +249,30 @@ The Hyperlane validator agent needs to:
 
 ---
 
-## 7. Current Deployment Status
+## 7. NFT Policy Addressing
+
+**Status: Complete**
+
+The previous registry-based architecture has been replaced with direct NFT policy-based addressing.
+
+### How It Works
+
+- Recipients are identified by their state NFT policy ID
+- Hyperlane address format: `0x01000000{nft_policy_id}` for NFT-based addresses
+- Core contracts use: `0x02000000{script_hash}` for script-based addresses
+- The relayer's `RecipientResolver` performs O(1) lookups via Blockfrost NFT queries
+- No registry contract or registration transactions needed
+
+### Benefits
+
+- O(1) recipient discovery (query NFT by policy)
+- No registry contract to deploy or maintain
+- No registration transactions needed
+- Simpler deployment flow
+
+---
+
+## 8. Current Deployment Status
 
 ### Testnet (Preview)
 
@@ -314,81 +289,69 @@ cat cardano/deployments/preview/deployment_info.json
 
 ---
 
-## 8. Recommended Next Steps
+## 9. Recommended Next Steps
 
 ### High Priority (Blocking for Production)
 
-1. **Validator Agent Integration**
-
-   - Implement Cardano chain support in validator agent
-   - Enable checkpoint signing for Cardano-originated messages
-   - Test full outgoing message flow
-
-2. **Outgoing Message E2E Test**
-
-   - Add CLI command for dispatching test messages
-   - Verify message appears on destination chain
-   - Test full Cardano → Fuji → back flow
-
-3. **Security Audit**
+1. **Security Audit**
    - Audit Aiken contracts
    - Review signature verification logic
    - Validate merkle tree implementation
 
-### Medium Priority (Production Hardening)
-
-4. **IGP Integration**
-
+2. **IGP Integration**
    - Add RPC endpoint for gas payments
    - Test gas payment flow
    - Integrate with relayer economics
 
-5. **Warp Route Deployment**
-   - Deploy test warp route on Preview
-   - Enroll remote routes
-   - Test token transfers both directions
+### Medium Priority (Production Hardening)
 
-### Low Priority (Optimization)
-
-6. **Reorg Reporter**
-
+3. **Reorg Reporter**
    - Implement Cardano-specific reorg detection
+   - Currently marked as not implemented for Cardano
 
-7. **Monitoring & Observability**
+4. **Monitoring & Observability**
    - Metrics for Cardano message processing
    - Alerting for failed deliveries
 
----
+5. **On-chain Custom ISM Enforcement**
+   - Move per-recipient ISM selection from relayer to mailbox contract
 
-## 9. Architecture Overview
+### Low Priority (Optimization)
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         CARDANO CHAIN                                │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐ │
-│  │  Mailbox   │   │Multisig ISM│   │    IGP     │   │  Warp      │ │
-│  │  ✅ Ready  │   │  ✅ Ready  │   │ ⚠️ Partial │   │  Route     │ │
-│  └────────────┘   └────────────┘   └────────────┘   │ ⚠️ Untested│ │
-│                                                      └────────────┘ │
-│  Recipients resolved via NFT policy queries (O(1) lookups)          │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
-                               │
-                               │ Relayer (Rust)
-                               │ ✅ Incoming Working
-                               │ ⚠️ Outgoing Needs Validator
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         OTHER CHAINS                                 │
-│                (Fuji, Ethereum, Solana, Cosmos, etc.)               │
-└─────────────────────────────────────────────────────────────────────┘
-```
+6. **UTXO Contention Mitigation**
+   - Convert Mailbox/ISM to minting policies for parallel processing
+   - See `FUTURE_OPTIMIZATIONS.md`
 
 ---
 
-## 10. File References
+## 10. Architecture Overview
+
+```
++----------------------------------------------------------------------+
+|                         CARDANO CHAIN                                 |
++----------------------------------------------------------------------+
+|                                                                       |
+|  +------------+   +------------+   +------------+   +------------+   |
+|  |  Mailbox   |   |Multisig ISM|   |    IGP     |   |  Warp      |   |
+|  |  Complete  |   |  Complete  |   |  Partial   |   |  Route     |   |
+|  +------------+   +------------+   +------------+   |  Tested    |   |
+|                                                      +------------+   |
+|  Recipients resolved via NFT policy queries (O(1) lookups)           |
+|                                                                       |
++----------------------------------------------------------------------+
+                               |
+                               | Relayer (Rust)
+                               | Bidirectional: Working
+                               v
++----------------------------------------------------------------------+
+|                         OTHER CHAINS                                  |
+|                (Fuji, Ethereum, Solana, Cosmos, etc.)                |
++----------------------------------------------------------------------+
+```
+
+---
+
+## 11. File References
 
 ### On-Chain Contracts (Validators)
 
@@ -449,17 +412,13 @@ cat cardano/deployments/preview/deployment_info.json
   - `query.rs` - State queries
   - `deferred.rs` - Deferred message processing
 
-### Scripts
-
-- `cardano/scripts/send-message-to-recipient.sh` - Send test message to recipient
-
 ### Configuration
 
-- `cardano/config/relayer-config.json` - Relayer configuration for testnet
+- `cardano/e2e-docker/config/relayer-cardano-fuji.json` - Relayer configuration for testnet
 
 ---
 
-## 11. Known Issues & TODOs
+## 12. Known Issues & TODOs
 
 | Location                | Issue                                                                                              |
 | ----------------------- | -------------------------------------------------------------------------------------------------- |
@@ -470,4 +429,4 @@ cat cardano/deployments/preview/deployment_info.json
 
 ---
 
-_Last Updated: February 2025_
+_Last Updated: February 2026_
