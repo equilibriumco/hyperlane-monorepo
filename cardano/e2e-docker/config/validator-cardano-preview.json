@@ -46,8 +46,6 @@
         "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
         "processedMessagesScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
         "processedMessagesNftPolicyId": "${CARDANO_PROCESSED_MSG_POLICY_ID}",
-        "registryPolicyId": "${CARDANO_REGISTRY_POLICY_ID}",
-        "registryAssetNameHex": "5265676973747279205374617465",
         "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
         "ismAssetNameHex": "49534d205374617465",
         "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",

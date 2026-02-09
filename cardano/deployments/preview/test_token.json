@@ -1,8 +1,0 @@
-{
-  "amount": 1000000,
-  "asset_name": "CTEST",
-  "asset_name_hex": "4354455354",
-  "mint_tx_hash": "e419761846e7b9bbd0f3bbc150680d47859f33b20ea4c3ad945e761662d5f907",
-  "policy_id": "f24daaface9c4290d8f6b9748db1c2acb07c5d90890178615330d3c9",
-  "seed_utxo": "0de9896f96715b8e335e75c1c2a250bc262df4b3d611b4caf6262f768a8e3249#0"
-}
