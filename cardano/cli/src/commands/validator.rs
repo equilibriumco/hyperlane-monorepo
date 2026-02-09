@@ -71,7 +71,7 @@ pub async fn execute(ctx: &CliContext, args: ValidatorArgs) -> Result<()> {
             validator_key,
             signing_key,
             dry_run,
-        } => announce_validator(ctx, &storage_location, &validator_key, signing_key, dry_run).await,
+        } => announce_validator(ctx, &storage_location, &validator_key, signing_key, dry_run, &[]).await,
         ValidatorCommands::Show { validator } => show_announcements(ctx, validator).await,
     }
 }
@@ -83,6 +83,7 @@ pub(crate) async fn announce_validator(
     validator_key_hex: &str,
     signing_key: Option<String>,
     dry_run: bool,
+    exclude_utxos: &[String],
 ) -> Result<()> {
     println!("{}", "Announcing validator storage location...".cyan());
     println!("  Storage: {}", storage_location);
@@ -292,7 +293,11 @@ pub(crate) async fn announce_validator(
     let all_payer_utxos = client.get_utxos(&payer_address).await?;
     let payer_utxos: Vec<_> = all_payer_utxos
         .into_iter()
-        .filter(|u| !spent_utxos.iter().any(|(hash, idx)| &u.tx_hash == hash && u.output_index == *idx as u32))
+        .filter(|u| {
+            let ref_str = format!("{}#{}", u.tx_hash, u.output_index);
+            !spent_utxos.iter().any(|(hash, idx)| &u.tx_hash == hash && u.output_index == *idx as u32)
+                && !exclude_utxos.contains(&ref_str)
+        })
         .collect();
     if payer_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found for payer address"));

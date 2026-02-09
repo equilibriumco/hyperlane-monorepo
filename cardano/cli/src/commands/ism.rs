@@ -127,14 +127,14 @@ pub async fn execute(ctx: &CliContext, args: IsmArgs) -> Result<()> {
             ism_policy,
             signing_key,
             dry_run,
-        } => set_validators(ctx, domain, validators, threshold, ism_policy, signing_key, dry_run).await,
+        } => set_validators(ctx, domain, validators, threshold, ism_policy, signing_key, dry_run, &[]).await.map(|_| ()),
         IsmCommands::SetThreshold {
             domain,
             threshold,
             ism_policy,
             signing_key,
             dry_run,
-        } => set_threshold(ctx, domain, threshold, ism_policy, signing_key, dry_run).await,
+        } => set_threshold(ctx, domain, threshold, ism_policy, signing_key, dry_run, &[]).await.map(|_| ()),
         IsmCommands::Show { ism_policy, domain } => show_config(ctx, ism_policy, domain).await,
         IsmCommands::AddValidator {
             domain,
@@ -159,7 +159,8 @@ pub(crate) async fn set_validators(
     ism_policy: Option<String>,
     signing_key: Option<String>,
     dry_run: bool,
-) -> Result<()> {
+    exclude_utxos: &[String],
+) -> Result<Option<String>> {
     println!("{}", "Setting ISM validators...".cyan());
     println!("  Domain: {}", domain);
     println!("  Validators: {}", validators.len());
@@ -287,14 +288,22 @@ pub(crate) async fn set_validators(
         println!("2. Uses SetValidators redeemer: {}", hex::encode(&redeemer_cbor));
         println!("3. Creates new ISM UTXO with updated datum");
         println!("4. Requires owner signature: {}", hex::encode(&owner));
-        return Ok(());
+        return Ok(None);
     }
 
     // Build and submit the transaction
     println!("\n{}", "Building transaction...".cyan());
 
-    // Get payer UTXOs for fees and collateral
-    let payer_utxos = client.get_utxos(&payer_address).await?;
+    // Get payer UTXOs for fees and collateral, filtering out already-spent ones
+    let all_payer_utxos = client.get_utxos(&payer_address).await?;
+    let payer_utxos: Vec<_> = all_payer_utxos
+        .into_iter()
+        .filter(|u| {
+            let ref_str = format!("{}#{}", u.tx_hash, u.output_index);
+            !exclude_utxos.contains(&ref_str)
+        })
+        .collect();
+    println!("  Found {} UTXOs at wallet (excluding {} spent)", payer_utxos.len(), exclude_utxos.len());
     if payer_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found for payer address"));
     }
@@ -429,6 +438,7 @@ pub(crate) async fn set_validators(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
+    let spent_ref = format!("{}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
     let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
@@ -436,7 +446,7 @@ pub(crate) async fn set_validators(
     println!("\n  Domain: {}", domain);
     println!("  Validators: {} (threshold {})", validators.len(), threshold.unwrap_or(0));
 
-    Ok(())
+    Ok(Some(spent_ref))
 }
 
 pub(crate) async fn set_threshold(
@@ -446,7 +456,8 @@ pub(crate) async fn set_threshold(
     ism_policy: Option<String>,
     signing_key: Option<String>,
     dry_run: bool,
-) -> Result<()> {
+    exclude_utxos: &[String],
+) -> Result<Option<String>> {
     println!("{}", "Setting ISM threshold...".cyan());
     println!("  Domain: {}", domain);
     println!("  Threshold: {}", threshold);
@@ -551,14 +562,22 @@ pub(crate) async fn set_threshold(
         println!("2. Uses SetThreshold redeemer: {}", hex::encode(&redeemer_cbor));
         println!("3. Creates new ISM UTXO with updated datum");
         println!("4. Requires owner signature: {}", hex::encode(&owner));
-        return Ok(());
+        return Ok(None);
     }
 
     // Build and submit the transaction
     println!("\n{}", "Building transaction...".cyan());
 
-    // Get payer UTXOs for fees and collateral
-    let payer_utxos = client.get_utxos(&payer_address).await?;
+    // Get payer UTXOs for fees and collateral, filtering out already-spent ones
+    let all_payer_utxos = client.get_utxos(&payer_address).await?;
+    let payer_utxos: Vec<_> = all_payer_utxos
+        .into_iter()
+        .filter(|u| {
+            let ref_str = format!("{}#{}", u.tx_hash, u.output_index);
+            !exclude_utxos.contains(&ref_str)
+        })
+        .collect();
+    println!("  Found {} UTXOs at wallet (excluding {} spent)", payer_utxos.len(), exclude_utxos.len());
     if payer_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found for payer address"));
     }
@@ -708,6 +727,7 @@ pub(crate) async fn set_threshold(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
+    let spent_ref = format!("{}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
     let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
@@ -715,7 +735,7 @@ pub(crate) async fn set_threshold(
     println!("\n  Domain: {}", domain);
     println!("  New threshold: {}", threshold);
 
-    Ok(())
+    Ok(Some(spent_ref))
 }
 
 async fn show_config(
@@ -825,7 +845,7 @@ async fn add_validator(
     println!("  New validators: {:?}", new_validators);
 
     // Call set_validators with updated list
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run).await
+    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, &[]).await.map(|_| ())
 }
 
 async fn remove_validator(
@@ -867,7 +887,7 @@ async fn remove_validator(
 
     println!("  New validators: {:?}", new_validators);
 
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run).await
+    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, &[]).await.map(|_| ())
 }
 
 // Helper functions

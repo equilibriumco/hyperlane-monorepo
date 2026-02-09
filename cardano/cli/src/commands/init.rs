@@ -1211,7 +1211,9 @@ async fn init_all(
                 })
             });
 
-            super::ism::set_validators(ctx, d, addrs, thresh, None, None, dry_run).await?;
+            if let Some(spent) = super::ism::set_validators(ctx, d, addrs, thresh, None, None, dry_run, &spent_utxos).await? {
+                spent_utxos.push(spent);
+            }
         }
         step += 1;
     }
@@ -1229,7 +1231,9 @@ async fn init_all(
                     .with_context(|| format!("Invalid domain in thresholds: '{}'", parts[0]))?;
                 let t: u32 = parts[1].parse()
                     .with_context(|| format!("Invalid threshold: '{}'", parts[1]))?;
-                super::ism::set_threshold(ctx, d, t, None, None, dry_run).await?;
+                if let Some(spent) = super::ism::set_threshold(ctx, d, t, None, None, dry_run, &spent_utxos).await? {
+                    spent_utxos.push(spent);
+                }
             }
             step += 1;
         }
@@ -1238,7 +1242,7 @@ async fn init_all(
     // Optional: validator announce
     if let (Some(ref location), Some(ref key)) = (&storage_location, &validator_key) {
         println!("\n{}", format!("{}. Announcing validator...", step).cyan());
-        super::validator::announce_validator(ctx, location, key, None, dry_run).await?;
+        super::validator::announce_validator(ctx, location, key, None, dry_run, &spent_utxos).await?;
     }
 
     println!("\n{}", "✓ All contracts initialized successfully!".green().bold());
