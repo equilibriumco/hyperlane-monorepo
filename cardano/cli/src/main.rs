@@ -51,6 +51,10 @@ struct Cli {
     /// Verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Skip waiting for TX confirmation after submission
+    #[arg(long, global = true)]
+    no_wait: bool,
 }
 
 #[derive(Subcommand)]
@@ -139,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         cli.signing_key.as_deref(),
         &cli.deployments_dir,
         &cli.contracts_dir,
+        cli.no_wait,
     )?;
 
     // Execute command

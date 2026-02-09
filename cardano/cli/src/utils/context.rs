@@ -20,6 +20,8 @@ pub struct CliContext {
     pub deployments_dir: PathBuf,
     /// Path to contracts directory
     pub contracts_dir: PathBuf,
+    /// Skip waiting for TX confirmation
+    pub no_wait: bool,
 }
 
 impl CliContext {
@@ -29,6 +31,7 @@ impl CliContext {
         signing_key: Option<&str>,
         deployments_dir: &str,
         contracts_dir: &str,
+        no_wait: bool,
     ) -> Result<Self> {
         let network = match network.to_lowercase().as_str() {
             "mainnet" => CardanoNetwork::Mainnet,
@@ -43,6 +46,7 @@ impl CliContext {
             signing_key_path: signing_key.map(PathBuf::from),
             deployments_dir: PathBuf::from(deployments_dir),
             contracts_dir: PathBuf::from(contracts_dir),
+            no_wait,
         })
     }
 

@@ -641,6 +641,18 @@ impl BlockfrostClient {
         Ok(tx_hash.trim_matches('"').to_string())
     }
 
+    /// Submit a transaction and optionally wait for on-chain confirmation
+    pub async fn submit_and_confirm(&self, tx_cbor: &[u8], no_wait: bool) -> Result<String> {
+        let tx_hash = self.submit_tx(tx_cbor).await?;
+        println!("  TX Hash: {}", tx_hash);
+        if !no_wait {
+            println!("  Waiting for confirmation...");
+            self.wait_for_tx(&tx_hash, 120).await?;
+            println!("  Confirmed");
+        }
+        Ok(tx_hash)
+    }
+
     /// Get transaction details
     pub async fn get_tx(&self, tx_hash: &str) -> Result<TxInfo> {
         self.get(&format!("/txs/{}", tx_hash)).await
