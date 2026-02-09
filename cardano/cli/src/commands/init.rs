@@ -7,7 +7,7 @@ use colored::Colorize;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{build_igp_datum, build_ism_datum, build_mailbox_datum};
 use crate::utils::context::CliContext;
-use crate::utils::plutus::{apply_validator_param, encode_output_reference, encode_script_hash_param, script_hash_to_address};
+use crate::utils::plutus::{apply_validator_param, apply_validator_params, encode_output_reference, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 use crate::utils::types::{AppliedParameter, StateNftInfo};
 
@@ -253,9 +253,10 @@ async fn init_mailbox(
 /// The mailbox initialization follows a specific parameterization chain:
 /// 1. Create state_nft policy (one-shot) -> mailbox_policy_id
 /// 2. Apply mailbox_policy_id to processed_message_nft -> processed_messages_nft_policy
-/// 3. Apply processed_messages_nft_policy to mailbox -> final mailbox script
+/// 3. Apply mailbox_policy_id to stored_message_nft -> stored_message_nft_policy
+/// 4. Apply [processed_messages_nft_policy, stored_message_nft_policy] to mailbox -> final mailbox script
 ///
-/// This ensures replay protection is stable across mailbox upgrades.
+/// This ensures replay protection and message storage are stable across mailbox upgrades.
 async fn init_mailbox_internal(
     ctx: &CliContext,
     domain: u32,
@@ -346,11 +347,19 @@ async fn init_mailbox_internal(
     let processed_messages_nft_policy = applied_processed_nft.policy_id.clone();
     println!("  Processed Messages NFT Policy: {}", processed_messages_nft_policy.green());
 
-    // Step 3: Apply processed_messages_nft_policy to mailbox validator
-    println!("\n{}", "Step 3: Creating mailbox validator...".cyan());
+    // Step 3: Apply mailbox_policy_id to stored_message_nft to get the NFT policy
+    println!("\n{}", "Step 3: Creating stored_message_nft policy...".cyan());
+    let applied_stored_nft = apply_validator_param(&ctx.contracts_dir, "stored_message_nft", "stored_message_nft", &mailbox_policy_hex)?;
+    let stored_message_nft_policy = applied_stored_nft.policy_id.clone();
+    println!("  Stored Message NFT Policy: {}", stored_message_nft_policy.green());
+
+    // Step 4: Apply both processed_messages_nft_policy and stored_message_nft_policy to mailbox
+    println!("\n{}", "Step 4: Creating mailbox validator...".cyan());
     let pm_policy_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
     let pm_policy_hex = hex::encode(&pm_policy_cbor);
-    let applied_mailbox = apply_validator_param(&ctx.contracts_dir, "mailbox", "mailbox", &pm_policy_hex)?;
+    let sm_policy_cbor = encode_script_hash_param(&stored_message_nft_policy)?;
+    let sm_policy_hex = hex::encode(&sm_policy_cbor);
+    let applied_mailbox = apply_validator_params(&ctx.contracts_dir, "mailbox", "mailbox", &[&pm_policy_hex, &sm_policy_hex])?;
     let mailbox_addr = script_hash_to_address(&applied_mailbox.policy_id, ctx.pallas_network())?;
     println!("  Mailbox Script Hash: {}", applied_mailbox.policy_id.green());
     println!("  Mailbox Address: {}", mailbox_addr);
@@ -370,7 +379,8 @@ async fn init_mailbox_internal(
         println!("\n{}", "Parameterization chain:".green());
         println!("  1. mailbox_policy_id (state NFT): {}", mailbox_policy_id);
         println!("  2. processed_messages_nft_policy: {}", processed_messages_nft_policy);
-        println!("  3. Resulting mailbox hash: {}", applied_mailbox.policy_id);
+        println!("  3. stored_message_nft_policy: {}", stored_message_nft_policy);
+        println!("  4. Resulting mailbox hash: {}", applied_mailbox.policy_id);
         return Ok(None);
     }
 
@@ -416,14 +426,19 @@ async fn init_mailbox_internal(
     // Update deployment info with complete initialization details
     let mut deployment = deployment;
     if let Some(ref mut mailbox) = deployment.mailbox {
-        // Record the parameter that was applied (now using processed_messages_nft_policy)
         mailbox.applied_parameters = vec![
             AppliedParameter {
                 name: "processed_messages_nft_policy".to_string(),
                 param_type: "PolicyId".to_string(),
                 value: processed_messages_nft_policy.clone(),
                 description: Some("Policy ID for processed message NFTs (parameterized by mailbox_policy_id)".to_string()),
-            }
+            },
+            AppliedParameter {
+                name: "stored_message_nft_policy".to_string(),
+                param_type: "PolicyId".to_string(),
+                value: stored_message_nft_policy.clone(),
+                description: Some("Policy ID for stored message NFTs (parameterized by mailbox_policy_id)".to_string()),
+            },
         ];
 
         // Update hash and address to post-parameterization values
@@ -459,6 +474,14 @@ async fn init_mailbox_internal(
     let processed_nft_path = ctx.network_deployments_dir().join("processed_message_nft_applied.plutus");
     applied_processed_nft.save_plutus_file(&processed_nft_path, "Applied processed_message_nft minting policy")?;
     println!("  Processed message NFT script saved to: {:?}", processed_nft_path);
+
+    let stored_nft_path = ctx.network_deployments_dir().join("stored_message_nft_applied.plutus");
+    applied_stored_nft.save_plutus_file(&stored_nft_path, "Applied stored_message_nft minting policy")?;
+    println!("  Stored message NFT script saved to: {:?}", stored_nft_path);
+
+    println!("\n{}", "Relayer config values:".cyan());
+    println!("  storedMessageNftPolicyId: {}", stored_message_nft_policy);
+    println!("  storedMessageNftScriptCbor: {}", applied_stored_nft.compiled_code);
 
     // Return the spent UTXO reference
     Ok(Some(format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index)))

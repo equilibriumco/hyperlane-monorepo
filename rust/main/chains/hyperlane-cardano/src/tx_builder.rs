@@ -1389,17 +1389,29 @@ impl HyperlaneTxBuilder {
         // 4. Processed message marker output
         // This output goes to the processed_messages_script address with inline datum
         // If NFT minting is configured, the NFT will be included in this output
-        // Calculate proper minUTxO based on whether NFT minting is enabled
-        let processed_marker_min_lovelace = if self.conf.processed_messages_nft_policy_id.is_some()
-        {
-            // Output will have datum + NFT (asset name = 32-byte message_id)
+        // For WarpRoute recipients, the stored_message_nft also goes here
+        let has_message_redemption = components.message_redemption_datum_cbor.is_some();
+        let has_processed_nft = self.conf.processed_messages_nft_policy_id.is_some();
+        let has_stored_nft = self.conf.stored_message_nft_policy_id.is_some();
+        let stored_nft_in_marker = has_stored_nft && !has_message_redemption;
+        let nfts_in_marker = has_processed_nft as u8 + stored_nft_in_marker as u8;
+
+        let processed_marker_min_lovelace = if nfts_in_marker >= 2 {
+            // Two NFTs under different policies need extra space (~80 bytes per extra policy)
+            let base = self
+                .calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                    asset_name_len: 32,
+                    datum_size: components.processed_datum_cbor.len(),
+                })
+                .await;
+            base + 400_000
+        } else if nfts_in_marker == 1 {
             self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                asset_name_len: 32, // message_id is 32 bytes
+                asset_name_len: 32,
                 datum_size: components.processed_datum_cbor.len(),
             })
             .await
         } else {
-            // Output only has datum
             self.calculate_min_lovelace(OutputType::WithInlineDatum {
                 datum_size: components.processed_datum_cbor.len(),
             })
@@ -1470,13 +1482,87 @@ impl HyperlaneTxBuilder {
             );
         }
 
+        // 4b-bis: Always mint stored message NFT (required by mailbox validator)
+        // The mailbox always checks stored_nft_minted during Process.
+        // For MessageRedemption recipients, the NFT goes into the message redemption output.
+        // For WarpRoute recipients, it goes into the processed marker output.
+        let stored_nft_info = if let (
+            Some(ref stored_nft_policy_id),
+            Some(ref stored_nft_script_cbor),
+        ) = (
+            &self.conf.stored_message_nft_policy_id,
+            &self.conf.stored_message_nft_script_cbor,
+        ) {
+            let stored_policy_bytes: Hash<28> = Hash::new(
+                hex::decode(stored_nft_policy_id)
+                    .map_err(|e| {
+                        TxBuilderError::Encoding(format!(
+                            "Invalid stored_message_nft_policy_id hex: {e}"
+                        ))
+                    })?
+                    .try_into()
+                    .map_err(|_| {
+                        TxBuilderError::Encoding(
+                            "stored_message_nft_policy_id must be 28 bytes".to_string(),
+                        )
+                    })?,
+            );
+
+            let stored_nft_asset_name: Vec<u8> = components.message_id.to_vec();
+
+            tx = tx
+                .mint_asset(stored_policy_bytes, stored_nft_asset_name.clone(), 1)
+                .map_err(|e| {
+                    TxBuilderError::TxBuild(format!("Failed to mint stored message NFT: {e:?}"))
+                })?;
+
+            let stored_nft_mint_redeemer = vec![0xd8, 0x79, 0x9f, 0xff]; // MintMessage = Constr 0 []
+            let ex_units_stored_nft = ExUnits {
+                mem: DEFAULT_MEM_UNITS,
+                steps: DEFAULT_STEP_UNITS,
+            };
+            tx = tx.add_mint_redeemer(
+                stored_policy_bytes,
+                stored_nft_mint_redeemer,
+                Some(ex_units_stored_nft),
+            );
+
+            let stored_script_bytes = hex::decode(stored_nft_script_cbor).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid stored_message_nft_script_cbor hex: {e}"))
+            })?;
+            tx = tx.script(ScriptKind::PlutusV3, stored_script_bytes);
+
+            info!(
+                "Minted stored message NFT for message_id: {}",
+                hex::encode(components.message_id)
+            );
+
+            Some((stored_policy_bytes, stored_nft_asset_name))
+        } else {
+            None
+        };
+
+        // For non-MessageRedemption recipients, add stored NFT to processed marker output
+        if !has_message_redemption {
+            if let Some((ref policy, ref asset_name)) = stored_nft_info {
+                processed_marker_output = processed_marker_output
+                    .add_asset(*policy, asset_name.clone(), 1)
+                    .map_err(|e| {
+                        TxBuilderError::TxBuild(format!(
+                            "Failed to add stored message NFT to processed marker output: {e:?}"
+                        ))
+                    })?;
+                info!("Added stored message NFT to processed marker output");
+            }
+        }
+
         tx = tx.output(processed_marker_output);
         debug!(
             "Added processed message marker output for message_id: {}",
             hex::encode(components.message_id)
         );
 
-        // 4c. Message redemption output + stored message NFT (MessageRedemption only)
+        // 4c. Message redemption output (MessageRedemption only)
         if let Some((ref msg_redemption_datum_cbor, ref msg_redemption_hash_hex)) =
             components.message_redemption_datum_cbor
         {
@@ -1505,65 +1591,16 @@ impl HyperlaneTxBuilder {
                 Output::new(msg_redemption_address, message_redemption_min_lovelace)
                     .set_inline_datum(msg_redemption_datum_cbor.clone());
 
-            // Mint stored message NFT and add to redemption output
-            if let (Some(ref stored_nft_policy_id), Some(ref stored_nft_script_cbor)) = (
-                &self.conf.stored_message_nft_policy_id,
-                &self.conf.stored_message_nft_script_cbor,
-            ) {
-                let stored_policy_bytes: Hash<28> = Hash::new(
-                    hex::decode(stored_nft_policy_id)
-                        .map_err(|e| {
-                            TxBuilderError::Encoding(format!(
-                                "Invalid stored_message_nft_policy_id hex: {e}"
-                            ))
-                        })?
-                        .try_into()
-                        .map_err(|_| {
-                            TxBuilderError::Encoding(
-                                "stored_message_nft_policy_id must be 28 bytes".to_string(),
-                            )
-                        })?,
-                );
-
-                let stored_nft_asset_name: Vec<u8> = components.message_id.to_vec();
-
-                tx = tx
-                    .mint_asset(stored_policy_bytes, stored_nft_asset_name.clone(), 1)
-                    .map_err(|e| {
-                        TxBuilderError::TxBuild(format!("Failed to mint stored message NFT: {e:?}"))
-                    })?;
-
+            // Add stored message NFT to message redemption output
+            if let Some((ref policy, ref asset_name)) = stored_nft_info {
                 msg_redemption_output = msg_redemption_output
-                    .add_asset(stored_policy_bytes, stored_nft_asset_name.clone(), 1)
+                    .add_asset(*policy, asset_name.clone(), 1)
                     .map_err(|e| {
                         TxBuilderError::TxBuild(format!(
                             "Failed to add stored message NFT to redemption output: {e:?}"
                         ))
                     })?;
-
-                // MintMessage = Constr 0 []
-                let stored_nft_mint_redeemer = vec![0xd8, 0x79, 0x9f, 0xff];
-                let ex_units_stored_nft = ExUnits {
-                    mem: DEFAULT_MEM_UNITS,
-                    steps: DEFAULT_STEP_UNITS,
-                };
-                tx = tx.add_mint_redeemer(
-                    stored_policy_bytes,
-                    stored_nft_mint_redeemer,
-                    Some(ex_units_stored_nft),
-                );
-
-                let stored_script_bytes = hex::decode(stored_nft_script_cbor).map_err(|e| {
-                    TxBuilderError::Encoding(format!(
-                        "Invalid stored_message_nft_script_cbor hex: {e}"
-                    ))
-                })?;
-                tx = tx.script(ScriptKind::PlutusV3, stored_script_bytes);
-
-                info!(
-                    "Minted stored message NFT for message_id: {}",
-                    hex::encode(components.message_id)
-                );
+                info!("Added stored message NFT to message redemption output");
             }
 
             tx = tx.output(msg_redemption_output);

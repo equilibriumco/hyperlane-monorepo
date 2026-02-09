@@ -12,7 +12,7 @@ use colored::Colorize;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{normalize_datum, CborBuilder};
 use crate::utils::context::CliContext;
-use crate::utils::plutus::script_hash_to_address;
+use crate::utils::plutus::{apply_validator_param, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 
 #[derive(Args)]
@@ -494,6 +494,49 @@ async fn receive_message(
         .transpose()
         .map_err(|e| anyhow!("Invalid recipient-new-datum hex: {}", e))?;
 
+    // Load inline scripts if reference scripts are not provided
+    let deployment_info = ctx.load_deployment_info()?;
+    let mailbox_info = deployment_info
+        .mailbox
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not found in deployment_info.json"))?;
+    let mailbox_policy = mailbox_info
+        .state_nft_policy
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing mailbox.stateNftPolicy in deployment_info.json"))?;
+
+    let redemption_inline_script = if redemption_ref_script.is_none() {
+        println!("  Loading message_redemption inline script");
+        let nft_policy_param = encode_script_hash_param(message_nft_policy)?;
+        let nft_policy_hex = hex::encode(&nft_policy_param);
+        let applied = apply_validator_param(
+            &ctx.contracts_dir,
+            "message_redemption",
+            "message_redemption",
+            &nft_policy_hex,
+        )?;
+        let script_bytes = hex::decode(&applied.compiled_code)?;
+        Some(script_bytes)
+    } else {
+        None
+    };
+
+    let nft_inline_script = if nft_ref_script.is_none() {
+        println!("  Loading stored_message_nft inline script");
+        let mailbox_policy_param = encode_script_hash_param(mailbox_policy)?;
+        let mailbox_policy_hex = hex::encode(&mailbox_policy_param);
+        let applied = apply_validator_param(
+            &ctx.contracts_dir,
+            "stored_message_nft",
+            "stored_message_nft",
+            &mailbox_policy_hex,
+        )?;
+        let script_bytes = hex::decode(&applied.compiled_code)?;
+        Some(script_bytes)
+    } else {
+        None
+    };
+
     let built_tx = tx_builder
         .build_message_receive_tx(
             &keypair,
@@ -507,9 +550,12 @@ async fn receive_message(
             &nft_redeemer,
             redemption_ref_script.as_deref(),
             nft_ref_script.as_deref(),
+            redemption_inline_script.as_deref(),
+            nft_inline_script.as_deref(),
             recipient_redeemer_bytes.as_deref(),
             new_state_datum_bytes.as_deref(),
             recipient_ref_script.as_deref(),
+            None,
         )
         .await?;
 

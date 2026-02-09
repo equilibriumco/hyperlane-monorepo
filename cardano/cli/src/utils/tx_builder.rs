@@ -488,9 +488,12 @@ impl<'a> HyperlaneTxBuilder<'a> {
         nft_burn_redeemer: &[u8],
         redemption_ref_script: Option<&str>,
         nft_ref_script: Option<&str>,
+        redemption_inline_script: Option<&[u8]>,
+        nft_inline_script: Option<&[u8]>,
         recipient_redeemer: Option<&[u8]>,
         new_state_datum: Option<&[u8]>,
         recipient_ref_script: Option<&str>,
+        recipient_inline_script: Option<&[u8]>,
     ) -> Result<BuiltTransaction> {
         let current_slot = self.client.get_latest_slot().await?;
         let validity_end = current_slot + 7200;
@@ -632,6 +635,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 .try_into()
                 .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
             staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else if let Some(inline_script) = redemption_inline_script {
+            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
         }
 
         if let Some(ref_script) = nft_ref_script {
@@ -640,6 +645,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 .try_into()
                 .map_err(|_| anyhow!("Invalid NFT reference script tx hash"))?;
             staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else if let Some(inline_script) = nft_inline_script {
+            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
         }
 
         if let Some(ref_script) = recipient_ref_script {
@@ -648,6 +655,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 .try_into()
                 .map_err(|_| anyhow!("Invalid recipient reference script tx hash"))?;
             staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else if let Some(inline_script) = recipient_inline_script {
+            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
         }
 
         if change > 1_500_000 {
