@@ -370,6 +370,114 @@ async fn update_relayer(
         }
     }
 
+    // Generate stored_message_nft policy + message_redemption script hash
+    if let Some(ref mailbox) = deployment.mailbox {
+        let mailbox_policy_id = mailbox.state_nft.as_ref()
+            .map(|nft| nft.policy_id.clone())
+            .or_else(|| mailbox.state_nft_policy.clone());
+
+        if let Some(ref mailbox_pid) = mailbox_policy_id {
+            println!("\n{}", "Generating stored_message_nft policy...".cyan());
+            let param = encode_script_hash_param(mailbox_pid)
+                .with_context(|| "Failed to encode mailbox_policy_id")?;
+            let param_hex = hex::encode(&param);
+
+            match apply_validator_param_with_purpose(
+                &ctx.contracts_dir,
+                "stored_message_nft",
+                "stored_message_nft",
+                Some("mint"),
+                &param_hex,
+            ) {
+                Ok(applied) => {
+                    println!("  Stored message NFT policy: {}", applied.policy_id.green());
+
+                    let old = get_old_value(connection, "storedMessageNftPolicyId");
+                    connection_updates.push((
+                        "storedMessageNftPolicyId".to_string(),
+                        json!(applied.policy_id.clone()),
+                        old,
+                        applied.policy_id.clone(),
+                    ));
+
+                    let old_cbor = get_old_value(connection, "storedMessageNftScriptCbor");
+                    let cbor_display = if applied.compiled_code.len() > 40 {
+                        format!("{}...", &applied.compiled_code[..40])
+                    } else {
+                        applied.compiled_code.clone()
+                    };
+                    connection_updates.push((
+                        "storedMessageNftScriptCbor".to_string(),
+                        json!(applied.compiled_code.clone()),
+                        if old_cbor.len() > 40 { format!("{}...", &old_cbor[..40]) } else { old_cbor },
+                        cbor_display,
+                    ));
+
+                    // Now derive message_redemption script hash (parameterized by stored_nft_policy_id)
+                    println!("{}", "Generating message_redemption script hash...".cyan());
+                    let stored_param = encode_script_hash_param(&applied.policy_id)
+                        .with_context(|| "Failed to encode stored_nft_policy_id")?;
+                    let stored_param_hex = hex::encode(&stored_param);
+
+                    match apply_validator_param_with_purpose(
+                        &ctx.contracts_dir,
+                        "message_redemption",
+                        "message_redemption",
+                        Some("spend"),
+                        &stored_param_hex,
+                    ) {
+                        Ok(mr_applied) => {
+                            println!("  Message redemption hash: {}", mr_applied.policy_id.green());
+                            let old = get_old_value(connection, "messageRedemptionScriptHash");
+                            connection_updates.push((
+                                "messageRedemptionScriptHash".to_string(),
+                                json!(mr_applied.policy_id.clone()),
+                                old,
+                                mr_applied.policy_id.clone(),
+                            ));
+                        }
+                        Err(e) => {
+                            println!("  {} Failed to generate message_redemption hash: {}", "[WARN]".yellow(), e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  {} Failed to generate stored_message_nft policy: {}", "[WARN]".yellow(), e);
+                }
+            }
+        }
+    }
+
+    // Token redemption script hash (unparameterized)
+    {
+        let blueprint = ctx.load_blueprint();
+        if let Ok(bp) = blueprint {
+            if let Some(validator) = bp.find_validator("token_redemption.token_redemption.spend") {
+                let old = get_old_value(connection, "redemptionScriptHash");
+                connection_updates.push((
+                    "redemptionScriptHash".to_string(),
+                    json!(validator.hash.clone()),
+                    old,
+                    validator.hash.clone(),
+                ));
+            }
+        }
+    }
+
+    // Warp route reference script UTXO (from first warp route)
+    if let Some(warp) = deployment.warp_routes.first() {
+        if let Some(ref ref_utxo) = warp.reference_script_utxo {
+            let ref_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
+            let old = get_old_value(connection, "warpRouteReferenceScriptUtxo");
+            connection_updates.push((
+                "warpRouteReferenceScriptUtxo".to_string(),
+                json!(ref_str.clone()),
+                old,
+                ref_str,
+            ));
+        }
+    }
+
     // Update network
     connection_updates.push((
         "network".to_string(),
