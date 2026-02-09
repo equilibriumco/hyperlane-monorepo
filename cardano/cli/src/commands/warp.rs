@@ -822,6 +822,10 @@ async fn deploy_synthetic_route(
         synthetic_policy_id,
     );
 
+    // Auto-deploy minting policy reference script (required for relayer)
+    println!("\n{}", "Auto-deploying minting policy reference script...".cyan());
+    deploy_minting_ref(ctx, &deploy_ctx.warp_nft_applied.policy_id, false).await?;
+
     Ok(())
 }
 
