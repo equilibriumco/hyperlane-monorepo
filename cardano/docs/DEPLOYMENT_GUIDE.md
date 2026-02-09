@@ -11,7 +11,7 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 5. [Phase 3: Initialize Core Contracts](#phase-3-initialize-core-contracts)
 6. [Phase 4: Deploy Reference Scripts](#phase-4-deploy-reference-scripts)
 7. [Phase 5: Configure Contracts](#phase-5-configure-contracts)
-8. [Phase 6: Deploy Recipients](#phase-6-deploy-recipients)
+8. [Phase 6: Deploy Recipients (Optional)](#phase-6-deploy-recipients-optional)
 9. [Phase 7: Deploy Warp Routes](#phase-7-deploy-warp-routes)
 10. [Verification & Troubleshooting](#verification--troubleshooting)
 11. [Complete Deployment Script](#complete-deployment-script)
@@ -88,7 +88,7 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 
 | Contract                      | Purpose                 | Parameters        | Dependencies |
 | ----------------------------- | ----------------------- | ----------------- | ------------ |
-| **example_generic_recipient** | Example message handler | mailbox_policy_id | mailbox      |
+| **greeting**                  | Example message handler | mailbox_policy_id | mailbox      |
 | **warp_route**                | Token bridge            | mailbox_policy_id | mailbox      |
 
 ### Dependency Graph
@@ -113,8 +113,8 @@ By default, the CLI waits for transaction confirmation before returning. This pr
           │                 │
           ▼                 ▼
 ┌──────────────────┐ ┌──────────────────────────┐
-│ PROCESSED_MESSAGE│ │    GENERIC_RECIPIENT     │
-│ NFT (Mint)       │ │    (Parameterized)       │
+│ PROCESSED_MESSAGE│ │    GREETING / CUSTOM     │
+│ NFT (Mint)       │ │    RECIPIENT (Optional)  │
 └──────────────────┘ └──────────────────────────┘
 ```
 
@@ -160,7 +160,7 @@ Expected output:
 "mailbox.mailbox.spend"
 "multisig_ism.multisig_ism.spend"
 "state_nft.state_nft.mint"
-"example_generic_recipient.example_generic_recipient.spend"
+"greeting.greeting.spend"
 "processed_message_nft.processed_message_nft.mint"
 "warp_route.warp_route.spend"
 "synthetic_minting.synthetic_minting.mint"
@@ -447,23 +447,13 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ---
 
-## Phase 6: Deploy Recipients
+## Phase 6: Deploy Recipients (Optional)
 
-Recipients are contracts that receive Hyperlane messages. They must be parameterized with the mailbox policy ID. The CLI supports deploying both the built-in example recipient and custom recipient contracts.
+Recipients are contracts that receive Hyperlane messages on Cardano. They must be parameterized with the mailbox policy ID. This phase is only needed if you want to receive generic (non-warp-route) messages on Cardano.
 
-### 6.1 Deploy Built-in Example Recipient
+### 6.1 Deploy the Greeting Contract (Example)
 
-The CLI includes a generic recipient for testing. Deploy it with:
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  init recipient
-```
-
-The CLI automatically reads the mailbox NFT policy ID from `deployment_info.json`. If you need to specify it manually:
+The greeting contract is a simple recipient that stores "Hello, {name}" messages on-chain. It's useful for testing the full message flow end-to-end.
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -471,28 +461,41 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --signing-key $CARDANO_SIGNING_KEY \
   --network $NETWORK \
   init recipient \
-  --mailbox-hash <mailbox_nft_policy_id>
+  --custom-contracts ./contracts \
+  --custom-module greeting \
+  --custom-validator greeting
 ```
 
 This:
 
-1. Applies the mailbox NFT policy ID parameter to the `example_generic_recipient` script
+1. Applies the mailbox NFT policy ID parameter to the `greeting` validator
 2. Creates a state NFT for the recipient
 3. Creates two UTXOs:
-   - State UTXO at recipient address with datum
-   - Reference script UTXO for transaction efficiency
+   - State UTXO at script address with datum (greeting state)
+   - Reference script UTXO at deployer address with "ref" NFT + validator script
 
 Output:
 
 ```
 Recipient deployed!
-  Script Hash: 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc
-  State NFT Policy: f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
-  State UTXO: xyz123...#0
-  Reference Script UTXO: xyz123...#1
+  Script Hash: e4edab59ad48a709b58318c714142f6ceb5a3c87bd2f983054e64bec
+  State NFT Policy: cda0f0a48a73a90c06ac73f21f29f94a1377d5dbcbc346bab2ce93df
+  State UTXO: abc123...#0
+  Reference Script UTXO: abc123...#1
 ```
 
-### 6.2 Deploy Custom Recipient
+The greeting contract's datum tracks the last greeting and a counter:
+
+```aiken
+pub type GreetingDatum {
+  last_greeting: ByteArray,
+  greeting_count: Int,
+}
+```
+
+After deployment, sending a message with body `"Alice"` from another chain will update the datum to `last_greeting: "Hello, Alice"` and increment `greeting_count`.
+
+### 6.2 Deploy a Custom Recipient
 
 To deploy your own recipient contract, use the `--custom-contracts`, `--custom-module`, and `--custom-validator` options:
 
@@ -525,91 +528,6 @@ validator my_recipient(mailbox_policy_id: PolicyId) {
   }
 }
 ```
-
-### 6.3 Deploy Deferred Recipient (Optional)
-
-The deferred recipient pattern allows messages to be stored first and processed later. This is useful for:
-
-- Rate limiting or batching message processing
-- Allowing users to trigger message processing at their convenience
-- Separating message reception from execution
-
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  init recipient --deferred
-```
-
-This command:
-
-1. Applies the mailbox NFT policy ID to `stored_message_nft` (minting policy for message storage)
-2. Applies both `mailbox_policy_id` and `message_nft_policy` to `example_deferred_recipient`
-3. Creates the **three-UTXO pattern** with:
-   - State UTXO: holds the recipient state datum with state NFT (empty asset name)
-   - Recipient Reference Script UTXO: holds the recipient validator script with "ref" NFT
-   - Message NFT Reference Script UTXO: holds the `stored_message_nft` minting policy with "msg_ref" NFT
-
-#### Three-UTXO Pattern (Deferred Recipients)
-
-Deferred recipients require an additional reference script UTXO to provide the `stored_message_nft` minting policy. This allows the relayer to discover everything it needs without any additional configuration:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    DEFERRED RECIPIENT DEPLOYMENT                        │
-└─────────────────────────────────────────────────────────────────────────┘
-                                  │
-     ┌────────────────────────────┼────────────────────────────┐
-     │                            │                            │
-     ▼                            ▼                            ▼
-┌────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
-│  State UTXO    │     │  Ref Script UTXO     │     │  Msg Ref Script UTXO │
-│  (output #0)   │     │  (output #1)         │     │  (output #2)         │
-├────────────────┤     ├──────────────────────┤     ├──────────────────────┤
-│ NFT: "" (empty)│     │ NFT: "ref" (726566)  │     │ NFT: "msg_ref"       │
-│ Datum: state   │     │ Script: recipient    │     │      (6d73675f726566)│
-│ Location:      │     │ Location: deployer   │     │ Script: stored_      │
-│   script addr  │     │   address            │     │   message_nft        │
-└────────────────┘     └──────────────────────┘     │ Location: deployer   │
-                                                    │   address            │
-                                                    └──────────────────────┘
-```
-
-All three NFTs share the same policy ID. The relayer:
-
-1. Looks up the "ref" NFT UTXO for the recipient script
-2. Looks up the "msg_ref" NFT UTXO for the `stored_message_nft` script
-3. Uses both as reference inputs when processing messages
-
-Output includes:
-
-```
-Stored Message NFT Policy: abc123...
-Recipient Script Hash: def456...
-Message NFT Policy: abc123...
-
-State UTXO (output #0):
-  NFT Policy: xyz789...
-  NFT Asset Name: (empty)
-
-Recipient Reference Script UTXO (output #1):
-  NFT Policy: xyz789...
-  NFT Asset Name: 726566 ("ref")
-
-Message NFT Reference Script UTXO (output #2):
-  NFT Policy: xyz789...
-  NFT Asset Name: 6d73675f726566 ("msg_ref")
-  Contains: stored_message_nft minting policy script
-
-```
-
-> **Note**: The "msg_ref" NFT UTXO is automatically discovered by the relayer using the same policy ID as the state NFT. No additional configuration is needed in the relayer config.
-
-After deployment, you can:
-
-- List pending deferred messages: `hyperlane-cardano deferred list --recipient <address>`
-- Process a deferred message: `hyperlane-cardano deferred process --recipient <address> --message-utxo <utxo>`
 
 ---
 
@@ -1520,10 +1438,10 @@ validator my_validator(some_policy_id: PolicyId) {
 3. **Deploy**: The parameterized script is deployed as a reference script or used directly
 
 ```bash
-# Example: Apply mailbox_policy_id to the example_generic_recipient validator
+# Example: Apply mailbox_policy_id to the greeting validator
 aiken blueprint apply \
-  -v example_generic_recipient.example_generic_recipient \
-  -o recipient_applied.plutus \
+  -v greeting.greeting \
+  -o greeting_applied.plutus \
   "6421905a7b782eda294774816c944d1707d0091c3fb84bc71cbf46e7"
 ```
 
@@ -1561,43 +1479,39 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
            │
            │ Used as parameter for:
            │
-           ├─────────────────────────────────────────────────────────────┐
-           │                                                             │
-           ▼                                                             ▼
-┌─────────────────────────────┐                    ┌─────────────────────────────┐
-│  processed_message_nft      │                    │  stored_message_nft         │
-│  (mint)                     │                    │  (mint)                     │
-│                             │                    │                             │
-│  Parameter: mailbox_policy  │                    │  Parameter: mailbox_policy  │
-│                             │                    │                             │
-│  Used for: Replay protection│                    │  Used for: Deferred message │
-│  (one NFT per message_id)   │                    │  authentication             │
-└──────────┬──────────────────┘                    └──────────┬──────────────────┘
-           │                                                  │
-           │ processed_message_nft_policy                     │ stored_message_nft_policy
-           │                                                  │
-           ▼                                                  ▼
-┌─────────────────────────────┐                    ┌─────────────────────────────┐
-│  mailbox (spend)            │                    │  example_deferred_recipient │
-│                             │                    │  (spend)                    │
-│  Parameter:                 │                    │                             │
-│  processed_messages_nft_    │                    │  Parameters:                │
-│  policy                     │                    │  - mailbox_policy_id        │
-│                             │                    │  - stored_message_nft_policy│
-└─────────────────────────────┘                    └─────────────────────────────┘
+           ▼
+┌─────────────────────────────┐
+│  processed_message_nft      │
+│  (mint)                     │
+│                             │
+│  Parameter: mailbox_policy  │
+│                             │
+│  Used for: Replay protection│
+│  (one NFT per message_id)   │
+└──────────┬──────────────────┘
+           │
+           │ processed_message_nft_policy
+           │
+           ▼
+┌─────────────────────────────┐
+│  mailbox (spend)            │
+│                             │
+│  Parameter:                 │
+│  processed_messages_nft_    │
+│  policy                     │
+└─────────────────────────────┘
 
            │
            │ mailbox_policy_id
            │
            ▼
 ┌─────────────────────────────┐
-│  example_generic_recipient  │
-│  (spend)                    │
+│  greeting (spend)           │
 │                             │
 │  Parameter: mailbox_policy  │
 │                             │
-│  Verifies mailbox is caller │
-│  by checking for NFT        │
+│  Example recipient that     │
+│  stores greeting messages   │
 └─────────────────────────────┘
 ```
 
@@ -1610,8 +1524,7 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
 | `multisig_ism`               | Spend | (none)                                                        | -                                                    | No parameters needed                       |
 | `processed_message_nft`      | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can trigger minting   |
 | `stored_message_nft`         | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint message NFTs |
-| `example_generic_recipient`  | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Verifies mailbox is calling                |
-| `example_deferred_recipient` | Spend | `mailbox_policy_id: PolicyId`, `message_nft_policy: PolicyId` | `state_nft` for mailbox, `stored_message_nft` policy | Verifies mailbox and message authenticity  |
+| `greeting`                   | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Example recipient, stores greetings        |
 | `warp_route`                 | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Verifies mailbox is calling                |
 
 ### Why Stable vs Changing Parameters Matter
@@ -1679,10 +1592,8 @@ Step 5: Deploy mailbox reference script
 Step 6: Initialize other core contracts (ISM)
         └─ Each gets its own state_nft policy
 
-Step 7: Deploy recipients
-        ├─ Generic: Apply mailbox_policy_id → recipient_applied.plutus
-        └─ Deferred: Apply mailbox_policy_id to stored_message_nft
-                     Apply both to deferred_recipient
+Step 7: Deploy recipients (optional)
+        └─ Apply mailbox_policy_id → greeting_applied.plutus
 ```
 
 ### CLI Automation
@@ -1700,17 +1611,20 @@ The CLI internally:
 3. Applies the resulting policy to `mailbox`
 4. Saves all parameterized scripts to `deployments/<network>/`
 
-For recipients:
+For recipients (e.g., the greeting contract):
 
 ```bash
-./cli/target/release/hyperlane-cardano init recipient
+./cli/target/release/hyperlane-cardano init recipient \
+  --custom-contracts ./contracts \
+  --custom-module greeting \
+  --custom-validator greeting
 ```
 
 The CLI:
 
 1. Reads `mailbox_policy_id` from `deployment_info.json`
-2. Applies it to the recipient validator
-3. Saves the parameterized script
+2. Applies it to the specified validator from the custom contracts' `plutus.json`
+3. Creates the state NFT and deploys the two-UTXO pattern
 
 ### Manual Parameterization Example
 
