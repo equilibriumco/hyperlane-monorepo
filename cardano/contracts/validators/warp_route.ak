@@ -2,7 +2,7 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash, keccak_256}
 use aiken/primitive/bytearray
-use cardano/address.{Credential, Script}
+use cardano/address.{Script}
 use cardano/assets.{lovelace_of, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use types.{

@@ -6,7 +6,7 @@ use cardano/assets.{lovelace_of, quantity_of}
 use cardano/transaction.{OutputReference, Transaction, ValidityRange}
 use types.{
   AssetName, PolicyId,
-  RedemptionDatum, RedemptionTokenInfo, RedemptionAda, RedemptionToken,
+  RedemptionDatum, RedemptionAda, RedemptionToken,
 }
 use utils.{find_input}
 

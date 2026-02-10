@@ -4,7 +4,7 @@ use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
 use cardano/transaction.{Input, Output, OutputReference, Transaction}
-use cardano/assets.{Value, lovelace_of, merge, quantity_of, tokens, zero}
+use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero}
 
 /// Utility functions for Hyperlane Cardano contracts
 /// Script hash type alias
