@@ -1,12 +1,13 @@
 //! CLI commands module
 
 pub mod config;
-pub mod message;
 pub mod deploy;
+pub mod greeting;
 pub mod igp;
 pub mod init;
 pub mod ism;
 pub mod mailbox;
+pub mod message;
 pub mod query;
 pub mod token;
 pub mod tx;

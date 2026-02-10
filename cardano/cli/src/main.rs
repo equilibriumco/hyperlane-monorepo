@@ -11,7 +11,8 @@ use colored::Colorize;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use commands::{
-    config, deploy, igp, init, ism, mailbox, message, query, token, tx, utxo, validator, warp,
+    config, deploy, greeting, igp, init, ism, mailbox, message, query, token, tx, utxo, validator,
+    warp,
 };
 
 /// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
@@ -95,6 +96,9 @@ enum Commands {
     /// Message redemption (list, claim, expire stored messages)
     Message(message::MessageArgs),
 
+    /// Greeting contract (list, receive, show)
+    Greeting(greeting::GreetingArgs),
+
     /// Manage configuration files (relayer config)
     Config(config::ConfigArgs),
 
@@ -160,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Utxo(args) => utxo::execute(&ctx, args).await,
         Commands::Tx(args) => tx::execute(&ctx, args).await,
         Commands::Message(args) => message::execute(&ctx, args).await,
+        Commands::Greeting(args) => greeting::execute(&ctx, args).await,
         Commands::Config(args) => config::execute(&ctx, args).await,
         Commands::Completions { shell } => {
             use clap::CommandFactory;
