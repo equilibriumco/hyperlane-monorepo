@@ -121,27 +121,18 @@ pub type MessageNftRedeemer {
 }
 
 // ============================================================================
-// Message Redemption Types (unified message escrow pattern)
+// Verified Message Types (direct delivery to recipient)
 // ============================================================================
 
-/// Datum stored in the message redemption UTXO.
-/// The relayer creates this during Process (Phase 1), and the user claims
-/// it later (Phase 2) by spending their recipient contract.
-pub type MessageRedemptionDatum {
+/// Datum attached to the verified message UTXO delivered to recipient address.
+/// The mailbox creates this during Process, delivering it directly to the
+/// recipient's script address with a verified_message_nft.
+pub type VerifiedMessageDatum {
   origin: Domain,
   sender: HyperlaneAddress,
   body: ByteArray,
   message_id: ByteArray,
   nonce: Int,
-  recipient_policy: PolicyId,
-  return_address: VerificationKeyHash,
-  expiry_slot: Int,
-}
-
-/// Redeemer for message redemption validator
-pub type MessageRedemptionRedeemer {
-  ClaimMessage
-  ExpireMessage
 }
 
 // ============================================================================
@@ -365,15 +356,8 @@ pub type WarpRouteRedeemer {
   /// Receive tokens from another chain (via Hyperlane message)
   /// SECURITY: The contract verifies keccak256(encode_message(message)) == message_id
   /// to ensure the data matches what was ISM-validated.
-  /// Creates a redemption UTXO for the recipient to claim with their own ADA.
-  ReceiveTransfer {
-    message: Message,
-    message_id: ByteArray,
-    /// Address to return minUTxO after recipient claims (relayer's address)
-    return_address: VerificationKeyHash,
-    /// Slot after which relayer can reclaim if unclaimed
-    expiry_slot: Int,
-  }
+  /// Sends tokens directly to the recipient wallet address.
+  ReceiveTransfer { message: Message, message_id: ByteArray }
   /// Admin: enroll a remote route
   EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
 }
@@ -386,35 +370,6 @@ pub type WarpTransferBody {
   amount: Int,
 }
 
-// ============================================================================
-// Token Redemption Types (Two-Phase Token Claiming)
-// ============================================================================
-
-/// Token information for the redemption
-/// Indicates what type of token is being held in escrow
-pub type RedemptionTokenInfo {
-  /// Native ADA (no policy/asset)
-  RedemptionAda
-  /// Native token with policy and asset name
-  RedemptionToken { policy_id: PolicyId, asset_name: AssetName }
-}
-
-/// Redemption datum stored in the UTXO
-/// Holds bridged tokens in escrow until recipient claims with their own ADA
-pub type RedemptionDatum {
-  /// Credential of the intended recipient (28-byte hash)
-  /// Can be a verification key hash or script hash
-  recipient: ByteArray,
-  /// Token being held for redemption
-  token_info: RedemptionTokenInfo,
-  /// Amount of tokens (in local decimals)
-  amount: Int,
-  /// Address to return the minUTxO (and tokens on expiry)
-  /// This is typically the relayer's payment credential
-  return_address: VerificationKeyHash,
-  /// Slot after which the relayer can reclaim (POSIX time in slots)
-  expiry_slot: Int,
-}
 
 // ============================================================================
 // Validator Announce Types
