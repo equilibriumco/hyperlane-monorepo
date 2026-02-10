@@ -27,7 +27,7 @@ pub type GreetingRedeemer {
 
 validator greeting(verified_message_nft_policy: PolicyId) {
   spend(
-    datum: Option<GreetingDatum>,
+    datum: Option<Data>,
     redeemer: GreetingRedeemer,
     own_ref: OutputReference,
     tx: Transaction,
@@ -36,34 +36,42 @@ validator greeting(verified_message_nft_policy: PolicyId) {
 
     let HandleMessage { message, message_id } = redeemer
 
-    // Determine if this is a state UTXO or a message UTXO based on the datum type
-    when datum is {
-      Some(old_datum) -> {
-        // State UTXO: update the greeting
-        let greeting = bytearray.concat("Hello, ", message.body)
-        let own_addr = own_input.output.address
+    // Determine UTXO type by checking which NFT the input holds:
+    // - Message UTXO has verified_message_nft → just check burn
+    // - State UTXO has the greeting state NFT → full message processing
+    let is_message_utxo =
+      assets.quantity_of(
+        own_input.output.value,
+        verified_message_nft_policy,
+        message_id,
+      ) == 1
 
-        expect Some(continuation) =
-          list.find(tx.outputs, fn(output) { output.address == own_addr })
+    if is_message_utxo {
+      verified_nft_burned(tx, verified_message_nft_policy, message_id)
+    } else {
+      expect Some(raw_datum) = datum
+      expect old_datum: GreetingDatum = raw_datum
 
-        expect InlineDatum(raw_datum) = continuation.datum
-        expect new_datum: GreetingDatum = raw_datum
+      let greeting = bytearray.concat("Hello, ", message.body)
+      let own_addr = own_input.output.address
 
-        // Verify the message authenticity: keccak256(encode_message(message)) == message_id
-        expect keccak_256(encode_message(message)) == message_id
+      expect Some(continuation) =
+        list.find(tx.outputs, fn(output) { output.address == own_addr })
 
-        // Verify the verified_message_nft is being burned (proves message was ISM-validated)
-        expect verified_nft_burned(tx, verified_message_nft_policy, message_id)
+      expect InlineDatum(cont_datum) = continuation.datum
+      expect new_datum: GreetingDatum = cont_datum
 
-        // Verify a message UTXO at our address is being spent (contains the NFT)
-        expect message_utxo_spent(tx, own_addr, verified_message_nft_policy, message_id, own_ref)
+      expect keccak_256(encode_message(message)) == message_id
+      expect verified_nft_burned(tx, verified_message_nft_policy, message_id)
+      expect message_utxo_spent(
+        tx,
+        own_addr,
+        verified_message_nft_policy,
+        message_id,
+        own_ref,
+      )
 
-        new_datum.last_greeting == greeting && new_datum.greeting_count == old_datum.greeting_count + 1
-      }
-      None ->
-        // Message UTXO (no GreetingDatum): allow spending if the NFT is burned
-        // The state UTXO spending logic above ensures correctness
-        verified_nft_burned(tx, verified_message_nft_policy, message_id)
+      new_datum.last_greeting == greeting && new_datum.greeting_count == old_datum.greeting_count + 1
     }
   }
 
