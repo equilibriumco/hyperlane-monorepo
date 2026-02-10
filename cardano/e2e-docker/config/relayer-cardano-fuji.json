@@ -27,10 +27,8 @@
         "url": "https://cardano-preview.blockfrost.io/api/v0",
         "warpRouteReferenceScriptUtxo": "${CARDANO_WARP_ROUTE_REF_UTXO}",
         "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
-        "redemptionScriptHash": "${CARDANO_TOKEN_REDEMPTION_HASH}",
-        "storedMessageNftPolicyId": "${CARDANO_STORED_MSG_NFT_POLICY_ID}",
-        "storedMessageNftScriptCbor": "${CARDANO_STORED_MSG_NFT_SCRIPT_CBOR}",
-        "messageRedemptionScriptHash": "${CARDANO_MESSAGE_REDEMPTION_HASH}"
+        "verifiedMessageNftPolicyId": "${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}",
+        "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}"
       },
       "domainId": 2003,
       "index": {
