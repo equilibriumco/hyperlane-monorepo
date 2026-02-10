@@ -23,7 +23,7 @@ pub struct MessageInfra {
 /// Derive verified_message_nft_policy from deployment_info.
 ///
 /// The policy is read from `mailbox.appliedParameters` where
-/// `name == "stored_message_nft_policy"` (legacy name, refers to verified messages).
+/// `name == "verified_message_nft_policy"`.
 pub fn resolve_message_infra(ctx: &CliContext) -> Result<MessageInfra> {
     let deployment_info = ctx.load_deployment_info()?;
     let mailbox_info = deployment_info
@@ -34,10 +34,10 @@ pub fn resolve_message_infra(ctx: &CliContext) -> Result<MessageInfra> {
     let verified_message_nft_policy = mailbox_info
         .applied_parameters
         .iter()
-        .find(|p| p.name == "stored_message_nft_policy")
+        .find(|p| p.name == "verified_message_nft_policy")
         .map(|p| p.value.clone())
         .ok_or_else(|| {
-            anyhow!("stored_message_nft_policy not found in mailbox.appliedParameters")
+            anyhow!("verified_message_nft_policy not found in mailbox.appliedParameters")
         })?;
 
     Ok(MessageInfra {
@@ -514,6 +514,7 @@ async fn receive_message(
             &nft_redeemer,
             nft_ref_script.as_deref(),
             nft_inline_script.as_deref(),
+            recipient_redeemer_bytes.as_deref(),
             recipient_redeemer_bytes.as_deref(),
             new_state_datum_bytes.as_deref(),
             recipient_ref_script.as_deref(),

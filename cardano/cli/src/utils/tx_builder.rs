@@ -487,6 +487,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         nft_ref_script: Option<&str>,
         nft_inline_script: Option<&[u8]>,
         recipient_redeemer: Option<&[u8]>,
+        message_redeemer: Option<&[u8]>,
         new_state_datum: Option<&[u8]>,
         recipient_ref_script: Option<&str>,
         recipient_inline_script: Option<&[u8]>,
@@ -548,7 +549,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
         }
 
         let fee_estimate = 2_000_000u64;
-        let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+        let change = fee_utxo
+            .lovelace
+            .saturating_add(message_utxo.lovelace)
+            .saturating_sub(fee_estimate);
 
         let mut staging = StagingTransaction::new()
             .input(fee_input.clone())
@@ -567,6 +571,18 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 Some(ExUnits {
                     mem: 1_000_000,
                     steps: 500_000_000,
+                }),
+            );
+        }
+
+        // Add spend redeemer for message UTXO (when it's at a script address)
+        if let Some(redeemer) = message_redeemer {
+            staging = staging.add_spend_redeemer(
+                message_input,
+                redeemer.to_vec(),
+                Some(ExUnits {
+                    mem: 500_000,
+                    steps: 200_000_000,
                 }),
             );
         }

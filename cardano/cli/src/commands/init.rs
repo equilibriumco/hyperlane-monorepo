@@ -946,18 +946,24 @@ async fn init_recipient(
     let deployment = ctx.load_deployment_info()
         .with_context(|| "Run 'deploy extract' first")?;
 
-    let mailbox_policy_id = match mailbox_hash {
+    let mailbox_info = deployment.mailbox.as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not found in deployment info. Initialize mailbox first"))?;
+
+    let recipient_param = match mailbox_hash {
         Some(h) => h,
-        None => deployment
-            .mailbox
-            .as_ref()
-            .and_then(|m| m.state_nft.as_ref().map(|nft| nft.policy_id.clone()))
-            .or_else(|| deployment.mailbox.as_ref().and_then(|m| m.state_nft_policy.clone()))
-            .ok_or_else(|| anyhow!("Mailbox NFT policy not found. Use --mailbox-hash or ensure mailbox is initialized"))?,
+        None => {
+            // Look for verified_message_nft_policy in mailbox applied parameters.
+            // This is the parameter that recipients (e.g. greeting) need to identify
+            // message UTXOs delivered by the mailbox.
+            mailbox_info.applied_parameters.iter()
+                .find(|p| p.name == "verified_message_nft_policy")
+                .map(|p| p.value.clone())
+                .ok_or_else(|| anyhow!("verified_message_nft_policy not found in mailbox parameters. Use --mailbox-hash to specify manually"))?
+        },
     };
 
     println!("\n{}", "Configuration:".cyan());
-    println!("  Mailbox Policy ID: {}", mailbox_policy_id);
+    println!("  Recipient param (verified_message_nft_policy): {}", recipient_param);
     if let Some(ref ism) = custom_ism {
         println!("  Custom ISM: {}", ism);
     }
@@ -1039,8 +1045,8 @@ async fn init_recipient(
             let nft_applied = apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &output_ref_hex)?;
             println!("  State NFT Policy ID: {}", nft_applied.policy_id.green());
 
-            let mailbox_policy_cbor = encode_script_hash_param(&mailbox_policy_id)?;
-            let mailbox_policy_cbor_hex = hex::encode(&mailbox_policy_cbor);
+            let param_cbor = encode_script_hash_param(&recipient_param)?;
+            let param_cbor_hex = hex::encode(&param_cbor);
 
             println!("\n{}", format!("Applying {}.{} parameter from custom contracts...", custom_module, custom_validator).cyan());
             let custom_path = std::path::Path::new(&custom_contracts);
@@ -1048,7 +1054,7 @@ async fn init_recipient(
                 custom_path,
                 &custom_module,
                 &custom_validator,
-                &mailbox_policy_cbor_hex,
+                &param_cbor_hex,
             )?;
             println!("  Recipient Script Hash: {}", applied.policy_id.green());
 

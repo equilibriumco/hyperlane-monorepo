@@ -333,8 +333,22 @@ async fn receive_greeting(
     }
     println!("  Current count: {}", old_count);
 
-    // 3. Build greeting redeemer: HandleMessage { body } = Constr 0 [Bytes(body)]
-    let recipient_redeemer = build_greeting_redeemer(body_hex)?;
+    // 3. Build greeting redeemer: HandleMessage { message, message_id }
+    // Reconstruct the full Message from VerifiedMessageDatum + known constants
+    let version = 3u32; // Hyperlane message version
+    let destination = 2003u32; // Cardano Preview domain
+    // Recipient H256: 0x02000000 + script_hash
+    let recipient_h256 = format!("02000000{}", greeting_info.script_hash);
+    let recipient_redeemer = build_greeting_redeemer(
+        version,
+        parsed_datum.nonce,
+        parsed_datum.origin,
+        &parsed_datum.sender,
+        destination,
+        &recipient_h256,
+        body_hex,
+        &parsed_datum.message_id,
+    )?;
     println!(
         "\n  Built greeting redeemer (HandleMessage, {} bytes)",
         body_bytes.len()
@@ -411,6 +425,7 @@ async fn receive_greeting(
             &nft_redeemer,
             None,
             Some(&nft_inline_script),
+            Some(&recipient_redeemer),
             Some(&recipient_redeemer),
             Some(&new_datum),
             recipient_ref_script.as_deref(),
@@ -491,9 +506,13 @@ fn parse_greeting_datum(json_str: &str) -> Result<(String, u64)> {
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid GreetingDatum: missing fields"))?;
 
+    if fields.is_empty() {
+        return Ok((String::new(), 0));
+    }
+
     if fields.len() < 2 {
         return Err(anyhow!(
-            "Invalid GreetingDatum: expected 2 fields, got {}",
+            "Invalid GreetingDatum: expected 0 or 2 fields, got {}",
             fields.len()
         ));
     }
@@ -512,11 +531,33 @@ fn parse_greeting_datum(json_str: &str) -> Result<(String, u64)> {
     Ok((last_greeting, count))
 }
 
-/// Build GreetingRedeemer: HandleMessage { body } = Constr 0 [Bytes(body)]
-fn build_greeting_redeemer(body_hex: &str) -> Result<Vec<u8>> {
+/// Build GreetingRedeemer: HandleMessage { message, message_id }
+/// = Constr 0 [Message, Bytes(message_id)]
+/// where Message = Constr 0 [version, nonce, origin, sender, destination, recipient, body]
+fn build_greeting_redeemer(
+    version: u32,
+    nonce: u32,
+    origin: u32,
+    sender_hex: &str,
+    destination: u32,
+    recipient_hex: &str,
+    body_hex: &str,
+    message_id_hex: &str,
+) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
+    // HandleMessage = Constr 0 [Message, Bytes(message_id)]
     builder.start_constr(0);
+    // Message = Constr 0 [version, nonce, origin, sender, destination, recipient, body]
+    builder.start_constr(0);
+    builder.uint(version as u64);
+    builder.uint(nonce as u64);
+    builder.uint(origin as u64);
+    builder.bytes_hex(sender_hex)?;
+    builder.uint(destination as u64);
+    builder.bytes_hex(recipient_hex)?;
     builder.bytes_hex(body_hex)?;
+    builder.end_constr();
+    builder.bytes_hex(message_id_hex)?;
     builder.end_constr();
     Ok(builder.build())
 }
