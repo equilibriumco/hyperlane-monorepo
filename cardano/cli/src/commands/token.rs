@@ -105,9 +105,9 @@ async fn deploy_token(
         None => {
             utxos
                 .iter()
-                .find(|u| u.lovelace >= min_required && u.assets.is_empty())
+                .find(|u| u.lovelace >= min_required && u.assets.is_empty() && u.reference_script.is_none())
                 .cloned()
-                .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets)", min_required / 1_000_000))?
+                .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets or reference scripts)", min_required / 1_000_000))?
         }
     };
 
@@ -117,10 +117,11 @@ async fn deploy_token(
         .find(|u| {
             u.lovelace >= 5_000_000
                 && u.assets.is_empty()
+                && u.reference_script.is_none()
                 && !(u.tx_hash == input_utxo.tx_hash && u.output_index == input_utxo.output_index)
         })
         .cloned()
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO found (need a second UTXO with >= 5 ADA)"))?;
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO found (need a second UTXO with >= 5 ADA without reference scripts)"))?;
 
     println!("  Input UTXO: {}#{} ({} ADA)", input_utxo.tx_hash, input_utxo.output_index, input_utxo.lovelace / 1_000_000);
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);

@@ -316,7 +316,12 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     let min_ada = 28_000_000u64;
     let suitable_utxos: Vec<_> = utxos
         .into_iter()
-        .filter(|u| u.lovelace >= min_ada && u.assets.is_empty())
+        .filter(|u| {
+            u.lovelace >= min_ada
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
         .collect();
 
     if suitable_utxos.len() < 2 {
@@ -1778,7 +1783,12 @@ async fn transfer(
     // Find collateral UTXO (pure ADA, no tokens)
     let collateral_utxo = payer_utxos
         .iter()
-        .find(|u| u.lovelace >= 10_000_000 && u.assets.is_empty())
+        .find(|u| {
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
         .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 10+ ADA without tokens)"))?;
 
     // Calculate minimum lovelace needed for fee UTXO
@@ -1799,6 +1809,8 @@ async fn transfer(
         .filter(|u| {
             u.lovelace >= min_fee_utxo_lovelace
                 && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
                 && (u.tx_hash != collateral_utxo.tx_hash
                     || u.output_index != collateral_utxo.output_index)
         })
@@ -3368,7 +3380,11 @@ async fn claim_single_utxo(
     let payer_utxos = client.get_utxos(payer_address).await?;
     let fee_utxo = payer_utxos
         .iter()
-        .filter(|u| u.assets.is_empty())
+        .filter(|u| {
+            u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
         .max_by_key(|u| u.lovelace)
         .ok_or_else(|| anyhow!("No ADA-only UTXOs available for fees"))?;
     println!(
