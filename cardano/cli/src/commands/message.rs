@@ -15,6 +15,49 @@ use crate::utils::context::CliContext;
 use crate::utils::plutus::{apply_validator_param, encode_script_hash_param, script_hash_to_address};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 
+/// Auto-derived message infrastructure from deployment_info.json
+pub struct MessageInfra {
+    pub message_nft_policy: String,
+    pub redemption_hash: String,
+}
+
+/// Derive message_nft_policy and redemption_hash from deployment_info.
+///
+/// - `message_nft_policy` is read from `mailbox.appliedParameters` where
+///   `name == "stored_message_nft_policy"`.
+/// - `redemption_hash` is computed by applying `message_nft_policy` to the
+///   `message_redemption` validator and taking the resulting policy ID.
+pub fn resolve_message_infra(ctx: &CliContext) -> Result<MessageInfra> {
+    let deployment_info = ctx.load_deployment_info()?;
+    let mailbox_info = deployment_info
+        .mailbox
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not found in deployment_info.json"))?;
+
+    let message_nft_policy = mailbox_info
+        .applied_parameters
+        .iter()
+        .find(|p| p.name == "stored_message_nft_policy")
+        .map(|p| p.value.clone())
+        .ok_or_else(|| {
+            anyhow!("stored_message_nft_policy not found in mailbox.appliedParameters")
+        })?;
+
+    let nft_policy_param = encode_script_hash_param(&message_nft_policy)?;
+    let nft_policy_hex = hex::encode(&nft_policy_param);
+    let applied = apply_validator_param(
+        &ctx.contracts_dir,
+        "message_redemption",
+        "message_redemption",
+        &nft_policy_hex,
+    )?;
+
+    Ok(MessageInfra {
+        message_nft_policy,
+        redemption_hash: applied.policy_id,
+    })
+}
+
 #[derive(Args)]
 pub struct MessageArgs {
     #[command(subcommand)]
@@ -25,13 +68,17 @@ pub struct MessageArgs {
 enum MessageCommands {
     /// List pending messages at the message redemption script address
     List {
-        /// Message redemption script hash (28 bytes hex)
+        /// Message redemption script hash (auto-derived if omitted)
         #[arg(long)]
-        redemption_hash: String,
+        redemption_hash: Option<String>,
 
-        /// Stored message NFT policy ID (hex)
+        /// Stored message NFT policy ID (auto-derived if omitted)
         #[arg(long)]
-        message_nft_policy: String,
+        message_nft_policy: Option<String>,
+
+        /// Filter by recipient policy ID
+        #[arg(long)]
+        recipient_policy: Option<String>,
 
         /// Output format (table or json)
         #[arg(long, default_value = "table")]
@@ -61,13 +108,13 @@ enum MessageCommands {
         #[arg(long)]
         message_utxo: String,
 
-        /// Stored message NFT policy ID (for burning)
-        #[arg(long)]
-        message_nft_policy: String,
-
         /// Recipient state NFT policy ID (to find recipient UTXO)
         #[arg(long)]
-        recipient_state_policy: String,
+        recipient_policy: String,
+
+        /// Stored message NFT policy ID (auto-derived if omitted)
+        #[arg(long)]
+        message_nft_policy: Option<String>,
 
         /// Recipient state NFT asset name (hex, empty for unit)
         #[arg(long, default_value = "")]
@@ -89,7 +136,7 @@ enum MessageCommands {
         #[arg(long)]
         recipient_new_datum: Option<String>,
 
-        /// Reference script UTXO for recipient validator (format: txhash#index)
+        /// Reference script UTXO for recipient validator (auto-discovered if omitted)
         #[arg(long)]
         recipient_ref_script: Option<String>,
 
@@ -107,9 +154,9 @@ enum MessageCommands {
         #[arg(long)]
         message_utxo: String,
 
-        /// Stored message NFT policy ID (for burning)
+        /// Stored message NFT policy ID (auto-derived if omitted)
         #[arg(long)]
-        message_nft_policy: String,
+        message_nft_policy: Option<String>,
 
         /// Reference script UTXO for message redemption validator (format: txhash#index)
         #[arg(long)]
@@ -130,18 +177,29 @@ pub async fn execute(ctx: &CliContext, args: MessageArgs) -> Result<()> {
         MessageCommands::List {
             redemption_hash,
             message_nft_policy,
+            recipient_policy,
             format,
             show_body,
         } => {
-            list_messages(ctx, &redemption_hash, &message_nft_policy, &format, show_body).await
+            let (redemption_hash, message_nft_policy) =
+                resolve_or_override(ctx, redemption_hash, message_nft_policy)?;
+            list_messages(
+                ctx,
+                &redemption_hash,
+                &message_nft_policy,
+                recipient_policy.as_deref(),
+                &format,
+                show_body,
+            )
+            .await
         }
 
         MessageCommands::Show { message_utxo } => show_message(ctx, &message_utxo).await,
 
         MessageCommands::Receive {
             message_utxo,
+            recipient_policy,
             message_nft_policy,
-            recipient_state_policy,
             recipient_state_asset,
             redemption_ref_script,
             nft_ref_script,
@@ -150,11 +208,12 @@ pub async fn execute(ctx: &CliContext, args: MessageArgs) -> Result<()> {
             recipient_ref_script,
             dry_run,
         } => {
+            let nft_policy = resolve_nft_policy(ctx, message_nft_policy)?;
             receive_message(
                 ctx,
                 &message_utxo,
-                &message_nft_policy,
-                &recipient_state_policy,
+                &nft_policy,
+                &recipient_policy,
                 &recipient_state_asset,
                 redemption_ref_script,
                 nft_ref_script,
@@ -173,10 +232,11 @@ pub async fn execute(ctx: &CliContext, args: MessageArgs) -> Result<()> {
             nft_ref_script,
             dry_run,
         } => {
+            let nft_policy = resolve_nft_policy(ctx, message_nft_policy)?;
             expire_message(
                 ctx,
                 &message_utxo,
-                &message_nft_policy,
+                &nft_policy,
                 redemption_ref_script,
                 nft_ref_script,
                 dry_run,
@@ -186,10 +246,35 @@ pub async fn execute(ctx: &CliContext, args: MessageArgs) -> Result<()> {
     }
 }
 
+fn resolve_or_override(
+    ctx: &CliContext,
+    redemption_hash: Option<String>,
+    message_nft_policy: Option<String>,
+) -> Result<(String, String)> {
+    match (redemption_hash, message_nft_policy) {
+        (Some(h), Some(p)) => Ok((h, p)),
+        _ => {
+            println!("{}", "Auto-deriving message infrastructure from deployment_info...".dimmed());
+            let infra = resolve_message_infra(ctx)?;
+            Ok((infra.redemption_hash, infra.message_nft_policy))
+        }
+    }
+}
+
+fn resolve_nft_policy(ctx: &CliContext, override_policy: Option<String>) -> Result<String> {
+    if let Some(p) = override_policy {
+        return Ok(p);
+    }
+    println!("{}", "Auto-deriving message NFT policy from deployment_info...".dimmed());
+    let infra = resolve_message_infra(ctx)?;
+    Ok(infra.message_nft_policy)
+}
+
 async fn list_messages(
     ctx: &CliContext,
     redemption_hash: &str,
     message_nft_policy: &str,
+    recipient_policy_filter: Option<&str>,
     format: &str,
     show_body: bool,
 ) -> Result<()> {
@@ -209,6 +294,9 @@ async fn list_messages(
     println!("  Script Hash: {}", redemption_hash);
     println!("  Address: {}", redemption_address);
     println!("  NFT Policy: {}", message_nft_policy);
+    if let Some(filter) = recipient_policy_filter {
+        println!("  Filter by recipient: {}", filter);
+    }
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -221,6 +309,19 @@ async fn list_messages(
             utxo.assets
                 .iter()
                 .any(|asset| asset.policy_id == message_nft_policy)
+        })
+        .filter(|utxo| {
+            if let Some(filter) = recipient_policy_filter {
+                if let Some(datum_json) = &utxo.inline_datum {
+                    let datum_str = serde_json::to_string(datum_json).unwrap_or_default();
+                    if let Ok(parsed) = parse_message_redemption_datum(&datum_str) {
+                        return parsed.recipient_policy == filter;
+                    }
+                }
+                false
+            } else {
+                true
+            }
         })
         .collect();
 
@@ -382,7 +483,7 @@ async fn receive_message(
     ctx: &CliContext,
     message_utxo_ref: &str,
     message_nft_policy: &str,
-    recipient_state_policy: &str,
+    recipient_policy: &str,
     recipient_state_asset: &str,
     redemption_ref_script: Option<String>,
     nft_ref_script: Option<String>,
@@ -444,12 +545,12 @@ async fn receive_message(
 
     // 2. Fetch recipient state UTXO (must be spent to prove authorization)
     let recipient_state_utxo = client
-        .find_utxo_by_asset(recipient_state_policy, recipient_state_asset)
+        .find_utxo_by_asset(recipient_policy, recipient_state_asset)
         .await?
         .ok_or_else(|| {
             anyhow!(
                 "Recipient state UTXO not found with policy {}",
-                recipient_state_policy
+                recipient_policy
             )
         })?;
 
@@ -458,6 +559,21 @@ async fn receive_message(
         "  {}#{}",
         recipient_state_utxo.tx_hash, recipient_state_utxo.output_index
     );
+
+    // 2b. Auto-discover recipient reference script if not provided
+    let recipient_ref_script = if recipient_ref_script.is_some() {
+        recipient_ref_script
+    } else {
+        // Look for ref script NFT: same policy, asset name "726566" ("ref")
+        match client.find_utxo_by_asset(recipient_policy, "726566").await? {
+            Some(ref_utxo) => {
+                let ref_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
+                println!("  Auto-discovered recipient ref script: {}", ref_str);
+                Some(ref_str)
+            }
+            None => None,
+        }
+    };
 
     // 3. Find fee UTXOs
     let fee_utxos = client.get_utxos(&payer_address).await?;
@@ -709,7 +825,7 @@ async fn expire_message(
     Ok(())
 }
 
-fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
+pub fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
     let parts: Vec<&str> = s.split('#').collect();
     if parts.len() != 2 {
         return Err(anyhow!(
@@ -725,21 +841,21 @@ fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
 }
 
 #[derive(Debug)]
-struct MessageRedemptionParsed {
-    origin: u32,
-    sender: String,
-    body: String,
-    message_id: String,
-    nonce: u32,
-    recipient_policy: String,
-    return_address: String,
-    expiry_slot: u64,
+pub struct MessageRedemptionParsed {
+    pub origin: u32,
+    pub sender: String,
+    pub body: String,
+    pub message_id: String,
+    pub nonce: u32,
+    pub recipient_policy: String,
+    pub return_address: String,
+    pub expiry_slot: u64,
 }
 
 /// Parse MessageRedemptionDatum from JSON or CBOR hex
 /// Structure: Constr 0 [origin, sender, body, message_id, nonce,
 ///            recipient_policy, return_address, expiry_slot]
-fn parse_message_redemption_datum(json_str: &str) -> Result<MessageRedemptionParsed> {
+pub fn parse_message_redemption_datum(json_str: &str) -> Result<MessageRedemptionParsed> {
     let raw_json: serde_json::Value = serde_json::from_str(json_str)?;
 
     let json = normalize_datum(&raw_json)?;
@@ -839,7 +955,7 @@ fn build_nft_burn_redeemer() -> Vec<u8> {
     builder.build()
 }
 
-fn decode_body_utf8(hex_body: &str) -> Option<String> {
+pub fn decode_body_utf8(hex_body: &str) -> Option<String> {
     let bytes = hex::decode(hex_body).ok()?;
 
     match String::from_utf8(bytes) {
