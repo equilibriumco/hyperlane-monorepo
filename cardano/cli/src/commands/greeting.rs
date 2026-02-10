@@ -30,9 +30,9 @@ pub struct GreetingArgs {
 enum GreetingCommands {
     /// List pending greeting messages
     List {
-        /// Greeting contract NFT policy ID
+        /// Greeting contract NFT policy ID (auto-loaded from deployment_info.json)
         #[arg(long)]
-        greeting_policy: String,
+        greeting_policy: Option<String>,
 
         /// Output format (table or json)
         #[arg(long, default_value = "table")]
@@ -41,13 +41,13 @@ enum GreetingCommands {
 
     /// Receive a greeting message (auto-builds redeemer and new datum)
     Receive {
-        /// Message UTXO to receive (format: txhash#index)
+        /// Message UTXO to receive (auto-discovered if omitted)
         #[arg(long)]
-        message_utxo: String,
+        message_utxo: Option<String>,
 
-        /// Greeting contract NFT policy ID
+        /// Greeting contract NFT policy ID (auto-loaded from deployment_info.json)
         #[arg(long)]
-        greeting_policy: String,
+        greeting_policy: Option<String>,
 
         /// Dry run (don't submit transaction)
         #[arg(long)]
@@ -56,10 +56,26 @@ enum GreetingCommands {
 
     /// Show current greeting contract state
     Show {
-        /// Greeting contract NFT policy ID
+        /// Greeting contract NFT policy ID (auto-loaded from deployment_info.json)
         #[arg(long)]
-        greeting_policy: String,
+        greeting_policy: Option<String>,
     },
+}
+
+fn resolve_greeting_policy(ctx: &CliContext, override_policy: Option<String>) -> Result<String> {
+    if let Some(policy) = override_policy {
+        return Ok(policy);
+    }
+    let deployment = ctx.load_deployment_info()
+        .map_err(|_| anyhow!("No --greeting-policy provided and deployment_info.json not found"))?;
+    deployment
+        .recipients
+        .iter()
+        .find(|r| r.recipient_type == "greeting")
+        .map(|r| r.nft_policy.clone())
+        .ok_or_else(|| anyhow!(
+            "No greeting recipient in deployment_info.json. Use --greeting-policy or deploy with 'init recipient'"
+        ))
 }
 
 pub async fn execute(ctx: &CliContext, args: GreetingArgs) -> Result<()> {
@@ -67,15 +83,24 @@ pub async fn execute(ctx: &CliContext, args: GreetingArgs) -> Result<()> {
         GreetingCommands::List {
             greeting_policy,
             format,
-        } => list_greetings(ctx, &greeting_policy, &format).await,
+        } => {
+            let policy = resolve_greeting_policy(ctx, greeting_policy)?;
+            list_greetings(ctx, &policy, &format).await
+        }
 
         GreetingCommands::Receive {
             message_utxo,
             greeting_policy,
             dry_run,
-        } => receive_greeting(ctx, &message_utxo, &greeting_policy, dry_run).await,
+        } => {
+            let policy = resolve_greeting_policy(ctx, greeting_policy)?;
+            receive_greeting(ctx, message_utxo.as_deref(), &policy, dry_run).await
+        }
 
-        GreetingCommands::Show { greeting_policy } => show_greeting(ctx, &greeting_policy).await,
+        GreetingCommands::Show { greeting_policy } => {
+            let policy = resolve_greeting_policy(ctx, greeting_policy)?;
+            show_greeting(ctx, &policy).await
+        }
     }
 }
 
@@ -178,7 +203,7 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
 
 async fn receive_greeting(
     ctx: &CliContext,
-    message_utxo_ref: &str,
+    message_utxo_ref: Option<&str>,
     greeting_policy: &str,
     dry_run: bool,
 ) -> Result<()> {
@@ -195,14 +220,53 @@ async fn receive_greeting(
     let payer_address = keypair.address_bech32(ctx.pallas_network());
     println!("  Receiver: {}", payer_address);
 
+    // Auto-discover message UTXO if not provided
+    let resolved_utxo_ref = match message_utxo_ref {
+        Some(r) => r.to_string(),
+        None => {
+            println!("  Auto-discovering pending greeting message...");
+            let redemption_address =
+                script_hash_to_address(&infra.redemption_hash, ctx.pallas_network())?;
+            let utxos = client.get_utxos(&redemption_address).await?;
+            let pending: Vec<_> = utxos
+                .iter()
+                .filter(|u| {
+                    u.assets.iter().any(|a| a.policy_id == *message_nft_policy)
+                })
+                .filter(|u| {
+                    u.inline_datum.as_ref().map_or(false, |datum_json| {
+                        let datum_str = serde_json::to_string(datum_json).unwrap_or_default();
+                        parse_message_redemption_datum(&datum_str)
+                            .map_or(false, |p| p.recipient_policy == greeting_policy)
+                    })
+                })
+                .collect();
+            match pending.len() {
+                0 => return Err(anyhow!("No pending greeting messages found")),
+                1 => {
+                    let u = pending[0];
+                    let r = format!("{}#{}", u.tx_hash, u.output_index);
+                    println!("  Found 1 pending message: {}", r);
+                    r
+                }
+                n => {
+                    let u = pending[0];
+                    let r = format!("{}#{}", u.tx_hash, u.output_index);
+                    println!("  Found {} pending messages, using oldest: {}", n, r);
+                    r
+                }
+            }
+        }
+    };
+
     // 1. Fetch message UTXO and parse datum
-    let (msg_tx_hash, msg_output_index) = parse_utxo_ref(message_utxo_ref)?;
+    let (msg_tx_hash, msg_output_index) = parse_utxo_ref(&resolved_utxo_ref)?;
     let tx_utxos = client.get_tx_utxos(&msg_tx_hash).await?;
     let msg_utxo_entry = tx_utxos
         .outputs
         .iter()
         .find(|o| o.output_index == msg_output_index)
-        .ok_or_else(|| anyhow!("Message UTXO not found: {}", message_utxo_ref))?;
+        .ok_or_else(|| anyhow!("Message UTXO not found: {}", resolved_utxo_ref))?;
 
     let msg_address = &msg_utxo_entry.address;
     let msg_utxos = client.get_utxos(msg_address).await?;
