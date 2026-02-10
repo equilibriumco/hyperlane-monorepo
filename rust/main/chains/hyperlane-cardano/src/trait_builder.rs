@@ -55,18 +55,12 @@ pub struct ConnectionConf {
     pub igp_policy_id: String,
     /// Validator Announce policy ID (hex)
     pub validator_announce_policy_id: String,
-    /// Token Redemption script hash (hex) - optional, enables two-phase token claiming
-    /// When set, warp route transfers create redemption UTXOs instead of direct transfers
-    pub redemption_script_hash: Option<String>,
-    /// Stored message NFT policy ID (hex) - minting policy for stored message NFTs.
-    /// Required for the unified message redemption pattern.
-    pub stored_message_nft_policy_id: Option<String>,
-    /// Stored message NFT script CBOR (hex) - the minting policy script bytes.
-    /// Required if stored_message_nft_policy_id is set.
-    pub stored_message_nft_script_cbor: Option<String>,
-    /// Message redemption script hash (hex) - where message redemption UTXOs are created.
-    /// Required for the unified message redemption pattern.
-    pub message_redemption_script_hash: Option<String>,
+    /// Verified message NFT policy ID (hex) - minting policy for verified message NFTs.
+    /// Required for direct message delivery pattern.
+    pub verified_message_nft_policy_id: Option<String>,
+    /// Verified message NFT script CBOR (hex) - the minting policy script bytes.
+    /// Required if verified_message_nft_policy_id is set.
+    pub verified_message_nft_script_cbor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -91,10 +85,8 @@ pub struct RawConnectionConf {
     ism_reference_script_utxo: Option<String>,
     igp_policy_id: Option<String>,
     validator_announce_policy_id: Option<String>,
-    redemption_script_hash: Option<String>,
-    stored_message_nft_policy_id: Option<String>,
-    stored_message_nft_script_cbor: Option<String>,
-    message_redemption_script_hash: Option<String>,
+    verified_message_nft_policy_id: Option<String>,
+    verified_message_nft_script_cbor: Option<String>,
 }
 
 /// An error type when parsing a connection configuration.
@@ -223,15 +215,9 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let ism_script_cbor = raw.ism_script_cbor;
         let ism_reference_script_utxo = raw.ism_reference_script_utxo;
 
-        // Token redemption script (optional - enables two-phase token claiming)
-        let redemption_script_hash = raw.redemption_script_hash;
-
-        // Stored message NFT policy (optional - enables message redemption pattern)
-        let stored_message_nft_policy_id = raw.stored_message_nft_policy_id;
-        let stored_message_nft_script_cbor = raw.stored_message_nft_script_cbor;
-
-        // Message redemption script (optional - where message escrow UTXOs are created)
-        let message_redemption_script_hash = raw.message_redemption_script_hash;
+        // Verified message NFT policy (optional - enables direct message delivery)
+        let verified_message_nft_policy_id = raw.verified_message_nft_policy_id;
+        let verified_message_nft_script_cbor = raw.verified_message_nft_script_cbor;
 
         Ok(Self {
             url,
@@ -253,10 +239,8 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             ism_reference_script_utxo,
             igp_policy_id,
             validator_announce_policy_id,
-            redemption_script_hash,
-            stored_message_nft_policy_id,
-            stored_message_nft_script_cbor,
-            message_redemption_script_hash,
+            verified_message_nft_policy_id,
+            verified_message_nft_script_cbor,
         })
     }
 }

@@ -60,7 +60,7 @@ impl CardanoMailbox {
     ///
     /// This prepares all the UTXOs, redeemers, and datums needed for a Process transaction.
     /// The caller can use these components with pallas-txbuilder to construct the full transaction.
-    /// For TokenReceiver (warp routes), the payer's credential is used as the redemption return address.
+    /// For WarpRoute recipients, tokens are delivered directly to the recipient wallet.
     pub async fn build_process_tx_components(
         &self,
         message: &HyperlaneMessage,

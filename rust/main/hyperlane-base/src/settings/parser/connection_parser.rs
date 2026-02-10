@@ -1038,31 +1038,16 @@ pub fn build_cardano_connection_conf(
         .end()
         .map(|s| s.to_string());
 
-    // Optional: Token redemption script hash (hex) - enables two-phase token claiming
-    let redemption_script_hash = conn
+    let verified_message_nft_policy_id = conn
         .chain(&mut local_err)
-        .get_opt_key("redemptionScriptHash")
+        .get_opt_key("verifiedMessageNftPolicyId")
         .parse_string()
         .end()
         .map(|s| s.to_string());
 
-    let stored_message_nft_policy_id = conn
+    let verified_message_nft_script_cbor = conn
         .chain(&mut local_err)
-        .get_opt_key("storedMessageNftPolicyId")
-        .parse_string()
-        .end()
-        .map(|s| s.to_string());
-
-    let stored_message_nft_script_cbor = conn
-        .chain(&mut local_err)
-        .get_opt_key("storedMessageNftScriptCbor")
-        .parse_string()
-        .end()
-        .map(|s| s.to_string());
-
-    let message_redemption_script_hash = conn
-        .chain(&mut local_err)
-        .get_opt_key("messageRedemptionScriptHash")
+        .get_opt_key("verifiedMessageNftScriptCbor")
         .parse_string()
         .end()
         .map(|s| s.to_string());
@@ -1092,9 +1077,7 @@ pub fn build_cardano_connection_conf(
         ism_reference_script_utxo,
         igp_policy_id: igp_policy_id.to_string(),
         validator_announce_policy_id: validator_announce_policy_id.to_string(),
-        redemption_script_hash,
-        stored_message_nft_policy_id,
-        stored_message_nft_script_cbor,
-        message_redemption_script_hash,
+        verified_message_nft_policy_id,
+        verified_message_nft_script_cbor,
     }))
 }
