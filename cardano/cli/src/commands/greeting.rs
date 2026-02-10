@@ -17,7 +17,7 @@ use crate::utils::plutus::{
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 
 use super::message::{
-    decode_body_utf8, parse_message_redemption_datum, parse_utxo_ref, resolve_message_infra,
+    decode_body_utf8, parse_verified_message_datum, parse_utxo_ref, resolve_message_infra,
 };
 
 #[derive(Args)]
@@ -109,33 +109,30 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
 
     let infra = resolve_message_infra(ctx)?;
 
-    let redemption_address =
-        script_hash_to_address(&infra.redemption_hash, ctx.pallas_network())?;
+    let deployment_info = ctx.load_deployment_info()?;
+    let greeting_info = deployment_info
+        .recipients
+        .iter()
+        .find(|r| r.recipient_type == "greeting" && r.nft_policy == greeting_policy)
+        .ok_or_else(|| anyhow!("Greeting recipient not found in deployment_info.json"))?;
 
-    println!("  Redemption address: {}", redemption_address);
-    println!("  NFT Policy: {}", infra.message_nft_policy);
+    let greeting_address = script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
+
+    println!("  Greeting address: {}", greeting_address);
+    println!("  NFT Policy: {}", infra.verified_message_nft_policy);
     println!("  Filter by greeting: {}", greeting_policy);
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    let utxos = client.get_utxos(&redemption_address).await?;
+    let utxos = client.get_utxos(&greeting_address).await?;
 
     let message_utxos: Vec<_> = utxos
         .iter()
         .filter(|utxo| {
             utxo.assets
                 .iter()
-                .any(|asset| asset.policy_id == infra.message_nft_policy)
-        })
-        .filter(|utxo| {
-            if let Some(datum_json) = &utxo.inline_datum {
-                let datum_str = serde_json::to_string(datum_json).unwrap_or_default();
-                if let Ok(parsed) = parse_message_redemption_datum(&datum_str) {
-                    return parsed.recipient_policy == greeting_policy;
-                }
-            }
-            false
+                .any(|asset| asset.policy_id == infra.verified_message_nft_policy)
         })
         .collect();
 
@@ -156,7 +153,7 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
             .filter_map(|utxo| {
                 let datum_str =
                     serde_json::to_string(utxo.inline_datum.as_ref()?).unwrap_or_default();
-                let parsed = parse_message_redemption_datum(&datum_str).ok()?;
+                let parsed = parse_verified_message_datum(&datum_str).ok()?;
                 let body_decoded = decode_body_utf8(&parsed.body);
                 Some(serde_json::json!({
                     "utxo": format!("{}#{}", utxo.tx_hash, utxo.output_index),
@@ -164,7 +161,7 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
                     "nonce": parsed.nonce,
                     "body_hex": parsed.body,
                     "body": body_decoded,
-                    "expiry_slot": parsed.expiry_slot,
+                    "message_id": parsed.message_id,
                 }))
             })
             .collect();
@@ -180,10 +177,10 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
 
             if let Some(datum_json) = &utxo.inline_datum {
                 let datum_str = serde_json::to_string(datum_json).unwrap_or_default();
-                if let Ok(parsed) = parse_message_redemption_datum(&datum_str) {
+                if let Ok(parsed) = parse_verified_message_datum(&datum_str) {
                     println!("  Origin: {}", parsed.origin);
                     println!("  Nonce:  {}", parsed.nonce);
-                    println!("  Expiry: slot {}", parsed.expiry_slot);
+                    println!("  Message ID: {}", parsed.message_id);
                     if let Some(decoded) = decode_body_utf8(&parsed.body) {
                         println!("  Body:   {}", decoded.cyan());
                         println!(
@@ -210,7 +207,16 @@ async fn receive_greeting(
     println!("{}", "Receiving greeting message...".cyan());
 
     let infra = resolve_message_infra(ctx)?;
-    let message_nft_policy = &infra.message_nft_policy;
+    let message_nft_policy = &infra.verified_message_nft_policy;
+
+    let deployment_info = ctx.load_deployment_info()?;
+    let greeting_info = deployment_info
+        .recipients
+        .iter()
+        .find(|r| r.recipient_type == "greeting" && r.nft_policy == greeting_policy)
+        .ok_or_else(|| anyhow!("Greeting recipient not found in deployment_info.json"))?;
+
+    let greeting_address = script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -225,20 +231,11 @@ async fn receive_greeting(
         Some(r) => r.to_string(),
         None => {
             println!("  Auto-discovering pending greeting message...");
-            let redemption_address =
-                script_hash_to_address(&infra.redemption_hash, ctx.pallas_network())?;
-            let utxos = client.get_utxos(&redemption_address).await?;
+            let utxos = client.get_utxos(&greeting_address).await?;
             let pending: Vec<_> = utxos
                 .iter()
                 .filter(|u| {
                     u.assets.iter().any(|a| a.policy_id == *message_nft_policy)
-                })
-                .filter(|u| {
-                    u.inline_datum.as_ref().map_or(false, |datum_json| {
-                        let datum_str = serde_json::to_string(datum_json).unwrap_or_default();
-                        parse_message_redemption_datum(&datum_str)
-                            .map_or(false, |p| p.recipient_policy == greeting_policy)
-                    })
                 })
                 .collect();
             match pending.len() {
@@ -283,7 +280,7 @@ async fn receive_greeting(
         .iter()
         .find(|asset| asset.policy_id == *message_nft_policy)
         .map(|asset| asset.asset_name.clone())
-        .ok_or_else(|| anyhow!("Stored message NFT not found in UTXO"))?;
+        .ok_or_else(|| anyhow!("Verified message NFT not found in UTXO"))?;
 
     println!("  Message ID: {}", message_id);
 
@@ -292,10 +289,9 @@ async fn receive_greeting(
         .as_ref()
         .ok_or_else(|| anyhow!("Message UTXO has no inline datum"))?;
     let datum_str = serde_json::to_string(datum_json)?;
-    let parsed_datum = parse_message_redemption_datum(&datum_str)?;
+    let parsed_datum = parse_verified_message_datum(&datum_str)?;
 
     println!("  Origin: {}", parsed_datum.origin);
-    println!("  Return Address (relayer): {}", parsed_datum.return_address);
 
     let body_hex = &parsed_datum.body;
     let body_bytes =
@@ -382,11 +378,9 @@ async fn receive_greeting(
     // 7. Build transaction
     println!("\n{}", "Building receive transaction...".cyan());
 
-    let receive_redeemer = build_claim_message_redeemer();
     let nft_redeemer = build_nft_burn_redeemer();
 
     // Load inline scripts
-    let deployment_info = ctx.load_deployment_info()?;
     let mailbox_info = deployment_info
         .mailbox
         .as_ref()
@@ -396,22 +390,12 @@ async fn receive_greeting(
         .as_ref()
         .ok_or_else(|| anyhow!("Missing mailbox.stateNftPolicy in deployment_info.json"))?;
 
-    let nft_policy_param = encode_script_hash_param(message_nft_policy)?;
-    let nft_policy_hex = hex::encode(&nft_policy_param);
-    let redemption_applied = apply_validator_param(
-        &ctx.contracts_dir,
-        "message_redemption",
-        "message_redemption",
-        &nft_policy_hex,
-    )?;
-    let redemption_inline_script = hex::decode(&redemption_applied.compiled_code)?;
-
     let mailbox_policy_param = encode_script_hash_param(mailbox_policy)?;
     let mailbox_policy_hex = hex::encode(&mailbox_policy_param);
     let nft_applied = apply_validator_param(
         &ctx.contracts_dir,
-        "stored_message_nft",
-        "stored_message_nft",
+        "verified_message_nft",
+        "verified_message_nft",
         &mailbox_policy_hex,
     )?;
     let nft_inline_script = hex::decode(&nft_applied.compiled_code)?;
@@ -424,12 +408,8 @@ async fn receive_greeting(
             &recipient_state_utxo,
             message_nft_policy,
             &message_id,
-            &parsed_datum.return_address,
-            &receive_redeemer,
             &nft_redeemer,
             None,
-            None,
-            Some(&redemption_inline_script),
             Some(&nft_inline_script),
             Some(&recipient_redeemer),
             Some(&new_datum),
@@ -549,12 +529,6 @@ fn build_greeting_datum(greeting_hex: &str, count: u64) -> Result<Vec<u8>> {
     builder.uint(count);
     builder.end_constr();
     Ok(builder.build())
-}
-
-fn build_claim_message_redeemer() -> Vec<u8> {
-    let mut builder = CborBuilder::new();
-    builder.start_constr(0).end_constr();
-    builder.build()
 }
 
 fn build_nft_burn_redeemer() -> Vec<u8> {

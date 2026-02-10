@@ -268,13 +268,6 @@ pub fn build_mint_redeemer() -> Vec<u8> {
     builder.build()
 }
 
-/// Build a redemption claim redeemer (Claim = constructor 0)
-pub fn build_redemption_claim_redeemer() -> Vec<u8> {
-    let mut builder = CborBuilder::new();
-    builder.start_constr(0).end_constr();
-    builder.build()
-}
-
 /// Build a Mailbox SetDefaultIsm redeemer
 /// Redeemer: SetDefaultIsm { new_ism: ScriptHash }
 /// SetDefaultIsm is constructor index 2 in MailboxRedeemer

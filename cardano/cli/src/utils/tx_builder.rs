@@ -470,10 +470,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
     /// Build a message receive transaction
     ///
     /// This transaction:
-    /// 1. Spends the message redemption UTXO (ClaimMessage redeemer)
+    /// 1. Spends the verified message UTXO at recipient's address
     /// 2. Includes the recipient state UTXO as input (proves authorization)
-    /// 3. Burns the stored message NFT
-    /// 4. Sends ADA back to the relayer (return_address from datum)
+    /// 3. Burns the verified_message_nft
+    /// 4. Optionally updates recipient state
     #[allow(clippy::too_many_arguments)]
     pub async fn build_message_receive_tx(
         &self,
@@ -483,12 +483,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
         recipient_state_utxo: &Utxo,
         message_nft_policy: &str,
         message_id: &str,
-        return_address_hex: &str,
-        receive_redeemer: &[u8],
         nft_burn_redeemer: &[u8],
-        redemption_ref_script: Option<&str>,
         nft_ref_script: Option<&str>,
-        redemption_inline_script: Option<&[u8]>,
         nft_inline_script: Option<&[u8]>,
         recipient_redeemer: Option<&[u8]>,
         new_state_datum: Option<&[u8]>,
@@ -530,33 +526,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
             recipient_state_utxo.output_index as u64,
         );
 
-        // Build return output to relayer (return_address is a pkh)
-        let return_addr_bytes = hex::decode(return_address_hex)?;
-        if return_addr_bytes.len() != 28 {
-            return Err(anyhow!(
-                "Invalid return_address: expected 28 bytes, got {}",
-                return_addr_bytes.len()
-            ));
-        }
-
-        // Build relayer return address from pkh
-        let return_addr = pallas_addresses::Address::Shelley(
-            pallas_addresses::ShelleyAddress::new(
-                if matches!(self.network, Network::Testnet) {
-                    pallas_addresses::Network::Testnet
-                } else {
-                    pallas_addresses::Network::Mainnet
-                },
-                pallas_addresses::ShelleyPaymentPart::key_hash(
-                    return_addr_bytes.as_slice().into(),
-                ),
-                pallas_addresses::ShelleyDelegationPart::Null,
-            ),
-        );
-
-        // Return the message UTXO's lovelace to the relayer
-        let return_output = Output::new(return_addr, message_utxo.lovelace);
-
         // Recipient state UTXO continuation (same datum, same address)
         let state_addr = pallas_addresses::Address::from_bech32(&recipient_state_utxo.address)
             .map_err(|e| anyhow!("Invalid state address: {}", e))?;
@@ -586,18 +555,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .input(message_input.clone())
             .input(state_input.clone())
             .collateral_input(fee_input)
-            .output(return_output)
             .output(state_output)
             .mint_asset(Hash::new(nft_policy), message_id_bytes, -1)
-            .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?
-            .add_spend_redeemer(
-                message_input,
-                receive_redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
-            );
+            .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?;
 
         // Add spend redeemer for recipient state (required for script-based recipients)
         if let Some(redeemer) = recipient_redeemer {
@@ -629,16 +589,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
                 1
             });
 
-        if let Some(ref_script) = redemption_ref_script {
-            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
-            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
-                .try_into()
-                .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
-            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
-        } else if let Some(inline_script) = redemption_inline_script {
-            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
-        }
-
         if let Some(ref_script) = nft_ref_script {
             let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
             let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
@@ -657,145 +607,6 @@ impl<'a> HyperlaneTxBuilder<'a> {
             staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
         } else if let Some(inline_script) = recipient_inline_script {
             staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
-        }
-
-        if change > 1_500_000 {
-            staging = staging.output(Output::new(payer_addr, change));
-        }
-
-        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
-        staging = staging.disclosed_signer(signer_hash);
-
-        let tx = staging
-            .build_conway_raw()
-            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
-
-        Ok(tx)
-    }
-
-    /// Build a message expire transaction
-    ///
-    /// After the expiry slot, the relayer can reclaim everything without
-    /// the recipient being involved.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn build_message_expire_tx(
-        &self,
-        payer: &Keypair,
-        fee_utxo: &Utxo,
-        message_utxo: &Utxo,
-        message_nft_policy: &str,
-        message_id: &str,
-        return_address_hex: &str,
-        expire_redeemer: &[u8],
-        nft_burn_redeemer: &[u8],
-        expiry_slot: u64,
-        redemption_ref_script: Option<&str>,
-        nft_ref_script: Option<&str>,
-    ) -> Result<BuiltTransaction> {
-        let current_slot = self.client.get_latest_slot().await?;
-        let validity_end = current_slot + 7200;
-        let cost_model = self.client.get_plutusv3_cost_model().await?;
-
-        let payer_address = payer.address_bech32(self.network);
-        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
-            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
-
-        let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid fee tx hash"))?;
-
-        let message_tx_hash: [u8; 32] = hex::decode(&message_utxo.tx_hash)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid message tx hash"))?;
-
-        let nft_policy: [u8; 28] = hex::decode(message_nft_policy)?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid NFT policy ID"))?;
-
-        let message_id_bytes = hex::decode(message_id).unwrap_or_default();
-
-        let fee_input = Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64);
-        let message_input =
-            Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
-
-        // Build return output to relayer
-        let return_addr_bytes = hex::decode(return_address_hex)?;
-        if return_addr_bytes.len() != 28 {
-            return Err(anyhow!(
-                "Invalid return_address: expected 28 bytes, got {}",
-                return_addr_bytes.len()
-            ));
-        }
-
-        let return_addr = pallas_addresses::Address::Shelley(
-            pallas_addresses::ShelleyAddress::new(
-                if matches!(self.network, Network::Testnet) {
-                    pallas_addresses::Network::Testnet
-                } else {
-                    pallas_addresses::Network::Mainnet
-                },
-                pallas_addresses::ShelleyPaymentPart::key_hash(
-                    return_addr_bytes.as_slice().into(),
-                ),
-                pallas_addresses::ShelleyDelegationPart::Null,
-            ),
-        );
-
-        let return_output = Output::new(return_addr, message_utxo.lovelace);
-
-        let fee_estimate = 2_000_000u64;
-        let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
-
-        // For expire, validity_start must be AFTER expiry_slot
-        let validity_start = expiry_slot;
-
-        let mut staging = StagingTransaction::new()
-            .input(fee_input.clone())
-            .input(message_input.clone())
-            .collateral_input(fee_input)
-            .output(return_output)
-            .mint_asset(Hash::new(nft_policy), message_id_bytes, -1)
-            .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?
-            .add_spend_redeemer(
-                message_input,
-                expire_redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
-            )
-            .add_mint_redeemer(
-                Hash::new(nft_policy),
-                nft_burn_redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 500_000,
-                    steps: 200_000_000,
-                }),
-            )
-            .language_view(ScriptKind::PlutusV3, cost_model)
-            .fee(fee_estimate)
-            .valid_from_slot(validity_start)
-            .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) {
-                0
-            } else {
-                1
-            });
-
-        if let Some(ref_script) = redemption_ref_script {
-            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
-            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
-                .try_into()
-                .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
-            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
-        }
-
-        if let Some(ref_script) = nft_ref_script {
-            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
-            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
-                .try_into()
-                .map_err(|_| anyhow!("Invalid NFT reference script tx hash"))?;
-            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
         }
 
         if change > 1_500_000 {
