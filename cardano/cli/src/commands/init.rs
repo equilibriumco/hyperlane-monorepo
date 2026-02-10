@@ -1140,6 +1140,27 @@ async fn init_recipient(
     println!("  Location: {}", address);
     println!();
 
+    // Save to deployment_info.json
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        use crate::utils::types::{RecipientDeployment, ReferenceScriptUtxo};
+        // Remove existing entry for same type
+        deployment.recipients.retain(|r| r.recipient_type != custom_validator);
+        deployment.recipients.push(RecipientDeployment {
+            recipient_type: custom_validator.to_string(),
+            script_hash: recipient_hash.clone(),
+            address: recipient_addr.clone(),
+            nft_policy: nft_policy_id.clone(),
+            init_tx_hash: Some(tx_hash.clone()),
+            reference_script_utxo: Some(ReferenceScriptUtxo {
+                tx_hash: tx_hash.clone(),
+                output_index: 1,
+                lovelace: ref_script_lovelace,
+            }),
+        });
+        ctx.save_deployment_info(&deployment)?;
+        println!("{}", "✓ Saved to deployment_info.json".green());
+    }
+
     Ok(())
 }
 

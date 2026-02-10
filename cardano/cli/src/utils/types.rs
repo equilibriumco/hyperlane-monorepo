@@ -200,6 +200,25 @@ pub struct WarpRouteDeployment {
     pub minting_ref_script_utxo: Option<ReferenceScriptUtxo>,
 }
 
+/// Deployed recipient contract (e.g. greeting)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientDeployment {
+    /// Recipient type (e.g. "greeting")
+    pub recipient_type: String,
+    /// Script hash
+    pub script_hash: String,
+    /// Bech32 address
+    pub address: String,
+    /// State NFT policy ID
+    pub nft_policy: String,
+    /// Initialization transaction hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_tx_hash: Option<String>,
+    /// Reference script UTXO
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_script_utxo: Option<ReferenceScriptUtxo>,
+}
+
 /// Deployment information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentInfo {
@@ -217,6 +236,9 @@ pub struct DeploymentInfo {
     /// List of deployed warp routes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warp_routes: Vec<WarpRouteDeployment>,
+    /// List of deployed recipient contracts
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipients: Vec<RecipientDeployment>,
 }
 
 impl DeploymentInfo {
@@ -229,6 +251,7 @@ impl DeploymentInfo {
             igp: None,
             validator_announce: None,
             warp_routes: Vec::new(),
+            recipients: Vec::new(),
         }
     }
 }

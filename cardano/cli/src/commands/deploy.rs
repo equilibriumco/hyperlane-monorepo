@@ -224,6 +224,7 @@ async fn extract(
         igp: validators.igp.as_ref().map(to_script_info),
         validator_announce: validators.validator_announce.as_ref().map(to_script_info),
         warp_routes: Vec::new(),
+        recipients: Vec::new(),
     };
 
     let info_path = output_dir.join("deployment_info.json");
