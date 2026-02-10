@@ -50,9 +50,10 @@ This flow is mature and has been tested end-to-end with messages from Fuji (Aval
   - Mints unique NFT per processed message
   - Enables O(1) delivery status lookups
 
-- **Deferred Recipient** (`contracts/validators/deferred_recipient.ak`): Two-phase processing
-  - Phase 1: Relayer stores message with NFT proof
-  - Phase 2: Separate processing burns NFT and handles message
+- **Verified Message NFT** (`contracts/validators/verified_message_nft.ak`): Message authentication
+  - Minted during Process for generic recipients
+  - Delivered to recipient's script address with VerifiedMessageDatum
+  - Burned when recipient processes the message
 
 #### Off-Chain (Rust)
 
@@ -217,19 +218,19 @@ All three warp route types have been deployed and tested bidirectionally between
 #### Off-Chain (Rust)
 
 - Transaction builder handles all warp route operations (lock, release, mint, burn)
-- Redemption pattern: relayer creates redemption UTXO, recipient claims with own ADA
+- Direct delivery: relayer sends tokens directly to recipient wallet address
 - Decimal conversion between Cardano (0/6 decimals) and EVM (6/18 decimals)
 
 ### Test Results
 
-| Direction                           | Status | Notes                              |
-| ----------------------------------- | ------ | ---------------------------------- |
-| Native ADA Cardano -> Fuji wADA    | Pass   | ADA locked, wADA minted on Fuji   |
-| Fuji wADA -> Cardano Native ADA    | Pass   | wADA burned, ADA released + claim |
-| Collateral TEST Cardano -> Fuji    | Pass   | TEST locked, wCTEST minted        |
-| Fuji wCTEST -> Cardano Collateral  | Pass   | wCTEST burned, TEST released      |
-| Fuji FTEST -> Cardano Synthetic    | Pass   | FTEST locked, synthetic minted    |
-| Cardano Synthetic -> Fuji FTEST    | Pass   | Synthetic burned, FTEST released  |
+| Direction                           | Status | Notes                                  |
+| ----------------------------------- | ------ | -------------------------------------- |
+| Native ADA Cardano -> Fuji wADA    | Pass   | ADA locked, wADA minted on Fuji       |
+| Fuji wADA -> Cardano Native ADA    | Pass   | wADA burned, ADA delivered to wallet   |
+| Collateral TEST Cardano -> Fuji    | Pass   | TEST locked, wCTEST minted            |
+| Fuji wCTEST -> Cardano Collateral  | Pass   | wCTEST burned, TEST delivered to wallet|
+| Fuji FTEST -> Cardano Synthetic    | Pass   | FTEST locked, synthetic minted         |
+| Cardano Synthetic -> Fuji FTEST    | Pass   | Synthetic burned, FTEST released       |
 
 ---
 
@@ -362,12 +363,10 @@ cat cardano/deployments/preview/deployment_info.json
 | `validators/multisig_ism_test.ak`          | 520   | ISM unit tests                               |
 | `validators/warp_route.ak`                 | 519   | Token bridge implementation                  |
 | `validators/igp.ak`                        | 275   | Interchain gas paymaster                     |
-| `validators/deferred_recipient.ak`         | 336   | Two-phase message processing                 |
-| `validators/example_deferred_recipient.ak` | 468   | Example deferred recipient                   |
-| `validators/example_generic_recipient.ak`  | 203   | Example basic recipient                      |
+| `validators/greeting.ak`                   | 112   | Example generic recipient (greeting)         |
 | `validators/vault.ak`                      | 286   | Token vault for collateral                   |
 | `validators/validator_announce.ak`         | 181   | Validator announcements                      |
-| `validators/stored_message_nft.ak`         | 109   | NFT for stored messages                      |
+| `validators/verified_message_nft.ak`       | 109   | NFT for verified messages                    |
 | `validators/processed_message_nft.ak`      | 58    | NFT for processed messages                   |
 | `validators/state_nft.ak`                  | 39    | One-shot state NFT policy                    |
 | `validators/synthetic_token.ak`            | 32    | Synthetic token minting                      |
@@ -410,7 +409,7 @@ cat cardano/deployments/preview/deployment_info.json
   - `ism.rs` - ISM validator management
   - `warp.rs` - Warp route commands
   - `query.rs` - State queries
-  - `deferred.rs` - Deferred message processing
+  - `message.rs` - Verified message listing and receiving
 
 ### Configuration
 

@@ -74,6 +74,12 @@ sequenceDiagram
 
 ### Detailed Transaction Flow
 
+The process transaction structure depends on the recipient type. WarpRoute recipients (TokenReceiver) are spent in the same transaction as the mailbox. Generic recipients receive a verified message UTXO instead.
+
+#### WarpRoute Recipients (TokenReceiver)
+
+The recipient UTXO is spent in the same transaction. Tokens go directly to the recipient wallet.
+
 ```mermaid
 flowchart TB
     subgraph Inputs["Transaction Inputs"]
@@ -119,6 +125,90 @@ flowchart TB
     MBScript -.-> MI
     ISMScript -.-> II
     RecScript -.-> RI
+```
+
+#### Generic Recipients (e.g., Greeting)
+
+The mailbox creates a verified message UTXO at the recipient's script address. The recipient processes it in a separate transaction.
+
+**TX 1: Mailbox Process**
+
+```mermaid
+flowchart TB
+    subgraph Inputs["Transaction Inputs"]
+        MI[/"Mailbox UTXO<br/>with State NFT"/]
+        II[/"ISM UTXO<br/>with State NFT"/]
+        CI[/"Collateral UTXO<br/>(for fees)"/]
+    end
+
+    subgraph RefInputs["Reference Inputs"]
+        MBScript[/"Mailbox Reference Script"/]
+        ISMScript[/"ISM Reference Script"/]
+    end
+
+    subgraph Redeemers["Redeemers"]
+        MR["Mailbox: Process{<br/>message, metadata, message_id}"]
+        IR["ISM: Verify{<br/>checkpoint, signatures}"]
+    end
+
+    subgraph Outputs["Transaction Outputs"]
+        MO[/"Mailbox UTXO<br/>(unchanged datum)"/]
+        IO[/"ISM UTXO<br/>(unchanged datum)"/]
+        VMO[/"Verified Message UTXO<br/>at recipient script address<br/>(VerifiedMessageDatum + NFT)"/]
+        PMO[/"Processed Message UTXO<br/>(processed message NFT)"/]
+    end
+
+    subgraph Minting["Minting"]
+        PMNFT["Processed Message NFT<br/>(message_id as asset name)"]
+        VMNFT["Verified Message NFT"]
+    end
+
+    MI --> MR
+    II --> IR
+
+    MR --> MO
+    IR --> IO
+
+    PMNFT --> PMO
+    VMNFT --> VMO
+
+    MBScript -.-> MI
+    ISMScript -.-> II
+```
+
+**TX 2: Recipient Handling**
+
+```mermaid
+flowchart TB
+    subgraph Inputs["Transaction Inputs"]
+        VMI[/"Verified Message UTXO<br/>at recipient script address<br/>(VerifiedMessageDatum + NFT)"/]
+        RSI[/"Recipient State UTXO<br/>with State NFT"/]
+    end
+
+    subgraph RefInputs["Reference Inputs"]
+        RecScript[/"Recipient Reference Script"/]
+    end
+
+    subgraph Redeemers["Redeemers"]
+        RR["Recipient: HandleMessage"]
+    end
+
+    subgraph Outputs["Transaction Outputs"]
+        RO[/"Recipient State UTXO<br/>(updated state)"/]
+    end
+
+    subgraph Burning["Burning"]
+        VMNFT["Verified Message NFT<br/>(burned)"]
+    end
+
+    VMI --> RR
+    RSI --> RR
+
+    RR --> RO
+    VMI --> VMNFT
+
+    RecScript -.-> VMI
+    RecScript -.-> RSI
 ```
 
 ### Signature Verification Detail
@@ -360,25 +450,25 @@ The `processed_message_nft` minting policy is parameterized by `mailbox_policy_i
 
 The `mailbox_policy_id` is determined once during mailbox initialization and never changes. This ensures that all processed message NFTs, regardless of when they were minted, are under the same policy and can be found during replay checks.
 
-### 3. Message Authentication (Stored Message NFTs)
+### 3. Message Authentication (Verified Message NFTs)
 
-**Problem**: In deferred processing, prove that a stored message came from the mailbox.
+**Problem**: Generic recipients (scripts) cannot be invoked by the mailbox directly. We need a way to prove that a message was validated by the mailbox so the recipient can process it later.
 
-**Solution**: The mailbox mints a "stored message NFT" that only it can create. The recipient verifies this NFT exists when processing.
+**Solution**: During mailbox `process()`, the mailbox mints a "verified message NFT" and creates a UTXO at the recipient's script address containing the NFT and a `VerifiedMessageDatum`. The recipient processes this UTXO in a separate transaction, burning the NFT.
 
 ```mermaid
 flowchart TB
-    subgraph Phase1["Phase 1: Relayer Stores Message"]
-        MB["Mailbox validates message"]
-        MINT["Mint Stored Message NFT<br/>(only mailbox can mint)"]
-        STORE["Create Stored Message UTXO<br/>with NFT + message datum"]
+    subgraph Phase1["Phase 1: Mailbox Process (relayer TX)"]
+        MB["Mailbox validates message<br/>+ ISM signature verification"]
+        MINT["Mint Verified Message NFT<br/>(only mailbox can mint)"]
+        STORE["Create UTXO at recipient's<br/>script address with NFT +<br/>VerifiedMessageDatum"]
     end
 
-    subgraph Phase2["Phase 2: User/Anyone Processes"]
-        READ["Read Stored Message UTXO"]
-        VERIFY["Verify Stored Message NFT present<br/>(proves mailbox created it)"]
-        PROCESS["Process message in recipient"]
-        BURN["Burn Stored Message NFT"]
+    subgraph Phase2["Phase 2: Recipient Handling (separate TX)"]
+        READ["Spend message UTXO at<br/>recipient's script address"]
+        VERIFY["Verify Verified Message NFT present<br/>(proves mailbox created it)"]
+        PROCESS["Update recipient state"]
+        BURN["Burn Verified Message NFT"]
     end
 
     MB --> MINT
@@ -389,7 +479,7 @@ flowchart TB
     PROCESS --> BURN
 ```
 
-**Note:** The stored message / deferred processing flow exists in the contracts but the relayer does not currently handle deferred recipients directly. It processes messages using the standard (non-deferred) flow.
+This is the standard flow for generic recipients (e.g., greeting contract). The mailbox creates the verified message UTXO in one transaction, and anyone can trigger the recipient to consume it in a follow-up transaction.
 
 **Security Properties:**
 
@@ -403,7 +493,7 @@ flowchart TB
 | --------------------- | ---------------------------- | ----------------------- | ------------------- | ---------------- |
 | State NFT             | Identify state UTXOs         | One-shot (tied to UTXO) | Contract deployment | Never            |
 | Processed Message NFT | Replay protection            | Mailbox-controlled      | Message processing  | Never            |
-| Stored Message NFT    | Message authentication       | Mailbox-controlled      | Deferred store      | Deferred process |
+| Verified Message NFT  | Message authentication       | Mailbox-controlled      | Message processing (generic recipients) | Message handling by recipient |
 | Synthetic Token       | Bridged token representation | Warp route-controlled   | Token receive       | Token send       |
 
 ---
@@ -540,7 +630,7 @@ flowchart TB
     subgraph NFTs["NFT Policies"]
         STATE["State NFT"]
         PROC["Processed Message NFT"]
-        STORED["Stored Message NFT"]
+        VERIFIED["Verified Message NFT"]
     end
 
     MB -->|"verifies"| ISM
@@ -551,7 +641,7 @@ flowchart TB
     WR -->|"mints/burns"| SYNTH
 
     MB -->|"mints"| PROC
-    MB -->|"mints"| STORED
+    MB -->|"mints"| VERIFIED
 
     STATE -.->|"identifies"| MB
     STATE -.->|"identifies"| ISM
@@ -565,23 +655,22 @@ The relayer resolves recipients via O(1) NFT queries using the state NFT policy 
 ```mermaid
 flowchart TB
     subgraph Types["Recipient Types"]
-        GEN["Generic<br/>Simple state update"]
-        TOK["TokenReceiver<br/>Releases/mints tokens"]
+        GEN["Generic<br/>(script address)"]
+        TOK["TokenReceiver<br/>(wallet address)"]
     end
 
-    subgraph Generic["Generic Flow"]
-        G1["Relayer builds full tx"]
-        G2["State in -> State out"]
-        G3["No extra outputs"]
+    subgraph Generic["Generic Flow (two transactions)"]
+        G1["TX 1: Mailbox process<br/>Mints verified_message_nft<br/>Creates UTXO at recipient script"]
+        G2["TX 2: Recipient handling<br/>Spends message UTXO<br/>Burns NFT, updates state"]
     end
 
-    subgraph Token["TokenReceiver Flow"]
+    subgraph Token["TokenReceiver Flow (single transaction)"]
         T1["Relayer decodes body"]
         T2["Releases tokens from vault<br/>OR mints synthetic"]
-        T3["Sends to recipient address"]
+        T3["Sends tokens directly to<br/>recipient wallet address"]
     end
 
-    GEN --> G1 --> G2 --> G3
+    GEN --> G1 --> G2
     TOK --> T1 --> T2 --> T3
 ```
 

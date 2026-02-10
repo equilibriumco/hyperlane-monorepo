@@ -75,21 +75,22 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 
 ### Core Contracts
 
-| Contract                  | Purpose                      | Parameters                    | Dependencies          |
-| ------------------------- | ---------------------------- | ----------------------------- | --------------------- |
-| **state_nft**             | Unique NFT minting policy    | UTXO reference                | None                  |
-| **mailbox**               | Message dispatch/process hub | processed_messages_nft_policy | processed_message_nft |
-| **multisig_ism**          | Signature verification       | None                          | None                  |
-| **processed_message_nft** | Replay prevention            | mailbox_policy_id             | mailbox (state NFT)   |
+| Contract                  | Purpose                      | Parameters                                                  | Dependencies                             |
+| ------------------------- | ---------------------------- | ----------------------------------------------------------- | ---------------------------------------- |
+| **state_nft**             | Unique NFT minting policy    | UTXO reference                                              | None                                     |
+| **mailbox**               | Message dispatch/process hub | processed_messages_nft_policy, verified_message_nft_policy  | processed_message_nft, verified_message_nft |
+| **multisig_ism**          | Signature verification       | None                                                        | None                                     |
+| **processed_message_nft** | Replay prevention            | mailbox_policy_id                                           | mailbox (state NFT)                      |
+| **verified_message_nft**  | Verified message token       | mailbox_policy_id                                           | mailbox (state NFT)                      |
 
-> **Note**: The mailbox validator is parameterized with `processed_messages_nft_policy`, which is the minting policy for processed message NFTs. These NFTs provide replay protection by marking each message_id as processed. The `processed_message_nft` policy is parameterized by `mailbox_policy_id` (stable across upgrades) to ensure replay protection persists even when the mailbox code is updated. Warp routes and recipients are identified by their state NFT policy ID (Hyperlane address = `0x01000000 || nft_policy_id` for pubkey addresses or `0x02000000 || script_hash` for script addresses). See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
+> **Note**: The mailbox validator is parameterized with two policies: `processed_messages_nft_policy` (for replay prevention) and `verified_message_nft_policy` (for verified message tokens). The `processed_message_nft` and `verified_message_nft` policies are both parameterized by `mailbox_policy_id` (stable across upgrades) to ensure they persist even when the mailbox code is updated. Warp routes and recipients are identified by their state NFT policy ID (Hyperlane address = `0x01000000 || nft_policy_id` for pubkey addresses or `0x02000000 || script_hash` for script addresses). See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
 
 ### Recipient Contracts
 
-| Contract                      | Purpose                 | Parameters        | Dependencies |
-| ----------------------------- | ----------------------- | ----------------- | ------------ |
-| **greeting**                  | Example message handler | mailbox_policy_id | mailbox      |
-| **warp_route**                | Token bridge            | mailbox_policy_id | mailbox      |
+| Contract                      | Purpose                 | Parameters                                  | Dependencies                    |
+| ----------------------------- | ----------------------- | ------------------------------------------- | ------------------------------- |
+| **greeting**                  | Example message handler | verified_message_nft_policy                 | mailbox (verified_message_nft)  |
+| **warp_route**                | Token bridge            | mailbox_policy_id, processed_messages_nft_policy | mailbox                    |
 
 ### Dependency Graph
 
@@ -109,13 +110,23 @@ By default, the CLI waits for transaction confirmation before returning. This pr
                    │
                    │ mailbox_policy_id
                    │
-          ┌────────┴────────┐
-          │                 │
-          ▼                 ▼
-┌──────────────────┐ ┌──────────────────────────┐
-│ PROCESSED_MESSAGE│ │    GREETING / CUSTOM     │
-│ NFT (Mint)       │ │    RECIPIENT (Optional)  │
-└──────────────────┘ └──────────────────────────┘
+          ┌────────┼────────────────────┐
+          │        │                    │
+          ▼        ▼                    ▼
+┌──────────────┐ ┌──────────────┐ ┌────────────────────────────┐
+│ PROCESSED_   │ │ VERIFIED_    │ │  WARP_ROUTE (mailbox +     │
+│ MESSAGE_NFT  │ │ MESSAGE_NFT  │ │  processed_messages_nft)   │
+└──────────────┘ └──────┬───────┘ └────────────────────────────┘
+                        │
+                        │ verified_message_nft_policy
+                        │
+               ┌────────┴────────┐
+               │                 │
+               ▼                 ▼
+      ┌──────────────┐ ┌──────────────────────┐
+      │   GREETING   │ │   CUSTOM RECIPIENT   │
+      │              │ │   (Optional)         │
+      └──────────────┘ └──────────────────────┘
 ```
 
 ### Deployment Order
@@ -127,7 +138,7 @@ The contracts must be deployed in this order due to dependencies:
 3. **Deploy Reference Scripts** - deploy the parameterized scripts as on-chain reference scripts
 4. **Configure Mailbox** - set default ISM using ism_policy_id
 5. **Configure ISM** - set validators and thresholds for each origin domain
-6. **Deploy Recipients/Warp Routes** - parameterized with mailbox_policy_id
+6. **Deploy Recipients/Warp Routes** - recipients parameterized with verified_message_nft_policy; warp routes with mailbox_policy_id + processed_messages_nft_policy
 
 > **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
 
@@ -162,6 +173,7 @@ Expected output:
 "state_nft.state_nft.mint"
 "greeting.greeting.spend"
 "processed_message_nft.processed_message_nft.mint"
+"verified_message_nft.verified_message_nft.mint"
 "warp_route.warp_route.spend"
 "synthetic_minting.synthetic_minting.mint"
 ...
@@ -449,7 +461,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ## Phase 6: Deploy Recipients (Optional)
 
-Recipients are contracts that receive Hyperlane messages on Cardano. They must be parameterized with the mailbox policy ID. This phase is only needed if you want to receive generic (non-warp-route) messages on Cardano.
+Recipients are contracts that receive Hyperlane messages on Cardano. Generic recipients (like the greeting contract) are parameterized with `verified_message_nft_policy` and use the verified message pattern. This phase is only needed if you want to receive generic (non-warp-route) messages on Cardano.
 
 ### 6.1 Deploy the Greeting Contract (Example)
 
@@ -468,7 +480,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 This:
 
-1. Applies the mailbox NFT policy ID parameter to the `greeting` validator
+1. Applies the `verified_message_nft_policy` parameter to the `greeting` validator
 2. Creates a state NFT for the recipient
 3. Creates two UTXOs:
    - State UTXO at script address with datum (greeting state)
@@ -513,15 +525,34 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 Requirements for custom recipients:
 
 - Your contract must be an Aiken project with a compiled `plutus.json` blueprint
-- The validator must accept `mailbox_policy_id: PolicyId` as its first parameter
-- The CLI will automatically apply the mailbox policy ID parameter using `aiken blueprint apply`
+- The validator must accept a policy ID as its first parameter
+- The CLI will automatically apply the parameter using `aiken blueprint apply`
 
-Example custom recipient structure:
+There are two parameterization patterns for recipients:
+
+**Pattern 1: Verified message pattern** (recommended for generic recipients like greeting):
+
+The contract is parameterized by `verified_message_nft_policy`. The mailbox creates a verified message NFT when processing inbound messages, and the recipient verifies its presence.
 
 ```aiken
-validator my_recipient(mailbox_policy_id: PolicyId) {
+validator my_recipient(verified_message_nft_policy: PolicyId) {
   spend(datum, redeemer, own_ref, tx) {
-    // Verify mailbox is calling by checking for mailbox NFT in inputs
+    // Verify that a verified message NFT is present in the transaction
+    expect has_verified_message_nft(tx, verified_message_nft_policy)
+    // Your custom logic here
+    True
+  }
+}
+```
+
+**Pattern 2: Co-spending pattern** (used by warp routes):
+
+The contract is parameterized by `mailbox_policy_id` and `processed_messages_nft_policy`, and co-spends with the mailbox directly.
+
+```aiken
+validator my_warp_recipient(mailbox_policy_id: PolicyId, processed_messages_nft_policy: PolicyId) {
+  spend(datum, redeemer, own_ref, tx) {
+    // Verify mailbox is co-spending by checking for mailbox NFT in inputs
     expect mailbox_is_caller(tx, mailbox_policy_id)
     // Your custom logic here
     True
@@ -1438,7 +1469,7 @@ validator my_validator(some_policy_id: PolicyId) {
 3. **Deploy**: The parameterized script is deployed as a reference script or used directly
 
 ```bash
-# Example: Apply mailbox_policy_id to the greeting validator
+# Example: Apply verified_message_nft_policy to the greeting validator
 aiken blueprint apply \
   -v greeting.greeting \
   -o greeting_applied.plutus \
@@ -1480,39 +1511,39 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
            │ Used as parameter for:
            │
            ▼
-┌─────────────────────────────┐
-│  processed_message_nft      │
-│  (mint)                     │
-│                             │
-│  Parameter: mailbox_policy  │
-│                             │
-│  Used for: Replay protection│
-│  (one NFT per message_id)   │
-└──────────┬──────────────────┘
-           │
-           │ processed_message_nft_policy
-           │
-           ▼
-┌─────────────────────────────┐
-│  mailbox (spend)            │
-│                             │
-│  Parameter:                 │
-│  processed_messages_nft_    │
-│  policy                     │
-└─────────────────────────────┘
-
-           │
-           │ mailbox_policy_id
-           │
-           ▼
-┌─────────────────────────────┐
-│  greeting (spend)           │
-│                             │
-│  Parameter: mailbox_policy  │
-│                             │
-│  Example recipient that     │
-│  stores greeting messages   │
-└─────────────────────────────┘
+┌─────────────────────────────┐    ┌─────────────────────────────┐
+│  processed_message_nft      │    │  verified_message_nft       │
+│  (mint)                     │    │  (mint)                     │
+│                             │    │                             │
+│  Parameter: mailbox_policy  │    │  Parameter: mailbox_policy  │
+│                             │    │                             │
+│  Used for: Replay protection│    │  Used for: Verified message │
+│  (one NFT per message_id)   │    │  tokens for recipients      │
+└──────────┬──────────────────┘    └──────────┬──────────────────┘
+           │                                  │
+           │ processed_messages_nft_policy     │ verified_message_nft_policy
+           │                                  │
+           ▼                                  │
+┌─────────────────────────────┐               │
+│  mailbox (spend)            │               │
+│                             │               │
+│  Parameters:                │               │
+│  processed_messages_nft_    │               │
+│  policy,                    │               │
+│  verified_message_nft_      │               │
+│  policy                     │               │
+└─────────────────────────────┘               │
+                                              │
+                                              ▼
+                               ┌─────────────────────────────┐
+                               │  greeting (spend)           │
+                               │                             │
+                               │  Parameter:                 │
+                               │  verified_message_nft_policy│
+                               │                             │
+                               │  Example recipient that     │
+                               │  stores greeting messages   │
+                               └─────────────────────────────┘
 ```
 
 ### Script Parameterization Table
@@ -1520,12 +1551,12 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
 | Script                       | Type  | Parameter(s)                                                  | Parameter Source                                     | Purpose                                    |
 | ---------------------------- | ----- | ------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------ |
 | `state_nft`                  | Mint  | `utxo_ref: OutputReference`                                   | Any unspent UTXO                                     | One-shot minting, ensures unique NFT       |
-| `mailbox`                    | Spend | `processed_messages_nft_policy: PolicyId`                     | Derived from `processed_message_nft`                 | Replay protection via NFT minting          |
+| `mailbox`                    | Spend | `processed_messages_nft_policy: PolicyId, verified_message_nft_policy: PolicyId` | Derived from `processed_message_nft` and `verified_message_nft` | Replay protection + verified message minting |
 | `multisig_ism`               | Spend | (none)                                                        | -                                                    | No parameters needed                       |
 | `processed_message_nft`      | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can trigger minting   |
-| `stored_message_nft`         | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint message NFTs |
-| `greeting`                   | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Example recipient, stores greetings        |
-| `warp_route`                 | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Verifies mailbox is calling                |
+| `verified_message_nft`       | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint verified message NFTs |
+| `greeting`                   | Spend | `verified_message_nft_policy: PolicyId`                       | Derived from `verified_message_nft`                  | Example recipient, verifies message NFT    |
+| `warp_route`                 | Spend | `mailbox_policy_id: PolicyId, processed_messages_nft_policy: PolicyId` | `state_nft` policy for mailbox + `processed_message_nft` | Co-spends with mailbox                     |
 
 ### Why Stable vs Changing Parameters Matter
 
@@ -1593,7 +1624,7 @@ Step 6: Initialize other core contracts (ISM)
         └─ Each gets its own state_nft policy
 
 Step 7: Deploy recipients (optional)
-        └─ Apply mailbox_policy_id → greeting_applied.plutus
+        └─ Apply verified_message_nft_policy → greeting_applied.plutus
 ```
 
 ### CLI Automation
@@ -1676,9 +1707,7 @@ cd cardano
 - Mailbox, ISM, IGP, VA policy IDs and script hashes
 - Reference script UTXOs
 - Processed messages NFT policy + script CBOR
-- Stored message NFT policy + script CBOR
-- Message redemption script hash
-- Token redemption script hash
+- Verified message NFT policy + script CBOR
 - Warp route reference script UTXO
 
 Use `--dry-run` to preview without writing changes.
@@ -1876,7 +1905,7 @@ To announce with the correct format:
 
 ### Example Complete Relayer Config for Cardano
 
-> **Tip**: Use `config update-relayer` to generate this automatically. The command derives all parameterized values (processed messages NFT, stored message NFT, message redemption) from the Plutus blueprint.
+> **Tip**: Use `config update-relayer` to generate this automatically. The command derives all parameterized values (processed messages NFT, verified message NFT) from the Plutus blueprint.
 
 ```json
 {
@@ -1903,10 +1932,8 @@ To announce with the correct format:
         "ismReferenceScriptUtxo": "<tx_hash>#0",
         "igpPolicyId": "<igp_state_nft_policy_id>",
         "validatorAnnouncePolicyId": "<va_state_nft_policy_id>",
-        "storedMessageNftPolicyId": "<stored_msg_nft_policy_id>",
-        "storedMessageNftScriptCbor": "<cbor_hex_from_applied_script>",
-        "messageRedemptionScriptHash": "<message_redemption_hash>",
-        "redemptionScriptHash": "<token_redemption_hash>",
+        "verifiedMessageNftPolicyId": "<verified_msg_nft_policy_id>",
+        "verifiedMessageNftScriptCbor": "<cbor_hex_from_applied_script>",
         "warpRouteReferenceScriptUtxo": "<tx_hash>#1"
       },
       "index": {

@@ -27,7 +27,7 @@ Create a new validator in `contracts/validators/`. Recipients must follow this p
 ```aiken
 use types.{
   Domain, HyperlaneAddress, HyperlaneRecipientDatum, HyperlaneRecipientRedeemer,
-  ScriptHash, HandleMessage, ContractAction,
+  PolicyId, HandleMessage, ContractAction,
 }
 
 /// Your contract-specific state
@@ -36,8 +36,8 @@ pub type MyRecipientInner {
   counter: Int,
 }
 
-/// Recipient validator - MUST be parameterized by mailbox_hash
-validator my_recipient(mailbox_hash: ScriptHash) {
+/// Recipient validator - MUST be parameterized by verified_message_nft_policy
+validator my_recipient(verified_message_nft_policy: PolicyId) {
   spend(
     datum: Option<HyperlaneRecipientDatum<MyRecipientInner>>,
     redeemer: HyperlaneRecipientRedeemer<Void>,
@@ -47,9 +47,10 @@ validator my_recipient(mailbox_hash: ScriptHash) {
     expect Some(recipient_datum) = datum
 
     when redeemer is {
-      HandleMessage { origin, sender, body } ->
+      HandleMessage { message, message_id } ->
         // Handle incoming Hyperlane message
-        handle_message(recipient_datum, origin, sender, body, tx, own_ref, mailbox_hash)
+        // Verify that a verified_message_nft is burned in this TX
+        handle_message(recipient_datum, message, message_id, tx, own_ref, verified_message_nft_policy)
 
       ContractAction { action } ->
         // Handle contract-specific actions
@@ -67,8 +68,8 @@ Key requirements:
 
 - Use `HyperlaneRecipientDatum<YourInner>` wrapper for state
 - Use `HyperlaneRecipientRedeemer<YourActions>` for redeemers
-- Parameterize by `mailbox_hash` to verify caller
-- Verify mailbox is spending its UTXO when handling messages
+- Parameterize by `verified_message_nft_policy` to verify message authenticity
+- Verify a `verified_message_nft` is burned when handling messages (the mailbox mints this NFT at the recipient's script address during `Process`, and the recipient burns it during message handling)
 
 ### 1.2 Compile the Contract
 
@@ -81,11 +82,11 @@ This generates `plutus.json` with unparameterized validators.
 
 ### 1.3 Apply Parameters
 
-The recipient validator requires the mailbox script hash as a parameter. You also need a state NFT minting policy parameterized by a UTXO.
+The recipient validator requires the `verified_message_nft_policy` as a parameter. This is the policy ID of the verified message NFT that the mailbox mints during `Process`. You also need a state NFT minting policy parameterized by a UTXO.
 
 ```bash
-# Get the mailbox script hash
-MAILBOX_HASH=$(cat ../deployments/preview/mailbox.hash)
+# Get the verified message NFT policy ID
+VERIFIED_MESSAGE_NFT_POLICY=$(cat ../deployments/preview/verified_message_nft.policy)
 
 # Choose a UTXO to consume for the state NFT (ensures uniqueness)
 # This UTXO will be spent in the init transaction
@@ -96,9 +97,9 @@ aiken blueprint apply -v state_nft.mint \
   --arg "$(echo "{\"constructor\":0,\"fields\":[{\"bytes\":\"$(echo $UTXO | cut -d'#' -f1)\"},{\"int\":$(echo $UTXO | cut -d'#' -f2)}]}")" \
   -o ../deployments/preview/recipient_state_nft.plutus
 
-# Apply generic_recipient parameter (mailbox hash)
+# Apply generic_recipient parameter (verified message NFT policy)
 aiken blueprint apply -v generic_recipient.spend \
-  --arg "{\"bytes\":\"$MAILBOX_HASH\"}" \
+  --arg "{\"bytes\":\"$VERIFIED_MESSAGE_NFT_POLICY\"}" \
   -o ../deployments/preview/generic_recipient.plutus
 ```
 
@@ -116,7 +117,7 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --signing-key path/to/payment.skey \
   --network preview \
   init recipient \
-  --mailbox-hash $(cat deployments/preview/mailbox.hash)
+  --verified-message-nft-policy $(cat deployments/preview/verified_message_nft.policy)
 
 # Or with pre-applied scripts (if aiken isn't available)
 BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
@@ -222,22 +223,26 @@ Remote chains must enroll this address as the Cardano recipient. For example, on
 
 ## Recipient Types
 
-| Type            | Description               | Use Case                   |
-| --------------- | ------------------------- | -------------------------- |
-| `Generic`       | Simple state update       | Message logging, counters  |
-| `TokenReceiver` | Mints/releases tokens     | Warp routes, token bridges |
-| `Deferred`      | Stores messages for later | Complex DeFi interactions  |
+| Type                          | Description                                                                 | Use Case                   |
+| ----------------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| `Generic (Verified Message)`  | Receives verified message NFT from mailbox, processes in separate TX        | Message logging, counters, DeFi interactions |
+| `TokenReceiver`               | Mints/releases tokens                                                       | Warp routes, token bridges |
 
-## 5. Deploying a Deferred Recipient
+## 5. Deploying a Generic Recipient (Verified Message Pattern)
 
-Deferred recipients require additional components compared to generic recipients. The relayer stores messages on-chain with NFT markers, and they are processed separately later.
+Generic recipients on Cardano use a two-step message delivery pattern:
+
+1. **Mailbox Process**: The mailbox creates a `verified_message_nft` UTXO at the recipient's script address during the `Process` transaction.
+2. **Message Receive**: A separate transaction spends the verified message NFT UTXO, burns the NFT, and delivers the message to the recipient contract.
+
+This is the standard pattern for all generic (non-warp-route) recipients.
 
 ### 5.1 Components Required
 
-A deferred recipient deployment requires:
+A generic recipient deployment requires:
 
-1. **Deferred Recipient Validator** - Parameterized by mailbox hash and message NFT policy
-2. **Message NFT Minting Policy** - Parameterized by mailbox policy (for security)
+1. **Recipient Validator** - Parameterized by `verified_message_nft_policy`
+2. **Verified Message NFT Minting Policy** - Parameterized by mailbox policy (for security)
 3. **State NFT Minting Policy** - Standard one-shot policy for state UTXO identification
 
 ### 5.2 Build the Contracts
@@ -249,27 +254,26 @@ aiken build
 
 The `plutus.json` will contain:
 
-- `example_deferred_recipient.spend` - The deferred recipient validator
-- `stored_message_nft.mint` - Message NFT policy (for message storage)
+- `generic_recipient.spend` (or your custom recipient) - The recipient validator
+- `verified_message_nft.mint` - Verified message NFT policy (minted by mailbox, burned by recipient)
 - `state_nft.mint` - State NFT policy
 
 ### 5.3 Apply Parameters
 
-Deferred recipients require multiple parameterized scripts:
+Generic recipients require multiple parameterized scripts:
 
 ```bash
 # Environment setup
-export MAILBOX_HASH=$(cat ../deployments/preview/mailbox.hash)
 export MAILBOX_POLICY=$(cat ../deployments/preview/mailbox_nft.policy)
 
-# 1. Apply message NFT policy parameter (mailbox policy ID)
-aiken blueprint apply -v stored_message_nft.mint \
+# 1. Apply verified message NFT policy parameter (mailbox policy ID)
+aiken blueprint apply -v verified_message_nft.mint \
   --arg "{\"bytes\":\"$MAILBOX_POLICY\"}" \
-  -o ../deployments/preview/message_nft.plutus
+  -o ../deployments/preview/verified_message_nft.plutus
 
-# Get the message NFT policy ID
-MESSAGE_NFT_POLICY=$(cardano-cli hash script \
-  --script-file ../deployments/preview/message_nft.plutus)
+# Get the verified message NFT policy ID
+VERIFIED_MESSAGE_NFT_POLICY=$(cardano-cli hash script \
+  --script-file ../deployments/preview/verified_message_nft.plutus)
 
 # 2. Choose a UTXO for state NFT uniqueness
 UTXO="your_tx_hash#output_index"
@@ -277,26 +281,23 @@ UTXO="your_tx_hash#output_index"
 # Apply state_nft parameter
 aiken blueprint apply -v state_nft.mint \
   --arg "$(echo "{\"constructor\":0,\"fields\":[{\"bytes\":\"$(echo $UTXO | cut -d'#' -f1)\"},{\"int\":$(echo $UTXO | cut -d'#' -f2)}]}")" \
-  -o ../deployments/preview/deferred_state_nft.plutus
+  -o ../deployments/preview/recipient_state_nft.plutus
 
-# 3. Apply deferred recipient parameters (mailbox hash + message NFT policy)
-aiken blueprint apply -v example_deferred_recipient.spend \
-  --arg "{\"bytes\":\"$MAILBOX_HASH\"}" \
-  --arg "{\"bytes\":\"$MESSAGE_NFT_POLICY\"}" \
-  -o ../deployments/preview/deferred_recipient.plutus
+# 3. Apply recipient parameter (verified message NFT policy)
+aiken blueprint apply -v generic_recipient.spend \
+  --arg "{\"bytes\":\"$VERIFIED_MESSAGE_NFT_POLICY\"}" \
+  -o ../deployments/preview/generic_recipient.plutus
 ```
 
-### 5.4 Initialize the Deferred Recipient
+### 5.4 Initialize the Recipient
 
 ```bash
-# Deploy deferred recipient (mints state NFT, creates state UTXO, deploys reference scripts)
+# Deploy recipient (mints state NFT, creates state UTXO, deploys reference scripts)
 BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --signing-key path/to/payment.skey \
   --network preview \
   init recipient \
-  --recipient-type deferred \
-  --mailbox-hash $MAILBOX_HASH \
-  --message-nft-policy $MESSAGE_NFT_POLICY
+  --verified-message-nft-policy $VERIFIED_MESSAGE_NFT_POLICY
 ```
 
 Or with pre-applied scripts:
@@ -306,45 +307,44 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --signing-key path/to/payment.skey \
   --network preview \
   init recipient \
-  --nft-script deployments/preview/deferred_state_nft.plutus \
-  --recipient-script deployments/preview/deferred_recipient.plutus \
-  --recipient-type deferred \
-  --message-nft-policy $MESSAGE_NFT_POLICY
+  --nft-script deployments/preview/recipient_state_nft.plutus \
+  --recipient-script deployments/preview/generic_recipient.plutus \
+  --verified-message-nft-policy $VERIFIED_MESSAGE_NFT_POLICY
 ```
 
 **Output:**
 
 ```
-Deferred Recipient Deployment:
+Generic Recipient Deployment:
   Recipient Script Hash: 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc
   Recipient Address: addr_test1wz...
   State NFT Policy: f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
-  Message NFT Policy: abc123...
+  Verified Message NFT Policy: abc123...
   Init TX Hash: 3081333c4d7becb16186fb9dfb29af70c4a309bdc0a53436b9ed8e6d01793994
 
 Reference Scripts:
   Recipient Ref Script: 3081333c4d7becb16186fb9dfb29af70c4a309bdc0a53436b9ed8e6d01793994#1
-  Message NFT Ref Script: 3081333c4d7becb16186fb9dfb29af70c4a309bdc0a53436b9ed8e6d01793994#2
+  Verified Message NFT Ref Script: 3081333c4d7becb16186fb9dfb29af70c4a309bdc0a53436b9ed8e6d01793994#2
 ```
 
-### 5.5 Deploy Message NFT Reference Script
+### 5.5 Deploy Verified Message NFT Reference Script
 
-For gas efficiency, deploy the message NFT policy as a reference script:
+For gas efficiency, deploy the verified message NFT policy as a reference script:
 
 ```bash
 BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --signing-key path/to/payment.skey \
   --network preview \
   deploy reference-script \
-  --script deployments/preview/message_nft.plutus \
-  --name "message_nft"
+  --script deployments/preview/verified_message_nft.plutus \
+  --name "verified_message_nft"
 ```
 
-### 5.6 Enrolling the Deferred Recipient
+### 5.6 Enrolling the Recipient
 
-No on-chain registration is needed. The deferred recipient's Hyperlane address is `0x01000000{state_nft_policy_id}`, the same as any other recipient. Remote chains should enroll this address.
+No on-chain registration is needed. The recipient's Hyperlane address is `0x01000000{state_nft_policy_id}`, the same as any other recipient. Remote chains should enroll this address.
 
-**Note:** The Deferred pattern exists in the on-chain contracts but is not currently integrated with the relayer's recipient resolver.
+The relayer automatically discovers generic recipients and creates verified message NFT UTXOs at the recipient's script address during the `Process` step.
 
 ### 5.7 Verify Deployment
 
@@ -354,45 +354,46 @@ No on-chain registration is needed. The deferred recipient's Hyperlane address i
   --policy f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
 ```
 
-## 6. Operating a Deferred Recipient
+## 6. Operating a Generic Recipient
 
-Once deployed, you need to process the stored messages. This can be done manually, via an automated service, through a dApp, or any other mechanism.
+Once deployed, you need to process verified messages delivered by the mailbox. The mailbox creates `verified_message_nft` UTXOs at the recipient's script address during `Process`. These contain a `VerifiedMessageDatum` with the message data. A separate `message receive` transaction delivers each message to the recipient contract by spending the verified message NFT UTXO and burning the NFT.
+
+This can be done manually, via an automated service, through a dApp, or any other mechanism.
 
 ### 6.1 Monitor for Pending Messages
 
 ```bash
 # Using the CLI
-hyperlane-cardano deferred list \
-  --recipient-address addr_test1wz... \
-  --message-nft-policy abc123...
+hyperlane-cardano message list \
+  --recipient-address addr_test1wz...
 ```
 
 ### 6.2 View Message Details
 
 ```bash
-hyperlane-cardano deferred show \
+hyperlane-cardano message show \
   --message-utxo "txhash#0"
 ```
 
-### 6.3 Process Messages
+### 6.3 Process Messages (Message Receive)
 
-For the example_deferred_recipient (simple counter pattern):
+For a generic recipient (e.g., the greeting contract):
 
 ```bash
 # Dry run first
-hyperlane-cardano deferred process \
+hyperlane-cardano message receive \
   --message-utxo "message_tx_hash#0" \
   --recipient-state-policy f2e541ac... \
-  --message-nft-policy abc123... \
+  --verified-message-nft-policy abc123... \
   --recipient-ref-script "ref_script_tx#1" \
   --nft-ref-script "nft_ref_script_tx#2" \
   --dry-run
 
 # Submit if dry run looks good
-hyperlane-cardano deferred process \
+hyperlane-cardano message receive \
   --message-utxo "message_tx_hash#0" \
   --recipient-state-policy f2e541ac... \
-  --message-nft-policy abc123... \
+  --verified-message-nft-policy abc123... \
   --recipient-ref-script "ref_script_tx#1" \
   --nft-ref-script "nft_ref_script_tx#2"
 ```
@@ -403,27 +404,26 @@ For production, you can set up automated processing with a cron job or daemon:
 
 ```bash
 #!/bin/bash
-# process_deferred_messages.sh
+# process_verified_messages.sh
 
 RECIPIENT_ADDRESS="addr_test1wz..."
 STATE_POLICY="f2e541ac..."
-MESSAGE_POLICY="abc123..."
+VERIFIED_MESSAGE_POLICY="abc123..."
 RECIPIENT_REF="ref_tx#1"
 NFT_REF="nft_tx#2"
 
 # List pending messages (JSON format)
-MESSAGES=$(hyperlane-cardano deferred list \
+MESSAGES=$(hyperlane-cardano message list \
   --recipient-address $RECIPIENT_ADDRESS \
-  --message-nft-policy $MESSAGE_POLICY \
   --format json)
 
 # Process each message
 echo "$MESSAGES" | jq -r '.[].utxo' | while read UTXO; do
   echo "Processing: $UTXO"
-  hyperlane-cardano deferred process \
+  hyperlane-cardano message receive \
     --message-utxo "$UTXO" \
     --recipient-state-policy $STATE_POLICY \
-    --message-nft-policy $MESSAGE_POLICY \
+    --verified-message-nft-policy $VERIFIED_MESSAGE_POLICY \
     --recipient-ref-script "$RECIPIENT_REF" \
     --nft-ref-script "$NFT_REF"
 
@@ -436,7 +436,7 @@ Run with cron:
 
 ```bash
 # Process every 5 minutes
-*/5 * * * * /path/to/process_deferred_messages.sh >> /var/log/deferred_processor.log 2>&1
+*/5 * * * * /path/to/process_verified_messages.sh >> /var/log/message_processor.log 2>&1
 ```
 
 ## Example: Full Deployment Flow
@@ -457,7 +457,7 @@ cd contracts && aiken build && cd ..
   --signing-key $SIGNING_KEY \
   --network $NETWORK \
   init recipient \
-  --mailbox-hash $(cat deployments/$NETWORK/mailbox.hash)
+  --verified-message-nft-policy $(cat deployments/$NETWORK/verified_message_nft.policy)
 
 # Note the output:
 # Recipient Script Hash: 931e71c75bd0ac35ff9024b3c2a578e006bf3abca509c11734f7f9bc
