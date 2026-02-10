@@ -1,7 +1,14 @@
+use aiken/collection/dict
 use aiken/collection/list
+use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
+use cardano/assets
+use cardano/address.{Address}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
-use types.{PolicyId}
+use types.{
+  Message, PolicyId,
+  encode_message,
+}
 use utils.{find_input}
 
 pub type GreetingDatum {
@@ -10,34 +17,95 @@ pub type GreetingDatum {
 }
 
 pub type GreetingRedeemer {
-  HandleMessage { body: ByteArray }
+  /// Handle a verified message delivered by the mailbox to this script address.
+  /// Burns the verified_message_nft and updates the greeting state.
+  HandleMessage {
+    message: Message,
+    message_id: ByteArray,
+  }
 }
 
-validator greeting(_mailbox_policy_id: PolicyId) {
+validator greeting(verified_message_nft_policy: PolicyId) {
   spend(
     datum: Option<GreetingDatum>,
     redeemer: GreetingRedeemer,
     own_ref: OutputReference,
     tx: Transaction,
   ) {
-    expect Some(old_datum) = datum
     expect Some(own_input) = find_input(tx, own_ref)
 
-    let HandleMessage { body } = redeemer
-    let greeting = bytearray.concat("Hello, ", body)
+    let HandleMessage { message, message_id } = redeemer
 
-    let own_addr = own_input.output.address
+    // Determine if this is a state UTXO or a message UTXO based on the datum type
+    when datum is {
+      Some(old_datum) -> {
+        // State UTXO: update the greeting
+        let greeting = bytearray.concat("Hello, ", message.body)
+        let own_addr = own_input.output.address
 
-    expect Some(continuation) =
-      list.find(tx.outputs, fn(output) { output.address == own_addr })
+        expect Some(continuation) =
+          list.find(tx.outputs, fn(output) { output.address == own_addr })
 
-    expect InlineDatum(raw_datum) = continuation.datum
-    expect new_datum: GreetingDatum = raw_datum
+        expect InlineDatum(raw_datum) = continuation.datum
+        expect new_datum: GreetingDatum = raw_datum
 
-    new_datum.last_greeting == greeting && new_datum.greeting_count == old_datum.greeting_count + 1
+        // Verify the message authenticity: keccak256(encode_message(message)) == message_id
+        expect keccak_256(encode_message(message)) == message_id
+
+        // Verify the verified_message_nft is being burned (proves message was ISM-validated)
+        expect verified_nft_burned(tx, verified_message_nft_policy, message_id)
+
+        // Verify a message UTXO at our address is being spent (contains the NFT)
+        expect message_utxo_spent(tx, own_addr, verified_message_nft_policy, message_id, own_ref)
+
+        new_datum.last_greeting == greeting && new_datum.greeting_count == old_datum.greeting_count + 1
+      }
+      None ->
+        // Message UTXO (no GreetingDatum): allow spending if the NFT is burned
+        // The state UTXO spending logic above ensures correctness
+        verified_nft_burned(tx, verified_message_nft_policy, message_id)
+    }
   }
 
   else(_) {
     fail
   }
+}
+
+/// Check that the verified_message_nft with this message_id is being burned
+fn verified_nft_burned(
+  tx: Transaction,
+  nft_policy: PolicyId,
+  message_id: ByteArray,
+) -> Bool {
+  let nft_mints = assets.tokens(tx.mint, nft_policy)
+  when dict.get(nft_mints, message_id) is {
+    Some(quantity) -> quantity < 0
+    None -> False
+  }
+}
+
+/// Check that a message UTXO at our address with the verified_message_nft is being spent
+fn message_utxo_spent(
+  tx: Transaction,
+  own_addr: Address,
+  nft_policy: PolicyId,
+  message_id: ByteArray,
+  state_ref: OutputReference,
+) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) {
+      // Skip the state UTXO itself
+      if input.output_reference == state_ref {
+        False
+      } else {
+        input.output.address == own_addr && assets.quantity_of(
+          input.output.value,
+          nft_policy,
+          message_id,
+        ) == 1
+      }
+    },
+  )
 }
