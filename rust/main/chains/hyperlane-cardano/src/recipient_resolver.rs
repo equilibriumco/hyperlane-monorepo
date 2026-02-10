@@ -1,5 +1,5 @@
 use crate::blockfrost_provider::{BlockfrostProvider, BlockfrostProviderError, Utxo};
-use crate::types::{hyperlane_address_to_policy_id, ScriptHash};
+use crate::types::{hyperlane_address_to_policy_id, hyperlane_address_to_script_hash, ScriptHash};
 use pallas_codec::minicbor;
 use pallas_primitives::conway::PlutusData;
 use thiserror::Error;
@@ -63,9 +63,28 @@ impl RecipientResolver {
 
     #[instrument(skip(self))]
     pub async fn resolve(&self, recipient: &[u8; 32]) -> Result<ResolvedRecipient, ResolverError> {
+        // 0x02 prefix = script-hash addressing (generic recipients)
+        if let Some(script_hash) = hyperlane_address_to_script_hash(recipient) {
+            // Only treat as script-hash if prefix is actually 0x02
+            if recipient[0] == 0x02 {
+                info!(
+                    "Resolving script-hash recipient: {}",
+                    hex::encode(script_hash)
+                );
+                return Ok(ResolvedRecipient {
+                    state_utxo: None,
+                    script_hash,
+                    recipient_kind: RecipientKind::GenericRecipient,
+                    ism: None,
+                    recipient_policy: [0u8; 28], // not used for generic recipients
+                });
+            }
+        }
+
+        // 0x01 prefix = NFT policy addressing (warp routes)
         let policy_id = hyperlane_address_to_policy_id(recipient).ok_or_else(|| {
             ResolverError::InvalidRecipient(format!(
-                "Not a policy ID address (expected 0x01 prefix): {}",
+                "Unsupported address format (expected 0x01 or 0x02 prefix): {}",
                 hex::encode(recipient)
             ))
         })?;
