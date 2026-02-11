@@ -634,8 +634,8 @@ flowchart TB
     end
 
     MB -->|"verifies"| ISM
-    MB -->|"invokes"| GEN
-    MB -->|"invokes"| WR
+    MB -->|"delivers NFT to"| GEN
+    MB -->|"co-spends"| WR
 
     WR -->|"uses"| VAULT
     WR -->|"mints/burns"| SYNTH
@@ -648,7 +648,7 @@ flowchart TB
     STATE -.->|"identifies"| WR
 ```
 
-The relayer resolves recipients via O(1) NFT queries using the state NFT policy as Hyperlane address. No registry contract is needed.
+The relayer resolves warp routes (`0x01`) via O(1) NFT queries using the state NFT policy. Generic recipients (`0x02`) are resolved by script hash address. No registry contract is needed.
 
 ### Recipient Types
 
@@ -828,8 +828,8 @@ For most initial deployments, this limitation is acceptable.
 
 Cardano uses 28-byte identifiers (script hashes and policy IDs) that must be padded to 32 bytes for Hyperlane compatibility. Two prefix types distinguish the identifier kind:
 
-- `0x01000000` -- NFT minting policy ID (used by warp routes and new recipients)
-- `0x02000000` -- Script hash credential (used by mailbox, ISM)
+- `0x01000000` -- NFT minting policy ID (used by warp routes)
+- `0x02000000` -- Script hash credential (used by generic recipients, mailbox, ISM)
 
 ```
 Cardano Script Hash:        0x1234567890abcdef... (28 bytes)
@@ -840,10 +840,15 @@ Hyperlane Address (script): 0x020000001234567890abcdef... (32 bytes)
 State NFT Policy ID:        0xabcdef1234567890... (28 bytes)
 Hyperlane Address (NFT):    0x01000000abcdef1234567890... (32 bytes)
                               ^^^^^^^^
-                              Prefix: 0x01000000 = NFT policy (warp routes)
+                              Prefix: 0x01000000 = NFT policy (warp routes only)
+
+Generic Recipient Hash:     0x7fb8e3ae915c4c37... (28 bytes)
+Hyperlane Address (script): 0x020000007fb8e3ae915c4c37... (32 bytes)
+                              ^^^^^^^^
+                              Prefix: 0x02000000 = Script credential (generic recipients, mailbox, ISM)
 ```
 
-Warp routes and other recipients that use state NFTs are identified by their NFT policy ID with the `0x01000000` prefix. Core protocol contracts (mailbox, ISM) use the script hash with the `0x02000000` prefix.
+Warp routes are identified by their NFT policy ID with the `0x01000000` prefix. Generic recipients (e.g., greeting) and core protocol contracts (mailbox, ISM) use the script hash with the `0x02000000` prefix.
 
 ### Domain IDs
 

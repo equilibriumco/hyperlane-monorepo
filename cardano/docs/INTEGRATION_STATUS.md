@@ -258,18 +258,21 @@ The previous registry-based architecture has been replaced with direct NFT polic
 
 ### How It Works
 
-- Recipients are identified by their state NFT policy ID
-- Hyperlane address format: `0x01000000{nft_policy_id}` for NFT-based addresses
-- Core contracts use: `0x02000000{script_hash}` for script-based addresses
-- The relayer's `RecipientResolver` performs O(1) lookups via Blockfrost NFT queries
-- No registry contract or registration transactions needed
+Two address prefixes distinguish recipient types:
+
+- **`0x01000000{nft_policy_id}`** — Warp routes (TokenReceiver). Identified by state NFT policy. The relayer discovers them via O(1) NFT queries. Spent in the same TX as the mailbox.
+- **`0x02000000{script_hash}`** — Generic recipients (e.g., greeting) and core contracts (mailbox, ISM). The relayer queries UTXOs at the script address. Generic recipients use two-phase verified message delivery.
+
+The mailbox's `verified_message_nft` minting/delivery is **conditional on the prefix**: only `0x02` recipients get verified message NFTs. Warp routes (`0x01`) validate independently by checking the mailbox is co-spending.
+
+No registry contract or registration transactions needed.
 
 ### Benefits
 
-- O(1) recipient discovery (query NFT by policy)
+- O(1) recipient discovery (query NFT by policy for warp routes, query by address for generic recipients)
 - No registry contract to deploy or maintain
 - No registration transactions needed
-- Simpler deployment flow
+- Conditional verified_message_nft avoids unnecessary minting for warp routes
 
 ---
 

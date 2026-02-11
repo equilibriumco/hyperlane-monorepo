@@ -9,7 +9,7 @@
 
 ## Objective
 
-Use the state NFT policy ID as the canonical Hyperlane address for all Cardano recipients, replacing script hash-based addressing. This provides O(1) lookups, removes the registry contract entirely, and aligns with Cardano's NFT-based identity patterns.
+Replace registry-based recipient lookups with direct addressing. Warp routes use their state NFT policy ID (`0x01` prefix) for O(1) lookups. Generic recipients use their script hash (`0x02` prefix). Removes the registry contract entirely.
 
 ## Background
 
@@ -32,11 +32,19 @@ Cardano recipients used their **script hash** as their Hyperlane address:
 
 ### Addressing Scheme
 
-**Hyperlane address = `0x01000000 || state_nft_policy_id`** (32 bytes total)
+Two address formats coexist, depending on recipient type:
 
-- `0x01` prefix byte distinguishes Cardano addresses from EVM (which use `0x000...` padding)
-- 3 zero-padded bytes follow the prefix
-- 28-byte state NFT policy ID (the natural unique identifier for each deployment)
+**Warp routes (TokenReceiver):** `0x01000000 || state_nft_policy_id` (32 bytes)
+- `0x01` prefix = NFT-policy addressing
+- Warp routes are spent in the same TX as the mailbox
+- No verified_message_nft needed (they validate by checking mailbox co-spending)
+
+**Generic recipients (e.g., greeting):** `0x02000000 || script_hash` (32 bytes)
+- `0x02` prefix = script-hash addressing
+- Two-phase delivery: mailbox creates verified_message_nft UTXO at recipient script address
+- Recipient processes message in separate TX, burning the NFT
+
+The mailbox conditionally mints/delivers `verified_message_nft` only for `0x02` recipients.
 
 ### Registry Removal
 
@@ -49,10 +57,10 @@ The resolver detects **recipient kind from the datum structure**:
 
 ### Warp Route Parameter Simplification
 
-Warp route validators went from 4 parameters to 3:
+Warp route validators went from 4 parameters to 2:
 
 ```aiken
-// BEFORE
+// BEFORE (original)
 validator warp_route(
   mailbox_policy_id: PolicyId,
   _state_nft_policy_id: PolicyId,
@@ -60,13 +68,14 @@ validator warp_route(
   redemption_script: ScriptHash,
 )
 
-// AFTER
+// AFTER (current)
 validator warp_route(
   mailbox_policy_id: PolicyId,
   processed_messages_nft_policy: PolicyId,
-  redemption_script: ScriptHash,
 )
 ```
+
+The `_state_nft_policy_id` was removed (unique identity via state NFTs doesn't need it as a parameter). The `redemption_script` was removed (tokens go directly to recipient wallets, no redemption pattern).
 
 All warp routes now share the **same script address**, identified by unique state NFTs.
 
@@ -102,14 +111,17 @@ The deferred recipient type was removed from the relayer. The contracts still ex
 
 ## Definition of Done
 
-- [x] `warp_route.ak` reduced to 3 parameters (`mailbox_policy_id`, `processed_messages_nft_policy`, `redemption_script`)
-- [x] Registry contract removed; relayer uses `RecipientResolver` with O(1) NFT queries
-- [x] Hyperlane address uses `0x01000000 || policy_id` format (32 bytes)
+- [x] `warp_route.ak` reduced to 2 parameters (`mailbox_policy_id`, `processed_messages_nft_policy`)
+- [x] Registry contract removed; relayer uses `RecipientResolver`
+- [x] Warp routes use `0x01000000 || nft_policy_id` format (32 bytes)
+- [x] Generic recipients use `0x02000000 || script_hash` format (32 bytes)
+- [x] Mailbox conditionally mints verified_message_nft only for `0x02` recipients
 - [x] All warp routes share the same script address, differentiated by state NFTs
 - [x] Shared reference script UTXO for all warp routes
 - [x] Custom ISM support via `ism: Option<ScriptHash>` in datum
-- [x] Recipient kind detection from datum structure (WarpRoute vs Generic)
+- [x] Recipient kind detection from address prefix (`0x01` = warp route, `0x02` = generic)
 - [x] CLI updated for new deploy params and address format
+- [x] Greeting contract tested end-to-end (Fuji → Cardano → greeting receive)
 
 ## Relationship to Task 4.4
 

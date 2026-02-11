@@ -198,16 +198,22 @@ No on-chain registration is needed on Cardano. The relayer discovers recipients 
 
 ### 4.1 Determine the Hyperlane Address
 
-Your recipient's Hyperlane address is derived from the state NFT policy ID:
+The addressing scheme depends on the recipient type:
 
+**Warp routes** (TokenReceiver): Use NFT-policy addressing
 ```
 Hyperlane address = 0x01000000{state_nft_policy_id}
 ```
 
-For example, if your state NFT policy is `f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7`, the Hyperlane address is:
+**Generic recipients** (e.g., greeting): Use script-hash addressing
+```
+Hyperlane address = 0x02000000{script_hash}
+```
+
+For example, if your generic recipient script hash is `7fb8e3ae915c4c3759ffa6e98ce31a10024c775f300efb0ede58472c`, the Hyperlane address is:
 
 ```
-0x01000000f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
+0x020000007fb8e3ae915c4c3759ffa6e98ce31a10024c775f300efb0ede58472c
 ```
 
 ### 4.2 Enroll on Remote Chains
@@ -342,7 +348,7 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
 
 ### 5.6 Enrolling the Recipient
 
-No on-chain registration is needed. The recipient's Hyperlane address is `0x01000000{state_nft_policy_id}`, the same as any other recipient. Remote chains should enroll this address.
+No on-chain registration is needed. The recipient's Hyperlane address is `0x02000000{script_hash}` for generic recipients, or `0x01000000{state_nft_policy_id}` for warp routes. Remote chains should enroll the appropriate address.
 
 The relayer automatically discovers generic recipients and creates verified message NFT UTXOs at the recipient's script address during the `Process` step.
 
@@ -464,8 +470,9 @@ cd contracts && aiken build && cd ..
 # State NFT Policy: f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
 
 # 3. Enroll on remote chains
-# The Hyperlane address is: 0x01000000f2e541ac484fc08eb2c0d8240a126d33a38316594a98343c768b0ab7
-# Enroll this address as the Cardano recipient on your remote chain's router contract.
+# For generic recipients: 0x02000000{script_hash}
+# For warp routes: 0x01000000{state_nft_policy_id}
+# Enroll the appropriate address on your remote chain's router contract.
 
 # 4. Verify state UTXO
 ./cli/target/release/hyperlane-cardano --network $NETWORK query utxo \

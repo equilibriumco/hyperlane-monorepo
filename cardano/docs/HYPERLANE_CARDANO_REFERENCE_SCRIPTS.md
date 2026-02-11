@@ -112,14 +112,16 @@ These point to UTXOs that contain the validator code as a reference script. They
 ## Relayer UTXO Discovery Flow
 
 ```
-Message arrives: { recipient: 0x01000000{nft_policy}, body: ... }
+Message arrives: { recipient: 0x01...{nft_policy} or 0x02...{script_hash}, body: ... }
                             │
                             ▼
 ┌─────────────────────────────────────────────────┐
-│ 1. Resolve recipient NFT policy from address    │
+│ 1. Resolve recipient from address prefix        │
 │                                                 │
-│    The recipient address encodes the NFT policy │
-│    used to locate the state UTXO.               │
+│    0x01: Warp route — extract NFT policy,       │
+│          query state UTXO by NFT.               │
+│    0x02: Generic recipient — extract script     │
+│          hash, query UTXOs at script address.   │
 └─────────────────────────────────────────────────┘
                             │
                             ▼
@@ -178,7 +180,7 @@ Message arrives: { recipient: 0x01000000{nft_policy}, body: ... }
 
 The relayer resolves UTXOs for transaction building as follows:
 
-1. **Recipient state UTXO**: Queried via NFT policy extracted from the recipient address (`0x01000000{nft_policy}`). The relayer queries Blockfrost for the UTXO containing that NFT.
+1. **Recipient state UTXO**: For warp routes (`0x01`), queried via NFT policy from the address. For generic recipients (`0x02`), queried via UTXOs at the script hash address.
 
 2. **Reference script UTXOs**: Loaded from the relayer's `ConnectionConf`:
 

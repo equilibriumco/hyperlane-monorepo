@@ -140,12 +140,19 @@ On Cardano, there is no separate registry contract. A recipient's Hyperlane addr
 
 ### How It Works
 
-1. Your recipient deploys with a unique state NFT (minted via a one-shot policy).
-2. The recipient's Hyperlane address is `0x01000000{state_nft_policy_id}` (the policy ID prefixed with `0x01000000`).
-3. The relayer discovers recipients via an O(1) NFT query -- it finds the state UTXO by looking up the NFT policy on-chain.
-4. Remote chains enroll `0x01000000{state_nft_policy_id}` as the Cardano recipient address.
+The addressing scheme depends on the recipient type:
 
-No registration transaction is needed. The act of deploying your contract with a state NFT is sufficient for the relayer to find it.
+**Warp routes** use NFT-policy addressing (`0x01` prefix):
+1. Hyperlane address = `0x01000000{state_nft_policy_id}` (32 bytes)
+2. The relayer discovers warp routes via O(1) NFT query
+3. Warp routes are TokenReceivers — spent in the same TX as the mailbox
+
+**Generic recipients** (e.g., greeting) use script-hash addressing (`0x02` prefix):
+1. Hyperlane address = `0x02000000{script_hash}` (32 bytes)
+2. The relayer discovers recipients by querying UTXOs at the script address
+3. Generic recipients use two-phase verified message delivery
+
+Remote chains enroll the appropriate address format. No registration transaction is needed.
 
 ## Transaction Flow
 

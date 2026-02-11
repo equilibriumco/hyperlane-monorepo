@@ -55,35 +55,35 @@ tasks/
 ## Epic Overview
 
 <details>
-<summary><strong>Epic 1: Bidirectional Messaging</strong> | 🔴 Critical | ⬜ Not Started | 7 tasks</summary>
+<summary><strong>Epic 1: Bidirectional Messaging</strong> | 🔴 Critical | ✅ Complete | 7 tasks</summary>
 
 Enable Cardano → Remote chain messaging
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1.1 | [MerkleTree Hook](./epic-1-bidirectional-messaging/task-1.1-merkletree-hook.md) | ⬜ | Implement merkle tree state retrieval |
-| 1.2 | [Validator Agent](./epic-1-bidirectional-messaging/task-1.2-validator-agent.md) | ⬜ | Add Cardano support to validator |
-| 1.3 | [Checkpoint Syncer](./epic-1-bidirectional-messaging/task-1.3-checkpoint-syncer.md) | ⬜ | Sync checkpoints from Cardano |
-| 1.4 | [Validator Config](./epic-1-bidirectional-messaging/task-1.4-validator-config.md) | ⬜ | Configuration and CLI commands |
-| 1.5 | [Dispatch CLI](./epic-1-bidirectional-messaging/task-1.5-dispatch-cli.md) | ⬜ | CLI command to dispatch messages |
-| 1.6 | [Validator Announce](./epic-1-bidirectional-messaging/task-1.6-validator-announce.md) | ⬜ | Register validators on-chain |
-| 1.7 | [E2E Testing](./epic-1-bidirectional-messaging/task-1.7-e2e-testing.md) | ⬜ | End-to-end and bidirectional tests |
+| 1.1 | [MerkleTree Hook](./epic-1-bidirectional-messaging/task-1.1-merkletree-hook.md) | ✅ | Implement merkle tree state retrieval |
+| 1.2 | [Validator Agent](./epic-1-bidirectional-messaging/task-1.2-validator-agent.md) | ✅ | Add Cardano support to validator |
+| 1.3 | [Checkpoint Syncer](./epic-1-bidirectional-messaging/task-1.3-checkpoint-syncer.md) | ✅ | Sync checkpoints from Cardano |
+| 1.4 | [Validator Config](./epic-1-bidirectional-messaging/task-1.4-validator-config.md) | ✅ | Configuration and CLI commands |
+| 1.5 | [Dispatch CLI](./epic-1-bidirectional-messaging/task-1.5-dispatch-cli.md) | ✅ | CLI command to dispatch messages |
+| 1.6 | [Validator Announce](./epic-1-bidirectional-messaging/task-1.6-validator-announce.md) | ✅ | Register validators on-chain |
+| 1.7 | [E2E Testing](./epic-1-bidirectional-messaging/task-1.7-e2e-testing.md) | ✅ | End-to-end and bidirectional tests |
 
 [View Epic Details](./epic-1-bidirectional-messaging/EPIC.md)
 </details>
 
 <details>
-<summary><strong>Epic 2: Token Bridge</strong> | 🟡 High | ⬜ Not Started | 5 tasks</summary>
+<summary><strong>Epic 2: Token Bridge</strong> | 🟡 High | ✅ Complete | 5 tasks</summary>
 
 Warp routes for cross-chain tokens
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 2.1 | [Fix Minted Amount](./epic-2-token-bridge/task-2.1-fix-minted-amount.md) | ⬜ | Fix placeholder in warp_route.ak |
-| 2.2 | [Collateral Route](./epic-2-token-bridge/task-2.2-collateral-route.md) | ⬜ | Deploy collateral warp route |
-| 2.3 | [Synthetic Route](./epic-2-token-bridge/task-2.3-synthetic-route.md) | ⬜ | Deploy synthetic warp route |
-| 2.4 | [Remote Enrollment](./epic-2-token-bridge/task-2.4-remote-enrollment.md) | ⬜ | Enroll remote routers |
-| 2.5 | [Transfer Testing](./epic-2-token-bridge/task-2.5-transfer-testing.md) | ⬜ | E2E transfer tests |
+| 2.1 | [Fix Minted Amount](./epic-2-token-bridge/task-2.1-fix-minted-amount.md) | ✅ | Fix placeholder in warp_route.ak |
+| 2.2 | [Collateral Route](./epic-2-token-bridge/task-2.2-collateral-route.md) | ✅ | Deploy collateral warp route |
+| 2.3 | [Synthetic Route](./epic-2-token-bridge/task-2.3-synthetic-route.md) | ✅ | Deploy synthetic warp route |
+| 2.4 | [Remote Enrollment](./epic-2-token-bridge/task-2.4-remote-enrollment.md) | ✅ | Enroll remote routers |
+| 2.5 | [Transfer Testing](./epic-2-token-bridge/task-2.5-transfer-testing.md) | ✅ | E2E transfer tests (all 6 directions) |
 
 [View Epic Details](./epic-2-token-bridge/EPIC.md)
 </details>
@@ -106,17 +106,18 @@ IGP for gas payment handling
 </details>
 
 <details>
-<summary><strong>Epic 4: Advanced Features</strong> | 🟡 High | ⬜ Not Started | 5 tasks</summary>
+<summary><strong>Epic 4: Advanced Features</strong> | 🟡 High | 🟡 Partial | 6 tasks</summary>
 
 Performance optimizations, upgradeability, and parallel processing (includes per-recipient ISM)
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 4.1 | [NFT Lookups](./epic-4-advanced-features/task-4.1-nft-lookups.md) | ⬜ | O(1) recipient lookups via NFT |
+| 4.1 | [NFT Lookups](./epic-4-advanced-features/task-4.1-nft-lookups.md) | ✅ | Dual addressing: `0x01` warp routes, `0x02` generic recipients |
 | 4.2 | [Ref Script Cache](./epic-4-advanced-features/task-4.2-ref-script-cache.md) | ⬜ | Cache reference script UTXOs |
 | 4.3 | [Parallel Queries](./epic-4-advanced-features/task-4.3-parallel-queries.md) | ⬜ | Parallelize Blockfrost calls |
-| 4.4 | [NFT-Based Identity](./epic-4-advanced-features/task-4.4-nft-identity.md) | ⬜ | Stable contract identity across upgrades |
+| 4.4 | [NFT-Based Identity](./epic-4-advanced-features/task-4.4-nft-identity.md) | ✅ | Stable contract identity across upgrades |
 | 4.5 | [Parallel Processing](./epic-4-advanced-features/task-4.5-parallel-processing.md) | ⬜ | Reference inputs for scalability (includes per-recipient ISM) |
+| 4.6 | [IGP Refund](./epic-4-advanced-features/task-4.6-igp-refund.md) | ⬜ | IGP refund handling |
 
 [View Epic Details](./epic-4-advanced-features/EPIC.md)
 </details>
@@ -272,18 +273,19 @@ Final audit before mainnet
 ## Quick Reference
 
 ### What's Working Now
-- ✅ Incoming messages (Fuji → Cardano)
-- ✅ ISM signature verification
-- ✅ Recipient invocation
-- ✅ CLI deployment commands
+- ✅ Bidirectional messaging (Fuji ↔ Cardano)
+- ✅ ISM signature verification (ECDSA secp256k1)
+- ✅ Validator agent (checkpoint signing + S3 storage)
+- ✅ Warp routes: Native, Collateral, Synthetic (all 6 directions)
+- ✅ Generic recipients: Greeting contract (Fuji → Cardano → greeting receive)
+- ✅ Dual addressing: `0x01` warp routes, `0x02` generic recipients
+- ✅ CLI deployment, dispatch, warp transfer, greeting commands
 
 ### What's Missing (Priority Order)
-1. **Outgoing messages** (Epic 1) - Cardano → Remote chains
-2. **Token transfers** (Epic 2) - Warp routes
-3. **Gas payments** (Epic 3) - IGP integration
-4. **Advanced features** (Epic 4) - Per-recipient ISM, performance, upgradeability, parallel processing
-5. **Production ops** (Epic 5) - Monitoring, alerting
-6. **Security audit** (Epic 6) - Final gate before mainnet
+1. **Gas payments** (Epic 3) - IGP integration
+2. **Advanced features** (Epic 4) - Ref script cache, parallel queries, parallel processing
+3. **Production ops** (Epic 5) - Monitoring, alerting, reorg detection
+4. **Security audit** (Epic 6) - Final gate before mainnet
 
 ## Related Documentation
 
