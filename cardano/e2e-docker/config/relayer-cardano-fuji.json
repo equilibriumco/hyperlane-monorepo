@@ -11,7 +11,7 @@
       "chainId": 2003,
       "connection": {
         "apiKey": "${BLOCKFROST_API_KEY}",
-        "igpPolicyId": "00000000000000000000000000000000000000000000000000000000",
+        "igpPolicyId": "${CARDANO_IGP_POLICY_ID}",
         "ismAssetNameHex": "49534d205374617465",
         "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
         "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
@@ -34,7 +34,7 @@
       "index": {
         "from": ${CARDANO_INDEX_FROM}
       },
-      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "interchainGasPaymaster": "${CARDANO_IGP}",
       "interchainSecurityModule": "${CARDANO_ISM}",
       "mailbox": "${CARDANO_MAILBOX}",
       "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
@@ -84,7 +84,8 @@
   "destinationChainNames": "cardanopreview,fuji",
   "gasPaymentEnforcement": [
     {
-      "type": "none"
+      "type": "onChainFeeQuoting",
+      "gasFraction": "1/1"
     }
   ],
   "metrics": {
