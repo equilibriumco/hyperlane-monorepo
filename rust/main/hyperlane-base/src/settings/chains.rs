@@ -784,7 +784,11 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn InterchainGasPaymaster>)
             }
-            ChainConnectionConf::Cardano(_) => Err(eyre!("Cardano IGP not yet implemented")),
+            ChainConnectionConf::Cardano(conf) => {
+                let paymaster =
+                    Box::new(h_cardano::CardanoInterchainGasPaymaster::new(conf, locator));
+                Ok(paymaster as Box<dyn InterchainGasPaymaster>)
+            }
         }
         .context(ctx)
     }

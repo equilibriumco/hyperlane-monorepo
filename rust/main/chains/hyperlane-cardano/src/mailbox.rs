@@ -489,21 +489,21 @@ impl Mailbox for CardanoMailbox {
 
     async fn process_estimate_costs(
         &self,
-        _message: &HyperlaneMessage,
+        message: &HyperlaneMessage,
         _metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
-        // Get protocol parameters to estimate fee
-        let _params = self
-            .provider
-            .get_protocol_parameters()
-            .await
-            .map_err(ChainCommunicationError::from_other)?;
+        // Estimate based on recipient type:
+        // - 0x01 prefix (warp routes): simpler TX, ~3 ADA
+        // - 0x02 prefix (script recipients): needs verified_message_nft, ~4 ADA
+        let recipient_bytes = message.recipient.as_bytes();
+        let estimated_fee_lovelace = if recipient_bytes.get(0) == Some(&0x01) {
+            3_000_000u64
+        } else {
+            4_000_000u64
+        };
 
-        // Cardano transaction fees are deterministic based on tx size and script execution units
-        // A typical Hyperlane process transaction would be around 2-5 ADA
-        // For now, return a conservative estimate
-        let estimated_fee_lovelace = 5_000_000u64; // 5 ADA
-
+        // gas_price=1 gives a 1:1 mapping between gas units and lovelace,
+        // so the relayer's onChainFeeQuoting compares payment directly in lovelace
         Ok(TxCostEstimate {
             gas_limit: U256::from(estimated_fee_lovelace),
             gas_price: FixedPointNumber::try_from(U256::from(1u64))

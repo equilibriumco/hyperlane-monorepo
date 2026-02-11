@@ -1,15 +1,58 @@
 use crate::blockfrost_provider::{BlockfrostProvider, TransactionUtxos};
+use crate::provider::CardanoProvider;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use hyperlane_core::{
-    ChainCommunicationError, ChainResult, ContractLocator, Indexed, Indexer, InterchainGasPayment,
-    LogMeta, SequenceAwareIndexer, H256, H512, U256,
+    ChainCommunicationError, ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract,
+    HyperlaneDomain, HyperlaneProvider, Indexed, Indexer, InterchainGasPaymaster,
+    InterchainGasPayment, LogMeta, SequenceAwareIndexer, H256, H512, U256,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+/// Cardano implementation of the InterchainGasPaymaster trait.
+///
+/// This is the struct returned by `build_interchain_gas_paymaster` in the
+/// chain settings. It implements the marker trait `InterchainGasPaymaster`
+/// (which has no methods) to satisfy the relayer's type requirements.
+#[derive(Debug)]
+pub struct CardanoInterchainGasPaymaster {
+    domain: HyperlaneDomain,
+    address: H256,
+    conf: ConnectionConf,
+}
+
+impl CardanoInterchainGasPaymaster {
+    pub fn new(conf: &ConnectionConf, locator: ContractLocator) -> Self {
+        Self {
+            domain: locator.domain.clone(),
+            address: locator.address,
+            conf: conf.clone(),
+        }
+    }
+}
+
+impl HyperlaneChain for CardanoInterchainGasPaymaster {
+    fn domain(&self) -> &HyperlaneDomain {
+        &self.domain
+    }
+
+    fn provider(&self) -> Box<dyn HyperlaneProvider> {
+        Box::new(CardanoProvider::new(&self.conf, self.domain.clone()))
+    }
+}
+
+impl HyperlaneContract for CardanoInterchainGasPaymaster {
+    fn address(&self) -> H256 {
+        self.address
+    }
+}
+
+#[async_trait]
+impl InterchainGasPaymaster for CardanoInterchainGasPaymaster {}
 
 /// Parsed PayForGas redeemer data (without payment amount which comes from UTXO diff)
 #[derive(Debug, Clone, PartialEq, Eq)]
