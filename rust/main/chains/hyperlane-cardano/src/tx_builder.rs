@@ -662,9 +662,27 @@ impl HyperlaneTxBuilder {
         let payer_address = payer.address_bech32(self.network_to_pallas());
         debug!("Payer address: {}", payer_address);
 
-        // Calculate additional funds needed when warp route doesn't have enough lovelace.
-        // For direct delivery, recipient output only needs min_lovelace
-        let recipient_output_cost = min_lovelace;
+        // Calculate min lovelace for the recipient output, accounting for native tokens
+        // when the warp route is collateral or synthetic (outputs include tokens).
+        let recipient_output_cost = match &components.warp_token_type {
+            Some(WarpTokenTypeInfo::Collateral { asset_name, .. })
+                if components.token_release_amount.is_some() =>
+            {
+                self.calculate_min_lovelace(OutputType::WithNativeToken {
+                    asset_name_len: asset_name.len() / 2, // hex string → bytes
+                })
+                .await
+            }
+            Some(WarpTokenTypeInfo::Synthetic { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                self.calculate_min_lovelace(OutputType::WithNativeToken {
+                    asset_name_len: 0, // synthetic tokens have empty asset name
+                })
+                .await
+            }
+            _ => min_lovelace,
+        };
 
         // warp_route_lovelace() helper - only called for WarpRoute where state_utxo is always Some
         let warp_route_lovelace = components
@@ -697,15 +715,17 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = warp_route_lovelace;
                 let release_amount = components.token_release_amount.unwrap();
+                // Recipient output must be at least min_lovelace
+                let recipient_actual = release_amount.max(min_lovelace);
                 let continuation_actual = original_lovelace
                     .saturating_sub(release_amount)
                     .max(continuation_min_lovelace);
-                let total_outputs = continuation_actual + release_amount;
+                let total_outputs = continuation_actual + recipient_actual;
                 let extra = total_outputs.saturating_sub(original_lovelace);
                 if extra > 0 {
                     info!(
-                        "Native route shortfall: warp_lovelace={}, continuation_actual={}, release={}, total_outputs={}, payer covers extra={} lovelace",
-                        original_lovelace, continuation_actual, release_amount, total_outputs, extra
+                        "Native route shortfall: warp_lovelace={}, continuation_actual={}, recipient_actual={} (release={}), payer covers extra={} lovelace",
+                        original_lovelace, continuation_actual, recipient_actual, release_amount, extra
                     );
                 }
                 extra
@@ -977,13 +997,16 @@ impl HyperlaneTxBuilder {
 
             match token_type {
                 WarpTokenTypeInfo::Native => {
-                    // Native ADA: direct transfer to recipient address
+                    // Native ADA: direct transfer to recipient address.
+                    // The output must have at least min_lovelace; if release_amount
+                    // is smaller, the payer tops up (covered by source chain fees).
                     let recipient_address = credential_to_address(recipient_bytes, pallas_network)?;
-                    let release_output = Output::new(recipient_address, release_amount);
+                    let output_lovelace = release_amount.max(min_lovelace);
+                    let release_output = Output::new(recipient_address, output_lovelace);
                     tx = tx.output(release_output);
                     info!(
-                        "Added Native ADA release output: {} lovelace",
-                        release_amount
+                        "Added Native ADA release output: {} lovelace (transfer={}, min={})",
+                        output_lovelace, release_amount, min_lovelace
                     );
                 }
                 WarpTokenTypeInfo::Collateral {
@@ -1005,7 +1028,7 @@ impl HyperlaneTxBuilder {
                         TxBuilderError::TxBuild(format!("Invalid asset_name hex: {e}"))
                     })?;
 
-                    let release_output = Output::new(recipient_address, min_lovelace)
+                    let release_output = Output::new(recipient_address, recipient_output_cost)
                         .add_asset(policy_bytes, asset_bytes, release_amount)
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
@@ -1014,8 +1037,8 @@ impl HyperlaneTxBuilder {
                         })?;
                     tx = tx.output(release_output);
                     info!(
-                        "Added Collateral token release output: {} units",
-                        release_amount
+                        "Added Collateral token release output: {} units, {} lovelace",
+                        release_amount, recipient_output_cost
                     );
                 }
                 WarpTokenTypeInfo::Synthetic { minting_policy } => {
@@ -1042,14 +1065,14 @@ impl HyperlaneTxBuilder {
                             ))
                         })?;
 
-                    // Create recipient output with minted tokens + min_lovelace
+                    // Create recipient output with minted tokens + proper min lovelace
                     let recipient_address = credential_to_address(recipient_bytes, pallas_network)?;
                     info!(
                         "Recipient address: {}",
                         recipient_address.to_bech32().unwrap_or_default()
                     );
 
-                    let recipient_output = Output::new(recipient_address, min_lovelace)
+                    let recipient_output = Output::new(recipient_address, recipient_output_cost)
                         .add_asset(minting_policy_bytes, asset_name.clone(), release_amount)
                         .map_err(|e| {
                             TxBuilderError::TxBuild(format!(
@@ -1307,15 +1330,17 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = warp_route_lovelace;
                 let release_amount = components.token_release_amount.unwrap();
+                // Recipient output must be at least min_lovelace
+                let recipient_actual = release_amount.max(min_lovelace);
                 let continuation_actual = original_lovelace
                     .saturating_sub(release_amount)
                     .max(continuation_min_lovelace);
-                let total_outputs = continuation_actual + release_amount + recipient_output_cost;
+                let total_outputs = continuation_actual + recipient_actual;
                 let shortfall = total_outputs.saturating_sub(original_lovelace);
                 if shortfall > 0 {
                     debug!(
-                        "Native recipient shortfall: warp_lovelace={}, continuation_actual={}, release={}, total_outputs={}, shortfall={}",
-                        original_lovelace, continuation_actual, release_amount + recipient_output_cost, total_outputs, shortfall
+                        "Native recipient shortfall: warp_lovelace={}, continuation_actual={}, recipient_actual={} (release={}), total_outputs={}, shortfall={}",
+                        original_lovelace, continuation_actual, recipient_actual, release_amount, total_outputs, shortfall
                     );
                 }
                 shortfall
