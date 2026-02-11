@@ -129,7 +129,7 @@ impl IgpTxContext {
         new_datum_cbor: Vec<u8>,
         redeemer_cbor: Vec<u8>,
         new_igp_lovelace: u64,
-        additional_output: Option<Output>,
+        additional_output: Option<(Output, u64)>,
         fee_utxo: &Utxo,
         collateral_utxo: &Utxo,
         signer_pkh: &[u8],
@@ -179,16 +179,12 @@ impl IgpTxContext {
             .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
             .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
 
-        // Calculate change
+        // Calculate total input/output for value conservation
         let fee_estimate = 2_000_000u64;
-        let fee_input_value = if fee_utxo.tx_hash == self.igp_utxo.tx_hash
-            && fee_utxo.output_index == self.igp_utxo.output_index
-        {
-            // Fee comes from IGP UTXO adjustment, no separate change
-            0
-        } else {
-            fee_utxo.lovelace
-        };
+        let fee_is_separate = fee_utxo.tx_hash != self.igp_utxo.tx_hash
+            || fee_utxo.output_index != self.igp_utxo.output_index;
+        let total_input_lovelace = self.igp_utxo.lovelace
+            + if fee_is_separate { fee_utxo.lovelace } else { 0 };
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
@@ -225,9 +221,7 @@ impl IgpTxContext {
             .network_id(ctx.network_id());
 
         // Add fee input if separate from IGP
-        if fee_utxo.tx_hash != self.igp_utxo.tx_hash
-            || fee_utxo.output_index != self.igp_utxo.output_index
-        {
+        if fee_is_separate {
             staging = staging.input(Input::new(
                 Hash::new(fee_tx_hash),
                 fee_utxo.output_index as u64,
@@ -235,14 +229,24 @@ impl IgpTxContext {
         }
 
         // Add additional output (e.g., beneficiary payment for claim)
-        if let Some(output) = additional_output {
+        let mut additional_lovelace = 0u64;
+        if let Some((output, lovelace)) = additional_output {
             staging = staging.output(output);
+            additional_lovelace = lovelace;
         }
 
-        // Add change output if significant
-        let change = fee_input_value.saturating_sub(fee_estimate);
-        if change > 1_500_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+        // Change = total_inputs - all_outputs - fee
+        let remaining = total_input_lovelace
+            .saturating_sub(new_igp_lovelace)
+            .saturating_sub(additional_lovelace)
+            .saturating_sub(fee_estimate);
+
+        if remaining > 1_500_000 {
+            // Return change to payer
+            staging = staging.output(Output::new(payer_addr, remaining));
+        } else {
+            // Too small for a separate output; absorb into fee
+            staging = staging.fee(fee_estimate + remaining);
         }
 
         // Build the transaction
@@ -944,7 +948,7 @@ async fn claim_fees(
             new_datum_cbor,
             redeemer_cbor,
             new_igp_lovelace,
-            Some(beneficiary_output),
+            Some((beneficiary_output, amount)),
             fee_utxo,
             collateral_utxo,
             &igp_ctx.beneficiary,
