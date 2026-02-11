@@ -23,7 +23,14 @@
   {
     "script_name": "mailbox",
     "script_hash": "c26a6a21d2cb090e2604aac0d36adf250a9658fe1d1cc1b6fca3a92a",
-    "tx_hash": "b24ecfb8fc5944856f72a1c6a6cf85de2c3ff13ef871eaa4cb366230cbea573f",
+    "tx_hash": "ec6ab8ad68ec9a2d7ce1f63c618fbe12a3987c8cd14643dce0ca59efb32e2315",
+    "output_index": 0,
+    "lovelace": 20000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "c0425512d247de100cc02f91899ed7457e070e6ecb06c02f8bf4e50c",
+    "tx_hash": "06f3429a46ffaa9e903ec36c8884fe60a911b495c3333991e525fb7232a73a5c",
     "output_index": 0,
     "lovelace": 20000000
   }
