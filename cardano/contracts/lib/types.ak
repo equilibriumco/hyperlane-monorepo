@@ -302,7 +302,12 @@ pub type IgpDatum {
 /// IGP redeemer
 pub type IgpRedeemer {
   /// Pay for message gas
-  PayForGas { message_id: ByteArray, destination: Domain, gas_amount: Int }
+  PayForGas {
+    message_id: ByteArray,
+    destination: Domain,
+    gas_amount: Int,
+    refund_address: ByteArray,
+  }
   /// Claim collected fees
   Claim { amount: Int }
   /// Admin: set gas oracle for a domain

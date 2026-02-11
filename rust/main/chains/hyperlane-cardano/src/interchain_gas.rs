@@ -17,6 +17,7 @@ pub struct PayForGasRedeemerData {
     pub message_id: H256,
     pub destination: u32,
     pub gas_amount: u64,
+    pub refund_address: Option<Vec<u8>>,
 }
 
 /// Indexer for Interchain Gas Payments on Cardano
@@ -69,8 +70,9 @@ impl CardanoInterchainGasPaymasterIndexer {
 /// Returns the parsed redeemer data without the payment amount,
 /// which must be calculated separately from UTXO value differences.
 ///
-/// PayForGas redeemer format (constructor 0):
-/// `{ "constructor": 0, "fields": [message_id, destination, gas_amount] }`
+/// Accepts both 3-field (legacy) and 4-field (with refund_address) formats:
+/// - Legacy: `{ "constructor": 0, "fields": [message_id, destination, gas_amount] }`
+/// - Current: `{ "constructor": 0, "fields": [message_id, destination, gas_amount, refund_address] }`
 fn parse_pay_for_gas_redeemer(json: &Value) -> Option<PayForGasRedeemerData> {
     let constructor = json.get("constructor")?.as_u64()?;
     if constructor != 0 {
@@ -97,10 +99,18 @@ fn parse_pay_for_gas_redeemer(json: &Value) -> Option<PayForGasRedeemerData> {
     // Parse gas_amount
     let gas_amount = fields.get(2)?.get("int")?.as_u64()?;
 
+    // Parse optional refund_address (4th field)
+    let refund_address = fields
+        .get(3)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .and_then(|hex_str| hex::decode(hex_str).ok());
+
     Some(PayForGasRedeemerData {
         message_id: H256::from(message_id),
         destination,
         gas_amount,
+        refund_address,
     })
 }
 
@@ -311,7 +321,7 @@ mod tests {
     // ==================== parse_pay_for_gas_redeemer tests ====================
 
     #[test]
-    fn test_parse_pay_for_gas_redeemer_valid() {
+    fn test_parse_pay_for_gas_redeemer_valid_legacy() {
         let message_id_hex = "ab".repeat(32);
         let redeemer_json = json!({
             "constructor": 0,
@@ -329,6 +339,31 @@ mod tests {
         assert_eq!(data.message_id, H256::from([0xab; 32]));
         assert_eq!(data.destination, 43113);
         assert_eq!(data.gas_amount, 200000);
+        assert_eq!(data.refund_address, None);
+    }
+
+    #[test]
+    fn test_parse_pay_for_gas_redeemer_with_refund_address() {
+        let message_id_hex = "ab".repeat(32);
+        let refund_hex = "cd".repeat(28);
+        let redeemer_json = json!({
+            "constructor": 0,
+            "fields": [
+                { "bytes": message_id_hex },
+                { "int": 43113 },
+                { "int": 200000 },
+                { "bytes": refund_hex }
+            ]
+        });
+
+        let result = parse_pay_for_gas_redeemer(&redeemer_json);
+        assert!(result.is_some());
+
+        let data = result.unwrap();
+        assert_eq!(data.message_id, H256::from([0xab; 32]));
+        assert_eq!(data.destination, 43113);
+        assert_eq!(data.gas_amount, 200000);
+        assert_eq!(data.refund_address, Some(vec![0xcd; 28]));
     }
 
     #[test]
@@ -427,6 +462,7 @@ mod tests {
         assert_eq!(data.message_id, H256::zero());
         assert_eq!(data.destination, 0);
         assert_eq!(data.gas_amount, 0);
+        assert_eq!(data.refund_address, None);
     }
 
     #[test]

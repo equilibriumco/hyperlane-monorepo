@@ -335,6 +335,10 @@ enum IgpCommands {
         #[arg(long)]
         gas_amount: u64,
 
+        /// Refund address (hex pubkey hash, defaults to payer)
+        #[arg(long)]
+        refund_address: Option<String>,
+
         /// IGP state NFT policy ID (defaults to deployment info)
         #[arg(long)]
         igp_policy: Option<String>,
@@ -379,9 +383,21 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
             message_id,
             destination,
             gas_amount,
+            refund_address,
             igp_policy,
             dry_run,
-        } => pay_for_gas(ctx, &message_id, destination, gas_amount, igp_policy, dry_run).await,
+        } => {
+            pay_for_gas(
+                ctx,
+                &message_id,
+                destination,
+                gas_amount,
+                refund_address,
+                igp_policy,
+                dry_run,
+            )
+            .await
+        }
         IgpCommands::Claim {
             amount,
             igp_policy,
@@ -653,6 +669,7 @@ async fn pay_for_gas(
     message_id: &str,
     destination: u32,
     gas_amount: u64,
+    refund_address: Option<String>,
     igp_policy: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -722,8 +739,16 @@ async fn pay_for_gas(
     // Build new datum (unchanged - PayForGas doesn't modify datum)
     let new_datum_cbor = igp_ctx.build_new_datum(None)?;
 
+    // Resolve refund address: use provided value or default to payer's pubkey hash
+    let refund_addr_bytes = match &refund_address {
+        Some(addr) => hex::decode(addr).map_err(|_| anyhow!("Invalid refund address hex"))?,
+        None => igp_ctx.payer_pkh.clone(),
+    };
+    println!("  Refund address: {}", hex::encode(&refund_addr_bytes));
+
     // Build PayForGas redeemer
-    let redeemer = build_pay_for_gas_redeemer(&message_id_bytes, destination, effective_gas);
+    let redeemer =
+        build_pay_for_gas_redeemer(&message_id_bytes, destination, effective_gas, &refund_addr_bytes);
     let redeemer_cbor = pallas_codec::minicbor::to_vec(&redeemer)
         .map_err(|e| anyhow!("Failed to encode redeemer: {:?}", e))?;
     println!("\n{}", "PayForGas Redeemer:".green());
@@ -944,8 +969,13 @@ async fn claim_fees(
 }
 
 /// Build PayForGas redeemer
-/// Structure: Constr 0 [message_id: ByteArray, destination: Int, gas_amount: Int]
-fn build_pay_for_gas_redeemer(message_id: &[u8], destination: u32, gas_amount: u64) -> PlutusData {
+/// Structure: Constr 0 [message_id: ByteArray, destination: Int, gas_amount: Int, refund_address: ByteArray]
+fn build_pay_for_gas_redeemer(
+    message_id: &[u8],
+    destination: u32,
+    gas_amount: u64,
+    refund_address: &[u8],
+) -> PlutusData {
     use pallas_primitives::conway::BoundedBytes;
     PlutusData::Constr(Constr {
         tag: 121, // Constr 0 (PayForGas)
@@ -954,6 +984,7 @@ fn build_pay_for_gas_redeemer(message_id: &[u8], destination: u32, gas_amount: u
             PlutusData::BoundedBytes(BoundedBytes::from(message_id.to_vec())),
             PlutusData::BigInt(BigInt::Int((destination as i64).into())),
             PlutusData::BigInt(BigInt::Int((gas_amount as i64).into())),
+            PlutusData::BoundedBytes(BoundedBytes::from(refund_address.to_vec())),
         ]),
     })
 }
@@ -1410,7 +1441,8 @@ mod tests {
     #[test]
     fn test_build_pay_for_gas_redeemer() {
         let message_id = [0u8; 32];
-        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000);
+        let refund_addr = [0xabu8; 28];
+        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000, &refund_addr);
 
         // Verify it's a Constr 0 (tag 121)
         match &redeemer {
@@ -1419,7 +1451,7 @@ mod tests {
 
                 match &c.fields {
                     MaybeIndefArray::Def(fields) => {
-                        assert_eq!(fields.len(), 3); // message_id, destination, gas_amount
+                        assert_eq!(fields.len(), 4); // message_id, destination, gas_amount, refund_address
                     }
                     _ => panic!("Expected Def fields"),
                 }
@@ -1434,7 +1466,8 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .unwrap();
-        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000);
+        let refund_addr = [0xabu8; 28];
+        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000, &refund_addr);
         let cbor = pallas_codec::minicbor::to_vec(&redeemer).unwrap();
 
         assert!(!cbor.is_empty());
