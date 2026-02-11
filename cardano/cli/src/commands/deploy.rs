@@ -216,18 +216,36 @@ async fn extract(
         }
     };
 
-    let deployment_info = DeploymentInfo {
-        network: format!("{:?}", ctx.network).to_lowercase(),
-        tx_id: None,
-        mailbox: Some(to_script_info(&validators.mailbox)),
-        ism: Some(to_script_info(&validators.ism)),
-        igp: validators.igp.as_ref().map(to_script_info),
-        validator_announce: validators.validator_announce.as_ref().map(to_script_info),
-        warp_routes: Vec::new(),
-        recipients: Vec::new(),
+    // Load existing deployment_info to preserve initialized state, warp routes, etc.
+    let info_path = output_dir.join("deployment_info.json");
+    let mut deployment_info = if info_path.exists() {
+        let content = std::fs::read_to_string(&info_path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| DeploymentInfo::new(ctx.network.as_str()))
+    } else {
+        DeploymentInfo::new(ctx.network.as_str())
     };
 
-    let info_path = output_dir.join("deployment_info.json");
+    let should_update = |name: &str| -> bool {
+        filter.as_ref().map_or(true, |f| f.contains(&name))
+    };
+
+    if should_update("mailbox") {
+        deployment_info.mailbox = Some(to_script_info(&validators.mailbox));
+    }
+    if should_update("multisig_ism") || should_update("ism") {
+        deployment_info.ism = Some(to_script_info(&validators.ism));
+    }
+    if should_update("igp") {
+        if let Some(igp) = &validators.igp {
+            deployment_info.igp = Some(to_script_info(igp));
+        }
+    }
+    if should_update("validator_announce") {
+        if let Some(va) = &validators.validator_announce {
+            deployment_info.validator_announce = Some(to_script_info(va));
+        }
+    }
+
     let info_json = serde_json::to_string_pretty(&deployment_info)?;
     std::fs::write(&info_path, info_json)?;
     println!("\n{}", "✓ Deployment info updated".green());
