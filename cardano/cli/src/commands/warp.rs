@@ -1942,10 +1942,43 @@ async fn transfer(
         WarpTokenTypeInfo::Native => amount,
         _ => 0,
     };
+    // When consuming a token UTXO (collateral/synthetic), its lovelace must be accounted for.
+    // If a token change output is created, it absorbs the token UTXO's lovelace; otherwise
+    // the excess goes into the main change output.
+    let token_utxo_extra = match (&token_utxo, &token_type) {
+        (Some(tu), WarpTokenTypeInfo::Synthetic { minting_policy }) => {
+            let qty = tu
+                .assets
+                .iter()
+                .find(|a| a.policy_id == *minting_policy)
+                .map(|a| a.quantity)
+                .unwrap_or(0);
+            if qty > amount {
+                0 // token change output will use tu.lovelace
+            } else {
+                tu.lovelace
+            }
+        }
+        (Some(tu), WarpTokenTypeInfo::Collateral { policy_id, .. }) => {
+            let qty = tu
+                .assets
+                .iter()
+                .find(|a| a.policy_id == *policy_id)
+                .map(|a| a.quantity)
+                .unwrap_or(0);
+            if qty > amount {
+                tu.lovelace.saturating_sub(2_000_000) // token change uses 2M ADA
+            } else {
+                tu.lovelace
+            }
+        }
+        _ => 0,
+    };
     let change = fee_utxo
         .lovelace
         .saturating_sub(fee_estimate)
-        .saturating_sub(native_transfer_amount);
+        .saturating_sub(native_transfer_amount)
+        + token_utxo_extra;
 
     // If change is too small to create an output, add it to the fee to balance the transaction
     let actual_fee = if change > 1_500_000 {
