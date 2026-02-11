@@ -10,7 +10,7 @@ use cardano/transaction.{OutputReference, Transaction}
 /// For the reference script patterns, this allows minting up to 3 NFTs:
 /// - State NFT (empty asset name) for the state UTXO
 /// - Reference Script NFT ("ref") for the recipient reference script UTXO
-/// - Message Ref NFT ("msg_ref") for the stored_message_nft reference script UTXO (deferred only)
+/// - Message Ref NFT ("msg_ref") for the verified_message_nft reference script UTXO (deferred only)
 validator state_nft(utxo_ref: OutputReference) {
   mint(_redeemer: Data, _policy_id: ByteArray, tx: Transaction) {
     // Can only mint if specific UTXO is consumed (one-shot)

@@ -117,5 +117,19 @@
         "lovelace": 12000000
       }
     }
+  ],
+  "recipients": [
+    {
+      "recipient_type": "greeting",
+      "script_hash": "7fb8e3ae915c4c3759ffa6e98ce31a10024c775f300efb0ede58472c",
+      "address": "addr_test1wplm3cawj9wycd6el7nwnr8rrggqynrhtucqa7cwmevywtq3v06k8",
+      "nft_policy": "6112012ebd14522c133f8b161cc11855e77547df3043a383a87bb4cf",
+      "init_tx_hash": "1d02ca038fda935a106c1aea273561387ec2fcd2c5ef3825ff643107e394303d",
+      "reference_script_utxo": {
+        "txHash": "1d02ca038fda935a106c1aea273561387ec2fcd2c5ef3825ff643107e394303d",
+        "outputIndex": 1,
+        "lovelace": 20000000
+      }
+    }
   ]
 }
