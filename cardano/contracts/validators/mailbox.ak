@@ -141,20 +141,23 @@ fn validate_process(
   // 5. Verify processed message NFT is being minted
   expect processed_nft_minted(message_id, tx, processed_messages_nft_policy)
 
-  // 6. Verify verified message NFT is being minted
-  expect verified_nft_minted(message_id, tx, verified_message_nft_policy)
-
-  // 7. Verify a UTXO is delivered to the recipient's script address
-  //    with the verified_message_nft and correct datum
+  // 6. For script-hash recipients (0x02 prefix), verify verified message delivery.
+  //    NFT-policy recipients (0x01 prefix, e.g. warp routes) handle their own
+  //    validation as spent inputs in the same TX.
+  let is_script_recipient = bytearray.at(message.recipient, 0) == 2
   expect
-    verified_message_delivered(
-      message,
-      message_id,
-      tx,
-      verified_message_nft_policy,
-    )
+    if is_script_recipient {
+      verified_nft_minted(message_id, tx, verified_message_nft_policy) && verified_message_delivered(
+        message,
+        message_id,
+        tx,
+        verified_message_nft_policy,
+      )
+    } else {
+      True
+    }
 
-  // 8. Validate mailbox continuation (datum unchanged for process)
+  // 7. Validate mailbox continuation (datum unchanged for process)
   validate_continuation(datum, datum, tx, own_ref)
 }
 
