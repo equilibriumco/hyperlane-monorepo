@@ -9,7 +9,7 @@
   {
     "script_name": "multisig_ism",
     "script_hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
-    "tx_hash": "1f6ef7712d3292cef7944339b652c165bbd8efe509b07baf95ebe921795231cd",
+    "tx_hash": "f81b2ae328fb60fdb6e90b6b9b2327966fa1841efe13cfa7b2b9c9c07980c1af",
     "output_index": 0,
     "lovelace": 13000000
   },
@@ -31,6 +31,13 @@
     "script_name": "mailbox",
     "script_hash": "c0425512d247de100cc02f91899ed7457e070e6ecb06c02f8bf4e50c",
     "tx_hash": "06f3429a46ffaa9e903ec36c8884fe60a911b495c3333991e525fb7232a73a5c",
+    "output_index": 0,
+    "lovelace": 20000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "ffdc839591d25eb44ccee8162b6468fe3301f9d0418073335f12073a",
+    "tx_hash": "63e3ae1a2ebb0eed9f51a14af74a4abcea13f91596f4ad10410986b1d273a035",
     "output_index": 0,
     "lovelace": 20000000
   }
