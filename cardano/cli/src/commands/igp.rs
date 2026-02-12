@@ -974,7 +974,7 @@ async fn claim_fees(
 
 /// Build PayForGas redeemer
 /// Structure: Constr 0 [message_id: ByteArray, destination: Int, gas_amount: Int, refund_address: ByteArray]
-fn build_pay_for_gas_redeemer(
+pub(crate) fn build_pay_for_gas_redeemer(
     message_id: &[u8],
     destination: u32,
     gas_amount: u64,
@@ -1028,7 +1028,7 @@ fn build_set_gas_oracle_redeemer(domain: u32, gas_price: u64, exchange_rate: u64
 
 /// Calculate gas payment in lovelace
 /// Formula: gas_amount * gas_price * token_exchange_rate / 1_000_000_000_000
-fn calculate_gas_payment(gas_amount: u64, gas_price: u64, exchange_rate: u64) -> u64 {
+pub(crate) fn calculate_gas_payment(gas_amount: u64, gas_price: u64, exchange_rate: u64) -> u64 {
     // Use u128 to avoid overflow during multiplication
     let numerator = gas_amount as u128 * gas_price as u128 * exchange_rate as u128;
     (numerator / 1_000_000_000_000u128) as u64
@@ -1047,7 +1047,7 @@ fn format_number(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-fn get_igp_policy(ctx: &CliContext, igp_policy: Option<String>) -> Result<String> {
+pub(crate) fn get_igp_policy(ctx: &CliContext, igp_policy: Option<String>) -> Result<String> {
     if let Some(p) = igp_policy {
         return Ok(p);
     }
@@ -1060,7 +1060,7 @@ fn get_igp_policy(ctx: &CliContext, igp_policy: Option<String>) -> Result<String
 }
 
 /// Parse IGP datum, returns (owner, beneficiary, gas_oracles, default_gas_limit)
-fn parse_igp_datum(
+pub(crate) fn parse_igp_datum(
     datum: &serde_json::Value,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<(u32, u64, u64)>, u64)> {
     // Check if datum is raw CBOR hex
