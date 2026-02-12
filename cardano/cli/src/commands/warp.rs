@@ -6,10 +6,11 @@ use colored::Colorize;
 use pallas_primitives::conway::{BigInt, PlutusData};
 use sha3::{Digest, Keccak256};
 
+use crate::commands::igp::{build_pay_for_gas_redeemer, calculate_gas_payment, get_igp_policy, parse_igp_datum};
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
-    build_enroll_remote_route_redeemer, build_mailbox_datum, build_mailbox_dispatch_redeemer,
-    build_mint_redeemer, build_transfer_remote_redeemer,
+    build_enroll_remote_route_redeemer, build_igp_datum, build_mailbox_datum,
+    build_mailbox_dispatch_redeemer, build_mint_redeemer, build_transfer_remote_redeemer,
     build_warp_route_collateral_datum, build_warp_route_collateral_datum_with_routes,
     build_warp_route_native_datum, build_warp_route_native_datum_with_routes,
     build_warp_route_synthetic_datum, build_warp_route_synthetic_datum_with_routes,
@@ -111,6 +112,10 @@ enum WarpCommands {
         #[arg(long)]
         warp_policy: Option<String>,
 
+        /// Gas amount for IGP payment (atomic IGP in same TX)
+        #[arg(long)]
+        gas_amount: Option<u64>,
+
         /// Dry run
         #[arg(long)]
         dry_run: bool,
@@ -173,8 +178,9 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             recipient,
             amount,
             warp_policy,
+            gas_amount,
             dry_run,
-        } => transfer(ctx, domain, &recipient, amount, warp_policy, dry_run).await,
+        } => transfer(ctx, domain, &recipient, amount, warp_policy, gas_amount, dry_run).await,
         WarpCommands::DeployMintingRef {
             warp_policy,
             dry_run,
@@ -1397,6 +1403,7 @@ async fn transfer(
     recipient: &str,
     amount: u64,
     warp_policy: Option<String>,
+    gas_amount: Option<u64>,
     dry_run: bool,
 ) -> Result<()> {
     println!(
@@ -1661,7 +1668,14 @@ async fn transfer(
     println!("  TransferRemote Redeemer: {} bytes", warp_redeemer.len());
 
     // NOTE: Mailbox dispatch uses the remote warp route as recipient, not the user's final recipient
-    let mailbox_redeemer = build_mailbox_dispatch_redeemer(domain, message_recipient, &body_hex)?;
+    // sender_ref points to the warp_utxo so the mailbox can deterministically identify the sender
+    let mailbox_redeemer = build_mailbox_dispatch_redeemer(
+        domain,
+        message_recipient,
+        &body_hex,
+        &warp_utxo.tx_hash,
+        warp_utxo.output_index,
+    )?;
     println!("  Dispatch Redeemer: {} bytes", mailbox_redeemer.len());
 
     if dry_run {
@@ -1698,8 +1712,60 @@ async fn transfer(
         return Ok(());
     }
 
-    // Step 8: Build and submit transaction
-    println!("\n{}", "Step 8: Building Transaction...".cyan());
+    // Step 8: Prepare IGP (if --gas-amount provided)
+    let igp_data = if let Some(gas_amt) = gas_amount {
+        println!("\n{}", "Step 8: Preparing Atomic IGP Payment...".cyan());
+        let igp_policy_id = get_igp_policy(ctx, None)?;
+        let igp_utxo = client
+            .find_utxo_by_asset(&igp_policy_id, "")
+            .await?
+            .ok_or_else(|| anyhow!("IGP UTXO not found with policy {}", igp_policy_id))?;
+
+        let igp_datum_val = igp_utxo
+            .inline_datum
+            .as_ref()
+            .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
+        let (owner, beneficiary, gas_oracles, default_gas_limit) = parse_igp_datum(igp_datum_val)?;
+
+        let effective_gas = if gas_amt > 0 { gas_amt } else { default_gas_limit };
+        let (gas_price, exchange_rate) = gas_oracles
+            .iter()
+            .find(|(d, _, _)| *d == domain)
+            .map(|(_, gp, er)| (*gp, *er))
+            .unwrap_or((1, 1_000_000));
+        let igp_payment = calculate_gas_payment(effective_gas, gas_price, exchange_rate);
+
+        println!("  IGP Policy: {}", igp_policy_id);
+        println!("  IGP UTXO: {}#{}", igp_utxo.tx_hash, igp_utxo.output_index);
+        println!("  Gas Amount: {}", effective_gas);
+        println!("  Payment: {} lovelace ({} ADA)", igp_payment, igp_payment as f64 / 1_000_000.0);
+
+        // Build IGP redeemer
+        let igp_redeemer = build_pay_for_gas_redeemer(
+            &hex::decode(&message_id)?,
+            domain,
+            effective_gas,
+            &payer_pkh,
+        );
+        let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
+            .map_err(|e| anyhow!("Failed to encode IGP redeemer: {:?}", e))?;
+
+        // Build new IGP datum (unchanged)
+        let new_igp_datum = build_igp_datum(
+            &hex::encode(&owner),
+            &hex::encode(&beneficiary),
+            &gas_oracles,
+            default_gas_limit,
+        )?;
+
+        Some((igp_utxo, igp_policy_id, igp_payment, igp_redeemer_cbor, new_igp_datum))
+    } else {
+        None
+    };
+
+    // Step 9: Build and submit transaction
+    let step_num = if igp_data.is_some() { 9 } else { 8 };
+    println!("\n{}", format!("Step {}: Building Transaction...", step_num).cyan());
 
     // Find payer UTXOs for fees and collateral
     let payer_utxos = client.get_utxos(&payer_address).await?;
@@ -1754,16 +1820,17 @@ async fn transfer(
     // Calculate minimum lovelace needed for fee UTXO
     // For Native transfers, need: amount + fee_estimate + min_change_buffer
     // For other types, just need enough for fees
-    let fee_estimate = 3_000_000u64;
+    // With IGP: add igp_payment + 2M buffer for larger TX
+    let igp_payment = igp_data.as_ref().map(|(_, _, p, _, _)| *p).unwrap_or(0);
+    let fee_estimate = if igp_data.is_some() { 5_000_000u64 } else { 3_000_000u64 };
     let min_change = 2_000_000u64;
     let min_fee_utxo_lovelace = match &token_type {
-        WarpTokenTypeInfo::Native => amount + fee_estimate + min_change,
-        _ => 5_000_000,
+        WarpTokenTypeInfo::Native => amount + igp_payment + fee_estimate + min_change,
+        _ => 5_000_000 + igp_payment + if igp_data.is_some() { 2_000_000 } else { 0 },
     };
 
-    // Find fee UTXO that sorts AFTER the warp route UTXO
-    // This ensures the warp route script is the first input and thus the sender
-    // Inputs are sorted lexicographically by (tx_hash, output_index)
+    // Find fee UTXO
+    // With sender_ref, input ordering no longer affects sender detection
     let fee_utxo = payer_utxos
         .iter()
         .filter(|u| {
@@ -1774,19 +1841,7 @@ async fn transfer(
                 && (u.tx_hash != collateral_utxo.tx_hash
                     || u.output_index != collateral_utxo.output_index)
         })
-        // Prefer UTXOs that sort after the warp route UTXO
-        .min_by(|a, b| {
-            // Sort by: (sorts_after_warp DESC, tx_hash ASC, output_index ASC)
-            let a_after_warp =
-                (&a.tx_hash, a.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
-            let b_after_warp =
-                (&b.tx_hash, b.output_index) > (&warp_utxo.tx_hash, warp_utxo.output_index);
-            match (a_after_warp, b_after_warp) {
-                (true, false) => std::cmp::Ordering::Less, // a sorts after warp, prefer a
-                (false, true) => std::cmp::Ordering::Greater, // b sorts after warp, prefer b
-                _ => (&a.tx_hash, a.output_index).cmp(&(&b.tx_hash, b.output_index)),
-            }
-        })
+        .min_by_key(|u| u.lovelace)
         .ok_or_else(|| {
             let needed_ada = min_fee_utxo_lovelace / 1_000_000;
             anyhow!(
@@ -1978,6 +2033,7 @@ async fn transfer(
         .lovelace
         .saturating_sub(fee_estimate)
         .saturating_sub(native_transfer_amount)
+        .saturating_sub(igp_payment)
         + token_utxo_extra;
 
     // If change is too small to create an output, add it to the fee to balance the transaction
@@ -2037,6 +2093,76 @@ async fn transfer(
         .fee(actual_fee)
         .invalid_from_slot(validity_end)
         .network_id(0); // Testnet
+
+    // Add IGP input, output, redeemer, and script if atomic IGP requested
+    if let Some((ref igp_utxo, ref igp_policy_id, igp_pay, ref igp_redeemer_cbor, ref new_igp_datum)) = igp_data {
+        println!("  Adding IGP input/output...");
+
+        let igp_tx_hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IGP tx hash"))?;
+        let igp_policy_bytes: [u8; 28] = hex::decode(igp_policy_id)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IGP policy"))?;
+
+        // Get IGP state NFT asset name
+        let igp_asset_name = igp_utxo
+            .assets
+            .iter()
+            .find(|a| a.policy_id == *igp_policy_id)
+            .map(|a| hex::decode(&a.asset_name).unwrap_or_default())
+            .unwrap_or_default();
+
+        let igp_addr = pallas_addresses::Address::from_bech32(&igp_utxo.address)?;
+        let new_igp_lovelace = igp_utxo.lovelace + igp_pay;
+
+        let igp_output = Output::new(igp_addr, new_igp_lovelace)
+            .set_inline_datum(new_igp_datum.clone())
+            .add_asset(Hash::new(igp_policy_bytes), igp_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add IGP NFT: {:?}", e))?;
+
+        staging = staging
+            .input(Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64))
+            .output(igp_output)
+            .add_spend_redeemer(
+                Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
+                igp_redeemer_cbor.clone(),
+                Some(ExUnits {
+                    mem: 5_000_000,
+                    steps: 2_000_000_000,
+                }),
+            );
+
+        // Add IGP script via reference or inline
+        if let Some(ref igp_deploy) = deployment.igp {
+            if let Some(ref rs) = igp_deploy.reference_script_utxo {
+                println!("  Using IGP reference script: {}#{}", rs.tx_hash, rs.output_index);
+                let ref_tx_hash: [u8; 32] = hex::decode(&rs.tx_hash)?
+                    .try_into()
+                    .map_err(|_| anyhow!("Invalid IGP ref script tx hash"))?;
+                staging = staging.reference_input(Input::new(
+                    Hash::new(ref_tx_hash),
+                    rs.output_index as u64,
+                ));
+            } else {
+                // Load IGP script from blueprint
+                let blueprint = ctx.load_blueprint()?;
+                let igp_validator = blueprint
+                    .find_validator("igp.igp.spend")
+                    .ok_or_else(|| anyhow!("IGP validator not found in blueprint"))?;
+                let igp_script_bytes = hex::decode(&igp_validator.compiled_code)?;
+                staging = staging.script(ScriptKind::PlutusV3, igp_script_bytes);
+            }
+        } else {
+            // Load IGP script from blueprint as fallback
+            let blueprint = ctx.load_blueprint()?;
+            let igp_validator = blueprint
+                .find_validator("igp.igp.spend")
+                .ok_or_else(|| anyhow!("IGP validator not found in blueprint"))?;
+            let igp_script_bytes = hex::decode(&igp_validator.compiled_code)?;
+            staging = staging.script(ScriptKind::PlutusV3, igp_script_bytes);
+        }
+    }
 
     // For collateral type, add token input and change output
     if let (
