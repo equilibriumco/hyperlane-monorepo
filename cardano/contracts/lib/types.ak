@@ -173,6 +173,7 @@ pub type MailboxRedeemer {
     recipient: HyperlaneAddress,
     body: ByteArray,
     sender_ref: OutputReference,
+    hook_metadata: ByteArray,
   }
   /// Inbound: process a message from another chain
   Process { message: Message, metadata: ByteArray, message_id: ByteArray }
@@ -292,6 +293,8 @@ pub type GasOracleConfig {
   gas_price: Int,
   /// Lovelace per remote gas unit (scaled)
   token_exchange_rate: Int,
+  /// Per-destination protocol overhead added to sender's gasLimit
+  gas_overhead: Int,
 }
 
 /// IGP datum
@@ -301,8 +304,6 @@ pub type IgpDatum {
   beneficiary: ByteArray,
   /// Gas oracles per destination domain
   gas_oracles: List<(Domain, GasOracleConfig)>,
-  /// Default gas limit for messages
-  default_gas_limit: Int,
 }
 
 /// IGP redeemer

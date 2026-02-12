@@ -38,13 +38,14 @@ validator mailbox(
     expect Some(mailbox_datum) = datum
 
     when redeemer is {
-      Dispatch { destination, recipient, body, sender_ref } ->
+      Dispatch { destination, recipient, body, sender_ref, hook_metadata } ->
         validate_dispatch(
           mailbox_datum,
           destination,
           recipient,
           body,
           sender_ref,
+          hook_metadata,
           tx,
           own_ref,
         )
@@ -80,6 +81,7 @@ fn validate_dispatch(
   recipient: HyperlaneAddress,
   body: ByteArray,
   sender_ref: OutputReference,
+  _hook_metadata: ByteArray,
   tx: Transaction,
   own_ref: OutputReference,
 ) -> Bool {

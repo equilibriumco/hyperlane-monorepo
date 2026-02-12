@@ -131,6 +131,7 @@ fn validate_set_gas_oracle(
   // 2. Validate config
   expect config.gas_price > 0
   expect config.token_exchange_rate > 0
+  expect config.gas_overhead >= 0
 
   // 3. Find own input
   expect Some(own_input) = find_input(tx, own_ref)
@@ -153,7 +154,6 @@ fn validate_set_gas_oracle(
   expect cont_datum.gas_oracles == new_gas_oracles
   expect cont_datum.owner == datum.owner
   expect cont_datum.beneficiary == datum.beneficiary
-  expect cont_datum.default_gas_limit == datum.default_gas_limit
 
   True
 }
@@ -169,22 +169,18 @@ fn calculate_gas_payment(
     when find_gas_oracle(datum.gas_oracles, destination) is {
       Some(c) -> c
       None ->
-        // Use default values if no oracle configured
-        GasOracleConfig { gas_price: 1, token_exchange_rate: 1000000 }
+        GasOracleConfig {
+          gas_price: 1,
+          token_exchange_rate: 1000000,
+          gas_overhead: 0,
+        }
     }
 
-  // Use requested gas amount or default
-  let effective_gas =
-    if gas_amount > 0 {
-      gas_amount
-    } else {
-      datum.default_gas_limit
-    }
+  expect gas_amount > 0
 
   // Calculate: gas_amount * gas_price * token_exchange_rate / scale_factor
-  // Scale factor is 10^18 to match EVM precision
-  // For simplicity, we use a scaled-down calculation
-  effective_gas * config.gas_price * config.token_exchange_rate / 1000000000000
+  // gas_amount is already total gas (gasLimit + gasOverhead), pre-computed by CLI
+  gas_amount * config.gas_price * config.token_exchange_rate / 1000000000000
 }
 
 /// Find gas oracle config for a domain
@@ -270,6 +266,5 @@ fn datum_preserved(old: IgpDatum, new: IgpDatum) -> Bool {
     old.owner == new.owner,
     old.beneficiary == new.beneficiary,
     old.gas_oracles == new.gas_oracles,
-    old.default_gas_limit == new.default_gas_limit,
   }
 }
