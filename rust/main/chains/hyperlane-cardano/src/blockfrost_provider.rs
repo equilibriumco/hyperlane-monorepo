@@ -343,6 +343,19 @@ impl BlockfrostProvider {
         Ok(tx_hash)
     }
 
+    /// Evaluate a transaction to get execution units for each script.
+    /// Sends the TX CBOR to Blockfrost's /utils/txs/evaluate endpoint.
+    /// Returns the raw JSON response (serde_json::Value).
+    #[instrument(skip(self, tx_cbor))]
+    pub async fn evaluate_tx(
+        &self,
+        tx_cbor: &[u8],
+    ) -> Result<serde_json::Value, BlockfrostProviderError> {
+        self.rate_limit().await;
+        let result = self.api.utils_tx_evaluate(tx_cbor.to_vec()).await?;
+        Ok(result)
+    }
+
     /// Get protocol parameters (returns JSON for flexibility)
     #[instrument(skip(self))]
     pub async fn get_protocol_parameters(

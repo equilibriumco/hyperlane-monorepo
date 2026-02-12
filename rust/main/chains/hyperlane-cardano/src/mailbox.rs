@@ -494,11 +494,37 @@ impl Mailbox for CardanoMailbox {
     async fn process_estimate_costs(
         &self,
         message: &HyperlaneMessage,
-        _metadata: &Metadata,
+        metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
-        // Estimate based on recipient type:
-        // - 0x01 prefix (warp routes): simpler TX, ~3 ADA
-        // - 0x02 prefix (script recipients): needs verified_message_nft, ~4 ADA
+        // Try dynamic estimation via Blockfrost TX evaluation
+        if let Some(payer) = self.payer.as_ref() {
+            match self
+                .tx_builder
+                .estimate_process_cost(message, metadata, payer)
+                .await
+            {
+                Ok(estimated_lovelace) => {
+                    info!(
+                        "Dynamic cost estimate for nonce {}: {} lovelace",
+                        message.nonce, estimated_lovelace
+                    );
+                    return Ok(TxCostEstimate {
+                        gas_limit: U256::from(estimated_lovelace),
+                        gas_price: FixedPointNumber::try_from(U256::from(1u64))
+                            .unwrap_or_else(|_| FixedPointNumber::zero()),
+                        l2_gas_limit: None,
+                    });
+                }
+                Err(e) => {
+                    debug!(
+                        "Dynamic cost estimation failed for nonce {}, using fallback: {}",
+                        message.nonce, e
+                    );
+                }
+            }
+        }
+
+        // Fallback: static estimate based on recipient type
         let recipient_bytes = message.recipient.as_bytes();
         let estimated_fee_lovelace = if recipient_bytes.first() == Some(&0x01) {
             3_000_000u64
@@ -506,8 +532,6 @@ impl Mailbox for CardanoMailbox {
             4_000_000u64
         };
 
-        // gas_price=1 gives a 1:1 mapping between gas units and lovelace,
-        // so the relayer's onChainFeeQuoting compares payment directly in lovelace
         Ok(TxCostEstimate {
             gas_limit: U256::from(estimated_fee_lovelace),
             gas_price: FixedPointNumber::try_from(U256::from(1u64))
