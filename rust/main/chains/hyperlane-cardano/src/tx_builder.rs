@@ -1813,6 +1813,113 @@ impl HyperlaneTxBuilder {
         info!("ISM update transaction submitted: {}", tx_hash);
         Ok(tx_hash)
     }
+
+    /// Estimate the total lovelace cost for processing a message by building
+    /// a dry-run TX, evaluating it via Blockfrost's Ogmios endpoint, and
+    /// computing the fee from protocol parameters + execution units.
+    pub async fn estimate_process_cost(
+        &self,
+        message: &HyperlaneMessage,
+        metadata: &[u8],
+        payer: &Keypair,
+    ) -> Result<u64, TxBuilderError> {
+        // 1. Build the TX with placeholder ExUnits
+        let components = self.build_process_tx(message, metadata, payer).await?;
+        let built_tx = self.build_complete_process_tx(&components, payer).await?;
+
+        // 2. Sign and serialize (evaluate endpoint requires a valid signed TX)
+        let signed_tx = self.sign_transaction(built_tx, payer)?;
+
+        // 3. Evaluate via Blockfrost (Ogmios)
+        let eval_result = self.provider.evaluate_tx(&signed_tx).await?;
+        debug!("TX evaluate response: {:?}", eval_result);
+
+        // 4. Parse execution units from response
+        // Ogmios format: { "result": [{ "validator": "spend:0", "budget": { "memory": N, "cpu": N } }] }
+        let (total_mem, total_steps) = parse_evaluation_result(&eval_result)?;
+        info!(
+            "Evaluated ExUnits: total_mem={}, total_steps={}",
+            total_mem, total_steps
+        );
+
+        // 5. Calculate fee from protocol parameters
+        let params = self.provider.get_protocol_parameters().await?;
+        let min_fee_a = params
+            .get("min_fee_a")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(44);
+        let min_fee_b = params
+            .get("min_fee_b")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(155381);
+        let price_mem: f64 = params
+            .get("price_mem")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0577);
+        let price_step: f64 = params
+            .get("price_step")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0000721);
+
+        let tx_size = signed_tx.len() as u64;
+        let size_fee = min_fee_b + (tx_size * min_fee_a);
+        let script_fee =
+            (price_mem * total_mem as f64 + price_step * total_steps as f64).ceil() as u64;
+        let base_fee = size_fee + script_fee;
+
+        // 6. Add minUTxO costs for outputs the relayer creates
+        let min_lovelace = self.min_lovelace_simple().await;
+        // processed marker output + change output
+        let output_costs = min_lovelace * 2;
+
+        // 7. Add 20% safety margin
+        let total = ((base_fee + output_costs) as f64 * 1.2).ceil() as u64;
+
+        info!(
+            "Estimated cost: base_fee={} (size={}, script={}), output_costs={}, total_with_margin={}",
+            base_fee, size_fee, script_fee, output_costs, total
+        );
+
+        Ok(total)
+    }
+}
+
+/// Parse the evaluation result from Blockfrost/Ogmios to extract total
+/// memory and CPU steps across all redeemers.
+fn parse_evaluation_result(result: &serde_json::Value) -> Result<(u64, u64), TxBuilderError> {
+    // Try Ogmios v6 format: { "result": [{ "validator": "...", "budget": { "memory": N, "cpu": N } }] }
+    if let Some(evaluations) = result.get("result").and_then(|v| v.as_array()) {
+        let mut total_mem = 0u64;
+        let mut total_steps = 0u64;
+        for entry in evaluations {
+            if let Some(budget) = entry.get("budget") {
+                total_mem += budget.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+                total_steps += budget.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0);
+            }
+        }
+        if total_mem > 0 || total_steps > 0 {
+            return Ok((total_mem, total_steps));
+        }
+    }
+
+    // Try alternative Ogmios format with EvaluationResult key
+    if let Some(eval_result) = result.get("EvaluationResult") {
+        let mut total_mem = 0u64;
+        let mut total_steps = 0u64;
+        if let Some(obj) = eval_result.as_object() {
+            for (_key, value) in obj {
+                total_mem += value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+                total_steps += value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+            }
+        }
+        if total_mem > 0 || total_steps > 0 {
+            return Ok((total_mem, total_steps));
+        }
+    }
+
+    Err(TxBuilderError::Encoding(format!(
+        "Could not parse evaluation result: {result}"
+    )))
 }
 
 /// Components needed to build a Process transaction
@@ -2697,6 +2804,7 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             recipient,
             body,
             sender_ref,
+            hook_metadata,
         } => {
             // Constructor 0: Dispatch
             // sender_ref encoded as OutputReference: Constr 0 [ByteArray(tx_hash), Int(output_index)]
@@ -2716,6 +2824,7 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
                     PlutusData::BoundedBytes(recipient.to_vec().into()),
                     PlutusData::BoundedBytes(body.clone().into()),
                     sender_ref_data,
+                    PlutusData::BoundedBytes(hook_metadata.clone().into()),
                 ]),
             })
         }

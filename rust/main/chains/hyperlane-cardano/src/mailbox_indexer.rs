@@ -61,7 +61,7 @@ impl CardanoMailboxIndexer {
         nonce: u32,
     ) -> Option<HyperlaneMessage> {
         // Dispatch redeemer format (constructor 0):
-        // { "constructor": 0, "fields": [destination, recipient, body, sender_ref] }
+        // { "constructor": 0, "fields": [destination, recipient, body, sender_ref, hook_metadata] }
         let constructor = json.get("constructor")?.as_u64()?;
         if constructor != 0 {
             return None; // Not a Dispatch redeemer
@@ -132,9 +132,12 @@ impl CardanoMailboxIndexer {
 
         // If sender_ref is provided, look up the specific input
         let first_input = if let Some((ref_tx_hash, ref_output_index)) = sender_ref {
-            spent_inputs.iter().find(|input| {
-                input.tx_hash == *ref_tx_hash && input.output_index == *ref_output_index
-            }).copied()
+            spent_inputs
+                .iter()
+                .find(|input| {
+                    input.tx_hash == *ref_tx_hash && input.output_index == *ref_output_index
+                })
+                .copied()
         } else {
             // Fallback heuristic for backwards compatibility
             let mailbox_address = self.get_mailbox_address().ok();
@@ -144,14 +147,17 @@ impl CardanoMailboxIndexer {
                 other => other,
             });
 
-            let sender_input = sorted_inputs.iter().find(|input| {
-                if let Some(ref mailbox_addr) = mailbox_address {
-                    if &input.address == mailbox_addr {
-                        return false;
+            let sender_input = sorted_inputs
+                .iter()
+                .find(|input| {
+                    if let Some(ref mailbox_addr) = mailbox_address {
+                        if &input.address == mailbox_addr {
+                            return false;
+                        }
                     }
-                }
-                input.address.starts_with("addr_test1w") || input.address.starts_with("addr1w")
-            }).copied();
+                    input.address.starts_with("addr_test1w") || input.address.starts_with("addr1w")
+                })
+                .copied();
 
             sender_input.or_else(|| sorted_inputs.first().copied())
         };
@@ -402,7 +408,8 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                 let nonce = self.extract_nonce_from_outputs(&tx_utxos);
                 info!("Extracted nonce: {}", nonce);
 
-                if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce)
+                if let Some(message) =
+                    self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce)
                 {
                     let message_id = message.id();
                     // Use the From trait conversion which automatically sets sequence from message.nonce

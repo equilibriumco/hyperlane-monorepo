@@ -132,6 +132,7 @@ pub enum MailboxRedeemer {
         recipient: HyperlaneAddress,
         body: Vec<u8>,
         sender_ref: ([u8; 32], u32), // (tx_hash, output_index)
+        hook_metadata: Vec<u8>,
     },
     Process {
         message: Message,
