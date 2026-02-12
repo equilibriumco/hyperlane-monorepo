@@ -239,13 +239,47 @@ async fn dispatch(
         new_merkle.count,
     )?;
 
-    // Build Dispatch redeemer
-    let redeemer_cbor = build_mailbox_dispatch_redeemer(destination, &recipient_hex, &body_hex)?;
+    // Get payer UTXOs for fees, collateral, and sender_ref
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000 &&
+            u.assets.is_empty() &&
+            u.reference_script.is_none() &&
+            u.tx_hash != collateral_utxo.tx_hash
+        })
+        .or_else(|| payer_utxos.iter().find(|u| {
+            u.lovelace >= 5_000_000 &&
+            u.assets.is_empty() &&
+            u.reference_script.is_none()
+        }))
+        .ok_or_else(|| anyhow!("No suitable fee UTXO found"))?;
+
+    // Build Dispatch redeemer — sender_ref points to the fee UTXO (payer's wallet)
+    // so the mailbox can deterministically identify the sender.
+    let redeemer_cbor = build_mailbox_dispatch_redeemer(
+        destination,
+        &recipient_hex,
+        &body_hex,
+        &fee_utxo.tx_hash,
+        fee_utxo.output_index as u32,
+    )?;
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\n{}", "Transaction Details:".cyan());
         println!("  Mailbox UTXO: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+        println!("  Fee UTXO: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
         println!("  Redeemer: {}", hex::encode(&redeemer_cbor));
         println!("  New Datum: {}", hex::encode(&new_datum_cbor));
         println!("\n{}", "Message Summary:".cyan());
@@ -258,39 +292,6 @@ async fn dispatch(
 
     // Build and submit the transaction
     println!("\n{}", "Building transaction...".cyan());
-
-    // Get payer UTXOs for fees and collateral
-    let payer_utxos = client.get_utxos(&payer_address).await?;
-    if payer_utxos.is_empty() {
-        return Err(anyhow!("No UTXOs found for payer address"));
-    }
-
-    // Find collateral UTXO (pure ADA, no tokens, no reference script)
-    let collateral_utxo = payer_utxos
-        .iter()
-        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
-
-    // Find fee UTXO that sorts BEFORE the mailbox UTXO lexicographically.
-    // This is critical because Cardano sorts inputs lexicographically, and the
-    // mailbox script uses the first input's address as the "sender". We need
-    // the fee input (payer's wallet) to come first, not the mailbox script.
-    // Must also not have a reference script attached.
-    let fee_utxo = payer_utxos
-        .iter()
-        .find(|u| {
-            u.lovelace >= 5_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            u.tx_hash < mailbox_utxo.tx_hash  // Must sort before mailbox
-        })
-        .ok_or_else(|| anyhow!(
-            "No suitable fee UTXO found that sorts before mailbox UTXO {}. \
-             The fee input must have a tx_hash that is lexicographically smaller \
-             than the mailbox tx_hash so that the payer becomes the message sender.",
-            mailbox_utxo.tx_hash
-        ))?;
-
     println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
     println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
 
