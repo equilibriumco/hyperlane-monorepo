@@ -104,7 +104,7 @@ impl CardanoInterchainGasPaymasterIndexer {
     /// Get the IGP script address
     fn get_igp_address(&self) -> ChainResult<String> {
         self.provider
-            .script_hash_to_address(&self.conf.igp_policy_id)
+            .script_hash_to_address(&self.conf.igp_script_hash)
             .map_err(ChainCommunicationError::from_other)
     }
 }

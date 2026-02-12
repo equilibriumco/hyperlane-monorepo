@@ -992,9 +992,9 @@ pub fn build_cardano_connection_conf(
         .end()
         .unwrap_or_default();
 
-    let igp_policy_id = conn
+    let igp_script_hash = conn
         .chain(&mut local_err)
-        .get_opt_key("igpPolicyId")
+        .get_opt_key("igpScriptHash")
         .parse_string()
         .end()
         .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
@@ -1081,7 +1081,7 @@ pub fn build_cardano_connection_conf(
         ism_script_hash: ism_script_hash.to_string(),
         ism_script_cbor,
         ism_reference_script_utxo,
-        igp_policy_id: igp_policy_id.to_string(),
+        igp_script_hash: igp_script_hash.to_string(),
         validator_announce_policy_id: validator_announce_policy_id.to_string(),
         verified_message_nft_policy_id,
         verified_message_nft_script_cbor,

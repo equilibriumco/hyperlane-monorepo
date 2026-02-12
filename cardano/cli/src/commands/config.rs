@@ -359,17 +359,15 @@ async fn update_relayer(
         }
     }
 
-    // Update IGP info
+    // Update IGP info (use script hash for address derivation)
     if let Some(ref igp) = deployment.igp {
-        if let Some(ref nft) = igp.state_nft {
-            let old = get_old_value(connection, "igpPolicyId");
-            connection_updates.push((
-                "igpPolicyId".to_string(),
-                json!(nft.policy_id.clone()),
-                old,
-                nft.policy_id.clone(),
-            ));
-        }
+        let old = get_old_value(connection, "igpScriptHash");
+        connection_updates.push((
+            "igpScriptHash".to_string(),
+            json!(igp.hash.clone()),
+            old,
+            igp.hash.clone(),
+        ));
     }
 
     // Update validator announce info
@@ -633,11 +631,9 @@ async fn update_validator(
         }
     }
 
-    // Add IGP info
+    // Add IGP info (use script hash for address derivation)
     if let Some(ref igp) = deployment.igp {
-        if let Some(ref nft) = igp.state_nft {
-            connection["igpPolicyId"] = json!(nft.policy_id);
-        }
+        connection["igpScriptHash"] = json!(igp.hash);
     }
 
     // Add validator announce info
@@ -878,8 +874,9 @@ async fn generate_env(
     // IGP
     if let Some(ref igp) = deployment.igp {
         lines.push("# IGP".to_string());
+        lines.push(format!("CARDANO_IGP_SCRIPT_HASH={}", igp.hash));
         if let Some(ref nft) = igp.state_nft {
-            lines.push(format!("CARDANO_IGP_POLICY_ID={}", nft.policy_id));
+            lines.push(format!("CARDANO_IGP_STATE_NFT_POLICY_ID={}", nft.policy_id));
         }
         lines.push(String::new());
     }

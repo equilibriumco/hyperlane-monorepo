@@ -51,8 +51,8 @@ pub struct ConnectionConf {
     /// ISM reference script UTXO (format: "tx_hash#output_index")
     /// When set, the transaction will use this as a reference input for ISM verification
     pub ism_reference_script_utxo: Option<String>,
-    /// IGP (Interchain Gas Paymaster) policy ID (hex)
-    pub igp_policy_id: String,
+    /// IGP (Interchain Gas Paymaster) script hash (hex) for address derivation
+    pub igp_script_hash: String,
     /// Validator Announce policy ID (hex)
     pub validator_announce_policy_id: String,
     /// Verified message NFT policy ID (hex) - minting policy for verified message NFTs.
@@ -88,7 +88,7 @@ pub struct RawConnectionConf {
     ism_script_hash: Option<String>,
     ism_script_cbor: Option<String>,
     ism_reference_script_utxo: Option<String>,
-    igp_policy_id: Option<String>,
+    igp_script_hash: Option<String>,
     validator_announce_policy_id: Option<String>,
     verified_message_nft_policy_id: Option<String>,
     verified_message_nft_script_cbor: Option<String>,
@@ -198,10 +198,10 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("ism_script_hash"))
             .into_config_result(|| cwp.join("ism_script_hash"))?;
 
-        let igp_policy_id = raw
-            .igp_policy_id
+        let igp_script_hash = raw
+            .igp_script_hash
             .ok_or(MissingPolicyId("igp"))
-            .into_config_result(|| cwp.join("igp_policy_id"))?;
+            .into_config_result(|| cwp.join("igp_script_hash"))?;
 
         let validator_announce_policy_id = raw
             .validator_announce_policy_id
@@ -245,7 +245,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             ism_script_hash,
             ism_script_cbor,
             ism_reference_script_utxo,
-            igp_policy_id,
+            igp_script_hash,
             validator_announce_policy_id,
             verified_message_nft_policy_id,
             verified_message_nft_script_cbor,

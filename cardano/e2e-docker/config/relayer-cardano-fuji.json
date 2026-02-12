@@ -11,7 +11,7 @@
       "chainId": 2003,
       "connection": {
         "apiKey": "${BLOCKFROST_API_KEY}",
-        "igpPolicyId": "${CARDANO_IGP_POLICY_ID}",
+        "igpScriptHash": "${CARDANO_IGP_SCRIPT_HASH}",
         "ismAssetNameHex": "49534d205374617465",
         "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
         "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
