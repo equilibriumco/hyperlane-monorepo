@@ -154,6 +154,12 @@ impl CborBuilder {
         }
     }
 
+    /// Append pre-encoded CBOR bytes directly
+    pub fn raw_cbor(&mut self, cbor: &[u8]) -> &mut Self {
+        self.bytes.extend_from_slice(cbor);
+        self
+    }
+
     /// Build and return the CBOR bytes
     pub fn build(self) -> Vec<u8> {
         self.bytes
@@ -283,13 +289,21 @@ pub fn build_mailbox_set_default_ism_redeemer(new_ism_hash: &str) -> Result<Vec<
 }
 
 /// Build a Mailbox Dispatch redeemer
-/// Redeemer: Dispatch { destination: Domain, recipient: HyperlaneAddress, body: ByteArray }
+/// Redeemer: Dispatch { destination, recipient, body, sender_ref: OutputReference }
 /// Dispatch is constructor index 0 in MailboxRedeemer
+/// sender_ref is encoded as Constr 0 [ByteArray(tx_hash), Int(output_index)]
 pub fn build_mailbox_dispatch_redeemer(
     destination: u32,
-    recipient_hex: &str, // 32 bytes hex (64 chars)
-    body_hex: &str,      // variable length hex
+    recipient_hex: &str,       // 32 bytes hex (64 chars)
+    body_hex: &str,            // variable length hex
+    sender_tx_hash: &str,      // 32 bytes hex (64 chars) - sender UTXO tx hash
+    sender_output_index: u32,  // sender UTXO output index
 ) -> Result<Vec<u8>> {
+    let sender_ref_cbor = crate::utils::plutus::encode_output_reference(
+        sender_tx_hash,
+        sender_output_index,
+    )?;
+
     let mut builder = CborBuilder::new();
 
     // Dispatch is constructor 0
@@ -297,6 +311,7 @@ pub fn build_mailbox_dispatch_redeemer(
     builder.uint(destination as u64);
     builder.bytes_hex(recipient_hex)?;
     builder.bytes_hex(body_hex)?;
+    builder.raw_cbor(&sender_ref_cbor);
     builder.end_constr();
 
     Ok(builder.build())
