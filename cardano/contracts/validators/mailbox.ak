@@ -38,12 +38,13 @@ validator mailbox(
     expect Some(mailbox_datum) = datum
 
     when redeemer is {
-      Dispatch { destination, recipient, body } ->
+      Dispatch { destination, recipient, body, sender_ref } ->
         validate_dispatch(
           mailbox_datum,
           destination,
           recipient,
           body,
+          sender_ref,
           tx,
           own_ref,
         )
@@ -78,6 +79,7 @@ fn validate_dispatch(
   destination: Domain,
   recipient: HyperlaneAddress,
   body: ByteArray,
+  sender_ref: OutputReference,
   tx: Transaction,
   own_ref: OutputReference,
 ) -> Bool {
@@ -86,7 +88,7 @@ fn validate_dispatch(
       version: 3,
       nonce: datum.outbound_nonce,
       origin: datum.local_domain,
-      sender: get_sender_address(tx, own_ref),
+      sender: get_sender_address(tx, sender_ref),
       destination,
       recipient,
       body,
@@ -260,30 +262,9 @@ fn verified_message_delivered(
   )
 }
 
-fn get_sender_address(tx: Transaction, mailbox_ref: OutputReference) -> HyperlaneAddress {
-  let sender_input =
-    list.find(
-      tx.inputs,
-      fn(input) {
-        if input.output_reference == mailbox_ref {
-          False
-        } else {
-          when input.output.address.payment_credential is {
-            Script(_) -> True
-            _ -> False
-          }
-        }
-      },
-    )
-
-  let input =
-    when sender_input is {
-      Some(i) -> i
-      None -> {
-        expect Some(fallback) = list.head(tx.inputs)
-        fallback
-      }
-    }
+fn get_sender_address(tx: Transaction, sender_ref: OutputReference) -> HyperlaneAddress {
+  expect Some(input) =
+    list.find(tx.inputs, fn(i) { i.output_reference == sender_ref })
 
   when input.output.address.payment_credential is {
     Credential.VerificationKey(hash) -> bytearray.concat(#"00000000", hash)

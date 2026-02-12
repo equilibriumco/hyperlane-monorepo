@@ -1,5 +1,6 @@
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
+use cardano/transaction.{OutputReference}
 
 /// Core types for Hyperlane Cardano implementation
 /// These types are shared across all contracts
@@ -167,7 +168,12 @@ pub type MailboxDatum {
 /// Mailbox redeemer actions
 pub type MailboxRedeemer {
   /// Outbound: dispatch a message to another chain
-  Dispatch { destination: Domain, recipient: HyperlaneAddress, body: ByteArray }
+  Dispatch {
+    destination: Domain,
+    recipient: HyperlaneAddress,
+    body: ByteArray,
+    sender_ref: OutputReference,
+  }
   /// Inbound: process a message from another chain
   Process { message: Message, metadata: ByteArray, message_id: ByteArray }
   /// Admin: set default ISM
