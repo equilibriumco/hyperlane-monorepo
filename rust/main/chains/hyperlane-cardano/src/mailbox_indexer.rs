@@ -52,15 +52,16 @@ impl CardanoMailboxIndexer {
         }
     }
 
-    /// Parse a Dispatch redeemer from Blockfrost's JSON format to extract message data
+    /// Parse a Dispatch redeemer from Blockfrost's JSON format to extract message data.
+    /// The sender_ref field (4th field) identifies the specific input to use as sender.
     fn parse_dispatch_redeemer(
         &self,
         json: &JsonValue,
-        sender: H256,
+        tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
         nonce: u32,
     ) -> Option<HyperlaneMessage> {
         // Dispatch redeemer format (constructor 0):
-        // { "constructor": 0, "fields": [destination, recipient, body] }
+        // { "constructor": 0, "fields": [destination, recipient, body, sender_ref] }
         let constructor = json.get("constructor")?.as_u64()?;
         if constructor != 0 {
             return None; // Not a Dispatch redeemer
@@ -87,6 +88,16 @@ impl CardanoMailboxIndexer {
         let body_hex = fields.get(2)?.get("bytes")?.as_str()?;
         let body = hex::decode(body_hex).ok()?;
 
+        // Parse sender_ref (4th field) if present: Constr 0 [tx_hash, output_index]
+        let sender_ref = fields.get(3).and_then(|sr| {
+            let sr_fields = sr.get("fields")?.as_array()?;
+            let tx_hash = sr_fields.first()?.get("bytes")?.as_str()?;
+            let output_index = sr_fields.get(1)?.get("int")?.as_u64()? as u32;
+            Some((tx_hash.to_string(), output_index))
+        });
+
+        let sender = self.extract_sender_from_tx(tx_utxos, sender_ref.as_ref());
+
         Some(HyperlaneMessage {
             version: 3, // Hyperlane protocol version
             nonce,
@@ -99,7 +110,8 @@ impl CardanoMailboxIndexer {
     }
 
     /// Extract the sender address from transaction inputs.
-    /// The sender is the first spent script input (in canonical order) that is NOT the mailbox.
+    /// When sender_ref is provided, looks up that specific input directly.
+    /// Falls back to the heuristic (first script input excluding mailbox) for old TXs.
     ///
     /// The on-chain Aiken mailbox computes sender as:
     /// - Payment key credential: `0x00000000 || vkh`
@@ -110,30 +122,39 @@ impl CardanoMailboxIndexer {
     fn extract_sender_from_tx(
         &self,
         tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
+        sender_ref: Option<&(String, u32)>,
     ) -> H256 {
-        let mailbox_address = self.get_mailbox_address().ok();
-
-        let mut spent_inputs: Vec<_> = tx_utxos
+        let spent_inputs: Vec<_> = tx_utxos
             .inputs
             .iter()
             .filter(|input| !input.collateral && !input.reference)
             .collect();
 
-        spent_inputs.sort_by(|a, b| match a.tx_hash.cmp(&b.tx_hash) {
-            std::cmp::Ordering::Equal => a.output_index.cmp(&b.output_index),
-            other => other,
-        });
+        // If sender_ref is provided, look up the specific input
+        let first_input = if let Some((ref_tx_hash, ref_output_index)) = sender_ref {
+            spent_inputs.iter().find(|input| {
+                input.tx_hash == *ref_tx_hash && input.output_index == *ref_output_index
+            }).copied()
+        } else {
+            // Fallback heuristic for backwards compatibility
+            let mailbox_address = self.get_mailbox_address().ok();
+            let mut sorted_inputs = spent_inputs.clone();
+            sorted_inputs.sort_by(|a, b| match a.tx_hash.cmp(&b.tx_hash) {
+                std::cmp::Ordering::Equal => a.output_index.cmp(&b.output_index),
+                other => other,
+            });
 
-        let sender_input = spent_inputs.iter().find(|input| {
-            if let Some(ref mailbox_addr) = mailbox_address {
-                if &input.address == mailbox_addr {
-                    return false;
+            let sender_input = sorted_inputs.iter().find(|input| {
+                if let Some(ref mailbox_addr) = mailbox_address {
+                    if &input.address == mailbox_addr {
+                        return false;
+                    }
                 }
-            }
-            input.address.starts_with("addr_test1w") || input.address.starts_with("addr1w")
-        });
+                input.address.starts_with("addr_test1w") || input.address.starts_with("addr1w")
+            }).copied();
 
-        let first_input = sender_input.or_else(|| spent_inputs.first());
+            sender_input.or_else(|| sorted_inputs.first().copied())
+        };
 
         if let Some(first_input) = first_input {
             if first_input.address.starts_with("addr") {
@@ -377,14 +398,11 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
                     }
                 };
 
-                // Extract sender from first input
-                let sender = self.extract_sender_from_tx(&tx_utxos);
-
                 // Try to extract nonce from mailbox output datum
                 let nonce = self.extract_nonce_from_outputs(&tx_utxos);
-                info!("Extracted sender: {:?}, nonce: {}", sender, nonce);
+                info!("Extracted nonce: {}", nonce);
 
-                if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, sender, nonce)
+                if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce)
                 {
                     let message_id = message.id();
                     // Use the From trait conversion which automatically sets sequence from message.nonce

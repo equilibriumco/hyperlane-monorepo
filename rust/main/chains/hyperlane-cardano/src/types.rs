@@ -131,6 +131,7 @@ pub enum MailboxRedeemer {
         destination: Domain,
         recipient: HyperlaneAddress,
         body: Vec<u8>,
+        sender_ref: ([u8; 32], u32), // (tx_hash, output_index)
     },
     Process {
         message: Message,

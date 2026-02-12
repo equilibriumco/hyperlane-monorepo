@@ -2696,8 +2696,18 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             destination,
             recipient,
             body,
+            sender_ref,
         } => {
             // Constructor 0: Dispatch
+            // sender_ref encoded as OutputReference: Constr 0 [ByteArray(tx_hash), Int(output_index)]
+            let sender_ref_data = PlutusData::Constr(Constr {
+                tag: 121,
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BoundedBytes(sender_ref.0.to_vec().into()),
+                    PlutusData::BigInt(BigInt::Int((sender_ref.1 as i64).into())),
+                ]),
+            });
             PlutusData::Constr(Constr {
                 tag: 121, // Constructor 0 alternative encoding
                 any_constructor: None,
@@ -2705,6 +2715,7 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
                     PlutusData::BigInt(BigInt::Int((*destination as i64).into())),
                     PlutusData::BoundedBytes(recipient.to_vec().into()),
                     PlutusData::BoundedBytes(body.clone().into()),
+                    sender_ref_data,
                 ]),
             })
         }
