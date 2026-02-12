@@ -59,16 +59,16 @@
     "hash": "644fa4df582c30200382b25d2a2d495fc51ea971ce2eed2f294555a9",
     "address": "addr_test1wpjylfxltqkrqgqrs2e9623df90u284fw88zamf099z4t2gezryll",
     "stateNft": {
-      "policyId": "c0ccb8f241aff4efebb4f37f9b71ded66e748e4a752fe8811ab5c81d",
+      "policyId": "5dfd0673f61f691eb330d651ae9d23e1ec7a76c5ad5d0e2b112722bc",
       "assetNameHex": "494750205374617465",
       "assetName": "IGP State",
-      "seedUtxo": "16e5540beef7b622cf7010ee1817cc3e9fb610b9af8cd54b7dadf0a0e607d7b8#2"
+      "seedUtxo": "308ac55ad02f7931d10771aef01429bf605b91d40511a0c204f798e4f08cf18b#1"
     },
-    "stateUtxo": "0917c2d15ef2a54f4e74698e10319458cbf150e6498512fc6d1da7f33f50b45d#0",
-    "initTxHash": "0917c2d15ef2a54f4e74698e10319458cbf150e6498512fc6d1da7f33f50b45d",
+    "stateUtxo": "6a55dfa7bd5edb1754a478d8b62d2f8beebc3ea790df32472541cdb18eeec416#0",
+    "initTxHash": "6a55dfa7bd5edb1754a478d8b62d2f8beebc3ea790df32472541cdb18eeec416",
     "initialized": true,
-    "utxo": "0917c2d15ef2a54f4e74698e10319458cbf150e6498512fc6d1da7f33f50b45d#0",
-    "stateNftPolicy": "c0ccb8f241aff4efebb4f37f9b71ded66e748e4a752fe8811ab5c81d"
+    "utxo": "6a55dfa7bd5edb1754a478d8b62d2f8beebc3ea790df32472541cdb18eeec416#0",
+    "stateNftPolicy": "5dfd0673f61f691eb330d651ae9d23e1ec7a76c5ad5d0e2b112722bc"
   },
   "validator_announce": {
     "hashBeforeParametrization": "db264a22625d7adaf23e0f7724d3e3e80cb0fe72ca1e972f81015a20",
@@ -123,6 +123,56 @@
       "mintingPolicy": "0edd98f13502d9b9355184d770f5b39d5c7e4315c321840983e76283",
       "mintingRefScriptUtxo": {
         "txHash": "9e8eddb1ba30389f31bec2f2f0bc171118a0197ee48186fa9d261dbdc7b9f274",
+        "outputIndex": 0,
+        "lovelace": 12000000
+      }
+    },
+    {
+      "warpType": "native",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "5e16e8a885a983776e962e97f829e1457e7744f648751223307828bc",
+      "address": "addr_test1wp0pd69gsk5cxamwjchf07pfu9zhua6y7ey82y3rxpuz30qhajkya",
+      "nftPolicy": "008fcf9b4790340e2a74148749b7be2eb14b1b70f4cb3653b35c12b5",
+      "initTxHash": "56523864bca1d058fd3eed94a78fe323ffd2dd0ed04a94a74ce49877c0748fce",
+      "referenceScriptUtxo": {
+        "txHash": "56523864bca1d058fd3eed94a78fe323ffd2dd0ed04a94a74ce49877c0748fce",
+        "outputIndex": 1,
+        "lovelace": 20000000
+      }
+    },
+    {
+      "warpType": "collateral",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "5e16e8a885a983776e962e97f829e1457e7744f648751223307828bc",
+      "address": "addr_test1wp0pd69gsk5cxamwjchf07pfu9zhua6y7ey82y3rxpuz30qhajkya",
+      "nftPolicy": "126e15750f908605ee133442e869684ab117a798f37734d525de522e",
+      "initTxHash": "42338e88793398e8739c954ea36ff210b46dee953c8c27dfc99a417ce7f2a45d",
+      "referenceScriptUtxo": {
+        "txHash": "42338e88793398e8739c954ea36ff210b46dee953c8c27dfc99a417ce7f2a45d",
+        "outputIndex": 1,
+        "lovelace": 20000000
+      },
+      "tokenPolicy": "0be3735173e2cd0f66085d88e6dcfbd208f3a808e9e5580949d0c410",
+      "tokenAsset": "54455354"
+    },
+    {
+      "warpType": "synthetic",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "5e16e8a885a983776e962e97f829e1457e7744f648751223307828bc",
+      "address": "addr_test1wp0pd69gsk5cxamwjchf07pfu9zhua6y7ey82y3rxpuz30qhajkya",
+      "nftPolicy": "0963527ebae525fb0ed03fb2ffa8ae2f47ad5b5a593c8592bf575fdb",
+      "initTxHash": "93fe22ed190bc9089dbcde00877d7ce95fd0d986060044c7b623ebb9381f0626",
+      "referenceScriptUtxo": {
+        "txHash": "93fe22ed190bc9089dbcde00877d7ce95fd0d986060044c7b623ebb9381f0626",
+        "outputIndex": 1,
+        "lovelace": 20000000
+      },
+      "mintingPolicy": "81cbe4326a93cd49926b8a017df1725ff036ca4127c963335ba060a6",
+      "mintingRefScriptUtxo": {
+        "txHash": "8c0012f48f4bb0f2b87c9896d167310c7f6064f99fba540749f3ce9e38d113bc",
         "outputIndex": 0,
         "lovelace": 12000000
       }
