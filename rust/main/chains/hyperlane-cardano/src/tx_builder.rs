@@ -113,7 +113,7 @@ impl HyperlaneTxBuilder {
     /// Create a new transaction builder
     pub fn new(conf: &ConnectionConf, provider: Arc<BlockfrostProvider>) -> Self {
         let resolver = RecipientResolver::new(
-            BlockfrostProvider::new(&conf.api_key, conf.network),
+            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay),
             conf.warp_route_reference_script_utxo.clone(),
         );
 

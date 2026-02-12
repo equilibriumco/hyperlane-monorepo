@@ -26,6 +26,10 @@ pub struct BlockfrostProvider {
     network: CardanoNetwork,
     /// Rate limiter: max 8 concurrent requests (staying under 10/sec limit)
     rate_limiter: Arc<Semaphore>,
+    /// How many blocks behind the tip to report as latest.
+    /// Prevents advancing past blocks that Blockfrost hasn't finished
+    /// indexing for address-transaction queries.
+    confirmation_block_delay: u32,
 }
 
 impl std::fmt::Debug for BlockfrostProvider {
@@ -106,13 +110,14 @@ impl Utxo {
 
 impl BlockfrostProvider {
     /// Create a new Blockfrost provider
-    pub fn new(api_key: &str, network: CardanoNetwork) -> Self {
+    pub fn new(api_key: &str, network: CardanoNetwork, confirmation_block_delay: u32) -> Self {
         let api = BlockfrostAPI::new(api_key, Default::default());
         Self {
             api,
             network,
             // Allow max 5 concurrent requests to stay under 10/sec limit
             rate_limiter: Arc::new(Semaphore::new(5)),
+            confirmation_block_delay,
         }
     }
 
@@ -130,12 +135,15 @@ impl BlockfrostProvider {
         self.network
     }
 
-    /// Get the latest block number
+    /// Get the latest block number, lagging behind the real tip by
+    /// `confirmation_block_delay` blocks to avoid querying blocks that
+    /// Blockfrost hasn't finished indexing for address-transaction lookups.
     #[instrument(skip(self))]
     pub async fn get_latest_block(&self) -> Result<u64, BlockfrostProviderError> {
         self.rate_limit().await;
         let block = self.api.blocks_latest().await?;
-        Ok(block.height.unwrap_or(0) as u64)
+        let tip = block.height.unwrap_or(0) as u64;
+        Ok(tip.saturating_sub(self.confirmation_block_delay as u64))
     }
 
     /// Get the latest slot number

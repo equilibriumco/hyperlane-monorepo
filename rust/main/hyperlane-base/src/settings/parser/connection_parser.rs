@@ -1052,6 +1052,12 @@ pub fn build_cardano_connection_conf(
         .end()
         .map(|s| s.to_string());
 
+    let confirmation_block_delay = conn
+        .chain(&mut local_err)
+        .get_opt_key("confirmationBlockDelay")
+        .parse_u32()
+        .unwrap_or(2);
+
     if !local_err.is_ok() || url.is_none() || api_key.is_none() {
         err.merge(local_err);
         return None;
@@ -1079,5 +1085,6 @@ pub fn build_cardano_connection_conf(
         validator_announce_policy_id: validator_announce_policy_id.to_string(),
         verified_message_nft_policy_id,
         verified_message_nft_script_cbor,
+        confirmation_block_delay,
     }))
 }

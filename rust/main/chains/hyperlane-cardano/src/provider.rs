@@ -16,7 +16,8 @@ pub struct CardanoProvider {
 
 impl CardanoProvider {
     pub fn new(conf: &ConnectionConf, domain: HyperlaneDomain) -> Self {
-        let provider = BlockfrostProvider::new(&conf.api_key, conf.network);
+        let provider =
+            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay);
         CardanoProvider {
             domain,
             provider: Arc::new(provider),

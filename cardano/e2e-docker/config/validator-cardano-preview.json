@@ -50,7 +50,8 @@
         "ismAssetNameHex": "49534d205374617465",
         "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",
         "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
-        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}"
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
+        "confirmationBlockDelay": 2
       },
       "index": {
         "from": ${CARDANO_INDEX_FROM},

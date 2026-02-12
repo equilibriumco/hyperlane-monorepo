@@ -58,6 +58,7 @@ impl CardanoAdapter {
         let provider = Arc::new(BlockfrostProvider::new(
             &connection_conf.api_key,
             connection_conf.network,
+            connection_conf.confirmation_block_delay,
         ));
 
         // Create the transaction builder

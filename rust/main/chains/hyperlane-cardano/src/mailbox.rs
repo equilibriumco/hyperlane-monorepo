@@ -38,10 +38,14 @@ impl CardanoMailbox {
         locator: ContractLocator,
         payer: Option<Keypair>,
     ) -> ChainResult<Self> {
-        let provider = Arc::new(BlockfrostProvider::new(&conf.api_key, conf.network));
+        let provider = Arc::new(BlockfrostProvider::new(
+            &conf.api_key,
+            conf.network,
+            conf.confirmation_block_delay,
+        ));
         let tx_builder = HyperlaneTxBuilder::new(conf, provider.clone());
         let resolver = RecipientResolver::new(
-            BlockfrostProvider::new(&conf.api_key, conf.network),
+            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay),
             conf.warp_route_reference_script_utxo.clone(),
         );
 
@@ -496,7 +500,7 @@ impl Mailbox for CardanoMailbox {
         // - 0x01 prefix (warp routes): simpler TX, ~3 ADA
         // - 0x02 prefix (script recipients): needs verified_message_nft, ~4 ADA
         let recipient_bytes = message.recipient.as_bytes();
-        let estimated_fee_lovelace = if recipient_bytes.get(0) == Some(&0x01) {
+        let estimated_fee_lovelace = if recipient_bytes.first() == Some(&0x01) {
             3_000_000u64
         } else {
             4_000_000u64

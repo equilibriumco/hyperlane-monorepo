@@ -61,6 +61,11 @@ pub struct ConnectionConf {
     /// Verified message NFT script CBOR (hex) - the minting policy script bytes.
     /// Required if verified_message_nft_policy_id is set.
     pub verified_message_nft_script_cbor: Option<String>,
+    /// Number of blocks to lag behind the tip when reporting latest block.
+    /// Prevents the indexer from advancing past blocks that Blockfrost hasn't
+    /// finished indexing for address-transaction queries (25-40s lag).
+    /// Defaults to 2 (~40s at ~20s/block on preview).
+    pub confirmation_block_delay: u32,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -87,6 +92,7 @@ pub struct RawConnectionConf {
     validator_announce_policy_id: Option<String>,
     verified_message_nft_policy_id: Option<String>,
     verified_message_nft_script_cbor: Option<String>,
+    confirmation_block_delay: Option<u32>,
 }
 
 /// An error type when parsing a connection configuration.
@@ -219,6 +225,8 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let verified_message_nft_policy_id = raw.verified_message_nft_policy_id;
         let verified_message_nft_script_cbor = raw.verified_message_nft_script_cbor;
 
+        let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(2);
+
         Ok(Self {
             url,
             api_key,
@@ -241,6 +249,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             validator_announce_policy_id,
             verified_message_nft_policy_id,
             verified_message_nft_script_cbor,
+            confirmation_block_delay,
         })
     }
 }

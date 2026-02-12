@@ -28,7 +28,8 @@
         "warpRouteReferenceScriptUtxo": "${CARDANO_WARP_ROUTE_REF_UTXO}",
         "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
         "verifiedMessageNftPolicyId": "${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}",
-        "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}"
+        "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}",
+        "confirmationBlockDelay": 2
       },
       "domainId": 2003,
       "index": {

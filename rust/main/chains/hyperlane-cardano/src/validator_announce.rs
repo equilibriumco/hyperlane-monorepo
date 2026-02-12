@@ -22,7 +22,8 @@ pub struct CardanoValidatorAnnounce {
 
 impl CardanoValidatorAnnounce {
     pub fn new(conf: &ConnectionConf, locator: ContractLocator) -> Self {
-        let provider = BlockfrostProvider::new(&conf.api_key, conf.network);
+        let provider =
+            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay);
         Self {
             provider: Arc::new(provider),
             domain: locator.domain.clone(),

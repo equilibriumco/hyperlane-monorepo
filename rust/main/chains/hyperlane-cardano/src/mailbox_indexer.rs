@@ -21,7 +21,8 @@ pub struct CardanoMailboxIndexer {
 
 impl CardanoMailboxIndexer {
     pub fn new(conf: &ConnectionConf, locator: ContractLocator) -> ChainResult<Self> {
-        let provider = BlockfrostProvider::new(&conf.api_key, conf.network);
+        let provider =
+            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay);
         let mailbox = CardanoMailbox::new(conf, locator, None)?;
         Ok(Self {
             provider: Arc::new(provider),
