@@ -128,11 +128,7 @@ enum InitCommands {
         #[arg(long)]
         beneficiary: Option<String>,
 
-        /// Default gas limit for messages
-        #[arg(long, default_value = "200000")]
-        default_gas_limit: u64,
-
-        /// Gas oracle config: "domain:gas_price:exchange_rate" (repeatable)
+        /// Gas oracle config: "domain:gas_price:exchange_rate:gas_overhead" (repeatable)
         #[arg(long = "oracle")]
         oracles: Vec<String>,
 
@@ -231,11 +227,10 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         } => init_recipient(ctx, mailbox_hash, custom_ism, custom_contracts, custom_module, custom_validator, utxo, output_lovelace, ref_script_lovelace, nft_script, recipient_script, datum_cbor, dry_run).await,
         InitCommands::Igp {
             beneficiary,
-            default_gas_limit,
             oracles,
             utxo,
             dry_run,
-        } => init_igp(ctx, beneficiary, default_gas_limit, oracles, utxo, dry_run).await,
+        } => init_igp(ctx, beneficiary, oracles, utxo, dry_run).await,
         InitCommands::All {
             domain,
             origin_domains,
@@ -710,7 +705,6 @@ async fn init_ism_internal(
 async fn init_igp(
     ctx: &CliContext,
     beneficiary: Option<String>,
-    default_gas_limit: u64,
     oracles: Vec<String>,
     utxo: Option<String>,
     dry_run: bool,
@@ -738,17 +732,16 @@ async fn init_igp(
     };
 
     // Parse oracle configurations
-    let gas_oracles: Vec<(u32, u64, u64)> = oracles
+    let gas_oracles: Vec<(u32, u64, u64, u64)> = oracles
         .iter()
         .map(|s| parse_oracle_config(s))
         .collect::<Result<Vec<_>>>()?;
 
     println!("  Owner: {}", owner_pkh);
     println!("  Beneficiary: {}", beneficiary_pkh);
-    println!("  Default Gas Limit: {}", default_gas_limit);
     println!("  Gas Oracles: {} configured", gas_oracles.len());
-    for (domain, gas_price, exchange_rate) in &gas_oracles {
-        println!("    - Domain {}: gas_price={}, exchange_rate={}", domain, gas_price, exchange_rate);
+    for (domain, gas_price, exchange_rate, gas_overhead) in &gas_oracles {
+        println!("    - Domain {}: gas_price={}, exchange_rate={}, gas_overhead={}", domain, gas_price, exchange_rate, gas_overhead);
     }
 
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -813,7 +806,7 @@ async fn init_igp(
     println!("  IGP Address: {}", igp_addr);
 
     // Build IGP datum
-    let datum_cbor = build_igp_datum(&owner_pkh, &beneficiary_pkh, &gas_oracles, default_gas_limit)?;
+    let datum_cbor = build_igp_datum(&owner_pkh, &beneficiary_pkh, &gas_oracles)?;
     println!("  Datum CBOR: {}...", hex::encode(&datum_cbor[..32.min(datum_cbor.len())]));
 
     if dry_run {
@@ -894,12 +887,12 @@ async fn init_igp(
     Ok(())
 }
 
-/// Parse oracle config string "domain:gas_price:exchange_rate"
-fn parse_oracle_config(s: &str) -> Result<(u32, u64, u64)> {
+/// Parse oracle config string "domain:gas_price:exchange_rate:gas_overhead"
+fn parse_oracle_config(s: &str) -> Result<(u32, u64, u64, u64)> {
     let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
+    if parts.len() != 4 {
         return Err(anyhow!(
-            "Invalid oracle format: '{}'. Expected 'domain:gas_price:exchange_rate'",
+            "Invalid oracle format: '{}'. Expected 'domain:gas_price:exchange_rate:gas_overhead'",
             s
         ));
     }
@@ -916,8 +909,12 @@ fn parse_oracle_config(s: &str) -> Result<(u32, u64, u64)> {
         .trim()
         .parse()
         .with_context(|| format!("Invalid exchange_rate in oracle config: '{}'", parts[2]))?;
+    let gas_overhead: u64 = parts[3]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid gas_overhead in oracle config: '{}'", parts[3]))?;
 
-    Ok((domain, gas_price, exchange_rate))
+    Ok((domain, gas_price, exchange_rate, gas_overhead))
 }
 
 async fn init_recipient(
@@ -1470,46 +1467,45 @@ mod tests {
 
     #[test]
     fn test_parse_oracle_config_valid() {
-        let result = parse_oracle_config("43113:25000000000:1000000").unwrap();
-        assert_eq!(result, (43113, 25000000000, 1000000));
+        let result = parse_oracle_config("43113:25000000000:1000000:500000").unwrap();
+        assert_eq!(result, (43113, 25000000000, 1000000, 500000));
     }
 
     #[test]
     fn test_parse_oracle_config_with_whitespace() {
-        let result = parse_oracle_config(" 43113 : 25000000000 : 1000000 ").unwrap();
-        assert_eq!(result, (43113, 25000000000, 1000000));
+        let result = parse_oracle_config(" 43113 : 25000000000 : 1000000 : 0 ").unwrap();
+        assert_eq!(result, (43113, 25000000000, 1000000, 0));
     }
 
     #[test]
     fn test_parse_oracle_config_large_values() {
-        // Test with large u64 values
-        let result = parse_oracle_config("11155111:30000000000:1200000").unwrap();
-        assert_eq!(result, (11155111, 30000000000, 1200000));
+        let result = parse_oracle_config("11155111:30000000000:1200000:1000000").unwrap();
+        assert_eq!(result, (11155111, 30000000000, 1200000, 1000000));
     }
 
     #[test]
     fn test_parse_oracle_config_too_few_parts() {
-        let result = parse_oracle_config("43113:25000000000");
+        let result = parse_oracle_config("43113:25000000000:1000000");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Expected 'domain:gas_price:exchange_rate'"));
+        assert!(result.unwrap_err().to_string().contains("Expected 'domain:gas_price:exchange_rate:gas_overhead'"));
     }
 
     #[test]
     fn test_parse_oracle_config_too_many_parts() {
-        let result = parse_oracle_config("43113:25000000000:1000000:extra");
+        let result = parse_oracle_config("43113:25000000000:1000000:500000:extra");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_oracle_config_invalid_domain() {
-        let result = parse_oracle_config("fuji:25000000000:1000000");
+        let result = parse_oracle_config("fuji:25000000000:1000000:0");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid domain"));
     }
 
     #[test]
     fn test_parse_oracle_config_invalid_gas_price() {
-        let result = parse_oracle_config("43113:not_a_number:1000000");
+        let result = parse_oracle_config("43113:not_a_number:1000000:0");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid gas_price"));
     }
@@ -1517,7 +1513,7 @@ mod tests {
     #[test]
     fn test_parse_oracle_config_negative_value() {
         // Negative values can't parse as u64
-        let result = parse_oracle_config("43113:-100:1000000");
+        let result = parse_oracle_config("43113:-100:1000000:0");
         assert!(result.is_err());
     }
 

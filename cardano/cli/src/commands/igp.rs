@@ -25,8 +25,7 @@ struct IgpTxContext {
     // Parsed datum fields
     owner: Vec<u8>,
     beneficiary: Vec<u8>,
-    gas_oracles: Vec<(u32, u64, u64)>,
-    default_gas_limit: u64,
+    gas_oracles: Vec<(u32, u64, u64, u64)>,
 }
 
 impl IgpTxContext {
@@ -50,7 +49,7 @@ impl IgpTxContext {
             .as_ref()
             .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
 
-        let (owner, beneficiary, gas_oracles, default_gas_limit) = parse_igp_datum(current_datum)?;
+        let (owner, beneficiary, gas_oracles) = parse_igp_datum(current_datum)?;
 
         Ok(Self {
             policy_id,
@@ -62,7 +61,6 @@ impl IgpTxContext {
             owner,
             beneficiary,
             gas_oracles,
-            default_gas_limit,
         })
     }
 
@@ -75,13 +73,12 @@ impl IgpTxContext {
     }
 
     /// Build the new IGP datum CBOR
-    fn build_new_datum(&self, updated_oracles: Option<&Vec<(u32, u64, u64)>>) -> Result<Vec<u8>> {
+    fn build_new_datum(&self, updated_oracles: Option<&Vec<(u32, u64, u64, u64)>>) -> Result<Vec<u8>> {
         let oracles = updated_oracles.unwrap_or(&self.gas_oracles);
         build_igp_datum(
             &hex::encode(&self.owner),
             &hex::encode(&self.beneficiary),
             oracles,
-            self.default_gas_limit,
         )
     }
 
@@ -293,9 +290,9 @@ enum IgpCommands {
         #[arg(long)]
         destination: u32,
 
-        /// Gas amount to quote (uses default_gas_limit if not provided)
+        /// Gas limit (app-level gas for handle())
         #[arg(long)]
-        gas_amount: Option<u64>,
+        gas_limit: u64,
 
         /// IGP state NFT policy ID (defaults to deployment info)
         #[arg(long)]
@@ -316,6 +313,10 @@ enum IgpCommands {
         #[arg(long)]
         exchange_rate: u64,
 
+        /// Per-destination protocol gas overhead
+        #[arg(long, default_value = "0")]
+        gas_overhead: u64,
+
         /// IGP state NFT policy ID (defaults to deployment info)
         #[arg(long)]
         igp_policy: Option<String>,
@@ -335,9 +336,9 @@ enum IgpCommands {
         #[arg(long)]
         destination: u32,
 
-        /// Gas amount to pay for
+        /// Gas limit (app-level gas for handle())
         #[arg(long)]
-        gas_amount: u64,
+        gas_limit: u64,
 
         /// Refund address (hex pubkey hash, defaults to payer)
         #[arg(long)]
@@ -373,20 +374,21 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
         IgpCommands::Show { igp_policy } => show_igp(ctx, igp_policy).await,
         IgpCommands::Quote {
             destination,
-            gas_amount,
+            gas_limit,
             igp_policy,
-        } => quote_gas(ctx, destination, gas_amount, igp_policy).await,
+        } => quote_gas(ctx, destination, gas_limit, igp_policy).await,
         IgpCommands::SetOracle {
             domain,
             gas_price,
             exchange_rate,
+            gas_overhead,
             igp_policy,
             dry_run,
-        } => set_oracle(ctx, domain, gas_price, exchange_rate, igp_policy, dry_run).await,
+        } => set_oracle(ctx, domain, gas_price, exchange_rate, gas_overhead, igp_policy, dry_run).await,
         IgpCommands::PayForGas {
             message_id,
             destination,
-            gas_amount,
+            gas_limit,
             refund_address,
             igp_policy,
             dry_run,
@@ -395,7 +397,7 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
                 ctx,
                 &message_id,
                 destination,
-                gas_amount,
+                gas_limit,
                 refund_address,
                 igp_policy,
                 dry_run,
@@ -439,20 +441,20 @@ async fn show_igp(ctx: &CliContext, igp_policy: Option<String>) -> Result<()> {
         .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
 
     match parse_igp_datum(datum) {
-        Ok((owner, beneficiary, gas_oracles, default_gas_limit)) => {
+        Ok((owner, beneficiary, gas_oracles)) => {
             println!("\n{}", "Configuration:".green());
             println!("  Owner: {}", hex::encode(&owner));
             println!("  Beneficiary: {}", hex::encode(&beneficiary));
-            println!("  Default Gas Limit: {}", default_gas_limit);
 
             println!("\n{}", "Gas Oracles:".green());
             if gas_oracles.is_empty() {
                 println!("  (none configured)");
             } else {
-                for (domain, gas_price, exchange_rate) in &gas_oracles {
+                for (domain, gas_price, exchange_rate, gas_overhead) in &gas_oracles {
                     println!("  Domain {}:", domain);
                     println!("    Gas Price: {}", gas_price);
                     println!("    Exchange Rate: {}", exchange_rate);
+                    println!("    Gas Overhead: {}", gas_overhead);
                 }
             }
 
@@ -479,7 +481,7 @@ async fn show_igp(ctx: &CliContext, igp_policy: Option<String>) -> Result<()> {
 async fn quote_gas(
     ctx: &CliContext,
     destination: u32,
-    gas_amount: Option<u64>,
+    gas_limit: u64,
     igp_policy: Option<String>,
 ) -> Result<()> {
     println!("{}", "IGP Gas Quote".cyan());
@@ -500,35 +502,34 @@ async fn quote_gas(
         .as_ref()
         .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
 
-    let (_, _, gas_oracles, default_gas_limit) = parse_igp_datum(datum)?;
-
-    // Determine effective gas amount
-    let effective_gas = gas_amount.unwrap_or(default_gas_limit);
+    let (_, _, gas_oracles) = parse_igp_datum(datum)?;
 
     // Find oracle for destination
-    let oracle = gas_oracles.iter().find(|(d, _, _)| *d == destination);
+    let oracle = gas_oracles.iter().find(|(d, _, _, _)| *d == destination);
 
     println!("\n{}", format!("Quote for destination {}:", destination).green());
-    println!("  Gas amount: {}", format_number(effective_gas));
+    println!("  Gas limit (app): {}", format_number(gas_limit));
 
-    let (gas_price, exchange_rate, required_lovelace) = match oracle {
-        Some((_, gp, er)) => {
-            let lovelace = calculate_gas_payment(effective_gas, *gp, *er);
-            (*gp, *er, lovelace)
+    let (gas_price, exchange_rate, gas_overhead, total_gas, required_lovelace) = match oracle {
+        Some((_, gp, er, overhead)) => {
+            let total = gas_limit + overhead;
+            let lovelace = calculate_gas_payment(total, *gp, *er);
+            (*gp, *er, *overhead, total, lovelace)
         }
         None => {
-            // Use default values (same as contract)
             let default_gas_price = 1u64;
             let default_exchange_rate = 1_000_000u64;
-            let lovelace = calculate_gas_payment(effective_gas, default_gas_price, default_exchange_rate);
+            let lovelace = calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
             println!(
                 "  {}",
                 "Warning: No oracle configured for this destination, using defaults".yellow()
             );
-            (default_gas_price, default_exchange_rate, lovelace)
+            (default_gas_price, default_exchange_rate, 0, gas_limit, lovelace)
         }
     };
 
+    println!("  Gas overhead: {}", format_number(gas_overhead));
+    println!("  Total gas: {}", format_number(total_gas));
     println!("  Gas price: {}", format_number(gas_price));
     println!("  Exchange rate: {}", format_number(exchange_rate));
     println!(
@@ -546,6 +547,7 @@ async fn set_oracle(
     domain: u32,
     gas_price: u64,
     exchange_rate: u64,
+    gas_overhead: u64,
     igp_policy: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -553,6 +555,7 @@ async fn set_oracle(
     println!("  Domain: {}", domain);
     println!("  Gas Price: {}", format_number(gas_price));
     println!("  Exchange Rate: {}", format_number(exchange_rate));
+    println!("  Gas Overhead: {}", format_number(gas_overhead));
 
     // Validate inputs
     if gas_price == 0 {
@@ -586,12 +589,13 @@ async fn set_oracle(
         if oracle.0 == domain {
             oracle.1 = gas_price;
             oracle.2 = exchange_rate;
+            oracle.3 = gas_overhead;
             found = true;
             break;
         }
     }
     if !found {
-        gas_oracles.push((domain, gas_price, exchange_rate));
+        gas_oracles.push((domain, gas_price, exchange_rate, gas_overhead));
     }
 
     // Build new datum
@@ -599,8 +603,8 @@ async fn set_oracle(
 
     println!("\n{}", "New IGP Datum:".green());
     println!("  Gas oracles: {} configured", gas_oracles.len());
-    for (d, gp, er) in &gas_oracles {
-        println!("    Domain {}: gas_price={}, exchange_rate={}", d, gp, er);
+    for (d, gp, er, oh) in &gas_oracles {
+        println!("    Domain {}: gas_price={}, exchange_rate={}, gas_overhead={}", d, gp, er, oh);
     }
     println!(
         "  Datum CBOR: {}...",
@@ -608,7 +612,7 @@ async fn set_oracle(
     );
 
     // Build SetGasOracle redeemer
-    let redeemer = build_set_gas_oracle_redeemer(domain, gas_price, exchange_rate);
+    let redeemer = build_set_gas_oracle_redeemer(domain, gas_price, exchange_rate, gas_overhead);
     let redeemer_cbor = pallas_codec::minicbor::to_vec(&redeemer)
         .map_err(|e| anyhow!("Failed to encode redeemer: {:?}", e))?;
     println!("\n{}", "SetGasOracle Redeemer:".green());
@@ -664,6 +668,7 @@ async fn set_oracle(
     println!("\n  Domain: {}", domain);
     println!("  Gas Price: {}", format_number(gas_price));
     println!("  Exchange Rate: {}", format_number(exchange_rate));
+    println!("  Gas Overhead: {}", format_number(gas_overhead));
 
     Ok(())
 }
@@ -672,7 +677,7 @@ async fn pay_for_gas(
     ctx: &CliContext,
     message_id: &str,
     destination: u32,
-    gas_amount: u64,
+    gas_limit: u64,
     refund_address: Option<String>,
     igp_policy: Option<String>,
     dry_run: bool,
@@ -692,7 +697,7 @@ async fn pay_for_gas(
 
     println!("  Message ID: 0x{}", message_id_clean);
     println!("  Destination: {}", destination);
-    println!("  Gas Amount: {}", format_number(gas_amount));
+    println!("  Gas Limit: {}", format_number(gas_limit));
 
     // Initialize shared context
     let igp_ctx = IgpTxContext::new(ctx, igp_policy).await?;
@@ -701,37 +706,34 @@ async fn pay_for_gas(
 
     igp_ctx.print_igp_utxo_info();
 
-    // Calculate required payment
-    let effective_gas = if gas_amount > 0 {
-        gas_amount
-    } else {
-        igp_ctx.default_gas_limit
-    };
-
+    // Calculate total gas = gas_limit + gas_overhead from oracle
     let oracle = igp_ctx
         .gas_oracles
         .iter()
-        .find(|(d, _, _)| *d == destination);
-    let (gas_price, exchange_rate, required_lovelace) = match oracle {
-        Some((_, gp, er)) => {
-            let lovelace = calculate_gas_payment(effective_gas, *gp, *er);
-            (*gp, *er, lovelace)
+        .find(|(d, _, _, _)| *d == destination);
+    let (gas_price, exchange_rate, gas_overhead, total_gas, required_lovelace) = match oracle {
+        Some((_, gp, er, overhead)) => {
+            let total = gas_limit + overhead;
+            let lovelace = calculate_gas_payment(total, *gp, *er);
+            (*gp, *er, *overhead, total, lovelace)
         }
         None => {
             let default_gas_price = 1u64;
             let default_exchange_rate = 1_000_000u64;
             let lovelace =
-                calculate_gas_payment(effective_gas, default_gas_price, default_exchange_rate);
+                calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
             println!(
                 "  {}",
                 "Warning: No oracle configured for this destination, using defaults".yellow()
             );
-            (default_gas_price, default_exchange_rate, lovelace)
+            (default_gas_price, default_exchange_rate, 0, gas_limit, lovelace)
         }
     };
 
     println!("\n{}", "Payment Calculation:".green());
-    println!("  Gas Amount: {}", format_number(effective_gas));
+    println!("  Gas Limit (app): {}", format_number(gas_limit));
+    println!("  Gas Overhead: {}", format_number(gas_overhead));
+    println!("  Total Gas: {}", format_number(total_gas));
     println!("  Gas Price: {}", format_number(gas_price));
     println!("  Exchange Rate: {}", format_number(exchange_rate));
     println!(
@@ -750,9 +752,9 @@ async fn pay_for_gas(
     };
     println!("  Refund address: {}", hex::encode(&refund_addr_bytes));
 
-    // Build PayForGas redeemer
+    // Build PayForGas redeemer (gas_amount = total gas including overhead)
     let redeemer =
-        build_pay_for_gas_redeemer(&message_id_bytes, destination, effective_gas, &refund_addr_bytes);
+        build_pay_for_gas_redeemer(&message_id_bytes, destination, total_gas, &refund_addr_bytes);
     let redeemer_cbor = pallas_codec::minicbor::to_vec(&redeemer)
         .map_err(|e| anyhow!("Failed to encode redeemer: {:?}", e))?;
     println!("\n{}", "PayForGas Redeemer:".green());
@@ -1006,9 +1008,9 @@ fn build_claim_redeemer(amount: u64) -> PlutusData {
 }
 
 /// Build SetGasOracle redeemer
-/// Structure: Constr 2 [domain: Int, config: Constr 0 [gas_price: Int, exchange_rate: Int]]
+/// Structure: Constr 2 [domain: Int, config: Constr 0 [gas_price: Int, exchange_rate: Int, gas_overhead: Int]]
 /// IGP redeemers: PayForGas=0, Claim=1, SetGasOracle=2
-fn build_set_gas_oracle_redeemer(domain: u32, gas_price: u64, exchange_rate: u64) -> PlutusData {
+fn build_set_gas_oracle_redeemer(domain: u32, gas_price: u64, exchange_rate: u64, gas_overhead: u64) -> PlutusData {
     PlutusData::Constr(Constr {
         tag: 123, // Constr 2 (SetGasOracle)
         any_constructor: None,
@@ -1020,6 +1022,7 @@ fn build_set_gas_oracle_redeemer(domain: u32, gas_price: u64, exchange_rate: u64
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((gas_price as i64).into())),
                     PlutusData::BigInt(BigInt::Int((exchange_rate as i64).into())),
+                    PlutusData::BigInt(BigInt::Int((gas_overhead as i64).into())),
                 ]),
             }),
         ]),
@@ -1059,10 +1062,10 @@ pub(crate) fn get_igp_policy(ctx: &CliContext, igp_policy: Option<String>) -> Re
         .ok_or_else(|| anyhow!("IGP policy not found. Use --igp-policy or initialize IGP first"))
 }
 
-/// Parse IGP datum, returns (owner, beneficiary, gas_oracles, default_gas_limit)
+/// Parse IGP datum, returns (owner, beneficiary, gas_oracles)
 pub(crate) fn parse_igp_datum(
     datum: &serde_json::Value,
-) -> Result<(Vec<u8>, Vec<u8>, Vec<(u32, u64, u64)>, u64)> {
+) -> Result<(Vec<u8>, Vec<u8>, Vec<(u32, u64, u64, u64)>)> {
     // Check if datum is raw CBOR hex
     if let Some(hex_str) = datum.as_str() {
         let decoded = crate::utils::cbor::decode_plutus_datum(hex_str)?;
@@ -1074,8 +1077,8 @@ pub(crate) fn parse_igp_datum(
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid IGP datum structure"))?;
 
-    if fields.len() < 4 {
-        return Err(anyhow!("IGP datum must have 4 fields"));
+    if fields.len() < 3 {
+        return Err(anyhow!("IGP datum must have 3 fields"));
     }
 
     // owner (field 0)
@@ -1108,20 +1111,18 @@ pub(crate) fn parse_igp_datum(
                 let domain = items[0].get("int").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
                 let oracle_fields = items[1].get("fields").and_then(|f| f.as_array());
                 if let Some(of) = oracle_fields {
-                    if of.len() >= 2 {
+                    if of.len() >= 3 {
                         let gas_price = of[0].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
                         let exchange_rate = of[1].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
-                        gas_oracles.push((domain, gas_price, exchange_rate));
+                        let gas_overhead = of[2].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
+                        gas_oracles.push((domain, gas_price, exchange_rate, gas_overhead));
                     }
                 }
             }
         }
     }
 
-    // default_gas_limit (field 3)
-    let default_gas_limit = fields[3].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
-
-    Ok((owner, beneficiary, gas_oracles, default_gas_limit))
+    Ok((owner, beneficiary, gas_oracles))
 }
 
 #[cfg(test)]
@@ -1136,12 +1137,11 @@ mod tests {
             "fields": [
                 {"bytes": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"},
                 {"bytes": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"},
-                {"list": []},
-                {"int": 200000}
+                {"list": []}
             ]
         });
 
-        let (owner, beneficiary, gas_oracles, default_gas_limit) =
+        let (owner, beneficiary, gas_oracles) =
             parse_igp_datum(&datum).unwrap();
 
         assert_eq!(
@@ -1153,7 +1153,6 @@ mod tests {
             "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"
         );
         assert!(gas_oracles.is_empty());
-        assert_eq!(default_gas_limit, 200000);
     }
 
     #[test]
@@ -1172,25 +1171,24 @@ mod tests {
                                     "constructor": 0,
                                     "fields": [
                                         {"int": 25000000000_u64},
-                                        {"int": 1000000}
+                                        {"int": 1000000},
+                                        {"int": 500000}
                                     ]
                                 }
                             ]
                         }
                     ]
-                },
-                {"int": 150000}
+                }
             ]
         });
 
-        let (owner, beneficiary, gas_oracles, default_gas_limit) =
+        let (owner, beneficiary, gas_oracles) =
             parse_igp_datum(&datum).unwrap();
 
         assert_eq!(hex::encode(&owner), "aabbccdd");
         assert_eq!(hex::encode(&beneficiary), "11223344");
         assert_eq!(gas_oracles.len(), 1);
-        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000));
-        assert_eq!(default_gas_limit, 150000);
+        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000, 500000));
     }
 
     #[test]
@@ -1209,7 +1207,8 @@ mod tests {
                                     "constructor": 0,
                                     "fields": [
                                         {"int": 25000000000_u64},
-                                        {"int": 1000000}
+                                        {"int": 1000000},
+                                        {"int": 0}
                                     ]
                                 }
                             ]
@@ -1221,22 +1220,22 @@ mod tests {
                                     "constructor": 0,
                                     "fields": [
                                         {"int": 30000000000_u64},
-                                        {"int": 1200000}
+                                        {"int": 1200000},
+                                        {"int": 100000}
                                     ]
                                 }
                             ]
                         }
                     ]
-                },
-                {"int": 200000}
+                }
             ]
         });
 
-        let (_, _, gas_oracles, _) = parse_igp_datum(&datum).unwrap();
+        let (_, _, gas_oracles) = parse_igp_datum(&datum).unwrap();
 
         assert_eq!(gas_oracles.len(), 2);
-        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000));
-        assert_eq!(gas_oracles[1], (11155111, 30000000000, 1200000));
+        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000, 0));
+        assert_eq!(gas_oracles[1], (11155111, 30000000000, 1200000, 100000));
     }
 
     #[test]
@@ -1251,7 +1250,7 @@ mod tests {
 
         let result = parse_igp_datum(&datum);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must have 4 fields"));
+        assert!(result.unwrap_err().to_string().contains("must have 3 fields"));
     }
 
     #[test]
@@ -1275,8 +1274,7 @@ mod tests {
             "fields": [
                 {"int": 123},
                 {"bytes": "11223344"},
-                {"list": []},
-                {"int": 200000}
+                {"list": []}
             ]
         });
 
@@ -1292,8 +1290,7 @@ mod tests {
             "fields": [
                 {"bytes": "aabbccdd"},
                 {"int": 456},
-                {"list": []},
-                {"int": 200000}
+                {"list": []}
             ]
         });
 
@@ -1304,7 +1301,6 @@ mod tests {
 
     #[test]
     fn test_parse_igp_datum_empty_oracle_list_items() {
-        // Test with malformed oracle entries that should be skipped
         let datum = json!({
             "constructor": 0,
             "fields": [
@@ -1315,13 +1311,11 @@ mod tests {
                         {"list": []},
                         {"list": [{"int": 1}]}
                     ]
-                },
-                {"int": 200000}
+                }
             ]
         });
 
-        let (_, _, gas_oracles, _) = parse_igp_datum(&datum).unwrap();
-        // Malformed entries should be skipped
+        let (_, _, gas_oracles) = parse_igp_datum(&datum).unwrap();
         assert!(gas_oracles.is_empty());
     }
 
@@ -1402,22 +1396,24 @@ mod tests {
     // Tests for build_set_gas_oracle_redeemer
     #[test]
     fn test_build_set_gas_oracle_redeemer() {
-        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000);
+        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000, 500_000);
 
-        // Verify it's a Constr 2 (tag 123)
         match &redeemer {
             PlutusData::Constr(c) => {
                 assert_eq!(c.tag, 123); // Constr 2
 
-                // Should have 2 fields: domain and config
                 match &c.fields {
                     MaybeIndefArray::Def(fields) => {
                         assert_eq!(fields.len(), 2);
 
-                        // Second field: GasOracleConfig (Constr 0)
+                        // GasOracleConfig now has 3 fields
                         match &fields[1] {
                             PlutusData::Constr(config) => {
-                                assert_eq!(config.tag, 121); // Constr 0
+                                assert_eq!(config.tag, 121);
+                                match &config.fields {
+                                    MaybeIndefArray::Def(cf) => assert_eq!(cf.len(), 3),
+                                    _ => panic!("Expected Def fields"),
+                                }
                             }
                             _ => panic!("Expected Constr for config"),
                         }
@@ -1431,12 +1427,10 @@ mod tests {
 
     #[test]
     fn test_build_set_gas_oracle_redeemer_encodes_correctly() {
-        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000);
+        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000, 0);
         let cbor = pallas_codec::minicbor::to_vec(&redeemer).unwrap();
 
-        // Just verify it encodes without error and produces some bytes
         assert!(!cbor.is_empty());
-        // The CBOR should start with d8 7b (tag 123 = Constr 2)
         assert_eq!(cbor[0], 0xd8);
         assert_eq!(cbor[1], 0x7b);
     }

@@ -12,8 +12,8 @@ use hyperlane_core::{identifiers::UniqueIdentifier, H256, H512};
 use crate::adapter::chains::AleoTxPrecursor;
 use crate::{
     adapter::chains::{
-        CardanoTxPrecursor, EthereumTxPrecursor, RadixTxPrecursor, SealevelTxPrecursor,
-        tron::TronTxPrecursor,
+        tron::TronTxPrecursor, CardanoTxPrecursor, EthereumTxPrecursor, RadixTxPrecursor,
+        SealevelTxPrecursor,
     },
     payload::PayloadDetails,
     LanderError,

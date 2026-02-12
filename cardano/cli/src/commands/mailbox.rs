@@ -273,6 +273,7 @@ async fn dispatch(
         &body_hex,
         &fee_utxo.tx_hash,
         fee_utxo.output_index as u32,
+        &[], // no hook metadata for direct dispatch
     )?;
 
     if dry_run {

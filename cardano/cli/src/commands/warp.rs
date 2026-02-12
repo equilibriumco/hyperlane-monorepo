@@ -112,9 +112,9 @@ enum WarpCommands {
         #[arg(long)]
         warp_policy: Option<String>,
 
-        /// Gas amount for IGP payment (atomic IGP in same TX)
+        /// Gas limit for IGP payment (app-level gas for handle())
         #[arg(long)]
-        gas_amount: Option<u64>,
+        gas_limit: Option<u64>,
 
         /// Dry run
         #[arg(long)]
@@ -178,9 +178,9 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             recipient,
             amount,
             warp_policy,
-            gas_amount,
+            gas_limit,
             dry_run,
-        } => transfer(ctx, domain, &recipient, amount, warp_policy, gas_amount, dry_run).await,
+        } => transfer(ctx, domain, &recipient, amount, warp_policy, gas_limit, dry_run).await,
         WarpCommands::DeployMintingRef {
             warp_policy,
             dry_run,
@@ -1403,7 +1403,7 @@ async fn transfer(
     recipient: &str,
     amount: u64,
     warp_policy: Option<String>,
-    gas_amount: Option<u64>,
+    gas_limit: Option<u64>,
     dry_run: bool,
 ) -> Result<()> {
     println!(
@@ -1675,6 +1675,7 @@ async fn transfer(
         &body_hex,
         &warp_utxo.tx_hash,
         warp_utxo.output_index,
+        &[], // hook metadata built from gas_limit if provided
     )?;
     println!("  Dispatch Redeemer: {} bytes", mailbox_redeemer.len());
 
@@ -1712,8 +1713,8 @@ async fn transfer(
         return Ok(());
     }
 
-    // Step 8: Prepare IGP (if --gas-amount provided)
-    let igp_data = if let Some(gas_amt) = gas_amount {
+    // Step 8: Prepare IGP (if --gas-limit provided)
+    let igp_data = if let Some(gas_lim) = gas_limit {
         println!("\n{}", "Step 8: Preparing Atomic IGP Payment...".cyan());
         let igp_policy_id = get_igp_policy(ctx, None)?;
         let igp_utxo = client
@@ -1725,26 +1726,28 @@ async fn transfer(
             .inline_datum
             .as_ref()
             .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
-        let (owner, beneficiary, gas_oracles, default_gas_limit) = parse_igp_datum(igp_datum_val)?;
+        let (owner, beneficiary, gas_oracles) = parse_igp_datum(igp_datum_val)?;
 
-        let effective_gas = if gas_amt > 0 { gas_amt } else { default_gas_limit };
-        let (gas_price, exchange_rate) = gas_oracles
+        let (gas_price, exchange_rate, gas_overhead) = gas_oracles
             .iter()
-            .find(|(d, _, _)| *d == domain)
-            .map(|(_, gp, er)| (*gp, *er))
-            .unwrap_or((1, 1_000_000));
-        let igp_payment = calculate_gas_payment(effective_gas, gas_price, exchange_rate);
+            .find(|(d, _, _, _)| *d == domain)
+            .map(|(_, gp, er, oh)| (*gp, *er, *oh))
+            .unwrap_or((1, 1_000_000, 0));
+        let total_gas = gas_lim + gas_overhead;
+        let igp_payment = calculate_gas_payment(total_gas, gas_price, exchange_rate);
 
         println!("  IGP Policy: {}", igp_policy_id);
         println!("  IGP UTXO: {}#{}", igp_utxo.tx_hash, igp_utxo.output_index);
-        println!("  Gas Amount: {}", effective_gas);
+        println!("  Gas Limit (app): {}", gas_lim);
+        println!("  Gas Overhead: {}", gas_overhead);
+        println!("  Total Gas: {}", total_gas);
         println!("  Payment: {} lovelace ({} ADA)", igp_payment, igp_payment as f64 / 1_000_000.0);
 
-        // Build IGP redeemer
+        // Build IGP redeemer (gas_amount = total gas including overhead)
         let igp_redeemer = build_pay_for_gas_redeemer(
             &hex::decode(&message_id)?,
             domain,
-            effective_gas,
+            total_gas,
             &payer_pkh,
         );
         let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
@@ -1755,7 +1758,6 @@ async fn transfer(
             &hex::encode(&owner),
             &hex::encode(&beneficiary),
             &gas_oracles,
-            default_gas_limit,
         )?;
 
         Some((igp_utxo, igp_policy_id, igp_payment, igp_redeemer_cbor, new_igp_datum))
