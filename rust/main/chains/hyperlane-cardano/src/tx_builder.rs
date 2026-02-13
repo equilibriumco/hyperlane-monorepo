@@ -982,6 +982,14 @@ impl HyperlaneTxBuilder {
             &components.token_release_recipient,
             &components.warp_token_type,
         ) {
+            if release_amount == 0 && !matches!(token_type, WarpTokenTypeInfo::Native) {
+                return Err(TxBuilderError::TxBuild(
+                    "Token release amount is zero after decimal conversion — \
+                     the transfer amount is too small to represent in local decimals"
+                        .to_string(),
+                ));
+            }
+
             info!(
                 "Creating direct token release: amount={}, recipient={}, token_type={:?}",
                 release_amount,
