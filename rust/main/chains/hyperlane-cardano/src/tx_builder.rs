@@ -524,6 +524,16 @@ impl HyperlaneTxBuilder {
                     token_msg.amount, local_amount, decimals.remote_decimals, decimals.local_decimals,
                     hex::encode(cardano_credential), token_type);
 
+            // Fail fast for amounts that round to zero after decimal conversion.
+            // This is a permanent condition — retrying won't change the result.
+            if local_amount == 0 && !matches!(token_type, WarpTokenTypeInfo::Native) {
+                return Err(TxBuilderError::TxBuild(
+                    "Token release amount is zero after decimal conversion — \
+                     the transfer amount is too small to represent in local decimals"
+                        .to_string(),
+                ));
+            }
+
             (
                 Some(local_amount),
                 Some(cardano_credential.to_vec()),
@@ -987,14 +997,6 @@ impl HyperlaneTxBuilder {
             &components.token_release_recipient,
             &components.warp_token_type,
         ) {
-            if release_amount == 0 && !matches!(token_type, WarpTokenTypeInfo::Native) {
-                return Err(TxBuilderError::TxBuild(
-                    "Token release amount is zero after decimal conversion — \
-                     the transfer amount is too small to represent in local decimals"
-                        .to_string(),
-                ));
-            }
-
             info!(
                 "Creating direct token release: amount={}, recipient={}, token_type={:?}",
                 release_amount,
