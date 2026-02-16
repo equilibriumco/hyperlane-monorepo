@@ -2,7 +2,7 @@ use crate::blockfrost_provider::{BlockfrostProvider, Utxo};
 use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
 use crate::recipient_resolver::RecipientResolver;
-use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents};
+use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents, TxBuilderError};
 use crate::types::{
     hyperlane_address_to_policy_id, script_hash_to_h256, MailboxDatum, MerkleTreeState,
 };
@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct CardanoMailbox {
     /// The mailbox minting policy hash - serves as both inbox and outbox address on Cardano
@@ -481,7 +481,12 @@ impl Mailbox for CardanoMailbox {
             .tx_builder
             .build_and_submit_process_tx(message, metadata, payer)
             .await
-            .map_err(ChainCommunicationError::from_other)?;
+            .map_err(|e| match &e {
+                TxBuilderError::UndeliverableMessage(_) => {
+                    ChainCommunicationError::SimulationFailed(e.to_string())
+                }
+                _ => ChainCommunicationError::from_other(e),
+            })?;
 
         info!(
             "Message processed successfully. Transaction: {:?}",
@@ -516,6 +521,13 @@ impl Mailbox for CardanoMailbox {
                     });
                 }
                 Err(e) => {
+                    if matches!(e, TxBuilderError::UndeliverableMessage(_)) {
+                        warn!(
+                            "Nonce {} is permanently undeliverable: {}",
+                            message.nonce, e
+                        );
+                        return Err(ChainCommunicationError::SimulationFailed(e.to_string()));
+                    }
                     debug!(
                         "Dynamic cost estimation unavailable for nonce {}, using static fallback: {}",
                         message.nonce, e

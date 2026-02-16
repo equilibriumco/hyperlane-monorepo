@@ -52,6 +52,8 @@ pub enum TxBuilderError {
     InvalidAddress(String),
     #[error("Submission failed: {0}")]
     SubmissionFailed(String),
+    #[error("Message permanently undeliverable: {0}")]
+    UndeliverableMessage(String),
 }
 
 /// Default execution units for script evaluation
@@ -527,7 +529,7 @@ impl HyperlaneTxBuilder {
             // Fail fast for amounts that round to zero after decimal conversion.
             // This is a permanent condition — retrying won't change the result.
             if local_amount == 0 && !matches!(token_type, WarpTokenTypeInfo::Native) {
-                return Err(TxBuilderError::TxBuild(
+                return Err(TxBuilderError::UndeliverableMessage(
                     "Token release amount is zero after decimal conversion — \
                      the transfer amount is too small to represent in local decimals"
                         .to_string(),
@@ -1842,14 +1844,16 @@ impl HyperlaneTxBuilder {
         metadata: &[u8],
         payer: &Keypair,
     ) -> Result<u64, TxBuilderError> {
+        // Always build TX components first — this catches permanent failures
+        // (e.g. zero-amount) regardless of evaluate endpoint availability.
+        let components = self.build_process_tx(message, metadata, payer).await?;
+
         if !self.evaluate_available.load(Ordering::Relaxed) {
             return Err(TxBuilderError::TxBuild(
                 "TX evaluate endpoint unavailable (disabled after previous failure)".to_string(),
             ));
         }
 
-        // 1. Build the TX with placeholder ExUnits
-        let components = self.build_process_tx(message, metadata, payer).await?;
         let built_tx = self.build_complete_process_tx(&components, payer).await?;
 
         // 2. Sign and serialize (evaluate endpoint requires a valid signed TX)
