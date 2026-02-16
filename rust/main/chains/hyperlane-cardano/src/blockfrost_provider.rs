@@ -18,6 +18,8 @@ pub enum BlockfrostProviderError {
     Deserialization(String),
     #[error("Script not found: {0}")]
     ScriptNotFound(String),
+    #[error("Request timeout: {0}")]
+    Timeout(String),
 }
 
 /// Blockfrost-based provider for Cardano chain data
@@ -108,6 +110,11 @@ impl Utxo {
     }
 }
 
+/// Per-request timeout for Blockfrost HTTP calls.
+/// Prevents indefinite hangs when the API is unresponsive, which would
+/// block the relayer's prepare queue for the entire destination domain.
+const BLOCKFROST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl BlockfrostProvider {
     /// Create a new Blockfrost provider
     pub fn new(api_key: &str, network: CardanoNetwork, confirmation_block_delay: u32) -> Self {
@@ -119,6 +126,25 @@ impl BlockfrostProvider {
             rate_limiter: Arc::new(Semaphore::new(5)),
             confirmation_block_delay,
         }
+    }
+
+    /// Wrap a future with a timeout to prevent indefinite hangs on
+    /// unresponsive Blockfrost API calls.
+    async fn with_timeout<T, E>(
+        &self,
+        fut: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, BlockfrostProviderError>
+    where
+        BlockfrostProviderError: From<E>,
+    {
+        tokio::time::timeout(BLOCKFROST_REQUEST_TIMEOUT, fut)
+            .await
+            .map_err(|_| {
+                BlockfrostProviderError::Timeout(
+                    "Blockfrost request timed out after 30s".to_string(),
+                )
+            })?
+            .map_err(BlockfrostProviderError::from)
     }
 
     /// Rate-limited delay between API calls
@@ -141,7 +167,7 @@ impl BlockfrostProvider {
     #[instrument(skip(self))]
     pub async fn get_latest_block(&self) -> Result<u64, BlockfrostProviderError> {
         self.rate_limit().await;
-        let block = self.api.blocks_latest().await?;
+        let block = self.with_timeout(self.api.blocks_latest()).await?;
         let tip = block.height.unwrap_or(0) as u64;
         Ok(tip.saturating_sub(self.confirmation_block_delay as u64))
     }
@@ -150,7 +176,7 @@ impl BlockfrostProvider {
     #[instrument(skip(self))]
     pub async fn get_latest_slot(&self) -> Result<u64, BlockfrostProviderError> {
         self.rate_limit().await;
-        let block = self.api.blocks_latest().await?;
+        let block = self.with_timeout(self.api.blocks_latest()).await?;
         Ok(block.slot.unwrap_or(0) as u64)
     }
 
@@ -170,7 +196,10 @@ impl BlockfrostProvider {
             let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
 
             // Handle 404 (address has no UTXOs) as empty result rather than error
-            let utxos = match self.api.addresses_utxos(address, pagination).await {
+            let utxos = match self
+                .with_timeout(self.api.addresses_utxos(address, pagination))
+                .await
+            {
                 Ok(utxos) => utxos,
                 Err(e) => {
                     let error_str = format!("{e:?}");
@@ -182,11 +211,11 @@ impl BlockfrostProvider {
                     if error_str.contains("429") || error_str.contains("Too Many Requests") {
                         tracing::warn!("Rate limited while fetching UTXOs for {}, returning {} UTXOs collected so far", address, all_utxos.len());
                         if all_utxos.is_empty() {
-                            return Err(e.into());
+                            return Err(e);
                         }
                         return Ok(all_utxos);
                     }
-                    return Err(e.into());
+                    return Err(e);
                 }
             };
 
@@ -240,7 +269,10 @@ impl BlockfrostProvider {
             self.rate_limit().await;
             let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
 
-            let addresses = match self.api.assets_addresses(&asset_id, pagination).await {
+            let addresses = match self
+                .with_timeout(self.api.assets_addresses(&asset_id, pagination))
+                .await
+            {
                 Ok(addrs) => addrs,
                 Err(e) => {
                     let error_str = format!("{e:?}");
@@ -252,7 +284,7 @@ impl BlockfrostProvider {
                         tracing::warn!("Rate limited while fetching asset addresses, continuing with {} addresses", all_addresses.len());
                         break;
                     }
-                    return Err(e.into());
+                    return Err(e);
                 }
             };
 
@@ -314,7 +346,9 @@ impl BlockfrostProvider {
     #[instrument(skip(self))]
     pub async fn get_datum(&self, datum_hash: &str) -> Result<String, BlockfrostProviderError> {
         self.rate_limit().await;
-        let datum = self.api.scripts_datum_hash(datum_hash).await?;
+        let datum = self
+            .with_timeout(self.api.scripts_datum_hash(datum_hash))
+            .await?;
         // The API returns serde_json::Value directly
         serde_json::to_string(&datum)
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
@@ -327,7 +361,9 @@ impl BlockfrostProvider {
         script_hash: &str,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
-        let script = self.api.scripts_by_id(script_hash).await?;
+        let script = self
+            .with_timeout(self.api.scripts_by_id(script_hash))
+            .await?;
         serde_json::to_value(&script)
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
     }
@@ -339,7 +375,9 @@ impl BlockfrostProvider {
         tx_cbor: &[u8],
     ) -> Result<String, BlockfrostProviderError> {
         self.rate_limit().await;
-        let tx_hash = self.api.transactions_submit(tx_cbor.to_vec()).await?;
+        let tx_hash = self
+            .with_timeout(self.api.transactions_submit(tx_cbor.to_vec()))
+            .await?;
         Ok(tx_hash)
     }
 
@@ -352,7 +390,9 @@ impl BlockfrostProvider {
         tx_cbor: &[u8],
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
-        let result = self.api.utils_tx_evaluate(tx_cbor.to_vec()).await?;
+        let result = self
+            .with_timeout(self.api.utils_tx_evaluate(tx_cbor.to_vec()))
+            .await?;
         Ok(result)
     }
 
@@ -362,7 +402,9 @@ impl BlockfrostProvider {
         &self,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
-        let params = self.api.epochs_latest_parameters().await?;
+        let params = self
+            .with_timeout(self.api.epochs_latest_parameters())
+            .await?;
         serde_json::to_value(&params)
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
     }
@@ -471,7 +513,10 @@ impl BlockfrostProvider {
             self.rate_limit().await;
             let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
 
-            let txs = match self.api.addresses_transactions(address, pagination).await {
+            let txs = match self
+                .with_timeout(self.api.addresses_transactions(address, pagination))
+                .await
+            {
                 Ok(txs) => txs,
                 Err(e) => {
                     let error_str = format!("{e:?}");
@@ -486,7 +531,7 @@ impl BlockfrostProvider {
                         );
                         break;
                     }
-                    return Err(e.into());
+                    return Err(e);
                 }
             };
 
@@ -532,7 +577,9 @@ impl BlockfrostProvider {
         tx_hash: &str,
     ) -> Result<TransactionUtxos, BlockfrostProviderError> {
         self.rate_limit().await;
-        let utxos = self.api.transactions_utxos(tx_hash).await?;
+        let utxos = self
+            .with_timeout(self.api.transactions_utxos(tx_hash))
+            .await?;
 
         let inputs = utxos
             .inputs
@@ -594,7 +641,9 @@ impl BlockfrostProvider {
         tx_hash: &str,
     ) -> Result<Vec<TransactionRedeemer>, BlockfrostProviderError> {
         self.rate_limit().await;
-        let redeemers = self.api.transactions_redeemers(tx_hash).await?;
+        let redeemers = self
+            .with_timeout(self.api.transactions_redeemers(tx_hash))
+            .await?;
 
         Ok(redeemers
             .into_iter()
@@ -618,7 +667,9 @@ impl BlockfrostProvider {
         height: u64,
     ) -> Result<BlockInfo, BlockfrostProviderError> {
         self.rate_limit().await;
-        let block = self.api.blocks_by_id(&height.to_string()).await?;
+        let block = self
+            .with_timeout(self.api.blocks_by_id(&height.to_string()))
+            .await?;
         Ok(BlockInfo {
             hash: block.hash,
             height: block.height.unwrap_or(0) as u64,
@@ -642,7 +693,10 @@ impl BlockfrostProvider {
             self.rate_limit().await;
             let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
 
-            let txs = match self.api.blocks_txs(block_hash, pagination).await {
+            let txs = match self
+                .with_timeout(self.api.blocks_txs(block_hash, pagination))
+                .await
+            {
                 Ok(txs) => txs,
                 Err(e) => {
                     let error_str = format!("{e:?}");
@@ -657,7 +711,7 @@ impl BlockfrostProvider {
                         );
                         break;
                     }
-                    return Err(e.into());
+                    return Err(e);
                 }
             };
 
@@ -681,7 +735,9 @@ impl BlockfrostProvider {
         datum_hash: &str,
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
-        let datum = self.api.scripts_datum_hash(datum_hash).await?;
+        let datum = self
+            .with_timeout(self.api.scripts_datum_hash(datum_hash))
+            .await?;
         // Blockfrost returns the datum under "json_value" key
         if let Some(json_value) = datum.get("json_value") {
             Ok(json_value.clone())
