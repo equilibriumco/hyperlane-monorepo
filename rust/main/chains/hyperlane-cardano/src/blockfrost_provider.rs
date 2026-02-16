@@ -32,6 +32,10 @@ pub struct BlockfrostProvider {
     /// Prevents advancing past blocks that Blockfrost hasn't finished
     /// indexing for address-transaction queries.
     confirmation_block_delay: u32,
+    /// API key for direct HTTP calls that bypass the blockfrost crate
+    api_key: String,
+    /// Base URL derived from the API key prefix (e.g. "preview" → cardano-preview)
+    base_url: String,
 }
 
 impl std::fmt::Debug for BlockfrostProvider {
@@ -119,12 +123,19 @@ impl BlockfrostProvider {
     /// Create a new Blockfrost provider
     pub fn new(api_key: &str, network: CardanoNetwork, confirmation_block_delay: u32) -> Self {
         let api = BlockfrostAPI::new(api_key, Default::default());
+        let base_url = match network {
+            CardanoNetwork::Mainnet => blockfrost::CARDANO_MAINNET_URL,
+            CardanoNetwork::Preprod => blockfrost::CARDANO_PREPROD_URL,
+            CardanoNetwork::Preview => blockfrost::CARDANO_PREVIEW_URL,
+        };
         Self {
             api,
             network,
             // Allow max 5 concurrent requests to stay under 10/sec limit
             rate_limiter: Arc::new(Semaphore::new(5)),
             confirmation_block_delay,
+            api_key: api_key.to_string(),
+            base_url: base_url.to_string(),
         }
     }
 
@@ -382,18 +393,62 @@ impl BlockfrostProvider {
     }
 
     /// Evaluate a transaction to get execution units for each script.
-    /// Sends the TX CBOR to Blockfrost's /utils/txs/evaluate endpoint.
-    /// Returns the raw JSON response (serde_json::Value).
+    /// Sends hex-encoded TX CBOR to Blockfrost's /utils/txs/evaluate endpoint.
+    ///
+    /// The blockfrost crate sends raw binary bytes, but Blockfrost's Ogmios
+    /// proxy expects the CBOR as a hex-encoded string. This method bypasses
+    /// the crate to send the correct format.
     #[instrument(skip(self, tx_cbor))]
     pub async fn evaluate_tx(
         &self,
         tx_cbor: &[u8],
     ) -> Result<serde_json::Value, BlockfrostProviderError> {
         self.rate_limit().await;
-        let result = self
-            .with_timeout(self.api.utils_tx_evaluate(tx_cbor.to_vec()))
-            .await?;
-        Ok(result)
+        let url = format!("{}/utils/txs/evaluate", self.base_url);
+        let hex_body = hex::encode(tx_cbor);
+
+        let response = tokio::time::timeout(
+            BLOCKFROST_REQUEST_TIMEOUT,
+            reqwest::Client::new()
+                .post(&url)
+                .header("project_id", &self.api_key)
+                .header("Content-Type", "application/cbor")
+                .body(hex_body)
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            BlockfrostProviderError::Timeout(
+                "Blockfrost evaluate request timed out after 30s".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            BlockfrostProviderError::Api(BlockfrostError::from(
+                Box::new(e) as Box<dyn std::error::Error>
+            ))
+        })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            BlockfrostProviderError::Deserialization(format!("Failed to read response body: {e}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(BlockfrostProviderError::Api(BlockfrostError::Response {
+                url: url.clone(),
+                reason: blockfrost::error::ResponseError {
+                    status_code: status.as_u16(),
+                    error: status.canonical_reason().unwrap_or("Unknown").to_string(),
+                    message: body,
+                },
+            }));
+        }
+
+        serde_json::from_str(&body).map_err(|e| {
+            BlockfrostProviderError::Deserialization(format!(
+                "Failed to parse evaluate response: {e}"
+            ))
+        })
     }
 
     /// Get protocol parameters (returns JSON for flexibility)
