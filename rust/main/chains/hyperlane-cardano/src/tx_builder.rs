@@ -1910,23 +1910,54 @@ fn parse_evaluation_result(result: &serde_json::Value) -> Result<(u64, u64), TxB
         }
     }
 
-    // Try alternative Ogmios format with EvaluationResult key
+    // Blockfrost/Ogmios v5 (JSON-WSP): { "result": { "EvaluationResult": { "spend:0": { "memory": N, "steps": N } } } }
+    if let Some(eval_result) = result.get("result").and_then(|r| r.get("EvaluationResult")) {
+        return parse_evaluation_object(eval_result);
+    }
+
+    // Top-level EvaluationResult (alternative format)
     if let Some(eval_result) = result.get("EvaluationResult") {
-        let mut total_mem = 0u64;
-        let mut total_steps = 0u64;
-        if let Some(obj) = eval_result.as_object() {
-            for (_key, value) in obj {
-                total_mem += value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
-                total_steps += value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
-            }
-        }
-        if total_mem > 0 || total_steps > 0 {
-            return Ok((total_mem, total_steps));
-        }
+        return parse_evaluation_object(eval_result);
+    }
+
+    // Check for Ogmios evaluation failure
+    if let Some(fault) = result.get("fault") {
+        let fault_msg = fault
+            .get("string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(TxBuilderError::Encoding(format!(
+            "TX evaluation failed: {fault_msg}"
+        )));
+    }
+    if let Some(err) = result
+        .get("result")
+        .and_then(|r| r.get("EvaluationFailure"))
+    {
+        return Err(TxBuilderError::Encoding(format!(
+            "TX evaluation failed: {err}"
+        )));
     }
 
     Err(TxBuilderError::Encoding(format!(
         "Could not parse evaluation result: {result}"
+    )))
+}
+
+fn parse_evaluation_object(eval_result: &serde_json::Value) -> Result<(u64, u64), TxBuilderError> {
+    let mut total_mem = 0u64;
+    let mut total_steps = 0u64;
+    if let Some(obj) = eval_result.as_object() {
+        for (_key, value) in obj {
+            total_mem += value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+            total_steps += value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+        }
+    }
+    if total_mem > 0 || total_steps > 0 {
+        return Ok((total_mem, total_steps));
+    }
+    Err(TxBuilderError::Encoding(format!(
+        "EvaluationResult had zero execution units: {eval_result}"
     )))
 }
 
@@ -4984,5 +5015,84 @@ mod signature_verification_tests {
             "eth_signed (keccak256 of above): {}",
             hex::encode(&eth_signed)
         );
+    }
+}
+
+#[cfg(test)]
+mod evaluation_parser_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_ogmios_v6_format() {
+        let result = json!({
+            "result": [
+                { "validator": "spend:0", "budget": { "memory": 1000000, "cpu": 500000000 } },
+                { "validator": "mint:0", "budget": { "memory": 200000, "cpu": 100000000 } }
+            ]
+        });
+        let (mem, steps) = parse_evaluation_result(&result).unwrap();
+        assert_eq!(mem, 1200000);
+        assert_eq!(steps, 600000000);
+    }
+
+    #[test]
+    fn parse_blockfrost_ogmios_v5_format() {
+        let result = json!({
+            "type": "jsonwsp/response",
+            "version": "1.0",
+            "servicename": "ogmios",
+            "methodname": "EvaluateTx",
+            "result": {
+                "EvaluationResult": {
+                    "spend:0": { "memory": 1500000, "steps": 800000000 },
+                    "spend:1": { "memory": 500000, "steps": 200000000 },
+                    "mint:0": { "memory": 300000, "steps": 150000000 }
+                }
+            }
+        });
+        let (mem, steps) = parse_evaluation_result(&result).unwrap();
+        assert_eq!(mem, 2300000);
+        assert_eq!(steps, 1150000000);
+    }
+
+    #[test]
+    fn parse_top_level_evaluation_result() {
+        let result = json!({
+            "EvaluationResult": {
+                "spend:0": { "memory": 1000000, "steps": 500000000 }
+            }
+        });
+        let (mem, steps) = parse_evaluation_result(&result).unwrap();
+        assert_eq!(mem, 1000000);
+        assert_eq!(steps, 500000000);
+    }
+
+    #[test]
+    fn parse_ogmios_fault_returns_error() {
+        let result = json!({
+            "type": "jsonwsp/fault",
+            "version": "1.0",
+            "servicename": "ogmios",
+            "fault": {
+                "code": "client",
+                "string": "Some validation error"
+            }
+        });
+        let err = parse_evaluation_result(&result).unwrap_err();
+        assert!(err.to_string().contains("Some validation error"));
+    }
+
+    #[test]
+    fn parse_evaluation_failure() {
+        let result = json!({
+            "result": {
+                "EvaluationFailure": {
+                    "ScriptFailures": { "spend:0": [{ "extraneousRedeemers": ["spend:2"] }] }
+                }
+            }
+        });
+        let err = parse_evaluation_result(&result).unwrap_err();
+        assert!(err.to_string().contains("TX evaluation failed"));
     }
 }
