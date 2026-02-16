@@ -22,6 +22,7 @@ use pallas_primitives::conway::{BigInt, Constr, PlutusData};
 use pallas_txbuilder::{
     BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::OnceCell;
@@ -107,6 +108,9 @@ pub struct HyperlaneTxBuilder {
     conf: ConnectionConf,
     /// Cached protocol parameter: lovelace cost per UTXO byte
     coins_per_utxo_byte: OnceCell<u64>,
+    /// Whether the Blockfrost evaluate endpoint is available.
+    /// Set to false after first HTTP 500 to avoid repeated failing calls.
+    evaluate_available: AtomicBool,
 }
 
 impl HyperlaneTxBuilder {
@@ -122,6 +126,7 @@ impl HyperlaneTxBuilder {
             resolver,
             conf: conf.clone(),
             coins_per_utxo_byte: OnceCell::new(),
+            evaluate_available: AtomicBool::new(true),
         }
     }
 
@@ -1825,25 +1830,58 @@ impl HyperlaneTxBuilder {
     /// Estimate the total lovelace cost for processing a message by building
     /// a dry-run TX, evaluating it via Blockfrost's Ogmios endpoint, and
     /// computing the fee from protocol parameters + execution units.
+    ///
+    /// Requires Blockfrost's "hosted variant" which includes an Ogmios backend.
+    /// If the evaluate endpoint is unavailable (HTTP 500), this method disables
+    /// itself for all future calls to avoid repeated failing requests.
     pub async fn estimate_process_cost(
         &self,
         message: &HyperlaneMessage,
         metadata: &[u8],
         payer: &Keypair,
     ) -> Result<u64, TxBuilderError> {
+        if !self.evaluate_available.load(Ordering::Relaxed) {
+            return Err(TxBuilderError::TxBuild(
+                "TX evaluate endpoint unavailable (disabled after previous failure)".to_string(),
+            ));
+        }
+
         // 1. Build the TX with placeholder ExUnits
         let components = self.build_process_tx(message, metadata, payer).await?;
         let built_tx = self.build_complete_process_tx(&components, payer).await?;
 
         // 2. Sign and serialize (evaluate endpoint requires a valid signed TX)
         let signed_tx = self.sign_transaction(built_tx, payer)?;
+        debug!(
+            "Evaluating TX CBOR ({} bytes): {}",
+            signed_tx.len(),
+            hex::encode(&signed_tx)
+        );
 
         // 3. Evaluate via Blockfrost (Ogmios)
-        let eval_result = self.provider.evaluate_tx(&signed_tx).await?;
+        let eval_result = match self.provider.evaluate_tx(&signed_tx).await {
+            Ok(result) => result,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("500") || err_str.contains("Internal Server Error") {
+                    self.evaluate_available.store(false, Ordering::Relaxed);
+                    warn!(
+                        "Blockfrost evaluate endpoint returned HTTP 500 — disabling dynamic \
+                         estimation. This endpoint requires Blockfrost's hosted variant with \
+                         Ogmios backend. Falling back to static estimation."
+                    );
+                } else {
+                    warn!(
+                        "Blockfrost evaluate failed for nonce {}: {}",
+                        message.nonce, e
+                    );
+                }
+                return Err(e.into());
+            }
+        };
         debug!("TX evaluate response: {:?}", eval_result);
 
         // 4. Parse execution units from response
-        // Ogmios format: { "result": [{ "validator": "spend:0", "budget": { "memory": N, "cpu": N } }] }
         let (total_mem, total_steps) = parse_evaluation_result(&eval_result)?;
         info!(
             "Evaluated ExUnits: total_mem={}, total_steps={}",

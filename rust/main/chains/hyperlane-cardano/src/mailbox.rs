@@ -517,7 +517,7 @@ impl Mailbox for CardanoMailbox {
                 }
                 Err(e) => {
                     debug!(
-                        "Dynamic cost estimation failed for nonce {}, using fallback: {}",
+                        "Dynamic cost estimation unavailable for nonce {}, using static fallback: {}",
                         message.nonce, e
                     );
                 }
