@@ -379,6 +379,19 @@ impl BlockfrostProvider {
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
     }
 
+    /// Get the serialised size (in bytes) of a script by its hash.
+    pub async fn get_script_size(&self, script_hash: &str) -> Result<u64, BlockfrostProviderError> {
+        let script_info = self.get_script(script_hash).await?;
+        script_info
+            .get("serialised_size")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                BlockfrostProviderError::Deserialization(format!(
+                    "Missing serialised_size for script {script_hash}"
+                ))
+            })
+    }
+
     /// Submit a transaction
     #[instrument(skip(self, tx_cbor))]
     pub async fn submit_transaction(

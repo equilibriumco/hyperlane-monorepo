@@ -22,11 +22,15 @@ use pallas_primitives::conway::{BigInt, Constr, PlutusData};
 use pallas_txbuilder::{
     BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
 };
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 use tracing::{debug, info, instrument, warn};
+
+/// Per-redeemer ExUnits from evaluation, keyed by "spend:N" or "mint:N"
+type EvaluatedExUnits = HashMap<String, (u64, u64)>;
 
 #[derive(Error, Debug)]
 pub enum TxBuilderError {
@@ -113,6 +117,9 @@ pub struct HyperlaneTxBuilder {
     /// Whether the Blockfrost evaluate endpoint is available.
     /// Set to false after first HTTP 500 to avoid repeated failing calls.
     evaluate_available: AtomicBool,
+    /// Cache for script serialised sizes (script_hash → bytes).
+    /// Script sizes are immutable once deployed, so this never needs invalidation.
+    script_size_cache: RwLock<HashMap<String, u64>>,
 }
 
 impl HyperlaneTxBuilder {
@@ -129,6 +136,7 @@ impl HyperlaneTxBuilder {
             conf: conf.clone(),
             coins_per_utxo_byte: OnceCell::new(),
             evaluate_available: AtomicBool::new(true),
+            script_size_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -163,6 +171,74 @@ impl HyperlaneTxBuilder {
                 }
             })
             .await
+    }
+
+    /// Get script size in bytes, using a cache to avoid redundant Blockfrost queries.
+    /// Script sizes are immutable once deployed, so this never needs invalidation.
+    async fn get_cached_script_size(&self, script_hash: &str) -> Result<u64, TxBuilderError> {
+        {
+            let cache = self.script_size_cache.read().await;
+            if let Some(&size) = cache.get(script_hash) {
+                return Ok(size);
+            }
+        }
+        let size = self.provider.get_script_size(script_hash).await?;
+        self.script_size_cache
+            .write()
+            .await
+            .insert(script_hash.to_string(), size);
+        debug!("Cached script size: {} = {} bytes", script_hash, size);
+        Ok(size)
+    }
+
+    /// Compute total reference script size for all scripts used in a process TX.
+    /// Queries Blockfrost for each script hash and caches results.
+    async fn compute_total_ref_script_size(
+        &self,
+        recipient_ref_script_utxo: &Option<Utxo>,
+        warp_token_type: &Option<WarpTokenTypeInfo>,
+    ) -> u64 {
+        let mut total: u64 = 0;
+        let mut script_hashes: Vec<String> = Vec::new();
+
+        // Mailbox script (always present when using reference scripts)
+        if self.conf.mailbox_reference_script_utxo.is_some() {
+            script_hashes.push(self.conf.mailbox_script_hash.clone());
+        }
+
+        // ISM script (always present when using reference scripts)
+        if self.conf.ism_reference_script_utxo.is_some() {
+            script_hashes.push(self.conf.ism_script_hash.clone());
+        }
+
+        // Warp route recipient script
+        if let Some(ref utxo) = recipient_ref_script_utxo {
+            if let Some(ref hash) = utxo.reference_script_hash {
+                script_hashes.push(hash.clone());
+            }
+        }
+
+        // Minting policy ref script (synthetic routes)
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = warp_token_type {
+            script_hashes.push(minting_policy.clone());
+        }
+
+        for hash in &script_hashes {
+            match self.get_cached_script_size(hash).await {
+                Ok(size) => total += size,
+                Err(e) => {
+                    warn!("Failed to get script size for {}: {}, using 0", hash, e);
+                }
+            }
+        }
+
+        debug!(
+            "Total reference script size: {} bytes ({} scripts: {:?})",
+            total,
+            script_hashes.len(),
+            script_hashes
+        );
+        total
     }
 
     /// Calculate minimum lovelace required for a UTXO based on its size.
@@ -578,6 +654,10 @@ impl HyperlaneTxBuilder {
                 (None, None)
             };
 
+        let total_ref_script_size = self
+            .compute_total_ref_script_size(&recipient_ref_script_utxo, &warp_token_type)
+            .await;
+
         Ok(ProcessTxComponents {
             mailbox_utxo,
             mailbox_redeemer_cbor,
@@ -598,6 +678,7 @@ impl HyperlaneTxBuilder {
             warp_token_type,
             verified_message_datum_cbor,
             recipient_script_hash,
+            total_ref_script_size,
         })
     }
 
@@ -621,13 +702,79 @@ impl HyperlaneTxBuilder {
 
         // 2. Build the complete transaction
         info!("Constructing full transaction with pallas-txbuilder");
-        let built_tx = self.build_complete_process_tx(&components, payer).await?;
+        let built_tx = self
+            .build_complete_process_tx(&components, payer, None)
+            .await?;
 
         // 3. Sign the transaction
         info!("Signing transaction");
-        let signed_tx = self.sign_transaction(built_tx, payer)?;
+        let mut signed_tx = self.sign_transaction(built_tx, payer)?;
+        let mut actual_fee = ESTIMATED_FEE_LOVELACE;
 
-        // 3b. Reject oversized transactions before submission
+        // 3b. Evaluate and rebuild with real fee if endpoint is available.
+        // The first build uses ESTIMATED_FEE_LOVELACE (3M) as a conservative placeholder.
+        // Evaluating the signed TX gives us actual ExUnits, so we can compute the real
+        // fee (~0.3-0.8M) and rebuild — saving the relayer ~2+ ADA per TX.
+        if self.evaluate_available.load(Ordering::Relaxed) {
+            let ref_script_size = components.total_ref_script_size;
+            match self
+                .evaluate_and_compute_fee(&signed_tx, ref_script_size)
+                .await
+            {
+                Ok((real_fee, ex_units_map)) => {
+                    info!(
+                        "Evaluated fee: {} lovelace (was {}), rebuilding TX with actual ExUnits",
+                        real_fee, ESTIMATED_FEE_LOVELACE
+                    );
+                    let rebuilt = self
+                        .build_complete_process_tx(
+                            &components,
+                            payer,
+                            Some((real_fee, &ex_units_map)),
+                        )
+                        .await?;
+                    signed_tx = self.sign_transaction(rebuilt, payer)?;
+
+                    // The rebuilt TX may differ in size from the first pass (ExUnits CBOR
+                    // encoding changes redeemer sizes). Recompute fee from actual TX size.
+                    let total_mem: u64 = ex_units_map.values().map(|(m, _)| m).sum();
+                    let total_steps: u64 = ex_units_map.values().map(|(_, s)| s).sum();
+                    let corrected_fee = self
+                        .compute_fee_from_evaluation(
+                            signed_tx.len() as u64,
+                            total_mem,
+                            total_steps,
+                            ref_script_size,
+                        )
+                        .await?;
+                    if corrected_fee > real_fee {
+                        info!(
+                            "Fee correction: {} → {} (TX size changed after rebuild)",
+                            real_fee, corrected_fee
+                        );
+                        let corrected = self
+                            .build_complete_process_tx(
+                                &components,
+                                payer,
+                                Some((corrected_fee, &ex_units_map)),
+                            )
+                            .await?;
+                        signed_tx = self.sign_transaction(corrected, payer)?;
+                        actual_fee = corrected_fee;
+                    } else {
+                        actual_fee = real_fee;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Fee evaluation failed, using static {} lovelace: {}",
+                        ESTIMATED_FEE_LOVELACE, e
+                    );
+                }
+            }
+        }
+
+        // 3c. Reject oversized transactions before submission
         let max_tx_size = self.get_max_tx_size().await;
         let tx_size = signed_tx.len() as u64;
         if tx_size > max_tx_size {
@@ -651,7 +798,7 @@ impl HyperlaneTxBuilder {
         Ok(TxOutcome {
             transaction_id: H512::from(tx_id_bytes),
             executed: true,
-            gas_used: U256::from(ESTIMATED_FEE_LOVELACE),
+            gas_used: U256::from(actual_fee),
             gas_price: FixedPointNumber::try_from(U256::from(1u64))
                 .unwrap_or_else(|_| FixedPointNumber::zero()),
         })
@@ -663,6 +810,7 @@ impl HyperlaneTxBuilder {
         &self,
         components: &ProcessTxComponents,
         payer: &Keypair,
+        eval_overrides: Option<(u64, &EvaluatedExUnits)>,
     ) -> Result<BuiltTransaction, TxBuilderError> {
         // Get minimum UTXO lovelace from protocol parameters
         let min_lovelace = self.min_lovelace_simple().await;
@@ -934,13 +1082,173 @@ impl HyperlaneTxBuilder {
             ));
         }
 
+        // Compute sorted indices for spend inputs to match Cardano's canonical ordering
+        // Collect all spent inputs (script inputs only, not reference inputs)
+        let mut spent_inputs: Vec<(Vec<u8>, u32)> = vec![];
+
+        // Mailbox is always first script input
+        spent_inputs.push((
+            hex::decode(&components.mailbox_utxo.tx_hash)
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx_hash: {e}")))?,
+            components.mailbox_utxo.output_index,
+        ));
+
+        // Recipient input (if present, second script input)
+        if let Some(ref recipient_utxo) = components.recipient_utxo {
+            spent_inputs.push((
+                hex::decode(&recipient_utxo.tx_hash)
+                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx_hash: {e}")))?,
+                recipient_utxo.output_index,
+            ));
+        }
+
+        // Additional inputs that must be spent
+        for (utxo, must_spend) in &components.additional_utxos {
+            if *must_spend {
+                spent_inputs.push((
+                    hex::decode(&utxo.tx_hash)
+                        .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx_hash: {e}")))?,
+                    utxo.output_index,
+                ));
+            }
+        }
+
+        // ISM input (always spent for verification)
+        spent_inputs.push((
+            hex::decode(&components.ism_utxo.tx_hash)
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx_hash: {e}")))?,
+            components.ism_utxo.output_index,
+        ));
+
+        // Selected payer UTXOs (fee payment, non-script inputs — no redeemers)
+        let mut payer_inputs: Vec<(Vec<u8>, u32)> = vec![];
+        for utxo in &selected_utxos {
+            payer_inputs.push((
+                hex::decode(&utxo.tx_hash)
+                    .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx_hash: {e}")))?,
+                utxo.output_index,
+            ));
+        }
+
+        // All inputs (script + payer) must be sorted together for canonical ordering
+        let mut all_inputs = spent_inputs.clone();
+        all_inputs.extend(payer_inputs);
+        all_inputs.sort_by(|a, b| {
+            // Sort by tx_hash bytes first, then by output_index
+            a.0.cmp(&b.0).then(a.1.cmp(&b.1))
+        });
+
+        // Find the sorted index of each script input
+        let mailbox_sorted_idx = all_inputs
+            .iter()
+            .position(|(hash, idx)| {
+                *hash == hex::decode(&components.mailbox_utxo.tx_hash).unwrap()
+                    && *idx == components.mailbox_utxo.output_index
+            })
+            .unwrap();
+
+        let recipient_sorted_idx = if let Some(ref recipient_utxo) = components.recipient_utxo {
+            all_inputs.iter().position(|(hash, idx)| {
+                *hash == hex::decode(&recipient_utxo.tx_hash).unwrap()
+                    && *idx == recipient_utxo.output_index
+            })
+        } else {
+            None
+        };
+
+        let ism_sorted_idx = all_inputs
+            .iter()
+            .position(|(hash, idx)| {
+                *hash == hex::decode(&components.ism_utxo.tx_hash).unwrap()
+                    && *idx == components.ism_utxo.output_index
+            })
+            .unwrap();
+
+        // Collect minting policies and compute their sorted indices
+        // Minting policies must be sorted by policy hash bytes (ascending)
+        let mut mint_policies: Vec<Vec<u8>> = vec![];
+
+        // 1. Synthetic minting policy (if present)
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = &components.warp_token_type {
+            let policy_bytes = hex::decode(minting_policy).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid minting_policy hex: {e}"))
+            })?;
+            mint_policies.push(policy_bytes);
+        }
+
+        // 2. Processed message NFT policy (if present)
+        if let Some(ref policy_id) = self.conf.processed_messages_nft_policy_id {
+            let policy_bytes = hex::decode(policy_id).map_err(|e| {
+                TxBuilderError::Encoding(format!(
+                    "Invalid processed_messages_nft_policy_id hex: {e}"
+                ))
+            })?;
+            mint_policies.push(policy_bytes);
+        }
+
+        // 3. Verified message NFT policy (if present and needed)
+        if components.verified_message_datum_cbor.is_some() {
+            if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
+                let policy_bytes = hex::decode(policy_id).map_err(|e| {
+                    TxBuilderError::Encoding(format!(
+                        "Invalid verified_message_nft_policy_id hex: {e}"
+                    ))
+                })?;
+                mint_policies.push(policy_bytes);
+            }
+        }
+
+        // Sort mint policies by policy hash bytes
+        mint_policies.sort();
+
+        // Find sorted index for each mint policy
+        let synthetic_mint_idx = if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) =
+            &components.warp_token_type
+        {
+            let policy_bytes = hex::decode(minting_policy).unwrap();
+            mint_policies.iter().position(|p| *p == policy_bytes)
+        } else {
+            None
+        };
+
+        let processed_nft_mint_idx =
+            if let Some(ref policy_id) = self.conf.processed_messages_nft_policy_id {
+                let policy_bytes = hex::decode(policy_id).unwrap();
+                mint_policies.iter().position(|p| *p == policy_bytes)
+            } else {
+                None
+            };
+
+        let verified_nft_mint_idx = if components.verified_message_datum_cbor.is_some() {
+            if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
+                let policy_bytes = hex::decode(policy_id).unwrap();
+                mint_policies.iter().position(|p| *p == policy_bytes)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Add spend redeemers with execution units
         // Re-create inputs for redeemer association (since Input doesn't impl Clone)
         let mailbox_input_for_redeemer = utxo_to_input(&components.mailbox_utxo)?;
 
-        let ex_units_mailbox = ExUnits {
-            mem: DEFAULT_MEM_UNITS,
-            steps: DEFAULT_STEP_UNITS,
+        let ex_units_mailbox = if let Some((_, ex_units_map)) = eval_overrides {
+            let key = format!("spend:{mailbox_sorted_idx}");
+            if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                ExUnits { mem, steps }
+            } else {
+                ExUnits {
+                    mem: DEFAULT_MEM_UNITS,
+                    steps: DEFAULT_STEP_UNITS,
+                }
+            }
+        } else {
+            ExUnits {
+                mem: DEFAULT_MEM_UNITS,
+                steps: DEFAULT_STEP_UNITS,
+            }
         };
 
         tx = tx.add_spend_redeemer(
@@ -950,14 +1258,27 @@ impl HyperlaneTxBuilder {
         );
 
         // Add recipient redeemer (WarpRoute only)
-        if let (Some(ref recipient_utxo), Some(ref redeemer_cbor)) = (
+        if let (Some(ref recipient_utxo), Some(ref redeemer_cbor), Some(sorted_idx)) = (
             &components.recipient_utxo,
             &components.recipient_redeemer_cbor,
+            recipient_sorted_idx,
         ) {
             let recipient_input_for_redeemer = utxo_to_input(recipient_utxo)?;
-            let ex_units_recipient = ExUnits {
-                mem: DEFAULT_MEM_UNITS,
-                steps: DEFAULT_STEP_UNITS,
+            let ex_units_recipient = if let Some((_, ex_units_map)) = eval_overrides {
+                let key = format!("spend:{sorted_idx}");
+                if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                    ExUnits { mem, steps }
+                } else {
+                    ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    }
+                }
+            } else {
+                ExUnits {
+                    mem: DEFAULT_MEM_UNITS,
+                    steps: DEFAULT_STEP_UNITS,
+                }
             };
 
             tx = tx.add_spend_redeemer(
@@ -969,9 +1290,21 @@ impl HyperlaneTxBuilder {
 
         // Add ISM Verify redeemer (for signature verification)
         let ism_input_for_redeemer = utxo_to_input(&components.ism_utxo)?;
-        let ex_units_ism = ExUnits {
-            mem: ISM_MEM_UNITS,
-            steps: ISM_STEP_UNITS,
+        let ex_units_ism = if let Some((_, ex_units_map)) = eval_overrides {
+            let key = format!("spend:{ism_sorted_idx}");
+            if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                ExUnits { mem, steps }
+            } else {
+                ExUnits {
+                    mem: ISM_MEM_UNITS,
+                    steps: ISM_STEP_UNITS,
+                }
+            }
+        } else {
+            ExUnits {
+                mem: ISM_MEM_UNITS,
+                steps: ISM_STEP_UNITS,
+            }
         };
 
         tx = tx.add_spend_redeemer(
@@ -1118,9 +1451,23 @@ impl HyperlaneTxBuilder {
 
                     // Add mint redeemer (Constr 0 [])
                     let mint_redeemer_cbor = encode_constructor_0_redeemer();
-                    let ex_units_mint = ExUnits {
-                        mem: DEFAULT_MEM_UNITS,
-                        steps: DEFAULT_STEP_UNITS,
+                    let ex_units_mint = if let (Some((_, ex_units_map)), Some(sorted_idx)) =
+                        (eval_overrides, synthetic_mint_idx)
+                    {
+                        let key = format!("mint:{sorted_idx}");
+                        if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                            ExUnits { mem, steps }
+                        } else {
+                            ExUnits {
+                                mem: DEFAULT_MEM_UNITS,
+                                steps: DEFAULT_STEP_UNITS,
+                            }
+                        }
+                    } else {
+                        ExUnits {
+                            mem: DEFAULT_MEM_UNITS,
+                            steps: DEFAULT_STEP_UNITS,
+                        }
                     };
                     tx = tx.add_mint_redeemer(
                         minting_policy_bytes,
@@ -1207,9 +1554,23 @@ impl HyperlaneTxBuilder {
 
             // Add mint redeemer (empty data since minting policy just checks mailbox is spent)
             let mint_redeemer_data = vec![0xd8, 0x79, 0x9f, 0xff]; // Constr 0 []
-            let ex_units_mint = ExUnits {
-                mem: DEFAULT_MEM_UNITS,
-                steps: DEFAULT_STEP_UNITS,
+            let ex_units_mint = if let (Some((_, ex_units_map)), Some(sorted_idx)) =
+                (eval_overrides, processed_nft_mint_idx)
+            {
+                let key = format!("mint:{sorted_idx}");
+                if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                    ExUnits { mem, steps }
+                } else {
+                    ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    }
+                }
+            } else {
+                ExUnits {
+                    mem: DEFAULT_MEM_UNITS,
+                    steps: DEFAULT_STEP_UNITS,
+                }
             };
             tx = tx.add_mint_redeemer(policy_bytes, mint_redeemer_data, Some(ex_units_mint));
 
@@ -1260,9 +1621,23 @@ impl HyperlaneTxBuilder {
                     })?;
 
                 let verified_nft_mint_redeemer = vec![0xd8, 0x79, 0x9f, 0xff]; // MintMessage = Constr 0 []
-                let ex_units_verified_nft = ExUnits {
-                    mem: DEFAULT_MEM_UNITS,
-                    steps: DEFAULT_STEP_UNITS,
+                let ex_units_verified_nft = if let (Some((_, ex_units_map)), Some(sorted_idx)) =
+                    (eval_overrides, verified_nft_mint_idx)
+                {
+                    let key = format!("mint:{sorted_idx}");
+                    if let Some(&(mem, steps)) = ex_units_map.get(&key) {
+                        ExUnits { mem, steps }
+                    } else {
+                        ExUnits {
+                            mem: DEFAULT_MEM_UNITS,
+                            steps: DEFAULT_STEP_UNITS,
+                        }
+                    }
+                } else {
+                    ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    }
                 };
                 tx = tx.add_mint_redeemer(
                     verified_policy_bytes,
@@ -1333,7 +1708,9 @@ impl HyperlaneTxBuilder {
         }
 
         // 5. Change output back to payer
-        let fee = ESTIMATED_FEE_LOVELACE;
+        let fee = eval_overrides
+            .map(|(f, _)| f)
+            .unwrap_or(ESTIMATED_FEE_LOVELACE);
         let processed_marker_cost = processed_marker_min_lovelace;
 
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
@@ -1872,47 +2249,102 @@ impl HyperlaneTxBuilder {
             ));
         }
 
-        let built_tx = self.build_complete_process_tx(&components, payer).await?;
+        let built_tx = self
+            .build_complete_process_tx(&components, payer, None)
+            .await?;
 
-        // 2. Sign and serialize (evaluate endpoint requires a valid signed TX)
         let signed_tx = self.sign_transaction(built_tx, payer)?;
+
+        // Early TX size check — catches oversized messages during the dry-run
+        // (which has backoff via on_reprepare) rather than during submission
+        let max_tx_size = self.get_max_tx_size().await;
+        let tx_size = signed_tx.len() as u64;
+        if tx_size > max_tx_size {
+            return Err(TxBuilderError::UndeliverableMessage(format!(
+                "Transaction size {tx_size} bytes exceeds max_tx_size {max_tx_size} bytes"
+            )));
+        }
+
         debug!(
             "Evaluating TX CBOR ({} bytes): {}",
             signed_tx.len(),
             hex::encode(&signed_tx)
         );
 
-        // 3. Evaluate via Blockfrost (Ogmios)
-        let eval_result = match self.provider.evaluate_tx(&signed_tx).await {
+        let (fee, _ex_units_map) = self
+            .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
+            .await?;
+
+        // Add minUTxO costs for outputs the relayer creates
+        let min_lovelace = self.min_lovelace_simple().await;
+        let output_costs = min_lovelace * 2; // processed marker + change
+        let total = fee + output_costs;
+
+        info!(
+            "Estimated cost: fee={}, output_costs={}, total={}",
+            fee, output_costs, total
+        );
+
+        Ok(total)
+    }
+
+    /// Evaluate a signed TX via Blockfrost and compute the real fee.
+    /// Returns (fee, per_redeemer_ex_units_map).
+    /// Disables the evaluate endpoint on HTTP 500 (Blockfrost plan limitation).
+    async fn evaluate_and_compute_fee(
+        &self,
+        signed_tx: &[u8],
+        ref_script_size: u64,
+    ) -> Result<(u64, EvaluatedExUnits), TxBuilderError> {
+        let eval_result = match self.provider.evaluate_tx(signed_tx).await {
             Ok(result) => result,
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("500") || err_str.contains("Internal Server Error") {
                     self.evaluate_available.store(false, Ordering::Relaxed);
                     warn!(
-                        "Blockfrost evaluate endpoint returned HTTP 500 — disabling dynamic \
-                         estimation. This endpoint requires Blockfrost's hosted variant with \
-                         Ogmios backend. Falling back to static estimation."
-                    );
-                } else {
-                    warn!(
-                        "Blockfrost evaluate failed for nonce {}: {}",
-                        message.nonce, e
+                        "Blockfrost evaluate endpoint returned HTTP 500 — disabling. \
+                         Falling back to static fee estimation."
                     );
                 }
                 return Err(e.into());
             }
         };
-        debug!("TX evaluate response: {:?}", eval_result);
 
-        // 4. Parse execution units from response
-        let (total_mem, total_steps) = parse_evaluation_result(&eval_result)?;
-        info!(
-            "Evaluated ExUnits: total_mem={}, total_steps={}",
-            total_mem, total_steps
-        );
+        let per_redeemer_units = parse_per_redeemer_ex_units(&eval_result)?;
+        let tx_size = signed_tx.len() as u64;
 
-        // 5. Calculate fee from protocol parameters
+        // Apply 20% margin to each redeemer and compute totals
+        let mut margined_units: EvaluatedExUnits = HashMap::new();
+        let mut total_mem = 0u64;
+        let mut total_steps = 0u64;
+        for (key, (mem, steps)) in per_redeemer_units {
+            let margined_mem = (mem as f64 * 1.2).ceil() as u64;
+            let margined_steps = (steps as f64 * 1.2).ceil() as u64;
+            margined_units.insert(key, (margined_mem, margined_steps));
+            total_mem += margined_mem;
+            total_steps += margined_steps;
+        }
+
+        let fee = self
+            .compute_fee_from_evaluation(tx_size, total_mem, total_steps, ref_script_size)
+            .await?;
+
+        Ok((fee, margined_units))
+    }
+
+    /// Compute the actual TX fee from protocol parameters and evaluation results.
+    ///
+    /// The Conway fee formula: size_fee + script_fee + ref_script_fee.
+    /// ExUnits already have 20% margin (applied per-redeemer in evaluate_and_compute_fee),
+    /// and we add 5% overall margin for CBOR encoding variance between build passes.
+    async fn compute_fee_from_evaluation(
+        &self,
+        tx_size: u64,
+        total_mem: u64,
+        total_steps: u64,
+        ref_script_size: u64,
+    ) -> Result<u64, TxBuilderError> {
         let params = self.provider.get_protocol_parameters().await?;
         let min_fee_a = params
             .get("min_fee_a")
@@ -1930,66 +2362,81 @@ impl HyperlaneTxBuilder {
             .get("price_step")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0000721);
-
-        let tx_size = signed_tx.len() as u64;
-        let max_tx_size = params
-            .get("max_tx_size")
+        let min_fee_ref_script: u64 = params
+            .get("min_fee_ref_script_cost_per_byte")
             .and_then(|v| v.as_u64())
-            .unwrap_or(16384);
-        if tx_size > max_tx_size {
-            return Err(TxBuilderError::UndeliverableMessage(format!(
-                "Transaction size {tx_size} bytes exceeds max_tx_size {max_tx_size} bytes"
-            )));
-        }
+            .unwrap_or(15);
 
         let size_fee = min_fee_b + (tx_size * min_fee_a);
         let script_fee =
             (price_mem * total_mem as f64 + price_step * total_steps as f64).ceil() as u64;
-        let base_fee = size_fee + script_fee;
+        let ref_script_fee = min_fee_ref_script * ref_script_size;
 
-        // 6. Add minUTxO costs for outputs the relayer creates
-        let min_lovelace = self.min_lovelace_simple().await;
-        // processed marker output + change output
-        let output_costs = min_lovelace * 2;
-
-        // 7. Add 20% safety margin
-        let total = ((base_fee + output_costs) as f64 * 1.2).ceil() as u64;
+        let base_fee = size_fee + script_fee + ref_script_fee;
+        let fee_with_margin = (base_fee as f64 * 1.05).ceil() as u64;
 
         info!(
-            "Estimated cost: base_fee={} (size={}, script={}), output_costs={}, total_with_margin={}",
-            base_fee, size_fee, script_fee, output_costs, total
+            "Computed fee: size_fee={}, script_fee={}, ref_script_fee={} ({}*{}), base_fee={}, with_margin={}",
+            size_fee, script_fee, ref_script_fee, min_fee_ref_script, ref_script_size, base_fee, fee_with_margin
         );
 
-        Ok(total)
+        Ok(fee_with_margin)
     }
 }
 
-/// Parse the evaluation result from Blockfrost/Ogmios to extract total
-/// memory and CPU steps across all redeemers.
-fn parse_evaluation_result(result: &serde_json::Value) -> Result<(u64, u64), TxBuilderError> {
-    // Try Ogmios v6 format: { "result": [{ "validator": "...", "budget": { "memory": N, "cpu": N } }] }
+/// Parse the evaluation result from Blockfrost/Ogmios to extract per-redeemer
+/// memory and CPU steps, keyed by "spend:N" or "mint:N".
+fn parse_per_redeemer_ex_units(
+    result: &serde_json::Value,
+) -> Result<EvaluatedExUnits, TxBuilderError> {
+    let mut ex_units_map: EvaluatedExUnits = HashMap::new();
+
+    // Try Ogmios v6 format: { "result": [{ "validator": {"index": N, "purpose": "spend"}, "budget": { "memory": M, "cpu": S } }] }
     if let Some(evaluations) = result.get("result").and_then(|v| v.as_array()) {
-        let mut total_mem = 0u64;
-        let mut total_steps = 0u64;
         for entry in evaluations {
-            if let Some(budget) = entry.get("budget") {
-                total_mem += budget.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
-                total_steps += budget.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let (Some(validator), Some(budget)) = (entry.get("validator"), entry.get("budget")) {
+                let purpose = validator
+                    .get("purpose")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let index = validator.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mem = budget.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+                let steps = budget.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0);
+                let key = format!("{purpose}:{index}");
+                ex_units_map.insert(key, (mem, steps));
             }
         }
-        if total_mem > 0 || total_steps > 0 {
-            return Ok((total_mem, total_steps));
+        if !ex_units_map.is_empty() {
+            return Ok(ex_units_map);
         }
     }
 
     // Blockfrost/Ogmios v5 (JSON-WSP): { "result": { "EvaluationResult": { "spend:0": { "memory": N, "steps": N } } } }
     if let Some(eval_result) = result.get("result").and_then(|r| r.get("EvaluationResult")) {
-        return parse_evaluation_object(eval_result);
+        if let Some(obj) = eval_result.as_object() {
+            for (key, value) in obj {
+                let mem = value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+                let steps = value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+                ex_units_map.insert(key.clone(), (mem, steps));
+            }
+        }
+        if !ex_units_map.is_empty() {
+            return Ok(ex_units_map);
+        }
     }
 
     // Top-level EvaluationResult (alternative format)
     if let Some(eval_result) = result.get("EvaluationResult") {
-        return parse_evaluation_object(eval_result);
+        if let Some(obj) = eval_result.as_object() {
+            for (key, value) in obj {
+                let mem = value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
+                let steps = value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+                ex_units_map.insert(key.clone(), (mem, steps));
+            }
+        }
+        if !ex_units_map.is_empty() {
+            return Ok(ex_units_map);
+        }
     }
 
     // Check for Ogmios evaluation failure
@@ -2012,24 +2459,7 @@ fn parse_evaluation_result(result: &serde_json::Value) -> Result<(u64, u64), TxB
     }
 
     Err(TxBuilderError::Encoding(format!(
-        "Could not parse evaluation result: {result}"
-    )))
-}
-
-fn parse_evaluation_object(eval_result: &serde_json::Value) -> Result<(u64, u64), TxBuilderError> {
-    let mut total_mem = 0u64;
-    let mut total_steps = 0u64;
-    if let Some(obj) = eval_result.as_object() {
-        for (_key, value) in obj {
-            total_mem += value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0);
-            total_steps += value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
-        }
-    }
-    if total_mem > 0 || total_steps > 0 {
-        return Ok((total_mem, total_steps));
-    }
-    Err(TxBuilderError::Encoding(format!(
-        "EvaluationResult had zero execution units: {eval_result}"
+        "Could not parse per-redeemer evaluation result: {result}"
     )))
 }
 
@@ -2074,6 +2504,9 @@ pub struct ProcessTxComponents {
     pub verified_message_datum_cbor: Option<Vec<u8>>,
     /// GenericRecipient: recipient script hash (28 bytes, extracted from Hyperlane address)
     pub recipient_script_hash: Option<[u8; 28]>,
+    /// Total size (bytes) of all reference scripts used in the TX.
+    /// Used for Conway-era fee calculation (`min_fee_ref_script_cost_per_byte`).
+    pub total_ref_script_size: u64,
 }
 
 // ============================================================================
@@ -5099,13 +5532,13 @@ mod evaluation_parser_tests {
     fn parse_ogmios_v6_format() {
         let result = json!({
             "result": [
-                { "validator": "spend:0", "budget": { "memory": 1000000, "cpu": 500000000 } },
-                { "validator": "mint:0", "budget": { "memory": 200000, "cpu": 100000000 } }
+                { "validator": { "purpose": "spend", "index": 0 }, "budget": { "memory": 1000000, "cpu": 500000000 } },
+                { "validator": { "purpose": "mint", "index": 0 }, "budget": { "memory": 200000, "cpu": 100000000 } }
             ]
         });
-        let (mem, steps) = parse_evaluation_result(&result).unwrap();
-        assert_eq!(mem, 1200000);
-        assert_eq!(steps, 600000000);
+        let ex_units_map = parse_per_redeemer_ex_units(&result).unwrap();
+        assert_eq!(ex_units_map.get("spend:0"), Some(&(1000000, 500000000)));
+        assert_eq!(ex_units_map.get("mint:0"), Some(&(200000, 100000000)));
     }
 
     #[test]
@@ -5123,9 +5556,10 @@ mod evaluation_parser_tests {
                 }
             }
         });
-        let (mem, steps) = parse_evaluation_result(&result).unwrap();
-        assert_eq!(mem, 2300000);
-        assert_eq!(steps, 1150000000);
+        let ex_units_map = parse_per_redeemer_ex_units(&result).unwrap();
+        assert_eq!(ex_units_map.get("spend:0"), Some(&(1500000, 800000000)));
+        assert_eq!(ex_units_map.get("spend:1"), Some(&(500000, 200000000)));
+        assert_eq!(ex_units_map.get("mint:0"), Some(&(300000, 150000000)));
     }
 
     #[test]
@@ -5135,9 +5569,8 @@ mod evaluation_parser_tests {
                 "spend:0": { "memory": 1000000, "steps": 500000000 }
             }
         });
-        let (mem, steps) = parse_evaluation_result(&result).unwrap();
-        assert_eq!(mem, 1000000);
-        assert_eq!(steps, 500000000);
+        let ex_units_map = parse_per_redeemer_ex_units(&result).unwrap();
+        assert_eq!(ex_units_map.get("spend:0"), Some(&(1000000, 500000000)));
     }
 
     #[test]
@@ -5151,7 +5584,7 @@ mod evaluation_parser_tests {
                 "string": "Some validation error"
             }
         });
-        let err = parse_evaluation_result(&result).unwrap_err();
+        let err = parse_per_redeemer_ex_units(&result).unwrap_err();
         assert!(err.to_string().contains("Some validation error"));
     }
 
@@ -5164,7 +5597,7 @@ mod evaluation_parser_tests {
                 }
             }
         });
-        let err = parse_evaluation_result(&result).unwrap_err();
+        let err = parse_per_redeemer_ex_units(&result).unwrap_err();
         assert!(err.to_string().contains("TX evaluation failed"));
     }
 }
