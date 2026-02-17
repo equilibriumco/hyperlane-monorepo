@@ -81,12 +81,12 @@
       "warpType": "native",
       "decimals": 6,
       "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
-      "scriptHash": "d12893d730e40a1221815641ca845de5817b5482daccce8751fd4d6b",
-      "address": "addr_test1wrgj3y7hxrjq5y3ps9tyrj5ythjcz765stdven58287566crm3xut",
-      "nftPolicy": "d3040059151d5c88c84c687bb1cfdb5f15fc63d54e9dba30bff23d16",
-      "initTxHash": "5eee8229b5dec22b05197d5eb9c9d8edf9c420ee9487c9b9100ba92af42ea5a7",
+      "scriptHash": "b9344809e57b1057607717e688c8abca2255f3d45759e9248767c963",
+      "address": "addr_test1wzungjqfu4a3q4mqwut7dzxg409zy40n63t4n6fysanujcc3achq6",
+      "nftPolicy": "cc1e4a55ba608b96c498431c42eb4c99fce73e520c0a3abdec00ef35",
+      "initTxHash": "4e2222ae685ef33c4f1946e869a901e7e6818550da6a30bbb88911890bc00409",
       "referenceScriptUtxo": {
-        "txHash": "5eee8229b5dec22b05197d5eb9c9d8edf9c420ee9487c9b9100ba92af42ea5a7",
+        "txHash": "4e2222ae685ef33c4f1946e869a901e7e6818550da6a30bbb88911890bc00409",
         "outputIndex": 1,
         "lovelace": 20000000
       }
