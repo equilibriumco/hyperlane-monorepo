@@ -324,7 +324,9 @@ fn validate_native_release(
 ) -> Bool {
   let input_ada = lovelace_of(own_input.value)
   let output_ada = lovelace_of(own_output.value)
-  expect input_ada - output_ada >= amount
+  // Continuation must keep at least (input - amount), preventing extra ADA drainage.
+  // The payer may top up the continuation to meet minUTxO requirements.
+  expect output_ada >= input_ada - amount
 
   // Recipient must receive at least the transferred amount
   expect recipient_receives_ada(tx, recipient, amount)
