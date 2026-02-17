@@ -105,7 +105,8 @@ impl ForwardBackwardIterator {
                     .is_none()
                 {
                     // No message at current nonce, jump to highest known nonce
-                    // The iterator will then work backwards and forwards from there
+                    // Also initialize the low nonce iterator to scan backward
+                    // from that point, so messages below the highest nonce are found
                     debug!(
                         current_nonce,
                         highest_nonce,
@@ -113,6 +114,7 @@ impl ForwardBackwardIterator {
                         "Jumping high nonce iterator to newly indexed messages"
                     );
                     self.high_nonce_iter.nonce = Some(highest_nonce);
+                    self.low_nonce_iter.nonce = highest_nonce.checked_sub(1);
                 }
             }
         }
