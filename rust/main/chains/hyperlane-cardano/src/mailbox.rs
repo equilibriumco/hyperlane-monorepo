@@ -501,6 +501,12 @@ impl Mailbox for CardanoMailbox {
         message: &HyperlaneMessage,
         metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
+        // Cardano's min_fee_a protocol parameter: 44 lovelace per TX byte.
+        // The IGP oracle uses gasPrice=44 so that 1 gas unit = 1 byte = 44 lovelace.
+        // We return gas_limit in these units so the relayer's onChainFeeQuoting
+        // policy can compare it against the gas_amount from payForGas.
+        const LOVELACE_PER_GAS_UNIT: u64 = 44;
+
         // Try dynamic estimation via Blockfrost TX evaluation
         if let Some(payer) = self.payer.as_ref() {
             match self
@@ -509,13 +515,14 @@ impl Mailbox for CardanoMailbox {
                 .await
             {
                 Ok(estimated_lovelace) => {
+                    let gas_units = estimated_lovelace / LOVELACE_PER_GAS_UNIT + 1;
                     info!(
-                        "Dynamic cost estimate for nonce {}: {} lovelace",
-                        message.nonce, estimated_lovelace
+                        "Dynamic cost estimate for nonce {}: {} lovelace ({} gas units)",
+                        message.nonce, estimated_lovelace, gas_units
                     );
                     return Ok(TxCostEstimate {
-                        gas_limit: U256::from(estimated_lovelace),
-                        gas_price: FixedPointNumber::try_from(U256::from(1u64))
+                        gas_limit: U256::from(gas_units),
+                        gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT))
                             .unwrap_or_else(|_| FixedPointNumber::zero()),
                         l2_gas_limit: None,
                     });
@@ -544,9 +551,10 @@ impl Mailbox for CardanoMailbox {
             4_000_000u64
         };
 
+        let gas_units = estimated_fee_lovelace / LOVELACE_PER_GAS_UNIT + 1;
         Ok(TxCostEstimate {
-            gas_limit: U256::from(estimated_fee_lovelace),
-            gas_price: FixedPointNumber::try_from(U256::from(1u64))
+            gas_limit: U256::from(gas_units),
+            gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT))
                 .unwrap_or_else(|_| FixedPointNumber::zero()),
             l2_gas_limit: None,
         })
