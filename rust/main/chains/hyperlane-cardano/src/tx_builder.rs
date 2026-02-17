@@ -215,6 +215,15 @@ impl HyperlaneTxBuilder {
         self.calculate_min_lovelace(OutputType::SimpleAda).await
     }
 
+    async fn get_max_tx_size(&self) -> u64 {
+        self.provider
+            .get_protocol_parameters()
+            .await
+            .ok()
+            .and_then(|p| p.get("max_tx_size").and_then(|v| v.as_u64()))
+            .unwrap_or(16384)
+    }
+
     /// Find the mailbox UTXO by NFT or fall back to script address lookup
     async fn find_mailbox_utxo(&self) -> Result<Utxo, TxBuilderError> {
         // First try to find by NFT (preferred method for production)
@@ -617,6 +626,15 @@ impl HyperlaneTxBuilder {
         // 3. Sign the transaction
         info!("Signing transaction");
         let signed_tx = self.sign_transaction(built_tx, payer)?;
+
+        // 3b. Reject oversized transactions before submission
+        let max_tx_size = self.get_max_tx_size().await;
+        let tx_size = signed_tx.len() as u64;
+        if tx_size > max_tx_size {
+            return Err(TxBuilderError::UndeliverableMessage(format!(
+                "Transaction size {tx_size} bytes exceeds max_tx_size {max_tx_size} bytes"
+            )));
+        }
 
         // 4. Submit to Blockfrost
         info!("Submitting transaction to Blockfrost");
@@ -1914,6 +1932,16 @@ impl HyperlaneTxBuilder {
             .unwrap_or(0.0000721);
 
         let tx_size = signed_tx.len() as u64;
+        let max_tx_size = params
+            .get("max_tx_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(16384);
+        if tx_size > max_tx_size {
+            return Err(TxBuilderError::UndeliverableMessage(format!(
+                "Transaction size {tx_size} bytes exceeds max_tx_size {max_tx_size} bytes"
+            )));
+        }
+
         let size_fee = min_fee_b + (tx_size * min_fee_a);
         let script_fee =
             (price_mem * total_mem as f64 + price_step * total_steps as f64).ceil() as u64;
