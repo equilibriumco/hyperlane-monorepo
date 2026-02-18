@@ -87,7 +87,6 @@ enum OutputType {
     /// Simple output containing only ADA
     SimpleAda,
     /// Output with a native token (policy ID + asset name)
-    #[allow(dead_code)]
     WithNativeToken { asset_name_len: usize },
     /// Output with an inline datum
     WithInlineDatum { datum_size: usize },
@@ -897,7 +896,9 @@ impl HyperlaneTxBuilder {
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = warp_route_lovelace;
-                let release_amount = components.token_release_amount.unwrap();
+                let release_amount = components
+                    .token_release_amount
+                    .expect("guarded by is_some()");
                 // Recipient output must be at least min_lovelace
                 let recipient_actual = release_amount.max(min_lovelace);
                 let continuation_actual = original_lovelace
@@ -1139,30 +1140,34 @@ impl HyperlaneTxBuilder {
         });
 
         // Find the sorted index of each script input
+        let mailbox_hash = hex::decode(&components.mailbox_utxo.tx_hash)
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid mailbox tx_hash hex: {e}")))?;
         let mailbox_sorted_idx = all_inputs
             .iter()
             .position(|(hash, idx)| {
-                *hash == hex::decode(&components.mailbox_utxo.tx_hash).unwrap()
-                    && *idx == components.mailbox_utxo.output_index
+                *hash == mailbox_hash && *idx == components.mailbox_utxo.output_index
             })
-            .unwrap();
+            .ok_or_else(|| {
+                TxBuilderError::MissingInput("mailbox UTXO not in sorted inputs".into())
+            })?;
 
         let recipient_sorted_idx = if let Some(ref recipient_utxo) = components.recipient_utxo {
+            let recipient_hash = hex::decode(&recipient_utxo.tx_hash).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid recipient tx_hash hex: {e}"))
+            })?;
             all_inputs.iter().position(|(hash, idx)| {
-                *hash == hex::decode(&recipient_utxo.tx_hash).unwrap()
-                    && *idx == recipient_utxo.output_index
+                *hash == recipient_hash && *idx == recipient_utxo.output_index
             })
         } else {
             None
         };
 
+        let ism_hash = hex::decode(&components.ism_utxo.tx_hash)
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid ISM tx_hash hex: {e}")))?;
         let ism_sorted_idx = all_inputs
             .iter()
-            .position(|(hash, idx)| {
-                *hash == hex::decode(&components.ism_utxo.tx_hash).unwrap()
-                    && *idx == components.ism_utxo.output_index
-            })
-            .unwrap();
+            .position(|(hash, idx)| *hash == ism_hash && *idx == components.ism_utxo.output_index)
+            .ok_or_else(|| TxBuilderError::MissingInput("ISM UTXO not in sorted inputs".into()))?;
 
         // Collect minting policies and compute their sorted indices
         // Minting policies must be sorted by policy hash bytes (ascending)
@@ -1205,7 +1210,9 @@ impl HyperlaneTxBuilder {
         let synthetic_mint_idx = if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) =
             &components.warp_token_type
         {
-            let policy_bytes = hex::decode(minting_policy).unwrap();
+            let policy_bytes = hex::decode(minting_policy).map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid minting_policy hex: {e}"))
+            })?;
             mint_policies.iter().position(|p| *p == policy_bytes)
         } else {
             None
@@ -1213,7 +1220,9 @@ impl HyperlaneTxBuilder {
 
         let processed_nft_mint_idx =
             if let Some(ref policy_id) = self.conf.processed_messages_nft_policy_id {
-                let policy_bytes = hex::decode(policy_id).unwrap();
+                let policy_bytes = hex::decode(policy_id).map_err(|e| {
+                    TxBuilderError::Encoding(format!("Invalid processed_messages_nft hex: {e}"))
+                })?;
                 mint_policies.iter().position(|p| *p == policy_bytes)
             } else {
                 None
@@ -1221,7 +1230,9 @@ impl HyperlaneTxBuilder {
 
         let verified_nft_mint_idx = if components.verified_message_datum_cbor.is_some() {
             if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
-                let policy_bytes = hex::decode(policy_id).unwrap();
+                let policy_bytes = hex::decode(policy_id).map_err(|e| {
+                    TxBuilderError::Encoding(format!("Invalid verified_message_nft hex: {e}"))
+                })?;
                 mint_policies.iter().position(|p| *p == policy_bytes)
             } else {
                 None
@@ -1741,7 +1752,9 @@ impl HyperlaneTxBuilder {
             }
             Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
                 let original_lovelace = warp_route_lovelace;
-                let release_amount = components.token_release_amount.unwrap();
+                let release_amount = components
+                    .token_release_amount
+                    .expect("guarded by is_some()");
                 // Recipient output must be at least min_lovelace
                 let recipient_actual = release_amount.max(min_lovelace);
                 let continuation_actual = original_lovelace
@@ -1899,8 +1912,9 @@ impl HyperlaneTxBuilder {
                 );
                 if let Some(ref redeemers) = tx.transaction_witness_set.redeemer {
                     info!("  - Has redeemers: true");
-                    let redeemer_cbor = redeemers.encode_fragment().unwrap();
-                    debug!("  - Redeemers CBOR: {}", hex::encode(&redeemer_cbor));
+                    if let Ok(redeemer_cbor) = redeemers.encode_fragment() {
+                        debug!("  - Redeemers CBOR: {}", hex::encode(&redeemer_cbor));
+                    }
                 }
                 info!("  - Success flag: {}", tx.success);
                 let has_aux = matches!(&tx.auxiliary_data, pallas_codec::utils::Nullable::Some(_));
@@ -3854,7 +3868,10 @@ pub fn parse_multisig_metadata(
     merkle_root.copy_from_slice(&metadata[32..64]);
 
     // Bytes 64-67: Checkpoint index
-    let root_index = u32::from_be_bytes(metadata[64..68].try_into().unwrap());
+    let root_index =
+        u32::from_be_bytes(metadata[64..68].try_into().map_err(|e| {
+            TxBuilderError::Encoding(format!("Invalid checkpoint index bytes: {e}"))
+        })?);
 
     // Compute the checkpoint hash that validators signed
     // Step 1: domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")

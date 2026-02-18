@@ -1058,14 +1058,17 @@ pub fn build_cardano_connection_conf(
         .parse_u32()
         .unwrap_or(2);
 
-    if !local_err.is_ok() || url.is_none() || api_key.is_none() {
+    if !local_err.is_ok() {
         err.merge(local_err);
         return None;
     }
 
+    let url = url?;
+    let api_key = api_key?;
+
     Some(ChainConnectionConf::Cardano(h_cardano::ConnectionConf {
-        url: url.unwrap(),
-        api_key: api_key.unwrap().to_string(),
+        url,
+        api_key: api_key.to_string(),
         network,
         mailbox_policy_id: mailbox_policy_id.to_string(),
         mailbox_asset_name_hex,
