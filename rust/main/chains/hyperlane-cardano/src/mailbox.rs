@@ -546,9 +546,14 @@ impl Mailbox for CardanoMailbox {
         // Fallback: static estimate based on recipient type
         let recipient_bytes = message.recipient.as_bytes();
         let estimated_fee_lovelace = if recipient_bytes.first() == Some(&0x01) {
+            // Warp routes: fee + processed_marker (no verified_message UTXO)
             3_000_000u64
         } else {
-            4_000_000u64
+            // Script recipients: fee + processed_marker + verified_message UTXO.
+            // The verified_message UTXO stores the full body in its inline datum
+            // and grows at ~4400 lovelace/byte (coins_per_utxo_byte + CBOR overhead).
+            let body_len = message.body.len() as u64;
+            4_000_000 + 4_400 * body_len
         };
 
         let gas_units = estimated_fee_lovelace / LOVELACE_PER_GAS_UNIT + 1;

@@ -353,6 +353,37 @@ impl HyperlaneTxBuilder {
         ))
     }
 
+    async fn find_ref_script_utxo_from_config(&self) -> Option<Utxo> {
+        let ref_utxo_str = self.conf.warp_route_reference_script_utxo.as_ref()?;
+        let parts: Vec<&str> = ref_utxo_str.split('#').collect();
+        if parts.len() != 2 {
+            tracing::warn!("Invalid warp_route_reference_script_utxo format: {ref_utxo_str}");
+            return None;
+        }
+        let tx_hash = parts[0].to_string();
+        let output_index: u32 = match parts[1].parse() {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!("Invalid ref script UTXO output index: {e}");
+                return None;
+            }
+        };
+        match self.provider.get_utxo(&tx_hash, output_index).await {
+            Ok(utxo) => {
+                tracing::info!(
+                    "Found fallback reference script UTXO from config: {}#{}",
+                    utxo.tx_hash,
+                    utxo.output_index
+                );
+                Some(utxo)
+            }
+            Err(e) => {
+                tracing::warn!("Could not fetch fallback ref script UTXO: {e}");
+                None
+            }
+        }
+    }
+
     /// Build a Process transaction for delivering a message to Cardano
     ///
     /// This creates a transaction that:
@@ -393,38 +424,27 @@ impl HyperlaneTxBuilder {
             resolved.recipient_kind
         );
 
-        // 3. Find recipient reference script UTXO from shared config (WarpRoute only)
+        // 3. Find recipient reference script UTXO (WarpRoute only)
+        // Each warp route has its own ref script UTXO identified by NFT {policy}726566 ("ref")
         let recipient_ref_script_utxo =
             if matches!(resolved.recipient_kind, RecipientKind::WarpRoute) {
-                if let Some(ref ref_utxo_str) = self.conf.warp_route_reference_script_utxo {
-                    let parts: Vec<&str> = ref_utxo_str.split('#').collect();
-                    if parts.len() == 2 {
-                        let tx_hash = parts[0].to_string();
-                        let output_index: u32 = parts[1].parse().map_err(|e| {
-                            TxBuilderError::Encoding(format!(
-                                "Invalid ref script UTXO output index: {e}"
-                            ))
-                        })?;
-                        match self.provider.get_utxo(&tx_hash, output_index).await {
-                            Ok(utxo) => {
-                                info!(
-                                    "Found shared reference script UTXO: {}#{}",
-                                    utxo.tx_hash, utxo.output_index
-                                );
-                                Some(utxo)
-                            }
-                            Err(e) => {
-                                warn!("Could not fetch shared ref script UTXO: {e}");
-                                None
-                            }
-                        }
-                    } else {
-                        warn!("Invalid warp_route_reference_script_utxo format: {ref_utxo_str}");
-                        None
+                let policy_hex = hex::encode(resolved.recipient_policy);
+                match self.provider.find_utxo_by_nft(&policy_hex, "726566").await {
+                    Ok(utxo) => {
+                        info!(
+                            "Found warp route reference script UTXO via NFT: {}#{}",
+                            utxo.tx_hash, utxo.output_index
+                        );
+                        Some(utxo)
                     }
-                } else {
-                    debug!("No shared reference script UTXO configured");
-                    None
+                    Err(e) => {
+                        warn!(
+                        "Could not find ref script UTXO for policy {}: {}. Falling back to config.",
+                        policy_hex, e
+                    );
+                        // Fall back to static config
+                        self.find_ref_script_utxo_from_config().await
+                    }
                 }
             } else {
                 None
@@ -2289,14 +2309,37 @@ impl HyperlaneTxBuilder {
             .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
             .await?;
 
-        // Add minUTxO costs for outputs the relayer creates
-        let min_lovelace = self.min_lovelace_simple().await;
-        let output_costs = min_lovelace * 2; // processed marker + change
+        // Add minUTxO costs for outputs the relayer creates (mirrors build_complete_process_tx)
+        let processed_marker_min = if self.conf.processed_messages_nft_policy_id.is_some() {
+            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                asset_name_len: 32,
+                datum_size: components.processed_datum_cbor.len(),
+            })
+            .await
+        } else {
+            self.calculate_min_lovelace(OutputType::WithInlineDatum {
+                datum_size: components.processed_datum_cbor.len(),
+            })
+            .await
+        };
+
+        let verified_message_min =
+            if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
+                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
+                    asset_name_len: 32,
+                    datum_size: datum_cbor.len(),
+                })
+                .await
+            } else {
+                0
+            };
+
+        let output_costs = processed_marker_min + verified_message_min;
         let total = fee + output_costs;
 
         info!(
-            "Estimated cost: fee={}, output_costs={}, total={}",
-            fee, output_costs, total
+            "Estimated cost: fee={}, processed_marker={}, verified_msg={}, total={}",
+            fee, processed_marker_min, verified_message_min, total
         );
 
         Ok(total)
