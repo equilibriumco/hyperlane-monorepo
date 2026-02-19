@@ -15,11 +15,11 @@ import {HypNative} from "contracts/token/HypNative.sol";
  *      Format: 0x02000000 prefix + 28-byte script hash
  *
  * Required environment variables:
- *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
- *   - FUJI_SYNTHETIC_WCTEST: Fuji wCTEST synthetic warp route address
- *   - FUJI_SYNTHETIC_WADA: Fuji wADA synthetic warp route address
- *   - FUJI_COLLATERAL_FTEST: Fuji FTEST collateral warp route address
- *   - FUJI_COLLATERAL_WADA: Fuji WADA collateral warp route address
+ *   - EVM_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SYNTHETIC_WCTEST: Fuji wCTEST synthetic warp route address
+ *   - EVM_SYNTHETIC_WADA: Fuji wADA synthetic warp route address
+ *   - EVM_COLLATERAL_FTEST: Fuji FTEST collateral warp route address
+ *   - EVM_COLLATERAL_WADA: Fuji WADA collateral warp route address
  *   - CARDANO_NATIVE_ADA: Cardano Native ADA warp route (H256 format)
  *   - CARDANO_COLLATERAL_CTEST: Cardano Collateral CTEST warp route (H256 format)
  *   - CARDANO_SYNTHETIC_FTEST: Cardano Synthetic FTEST warp route (H256 format)
@@ -35,7 +35,7 @@ contract EnrollCardanoRouters is Script {
     uint32 constant DEFAULT_CARDANO_DOMAIN = 2003;
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
         // Read Cardano domain (optional, defaults to Preview)
@@ -66,10 +66,10 @@ contract EnrollCardanoRouters is Script {
         );
 
         // Read deployed Fuji warp route addresses from environment
-        address syntheticWCtest = vm.envAddress("FUJI_SYNTHETIC_WCTEST");
-        address syntheticWAda = vm.envAddress("FUJI_SYNTHETIC_WADA");
-        address collateralFtest = vm.envAddress("FUJI_COLLATERAL_FTEST");
-        address collateralWada = vm.envAddress("FUJI_COLLATERAL_WADA");
+        address syntheticWCtest = vm.envAddress("EVM_SYNTHETIC_WCTEST");
+        address syntheticWAda = vm.envAddress("EVM_SYNTHETIC_WADA");
+        address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
+        address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -133,18 +133,18 @@ contract EnrollCardanoRouters is Script {
      * @dev Useful for enrolling routers one at a time or for routes not covered by run()
      *
      * Required environment variables:
-     *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
-     *   - FUJI_WARP_ROUTE: Fuji warp route address to enroll on
+     *   - EVM_SIGNER_KEY: Private key for Fuji transactions
+     *   - EVM_WARP_ROUTE: Fuji warp route address to enroll on
      *   - CARDANO_ROUTER: Cardano warp route address (H256 format)
      *   - CARDANO_DOMAIN: Cardano domain ID (optional, default: 2003)
      */
     function enrollSingle() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
         uint32 cardanoDomain = uint32(
             vm.envOr("CARDANO_DOMAIN", uint256(DEFAULT_CARDANO_DOMAIN))
         );
-        address fujiWarpRoute = vm.envAddress("FUJI_WARP_ROUTE");
+        address fujiWarpRoute = vm.envAddress("EVM_WARP_ROUTE");
         bytes32 cardanoRouter = vm.envBytes32("CARDANO_ROUTER");
 
         console.log("Enrolling single Cardano router");

@@ -17,10 +17,10 @@ contract TestWadaTransfer is Script {
     uint32 constant CARDANO_DOMAIN = 2003;
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        address wadaToken = vm.envAddress("FUJI_WADA");
-        address collateral = vm.envAddress("FUJI_COLLATERAL_WADA");
+        address wadaToken = vm.envAddress("EVM_WADA");
+        address collateral = vm.envAddress("EVM_COLLATERAL_WADA");
 
         console.log("=== Testing WADA Transfer (Fixed Scale=1) ===");
         console.log("Deployer:", deployer);
@@ -82,10 +82,10 @@ contract TestWadaTransfer is Script {
      * @notice Alternative: send to a specific Cardano address
      */
     function sendToAddress(bytes32 recipient, uint256 amount) external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        address wadaToken = vm.envAddress("FUJI_WADA");
-        address collateral = vm.envAddress("FUJI_COLLATERAL_WADA");
+        address wadaToken = vm.envAddress("EVM_WADA");
+        address collateral = vm.envAddress("EVM_COLLATERAL_WADA");
 
         vm.startBroadcast(deployerPrivateKey);
 

@@ -36,9 +36,9 @@ contract FixWadaCollateral is Script {
     uint256 constant CORRECT_SCALE = 1;
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        address wadaToken = vm.envAddress("FUJI_WADA");
+        address wadaToken = vm.envAddress("EVM_WADA");
 
         console.log("=== Fixing WADA Collateral with Correct Scale ===");
         console.log("Deployer:", deployer);
@@ -93,7 +93,7 @@ contract FixWadaCollateral is Script {
         console.log("Update your .env with:");
         console.log(
             string.concat(
-                "FUJI_COLLATERAL_WADA=",
+                "EVM_COLLATERAL_WADA=",
                 vm.toString(address(newCollateral))
             )
         );
@@ -105,10 +105,10 @@ contract FixWadaCollateral is Script {
      * @dev Use this if the deployer doesn't have WADA tokens
      */
     function mintAndDeposit() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        address wadaToken = vm.envAddress("FUJI_WADA");
-        address collateral = vm.envAddress("FUJI_COLLATERAL_WADA");
+        address wadaToken = vm.envAddress("EVM_WADA");
+        address collateral = vm.envAddress("EVM_COLLATERAL_WADA");
 
         vm.startBroadcast(deployerPrivateKey);
 

@@ -23,7 +23,7 @@ import {TypeCasts} from "contracts/libs/TypeCasts.sol";
  *      7. Collateral <-> Collateral (TokenA <-> TokenB)
  *
  * Required environment variables:
- *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SIGNER_KEY: Private key for Fuji transactions
  *
  * Optional environment variables for token customization:
  *   Test ERC20 Tokens:
@@ -48,9 +48,14 @@ import {TypeCasts} from "contracts/libs/TypeCasts.sol";
 contract DeployFujiWarp is Script {
     using TypeCasts for address;
 
-    // Fuji Hyperlane infrastructure
-    address constant FUJI_MAILBOX = 0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0;
-    address constant FUJI_ISM = 0xD44036F1917bb13cB36a4ab1ad0F87324aacF1EB;
+    // EVM Hyperlane infrastructure (read from environment)
+    address internal immutable EVM_MAILBOX;
+    address internal immutable EVM_ISM;
+
+    constructor() {
+        EVM_MAILBOX = vm.envAddress("EVM_MAILBOX");
+        EVM_ISM = vm.envAddress("EVM_ISM");
+    }
 
     // Cardano domain ID
     uint32 constant CARDANO_DOMAIN = 2003;
@@ -88,13 +93,13 @@ contract DeployFujiWarp is Script {
     }
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
         console.log("Deploying Fuji Warp Routes");
         console.log("Deployer:", deployer);
-        console.log("Mailbox:", FUJI_MAILBOX);
-        console.log("ISM:", FUJI_ISM);
+        console.log("Mailbox:", EVM_MAILBOX);
+        console.log("ISM:", EVM_ISM);
 
         // Read token configurations from environment (with defaults)
         TokenConfig memory ftestConfig = TokenConfig({
@@ -294,52 +299,49 @@ contract DeployFujiWarp is Script {
 
         // Output in a format easy to parse for scripts
         console.log("\n=== Environment Variables ===");
-        console.log(string.concat("FUJI_FTEST=", vm.toString(contracts.ftest)));
-        console.log(string.concat("FUJI_WADA=", vm.toString(contracts.wada)));
+        console.log(string.concat("EVM_FTEST=", vm.toString(contracts.ftest)));
+        console.log(string.concat("EVM_WADA=", vm.toString(contracts.wada)));
         console.log(
-            string.concat("FUJI_TOKENA=", vm.toString(contracts.tokenA))
+            string.concat("EVM_TOKENA=", vm.toString(contracts.tokenA))
         );
         console.log(
             string.concat(
-                "FUJI_SYNTHETIC_WCTEST=",
+                "EVM_SYNTHETIC_WCTEST=",
                 vm.toString(contracts.syntheticWCtest)
             )
         );
         console.log(
             string.concat(
-                "FUJI_SYNTHETIC_WADA=",
+                "EVM_SYNTHETIC_WADA=",
                 vm.toString(contracts.syntheticWAda)
             )
         );
         console.log(
             string.concat(
-                "FUJI_SYNTHETIC_WGUITKN=",
+                "EVM_SYNTHETIC_WGUITKN=",
                 vm.toString(contracts.syntheticWGuitkn)
             )
         );
         console.log(
             string.concat(
-                "FUJI_COLLATERAL_FTEST=",
+                "EVM_COLLATERAL_FTEST=",
                 vm.toString(contracts.collateralFtest)
             )
         );
         console.log(
             string.concat(
-                "FUJI_COLLATERAL_WADA=",
+                "EVM_COLLATERAL_WADA=",
                 vm.toString(contracts.collateralWada)
             )
         );
         console.log(
             string.concat(
-                "FUJI_COLLATERAL_TOKENA=",
+                "EVM_COLLATERAL_TOKENA=",
                 vm.toString(contracts.collateralTokenA)
             )
         );
         console.log(
-            string.concat(
-                "FUJI_NATIVE_AVAX=",
-                vm.toString(contracts.nativeAvax)
-            )
+            string.concat("EVM_NATIVE_AVAX=", vm.toString(contracts.nativeAvax))
         );
     }
 
@@ -350,13 +352,13 @@ contract DeployFujiWarp is Script {
         string memory symbol,
         address owner
     ) internal returns (address) {
-        HypERC20 synthetic = new HypERC20(decimals, scale, FUJI_MAILBOX);
+        HypERC20 synthetic = new HypERC20(decimals, scale, EVM_MAILBOX);
         synthetic.initialize(
             0, // no initial supply (minted on receive)
             name,
             symbol,
             address(0), // no hook
-            FUJI_ISM, // ISM
+            EVM_ISM, // ISM
             owner
         );
         return address(synthetic);
@@ -370,11 +372,11 @@ contract DeployFujiWarp is Script {
         HypERC20Collateral collateral = new HypERC20Collateral(
             token,
             scale,
-            FUJI_MAILBOX
+            EVM_MAILBOX
         );
         collateral.initialize(
             address(0), // no hook
-            FUJI_ISM, // ISM
+            EVM_ISM, // ISM
             owner
         );
         return address(collateral);
@@ -384,10 +386,10 @@ contract DeployFujiWarp is Script {
         uint256 scale,
         address owner
     ) internal returns (address) {
-        HypNative native = new HypNative(scale, FUJI_MAILBOX);
+        HypNative native = new HypNative(scale, EVM_MAILBOX);
         native.initialize(
             address(0), // no hook
-            FUJI_ISM, // ISM
+            EVM_ISM, // ISM
             owner
         );
         return address(native);
@@ -398,15 +400,15 @@ contract DeployFujiWarp is Script {
      * @dev Call this after Cardano warp routes are deployed
      */
     function enrollRouters() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
         // Read deployed addresses from environment
-        address syntheticWCtest = vm.envAddress("FUJI_SYNTHETIC_WCTEST");
-        address syntheticWAda = vm.envAddress("FUJI_SYNTHETIC_WADA");
-        address collateralFtest = vm.envAddress("FUJI_COLLATERAL_FTEST");
-        address collateralWada = vm.envAddress("FUJI_COLLATERAL_WADA");
-        address collateralTokenA = vm.envAddress("FUJI_COLLATERAL_TOKENA");
-        address nativeAvax = vm.envAddress("FUJI_NATIVE_AVAX");
+        address syntheticWCtest = vm.envAddress("EVM_SYNTHETIC_WCTEST");
+        address syntheticWAda = vm.envAddress("EVM_SYNTHETIC_WADA");
+        address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
+        address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
+        address collateralTokenA = vm.envAddress("EVM_COLLATERAL_TOKENA");
+        address nativeAvax = vm.envAddress("EVM_NATIVE_AVAX");
 
         // Read Cardano router addresses (as bytes32 with 0x00000000 prefix)
         bytes32 cardanoCollateralCtest = vm.envBytes32(
@@ -491,12 +493,12 @@ contract DeployFujiWarp is Script {
      * @notice Mint test tokens to the deployer for testing
      */
     function mintTestTokens() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        address ftest = vm.envAddress("FUJI_FTEST");
-        address wada = vm.envAddress("FUJI_WADA");
-        address tokenA = vm.envAddress("FUJI_TOKENA");
+        address ftest = vm.envAddress("EVM_FTEST");
+        address wada = vm.envAddress("EVM_WADA");
+        address tokenA = vm.envAddress("EVM_TOKENA");
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -518,12 +520,12 @@ contract DeployFujiWarp is Script {
      * @notice Pre-deposit tokens to collateral contracts for testing
      */
     function preDepositCollateral() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address wada = vm.envAddress("FUJI_WADA");
-        address tokenA = vm.envAddress("FUJI_TOKENA");
-        address collateralWada = vm.envAddress("FUJI_COLLATERAL_WADA");
-        address collateralTokenA = vm.envAddress("FUJI_COLLATERAL_TOKENA");
+        address wada = vm.envAddress("EVM_WADA");
+        address tokenA = vm.envAddress("EVM_TOKENA");
+        address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
+        address collateralTokenA = vm.envAddress("EVM_COLLATERAL_TOKENA");
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -548,7 +550,7 @@ contract DeployFujiWarp is Script {
      * @dev Use this if you already have other contracts deployed
      */
     function deployWGuitknSynthetic() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
         string memory name = vm.envOr(
@@ -584,7 +586,7 @@ contract DeployFujiWarp is Script {
         console.log("wGUITKN Synthetic deployed:", syntheticWGuitkn);
         console.log(
             string.concat(
-                "FUJI_SYNTHETIC_WGUITKN=",
+                "EVM_SYNTHETIC_WGUITKN=",
                 vm.toString(syntheticWGuitkn)
             )
         );
@@ -597,9 +599,9 @@ contract DeployFujiWarp is Script {
      *      - CARDANO_COLLATERAL_GUITKN: Cardano collateral address (H256 format)
      */
     function enrollTest2Router() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address syntheticWGuitkn = vm.envAddress("FUJI_SYNTHETIC_WGUITKN");
+        address syntheticWGuitkn = vm.envAddress("EVM_SYNTHETIC_WGUITKN");
         bytes32 cardanoCollateralGuitkn = vm.envBytes32(
             "CARDANO_COLLATERAL_GUITKN"
         );
@@ -630,9 +632,9 @@ contract DeployFujiWarp is Script {
      *      - CARDANO_SYNTHETIC: Cardano synthetic address (H256 format)
      */
     function enrollTest3Router() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address collateralFtest = vm.envAddress("FUJI_COLLATERAL_FTEST");
+        address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
         bytes32 cardanoSynthetic = vm.envBytes32("CARDANO_SYNTHETIC");
 
         console.log("Enrolling Test 3 routers:");

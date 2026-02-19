@@ -18,7 +18,7 @@ interface ITokenRouter {
  * @dev Creates a simple 1-of-1 multisig with the Cardano validator
  *
  * Required environment variables:
- *   - FUJI_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SIGNER_KEY: Private key for Fuji transactions
  *   - CARDANO_VALIDATOR: Cardano validator address (20-byte EVM address)
  *
  * Optional environment variables:
@@ -33,7 +33,7 @@ contract DeployCardanoISM is Script {
     uint8 constant DEFAULT_THRESHOLD = 1;
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
         // Read validator address from environment (required)
@@ -70,22 +70,22 @@ contract DeployCardanoISM is Script {
         vm.stopBroadcast();
 
         console.log("\n=== Environment Variable ===");
-        console.log(string.concat("FUJI_CARDANO_ISM=", vm.toString(ism)));
+        console.log(string.concat("EVM_CARDANO_ISM=", vm.toString(ism)));
     }
 
     /**
      * @notice Set the new ISM on all Fuji warp routes
      */
     function setISMOnWarpRoutes() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address cardanoIsm = vm.envAddress("FUJI_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
 
         // Read warp route addresses
-        address syntheticWCtest = vm.envAddress("FUJI_SYNTHETIC_WCTEST");
-        address collateralFtest = vm.envAddress("FUJI_COLLATERAL_FTEST");
-        address syntheticWAda = vm.envAddress("FUJI_SYNTHETIC_WADA");
-        address collateralWada = vm.envAddress("FUJI_COLLATERAL_WADA");
+        address syntheticWCtest = vm.envAddress("EVM_SYNTHETIC_WCTEST");
+        address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
+        address syntheticWAda = vm.envAddress("EVM_SYNTHETIC_WADA");
+        address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
 
         console.log("Setting Cardano ISM on Fuji warp routes");
         console.log("ISM:", cardanoIsm);
@@ -117,10 +117,10 @@ contract DeployCardanoISM is Script {
      * @notice Deploy a TestRecipient on Fuji and set the Cardano ISM
      */
     function deployTestRecipient() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        address cardanoIsm = vm.envAddress("FUJI_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
 
         console.log("Deploying TestRecipient on Fuji");
         console.log("Deployer:", deployer);
@@ -144,13 +144,13 @@ contract DeployCardanoISM is Script {
         console.log("\n=== For Cardano dispatch ===");
         console.log(
             string.concat(
-                "FUJI_TEST_RECIPIENT=",
+                "EVM_TEST_RECIPIENT=",
                 vm.toString(address(recipient))
             )
         );
         console.log(
             string.concat(
-                "FUJI_TEST_RECIPIENT_H256=0x000000000000000000000000",
+                "EVM_TEST_RECIPIENT_H256=0x000000000000000000000000",
                 vm.toString(address(recipient))
             )
         );
@@ -160,11 +160,11 @@ contract DeployCardanoISM is Script {
      * @notice Set ISM on an existing TestRecipient
      */
     function setISMOnTestRecipient() external {
-        uint256 deployerPrivateKey = vm.envUint("FUJI_SIGNER_KEY");
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address cardanoIsm = vm.envAddress("FUJI_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
         address payable testRecipient = payable(
-            vm.envAddress("FUJI_TEST_RECIPIENT")
+            vm.envAddress("EVM_TEST_RECIPIENT")
         );
 
         console.log("Setting Cardano ISM on TestRecipient");
