@@ -1,5 +1,7 @@
-# Docker Compose for Cardano <-> Fuji E2E Testing
+# Docker Compose for Cardano <-> EVM E2E Testing
 # This sets up validators and a bidirectional relayer for cross-chain message testing
+# Set RELAYER_CONFIG env var to switch between EVM chains:
+#   relayer-cardano-sepolia.json (default) or relayer-cardano-fuji.json
 
 services:
   # Cardano Preview Validator
@@ -60,15 +62,16 @@ services:
       start_period: 10s
 
   # Bidirectional Relayer
-  # Relays messages between Cardano Preview and Avalanche Fuji
+  # Relays messages between Cardano Preview and an EVM chain
   relayer:
     build:
       context: ../..
       dockerfile: cardano/e2e-docker/Dockerfile
     image: hyperlane-cardano-e2e:latest
-    container_name: hyperlane-relayer-cardano-fuji
+    container_name: hyperlane-relayer
     environment:
       AGENT_TYPE: relayer
+      RELAYER_CONFIG: ${RELAYER_CONFIG:-relayer-cardano-sepolia.json}
       RUST_LOG: ${RUST_LOG:-info}
 
       # Blockfrost API
@@ -97,7 +100,7 @@ services:
       CARDANO_IGP: ${CARDANO_IGP}
       CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
 
-      # Cardano signer for Fuji -> Cardano direction
+      # Cardano signer for EVM -> Cardano direction
       CARDANO_SIGNER_KEY: ${CARDANO_SIGNER_KEY}
 
       # Fuji (Avalanche testnet) configuration
@@ -109,6 +112,16 @@ services:
       FUJI_RPC_URL: ${FUJI_RPC_URL}
       FUJI_SIGNER_KEY: ${FUJI_SIGNER_KEY}
       FUJI_INDEX_FROM: ${FUJI_INDEX_FROM:-48764210}
+
+      # Sepolia (Ethereum testnet) configuration
+      SEPOLIA_MAILBOX: ${SEPOLIA_MAILBOX}
+      SEPOLIA_VALIDATOR_ANNOUNCE: ${SEPOLIA_VALIDATOR_ANNOUNCE}
+      SEPOLIA_MERKLE_TREE_HOOK: ${SEPOLIA_MERKLE_TREE_HOOK}
+      SEPOLIA_IGP: ${SEPOLIA_IGP}
+      SEPOLIA_ISM: ${SEPOLIA_ISM}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL}
+      SEPOLIA_SIGNER_KEY: ${SEPOLIA_SIGNER_KEY}
+      SEPOLIA_INDEX_FROM: ${SEPOLIA_INDEX_FROM:-10292190}
     volumes:
       - relayer-data:/data
       - ./config:/app/config-templates:ro

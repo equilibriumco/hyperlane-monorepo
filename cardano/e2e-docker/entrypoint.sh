@@ -16,7 +16,7 @@ case "$AGENT_TYPE" in
         SOURCE_CONFIG="/app/config-templates/validator-cardano-preview.json"
         ;;
     relayer)
-        SOURCE_CONFIG="/app/config-templates/relayer-cardano-fuji.json"
+        SOURCE_CONFIG="/app/config-templates/${RELAYER_CONFIG:-relayer-cardano-sepolia.json}"
         ;;
     scraper)
         SOURCE_CONFIG="/app/config-templates/scraper.json"

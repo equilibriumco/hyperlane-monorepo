@@ -1,0 +1,97 @@
+{
+  "allowContractCallCaching": false,
+  "allowLocalCheckpointSyncers": true,
+  "chains": {
+    "cardanopreview": {
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 20,
+        "reorgPeriod": 20
+      },
+      "chainId": 2003,
+      "connection": {
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "igpScriptHash": "${CARDANO_IGP_SCRIPT_HASH}",
+        "ismAssetNameHex": "49534d205374617465",
+        "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
+        "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
+        "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",
+        "mailboxAssetNameHex": "4d61696c626f78205374617465",
+        "mailboxPolicyId": "${CARDANO_MAILBOX_POLICY_ID}",
+        "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
+        "mailboxScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "network": "preview",
+        "processedMessagesNftPolicyId": "${CARDANO_PROCESSED_MSG_POLICY_ID}",
+        "processedMessagesNftScriptCbor": "${CARDANO_PROCESSED_MSG_NFT_SCRIPT_CBOR}",
+        "processedMessagesScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "warpRouteReferenceScriptUtxo": "${CARDANO_WARP_ROUTE_REF_UTXO}",
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
+        "verifiedMessageNftPolicyId": "${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}",
+        "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}",
+        "confirmationBlockDelay": 2
+      },
+      "domainId": 2003,
+      "index": {
+        "from": ${CARDANO_INDEX_FROM}
+      },
+      "interchainGasPaymaster": "${CARDANO_IGP}",
+      "interchainSecurityModule": "${CARDANO_ISM}",
+      "mailbox": "${CARDANO_MAILBOX}",
+      "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
+      "name": "cardanopreview",
+      "protocol": "cardano",
+      "rpcUrls": [
+        {
+          "http": "https://cardano-preview.blockfrost.io/api/v0"
+        }
+      ],
+      "signer": {
+        "key": "${CARDANO_SIGNER_KEY}",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}"
+    },
+    "sepolia": {
+      "blocks": {
+        "confirmations": 2,
+        "estimateBlockTime": 12,
+        "reorgPeriod": 2
+      },
+      "chainId": 11155111,
+      "domainId": 11155111,
+      "index": {
+        "from": ${SEPOLIA_INDEX_FROM}
+      },
+      "interchainGasPaymaster": "${SEPOLIA_IGP}",
+      "interchainSecurityModule": "${SEPOLIA_ISM}",
+      "mailbox": "${SEPOLIA_MAILBOX}",
+      "merkleTreeHook": "${SEPOLIA_MERKLE_TREE_HOOK}",
+      "name": "sepolia",
+      "protocol": "ethereum",
+      "rpcUrls": [
+        {
+          "http": "${SEPOLIA_RPC_URL}"
+        }
+      ],
+      "signer": {
+        "key": "${SEPOLIA_SIGNER_KEY}",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "${SEPOLIA_VALIDATOR_ANNOUNCE}"
+    }
+  },
+  "db": "/data/relayer_db",
+  "destinationChainNames": "cardanopreview,sepolia",
+  "gasPaymentEnforcement": [
+    {
+      "type": "none"
+    }
+  ],
+  "metrics": {
+    "port": 9094
+  },
+  "originChainNames": "cardanopreview,sepolia",
+  "relayChains": "cardanopreview,sepolia",
+  "blacklist": "[]"
+}
