@@ -169,7 +169,11 @@ impl BlockfrostClient {
     /// The asset_name should be hex-encoded (e.g., "4d61696c626f78205374617465" for "Mailbox State").
     /// If asset_name is empty, it will search for any asset under the policy and match UTXOs
     /// containing any asset from that policy.
-    pub async fn find_utxo_by_asset(&self, policy_id: &str, asset_name: &str) -> Result<Option<Utxo>> {
+    pub async fn find_utxo_by_asset(
+        &self,
+        policy_id: &str,
+        asset_name: &str,
+    ) -> Result<Option<Utxo>> {
         #[derive(Deserialize)]
         struct AssetAddress {
             address: String,
@@ -195,7 +199,11 @@ impl BlockfrostClient {
             for addr in addresses {
                 let utxos = self.get_utxos(&addr.address).await?;
                 for utxo in utxos {
-                    if utxo.assets.iter().any(|a| a.policy_id == policy_id && a.asset_name == asset_name) {
+                    if utxo
+                        .assets
+                        .iter()
+                        .any(|a| a.policy_id == policy_id && a.asset_name == asset_name)
+                    {
                         return Ok(Some(utxo));
                     }
                 }
@@ -242,7 +250,11 @@ impl BlockfrostClient {
             for addr in addresses {
                 let utxos = self.get_utxos(&addr.address).await?;
                 for utxo in utxos {
-                    if utxo.assets.iter().any(|a| a.policy_id == policy_id && a.asset_name == asset_name_from_unit) {
+                    if utxo
+                        .assets
+                        .iter()
+                        .any(|a| a.policy_id == policy_id && a.asset_name == asset_name_from_unit)
+                    {
                         return Ok(Some(utxo));
                     }
                 }
@@ -261,18 +273,6 @@ impl BlockfrostClient {
 
         let block: Block = self.get("/blocks/latest").await?;
         Ok(block.slot)
-    }
-
-    /// Get latest block slot and POSIX time (seconds since epoch)
-    pub async fn get_latest_slot_and_time(&self) -> Result<(u64, u64)> {
-        #[derive(Deserialize)]
-        struct Block {
-            slot: u64,
-            time: u64,
-        }
-
-        let block: Block = self.get("/blocks/latest").await?;
-        Ok((block.slot, block.time))
     }
 
     /// Get protocol parameters
@@ -659,8 +659,15 @@ impl BlockfrostClient {
     }
 
     /// Get transactions for an address (paginated, returns tx hashes in order)
-    pub async fn get_address_transactions(&self, address: &str, count: u32) -> Result<Vec<AddressTx>> {
-        let endpoint = format!("/addresses/{}/transactions?count={}&order=desc", address, count);
+    pub async fn get_address_transactions(
+        &self,
+        address: &str,
+        count: u32,
+    ) -> Result<Vec<AddressTx>> {
+        let endpoint = format!(
+            "/addresses/{}/transactions?count={}&order=desc",
+            address, count
+        );
         match self.get(&endpoint).await {
             Ok(txs) => Ok(txs),
             Err(e) => {
@@ -744,7 +751,6 @@ impl BlockfrostClient {
             }
         }
     }
-
 }
 
 /// Transaction information
@@ -759,7 +765,6 @@ pub struct TxInfo {
     pub fees: String,
     pub size: u32,
 }
-
 
 /// Address transaction info
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -37,7 +37,12 @@ impl CliContext {
             "mainnet" => CardanoNetwork::Mainnet,
             "preprod" => CardanoNetwork::Preprod,
             "preview" => CardanoNetwork::Preview,
-            _ => return Err(anyhow!("Invalid network: {}. Use mainnet, preprod, or preview", network)),
+            _ => {
+                return Err(anyhow!(
+                    "Invalid network: {}. Use mainnet, preprod, or preview",
+                    network
+                ))
+            }
         };
 
         Ok(Self {
@@ -86,17 +91,16 @@ impl CliContext {
 
     /// Require an API key (error if not set)
     pub fn require_api_key(&self) -> Result<&str> {
-        self.api_key
-            .as_deref()
-            .ok_or_else(|| anyhow!("Blockfrost API key required. Set --api-key or BLOCKFROST_API_KEY"))
+        self.api_key.as_deref().ok_or_else(|| {
+            anyhow!("Blockfrost API key required. Set --api-key or BLOCKFROST_API_KEY")
+        })
     }
 
     /// Load the signing keypair
     pub fn load_signing_key(&self) -> Result<Keypair> {
-        let path = self
-            .signing_key_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("Signing key required. Set --signing-key or CARDANO_SIGNING_KEY"))?;
+        let path = self.signing_key_path.as_ref().ok_or_else(|| {
+            anyhow!("Signing key required. Set --signing-key or CARDANO_SIGNING_KEY")
+        })?;
 
         Keypair::from_file(path)
     }
@@ -124,8 +128,7 @@ impl CliContext {
         let path = self.network_deployments_dir().join("deployment_info.json");
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read deployment info from {:?}", path))?;
-        serde_json::from_str(&content)
-            .with_context(|| "Failed to parse deployment info")
+        serde_json::from_str(&content).with_context(|| "Failed to parse deployment info")
     }
 
     /// Save deployment info for current network
@@ -169,19 +172,18 @@ impl CliContext {
     pub fn explorer_tx_url(&self, tx_hash: &str) -> String {
         match self.network {
             CardanoNetwork::Mainnet => format!("https://cardanoscan.io/transaction/{}", tx_hash),
-            CardanoNetwork::Preprod => format!("https://preprod.cardanoscan.io/transaction/{}", tx_hash),
-            CardanoNetwork::Preview => format!("https://preview.cardanoscan.io/transaction/{}", tx_hash),
+            CardanoNetwork::Preprod => {
+                format!("https://preprod.cardanoscan.io/transaction/{}", tx_hash)
+            }
+            CardanoNetwork::Preview => {
+                format!("https://preview.cardanoscan.io/transaction/{}", tx_hash)
+            }
         }
     }
 
     /// Get network as string
     pub fn network(&self) -> &str {
         self.network.as_str()
-    }
-
-    /// Get signing key path
-    pub fn signing_key_path(&self) -> Option<&Path> {
-        self.signing_key_path.as_deref()
     }
 
     /// Convert a script hash to a bech32 script address
