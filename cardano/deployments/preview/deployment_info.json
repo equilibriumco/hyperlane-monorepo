@@ -56,19 +56,19 @@
     "stateNftPolicy": "67b7ffa6dfc1f9741e5c359c8b5404f13f0ad60a277967ea6bcc26f5"
   },
   "igp": {
-    "hash": "1644a028b504600cd9826aa5e64b87032459f4d39d9275a667df3772",
-    "address": "addr_test1wqtyfgpgk5zxqrxesf42tejtsupjgk056wweyadxvl0nwusdvucan",
+    "hash": "ec4201ee17e0a800883934d14fb535a8b26e7d72b60d540b0b92d7ad",
+    "address": "addr_test1wrkyyq0wzls2sqyg8y6dzna4xk5tymnaw2mq64qtpwfd0tg9vghvx",
     "stateNft": {
-      "policyId": "4cbfc542e508692ef53644541364adf16d822cf8f63733633864220e",
+      "policyId": "e2d29d92ddf13743dac2119480b4c4892d5a04b3b5d078fd9898953b",
       "assetNameHex": "494750205374617465",
       "assetName": "IGP State",
-      "seedUtxo": "2267d5ecf66aa9756e7bf191d9f769e7e05ed564e4dcd301e46826582afe24ab#2"
+      "seedUtxo": "2f9c9a9433a6d78a6c0c3261ca448da1278de71aaaa2478b8475019526e303b0#1"
     },
-    "stateUtxo": "de499cdabb37b1234fb8d7726fea6a83e106a2c82e1f338c6ec7a79a5a4fdb4f#0",
-    "initTxHash": "de499cdabb37b1234fb8d7726fea6a83e106a2c82e1f338c6ec7a79a5a4fdb4f",
+    "stateUtxo": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47#0",
+    "initTxHash": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47",
     "initialized": true,
-    "utxo": "de499cdabb37b1234fb8d7726fea6a83e106a2c82e1f338c6ec7a79a5a4fdb4f#0",
-    "stateNftPolicy": "4cbfc542e508692ef53644541364adf16d822cf8f63733633864220e"
+    "utxo": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47#0",
+    "stateNftPolicy": "e2d29d92ddf13743dac2119480b4c4892d5a04b3b5d078fd9898953b"
   },
   "validator_announce": {
     "hashBeforeParametrization": "db264a22625d7adaf23e0f7724d3e3e80cb0fe72ca1e972f81015a20",
