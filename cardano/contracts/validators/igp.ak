@@ -23,7 +23,7 @@ validator igp {
     expect Some(igp_datum) = datum
 
     when redeemer is {
-      PayForGas { message_id, destination, gas_amount, .. } ->
+      PayForGas { message_id, destination, gas_amount } ->
         validate_pay_for_gas(
           igp_datum,
           message_id,

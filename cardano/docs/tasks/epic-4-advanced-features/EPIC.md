@@ -15,7 +15,7 @@ Implement advanced features including performance optimizations, contract upgrad
 - **Performance:** Reduces latency and API costs for high-volume usage
 - **Upgradeability:** Allows bug fixes and improvements without redeploying entire contract suite
 - **Scalability:** Increases inbound throughput from ~3 messages/minute to N messages/block
-- **Per-recipient ISM:** Implemented as part of parallel processing (Task 4.5)
+- **Per-recipient ISM:** Separate task (Task 4.7)
 
 ## Tasks
 
@@ -25,8 +25,8 @@ Implement advanced features including performance optimizations, contract upgrad
 | 4.2 | [Ref Script Cache](./task-4.2-ref-script-cache.md)               | ⬜     | -          | Cache reference script UTXOs                                  |
 | 4.3 | [Parallel Queries](./task-4.3-parallel-queries.md)               | ⬜     | -          | Parallelize Blockfrost calls                                  |
 | 4.4 | [NFT-Based Contract Identity](./task-4.4-nft-identity.md)        | ⬜     | -          | Stable identity across upgrades                               |
-| 4.5 | [Parallel Inbound Processing](./task-4.5-parallel-processing.md) | ⬜     | 4.4        | Reference inputs for scalability (includes per-recipient ISM) |
-| 4.6 | [IGP Refund Support](./task-4.6-igp-refund.md)                   | ⬜     | 3.1        | Refund unused gas payments to users                           |
+| 4.5 | [Parallel Inbound Processing](./task-4.5-parallel-processing.md) | ⬜     | 4.4        | Reference inputs for scalability                              |
+| 4.6 | [Per-Recipient ISM Overrides](./task-4.6-per-recipient-ism.md)   | ⬜     | 4.1        | Honor recipient-specific ISM overrides                        |
 
 ## Task Details
 
@@ -118,7 +118,7 @@ Related to Task 4.4 - both establish NFT policies as stable identifiers.
 - [ ] Independent queries parallelized
 - [ ] Mailbox can be upgraded without redeploying recipients
 - [ ] Multiple messages to different recipients processed in same block
-- [ ] Per-recipient ISM honored (part of parallel processing)
+- [ ] Per-recipient ISM honored
 - [ ] Benchmark shows measurable improvement
 - [ ] No regression in correctness
 

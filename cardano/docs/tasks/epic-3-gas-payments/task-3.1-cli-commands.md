@@ -129,7 +129,6 @@ Gas Oracles:
 - quote returns accurate payment estimate
 - quote handles missing oracle gracefully
 - pay-for-gas calculates correct payment
-- pay-for-gas with refund address works
 - claim transfers fees to beneficiary
 - claim fails for non-beneficiary
 - set-oracle updates state correctly

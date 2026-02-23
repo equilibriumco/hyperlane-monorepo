@@ -1748,7 +1748,6 @@ async fn transfer(
             &hex::decode(&message_id)?,
             domain,
             total_gas,
-            &payer_pkh,
         );
         let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
             .map_err(|e| anyhow!("Failed to encode IGP redeemer: {:?}", e))?;
