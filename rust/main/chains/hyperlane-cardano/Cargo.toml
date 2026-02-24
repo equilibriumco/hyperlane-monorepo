@@ -20,6 +20,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync"] }
+futures = { workspace = true }
 
 # Blockfrost API client
 blockfrost = "1.0.6"

@@ -1,7 +1,8 @@
-use crate::blockfrost_provider::{BlockfrostProvider, TransactionUtxos};
+use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider, TransactionUtxos};
 use crate::provider::CardanoProvider;
 use crate::ConnectionConf;
 use async_trait::async_trait;
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract,
     HyperlaneDomain, HyperlaneProvider, Indexed, Indexer, InterchainGasPaymaster,
@@ -105,6 +106,100 @@ impl CardanoInterchainGasPaymasterIndexer {
         self.provider
             .script_hash_to_address(&self.conf.igp_script_hash)
             .map_err(ChainCommunicationError::from_other)
+    }
+
+    async fn process_igp_transaction(
+        &self,
+        tx_info: &AddressTransaction,
+        igp_address: &str,
+        block_hashes: &HashMap<u64, H256>,
+    ) -> Vec<(Indexed<InterchainGasPayment>, LogMeta)> {
+        let mut results = Vec::new();
+
+        let redeemers = match self
+            .provider
+            .get_transaction_redeemers(&tx_info.tx_hash)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Could not get redeemers for tx {}: {}", tx_info.tx_hash, e);
+                return results;
+            }
+        };
+
+        for redeemer in redeemers {
+            if redeemer.purpose != "Spend" {
+                continue;
+            }
+
+            let redeemer_datum = match self
+                .provider
+                .get_redeemer_datum(&redeemer.redeemer_data_hash)
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    debug!(
+                        "Could not get redeemer datum for tx {}: {}",
+                        tx_info.tx_hash, e
+                    );
+                    continue;
+                }
+            };
+
+            if let Some(redeemer_data) = parse_pay_for_gas_redeemer(&redeemer_datum) {
+                let payment_lovelace =
+                    match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
+                        Ok(tx_utxos) => calculate_igp_payment(&tx_utxos, igp_address),
+                        Err(e) => {
+                            debug!("Could not get UTxOs for tx {}: {}", tx_info.tx_hash, e);
+                            0
+                        }
+                    };
+
+                let payment = InterchainGasPayment {
+                    message_id: redeemer_data.message_id,
+                    destination: redeemer_data.destination,
+                    payment: U256::from(payment_lovelace),
+                    gas_amount: U256::from(redeemer_data.gas_amount),
+                };
+
+                let indexed = Indexed::new(payment);
+
+                let block_hash = block_hashes
+                    .get(&tx_info.block_height)
+                    .copied()
+                    .unwrap_or_else(H256::zero);
+
+                let log_meta = LogMeta {
+                    address: self.address,
+                    block_number: tx_info.block_height,
+                    block_hash,
+                    transaction_id: H512::from_slice(&{
+                        let mut bytes = [0u8; 64];
+                        let tx_bytes =
+                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
+                        bytes[..tx_bytes.len().min(64)]
+                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
+                        bytes
+                    }),
+                    transaction_index: tx_info.tx_index as u64,
+                    log_index: U256::from(redeemer.tx_index),
+                };
+
+                info!(
+                    "Found gas payment in tx {} for message {}: {} lovelace for {} gas",
+                    tx_info.tx_hash,
+                    hex::encode(payment.message_id.as_bytes()),
+                    payment_lovelace,
+                    redeemer_data.gas_amount
+                );
+                results.push((indexed, log_meta));
+            }
+        }
+
+        results
     }
 }
 
@@ -212,117 +307,30 @@ impl Indexer<InterchainGasPayment> for CardanoInterchainGasPaymasterIndexer {
             .into_iter()
             .collect();
 
-        let mut block_hashes: HashMap<u64, H256> = HashMap::new();
-        for height in unique_heights {
-            match self.provider.get_block_by_height(height).await {
-                Ok(block_info) => {
-                    let hash = H256::from_slice(
+        let block_hashes: HashMap<u64, H256> = stream::iter(unique_heights)
+            .map(|height| async move {
+                let hash = match self.provider.get_block_by_height(height).await {
+                    Ok(block_info) => H256::from_slice(
                         &hex::decode(&block_info.hash).unwrap_or_else(|_| vec![0u8; 32]),
-                    );
-                    block_hashes.insert(height, hash);
-                }
-                Err(e) => {
-                    debug!("Could not fetch block info for height {}: {}", height, e);
-                    // Use zero hash as fallback
-                    block_hashes.insert(height, H256::zero());
-                }
-            }
-        }
-
-        let mut results = Vec::new();
-
-        for tx_info in transactions {
-            // Get transaction redeemers to find PayForGas actions
-            let redeemers = match self
-                .provider
-                .get_transaction_redeemers(&tx_info.tx_hash)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    debug!("Could not get redeemers for tx {}: {}", tx_info.tx_hash, e);
-                    continue;
-                }
-            };
-
-            // Find redeemers that are for spending
-            for redeemer in redeemers {
-                if redeemer.purpose != "Spend" {
-                    continue;
-                }
-
-                // Get the redeemer datum content
-                let redeemer_datum = match self
-                    .provider
-                    .get_redeemer_datum(&redeemer.redeemer_data_hash)
-                    .await
-                {
-                    Ok(d) => d,
+                    ),
                     Err(e) => {
-                        debug!(
-                            "Could not get redeemer datum for tx {}: {}",
-                            tx_info.tx_hash, e
-                        );
-                        continue;
+                        debug!("Could not fetch block info for height {}: {}", height, e);
+                        H256::zero()
                     }
                 };
+                (height, hash)
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
 
-                // Try to parse as PayForGas redeemer
-                if let Some(redeemer_data) = parse_pay_for_gas_redeemer(&redeemer_datum) {
-                    // Calculate actual payment from UTXO value differences
-                    let payment_lovelace =
-                        match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
-                            Ok(tx_utxos) => calculate_igp_payment(&tx_utxos, &igp_address),
-                            Err(e) => {
-                                debug!("Could not get UTxOs for tx {}: {}", tx_info.tx_hash, e);
-                                0
-                            }
-                        };
+        let futs: FuturesUnordered<_> = transactions
+            .iter()
+            .map(|tx_info| self.process_igp_transaction(tx_info, &igp_address, &block_hashes))
+            .collect();
+        let results: Vec<Vec<_>> = futs.collect().await;
 
-                    let payment = InterchainGasPayment {
-                        message_id: redeemer_data.message_id,
-                        destination: redeemer_data.destination,
-                        payment: U256::from(payment_lovelace),
-                        gas_amount: U256::from(redeemer_data.gas_amount),
-                    };
-
-                    let indexed = Indexed::new(payment);
-
-                    // Get the block hash from our cache (fetched earlier)
-                    let block_hash = block_hashes
-                        .get(&tx_info.block_height)
-                        .copied()
-                        .unwrap_or_else(H256::zero);
-
-                    let log_meta = LogMeta {
-                        address: self.address,
-                        block_number: tx_info.block_height,
-                        block_hash,
-                        transaction_id: H512::from_slice(&{
-                            let mut bytes = [0u8; 64];
-                            let tx_bytes =
-                                hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                            bytes[..tx_bytes.len().min(64)]
-                                .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                            bytes
-                        }),
-                        transaction_index: tx_info.tx_index as u64,
-                        log_index: U256::from(redeemer.tx_index),
-                    };
-
-                    info!(
-                        "Found gas payment in tx {} for message {}: {} lovelace for {} gas",
-                        tx_info.tx_hash,
-                        hex::encode(payment.message_id.as_bytes()),
-                        payment_lovelace,
-                        redeemer_data.gas_amount
-                    );
-                    results.push((indexed, log_meta));
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(results.into_iter().flatten().collect())
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {

@@ -354,8 +354,9 @@ impl CardanoMailbox {
     ) -> ChainResult<(IncrementalMerkle, u32)> {
         assert!(lag.is_none(), "Cardano always returns the finalized result");
 
-        // Find the mailbox UTXO and parse its datum
-        let utxo = self.find_mailbox_utxo().await?;
+        // Fetch mailbox UTXO and tip in parallel (independent queries)
+        let (utxo, tip) =
+            tokio::try_join!(self.find_mailbox_utxo(), self.finalized_block_number(),)?;
         let datum = self.parse_mailbox_datum(&utxo).await?;
 
         // Build an IncrementalMerkle tree from the datum's full branch state
@@ -366,8 +367,6 @@ impl CardanoMailbox {
             }
         }
         let count = datum.merkle_tree.count as usize;
-
-        let tip = self.finalized_block_number().await?;
 
         Ok((IncrementalMerkle::new(branch, count), tip))
     }

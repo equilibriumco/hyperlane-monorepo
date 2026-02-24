@@ -6018,6 +6018,7 @@ dependencies = [
  "ciborium",
  "derive-new",
  "ed25519-dalek",
+ "futures",
  "hex 0.4.3",
  "hyperlane-core",
  "hyperlane-operation-verifier",

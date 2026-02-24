@@ -284,6 +284,23 @@ impl HyperlaneTxBuilder {
         rounded
     }
 
+    /// Synchronous version of `calculate_min_lovelace` using a pre-fetched
+    /// `coins_per_utxo_byte` value, avoiding repeated `.await` calls.
+    fn calculate_min_lovelace_sync(coins_per_byte: u64, output_type: OutputType) -> u64 {
+        let output_size: u64 = match output_type {
+            OutputType::SimpleAda => 60,
+            OutputType::WithNativeToken { asset_name_len } => 60 + 28 + asset_name_len as u64 + 20,
+            OutputType::WithInlineDatum { datum_size } => 60 + datum_size as u64,
+            OutputType::WithTokenAndDatum {
+                asset_name_len,
+                datum_size,
+            } => 60 + 28 + asset_name_len as u64 + 20 + datum_size as u64,
+        };
+
+        let min_lovelace = coins_per_byte * (UTXO_BASE_OVERHEAD + output_size);
+        min_lovelace.div_ceil(100_000) * 100_000
+    }
+
     /// Calculate minimum lovelace for a simple ADA-only output.
     /// This is the most common case and provides a quick accessor.
     async fn min_lovelace_simple(&self) -> u64 {
@@ -409,15 +426,17 @@ impl HyperlaneTxBuilder {
         let msg = Message::from_hyperlane_message(message);
         let message_id = msg.id();
 
-        // 1. Find mailbox UTXO (try NFT first, then fall back to script address)
-        let mailbox_utxo = self.find_mailbox_utxo().await?;
+        // 1+2. Find mailbox UTXO and resolve recipient in parallel (independent queries)
+        let (mailbox_utxo, resolved) = tokio::try_join!(self.find_mailbox_utxo(), async {
+            self.resolver
+                .resolve(&msg.recipient)
+                .await
+                .map_err(TxBuilderError::from)
+        },)?;
         info!(
             "Found mailbox UTXO: {}#{}",
             mailbox_utxo.tx_hash, mailbox_utxo.output_index
         );
-
-        // 2. Resolve recipient via NFT policy ID query (replaces registry lookup)
-        let resolved = self.resolver.resolve(&msg.recipient).await?;
         info!(
             "Resolved recipient: script_hash={}, kind={:?}",
             hex::encode(resolved.script_hash),
@@ -831,19 +850,22 @@ impl HyperlaneTxBuilder {
         payer: &Keypair,
         eval_overrides: Option<(u64, &EvaluatedExUnits)>,
     ) -> Result<BuiltTransaction, TxBuilderError> {
-        // Get minimum UTXO lovelace from protocol parameters
-        let min_lovelace = self.min_lovelace_simple().await;
+        // Pre-fetch coins_per_utxo_byte once, then compute all min_lovelace values synchronously
+        let coins_per_byte = self.get_coins_per_utxo_byte().await;
+        let min_lovelace = Self::calculate_min_lovelace_sync(coins_per_byte, OutputType::SimpleAda);
 
         // Calculate the actual minUTxO for the warp route continuation output
         let continuation_min_lovelace =
             if let Some(ref cont_datum) = components.recipient_continuation_datum_cbor {
                 if components.warp_token_type.is_some() {
                     let nft_asset_name_len = 13;
-                    self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                        asset_name_len: nft_asset_name_len,
-                        datum_size: cont_datum.len(),
-                    })
-                    .await
+                    Self::calculate_min_lovelace_sync(
+                        coins_per_byte,
+                        OutputType::WithTokenAndDatum {
+                            asset_name_len: nft_asset_name_len,
+                            datum_size: cont_datum.len(),
+                        },
+                    )
                 } else {
                     min_lovelace
                 }
@@ -870,18 +892,20 @@ impl HyperlaneTxBuilder {
             Some(WarpTokenTypeInfo::Collateral { asset_name, .. })
                 if components.token_release_amount.is_some() =>
             {
-                self.calculate_min_lovelace(OutputType::WithNativeToken {
-                    asset_name_len: asset_name.len() / 2, // hex string → bytes
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithNativeToken {
+                        asset_name_len: asset_name.len() / 2,
+                    },
+                )
             }
             Some(WarpTokenTypeInfo::Synthetic { .. })
                 if components.token_release_amount.is_some() =>
             {
-                self.calculate_min_lovelace(OutputType::WithNativeToken {
-                    asset_name_len: 0, // synthetic tokens have empty asset name
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithNativeToken { asset_name_len: 0 },
+                )
             }
             _ => min_lovelace,
         };
@@ -955,29 +979,32 @@ impl HyperlaneTxBuilder {
         // This output is always created and needs higher minUTxO if NFT minting is enabled
         let processed_marker_min_lovelace_for_selection =
             if self.conf.processed_messages_nft_policy_id.is_some() {
-                // Output will have datum + NFT (asset name = 32-byte message_id)
-                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                    asset_name_len: 32, // message_id is 32 bytes
-                    datum_size: components.processed_datum_cbor.len(),
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithTokenAndDatum {
+                        asset_name_len: 32,
+                        datum_size: components.processed_datum_cbor.len(),
+                    },
+                )
             } else {
-                // Output only has datum
-                self.calculate_min_lovelace(OutputType::WithInlineDatum {
-                    datum_size: components.processed_datum_cbor.len(),
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithInlineDatum {
+                        datum_size: components.processed_datum_cbor.len(),
+                    },
+                )
             };
 
         // Calculate verified message UTXO cost if applicable
         let verified_message_min_lovelace =
             if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
-                // Output has inline datum + verified message NFT (asset name = 32-byte message_id)
-                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                    asset_name_len: 32,
-                    datum_size: datum_cbor.len(),
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithTokenAndDatum {
+                        asset_name_len: 32,
+                        datum_size: datum_cbor.len(),
+                    },
+                )
             } else {
                 0
             };
@@ -2076,9 +2103,6 @@ impl HyperlaneTxBuilder {
         ism_policy_id: &str,
         payer: &Keypair,
     ) -> Result<String, TxBuilderError> {
-        // Get minimum UTXO lovelace from protocol parameters
-        let min_lovelace = self.min_lovelace_simple().await;
-
         info!(
             "Updating ISM validators for domain {} (threshold: {}, validators: {})",
             domain,
@@ -2086,8 +2110,12 @@ impl HyperlaneTxBuilder {
             validators.len()
         );
 
-        // 1. Find ISM UTXO (ism_policy_id is actually the script hash)
-        let ism_utxos = self.provider.get_script_utxos(ism_policy_id).await?;
+        // Fetch min_lovelace and ISM UTXOs in parallel (independent queries)
+        let (min_lovelace, ism_utxos) = tokio::join!(
+            self.min_lovelace_simple(),
+            self.provider.get_script_utxos(ism_policy_id),
+        );
+        let ism_utxos = ism_utxos?;
 
         let ism_utxo = ism_utxos.into_iter().next().ok_or_else(|| {
             TxBuilderError::UtxoNotFound(format!("ISM UTXO not found at script {ism_policy_id}"))
@@ -2310,26 +2338,33 @@ impl HyperlaneTxBuilder {
             .await?;
 
         // Add minUTxO costs for outputs the relayer creates (mirrors build_complete_process_tx)
+        let coins_per_byte = self.get_coins_per_utxo_byte().await;
         let processed_marker_min = if self.conf.processed_messages_nft_policy_id.is_some() {
-            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                asset_name_len: 32,
-                datum_size: components.processed_datum_cbor.len(),
-            })
-            .await
+            Self::calculate_min_lovelace_sync(
+                coins_per_byte,
+                OutputType::WithTokenAndDatum {
+                    asset_name_len: 32,
+                    datum_size: components.processed_datum_cbor.len(),
+                },
+            )
         } else {
-            self.calculate_min_lovelace(OutputType::WithInlineDatum {
-                datum_size: components.processed_datum_cbor.len(),
-            })
-            .await
+            Self::calculate_min_lovelace_sync(
+                coins_per_byte,
+                OutputType::WithInlineDatum {
+                    datum_size: components.processed_datum_cbor.len(),
+                },
+            )
         };
 
         let verified_message_min =
             if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
-                self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                    asset_name_len: 32,
-                    datum_size: datum_cbor.len(),
-                })
-                .await
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithTokenAndDatum {
+                        asset_name_len: 32,
+                        datum_size: datum_cbor.len(),
+                    },
+                )
             } else {
                 0
             };

@@ -1,8 +1,10 @@
-use crate::blockfrost_provider::BlockfrostProvider;
+use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider};
 use crate::{CardanoMailbox, CardanoNetwork, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
 use ciborium::Value as CborValue;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneMessage, Indexed, Indexer, LogMeta,
     SequenceAwareIndexer, H256, H512, U256,
@@ -309,6 +311,109 @@ impl CardanoMailboxIndexer {
         message_id.copy_from_slice(&message_id_bytes);
         Some(H256::from(message_id))
     }
+
+    async fn process_dispatch_transaction(
+        &self,
+        tx_info: &AddressTransaction,
+    ) -> Vec<(Indexed<HyperlaneMessage>, LogMeta)> {
+        let mut results = Vec::new();
+
+        info!("Processing transaction: {}", tx_info.tx_hash);
+
+        let redeemers = match self
+            .provider
+            .get_transaction_redeemers(&tx_info.tx_hash)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                info!("Could not get redeemers for tx {}: {}", tx_info.tx_hash, e);
+                return results;
+            }
+        };
+
+        info!(
+            "Found {} redeemers for tx {}",
+            redeemers.len(),
+            tx_info.tx_hash
+        );
+
+        for redeemer in redeemers {
+            info!(
+                "Redeemer purpose: {}, data_hash: {}",
+                redeemer.purpose, redeemer.redeemer_data_hash
+            );
+            if redeemer.purpose != "spend" && redeemer.purpose != "Spend" {
+                info!("Skipping non-spend redeemer");
+                continue;
+            }
+
+            let redeemer_datum = match self
+                .provider
+                .get_redeemer_datum(&redeemer.redeemer_data_hash)
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    info!(
+                        "Could not get redeemer datum for tx {}: {}",
+                        tx_info.tx_hash, e
+                    );
+                    continue;
+                }
+            };
+
+            info!("Got redeemer datum: {:?}", redeemer_datum);
+
+            let tx_utxos = match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
+                Ok(u) => u,
+                Err(e) => {
+                    info!("Could not get UTXOs for tx {}: {}", tx_info.tx_hash, e);
+                    continue;
+                }
+            };
+
+            let nonce = self.extract_nonce_from_outputs(&tx_utxos);
+            info!("Extracted nonce: {}", nonce);
+
+            if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce) {
+                let message_id = message.id();
+                let indexed: Indexed<HyperlaneMessage> = message.into();
+                info!(
+                    "Created indexed message with nonce: {}, sequence: {:?}",
+                    nonce, indexed.sequence
+                );
+
+                let log_meta = LogMeta {
+                    address: H256::zero(),
+                    block_number: tx_info.block_height,
+                    block_hash: H256::from_slice(
+                        &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
+                            .unwrap_or_else(|_| vec![0u8; 32]),
+                    ),
+                    transaction_id: H512::from_slice(&{
+                        let mut bytes = [0u8; 64];
+                        let tx_bytes =
+                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
+                        bytes[..tx_bytes.len().min(64)]
+                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
+                        bytes
+                    }),
+                    transaction_index: tx_info.tx_index as u64,
+                    log_index: U256::from(redeemer.tx_index),
+                };
+
+                info!(
+                    "Found dispatched message in tx {}, message_id: {}",
+                    tx_info.tx_hash,
+                    hex::encode(message_id.as_bytes())
+                );
+                results.push((indexed, log_meta));
+            }
+        }
+
+        results
+    }
 }
 
 #[async_trait]
@@ -342,113 +447,13 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
             to
         );
 
-        let mut results = Vec::new();
+        let futs: FuturesUnordered<_> = transactions
+            .iter()
+            .map(|tx_info| self.process_dispatch_transaction(tx_info))
+            .collect();
+        let results: Vec<Vec<_>> = futs.collect().await;
 
-        for tx_info in transactions {
-            info!("Processing transaction: {}", tx_info.tx_hash);
-
-            // Get transaction redeemers to find Dispatch actions
-            let redeemers = match self
-                .provider
-                .get_transaction_redeemers(&tx_info.tx_hash)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    info!("Could not get redeemers for tx {}: {}", tx_info.tx_hash, e);
-                    continue;
-                }
-            };
-
-            info!(
-                "Found {} redeemers for tx {}",
-                redeemers.len(),
-                tx_info.tx_hash
-            );
-
-            // Find redeemers that are for spending (not minting)
-            for redeemer in redeemers {
-                info!(
-                    "Redeemer purpose: {}, data_hash: {}",
-                    redeemer.purpose, redeemer.redeemer_data_hash
-                );
-                if redeemer.purpose != "spend" && redeemer.purpose != "Spend" {
-                    info!("Skipping non-spend redeemer");
-                    continue;
-                }
-
-                // Get the redeemer datum content
-                let redeemer_datum = match self
-                    .provider
-                    .get_redeemer_datum(&redeemer.redeemer_data_hash)
-                    .await
-                {
-                    Ok(d) => d,
-                    Err(e) => {
-                        info!(
-                            "Could not get redeemer datum for tx {}: {}",
-                            tx_info.tx_hash, e
-                        );
-                        continue;
-                    }
-                };
-
-                info!("Got redeemer datum: {:?}", redeemer_datum);
-
-                // Get transaction UTXOs to extract sender
-                let tx_utxos = match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
-                    Ok(u) => u,
-                    Err(e) => {
-                        info!("Could not get UTXOs for tx {}: {}", tx_info.tx_hash, e);
-                        continue;
-                    }
-                };
-
-                // Try to extract nonce from mailbox output datum
-                let nonce = self.extract_nonce_from_outputs(&tx_utxos);
-                info!("Extracted nonce: {}", nonce);
-
-                if let Some(message) =
-                    self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce)
-                {
-                    let message_id = message.id();
-                    // Use the From trait conversion which automatically sets sequence from message.nonce
-                    let indexed: Indexed<HyperlaneMessage> = message.into();
-                    info!(
-                        "Created indexed message with nonce: {}, sequence: {:?}",
-                        nonce, indexed.sequence
-                    );
-
-                    let log_meta = LogMeta {
-                        address: H256::zero(), // Cardano doesn't have contract addresses like EVM
-                        block_number: tx_info.block_height,
-                        block_hash: H256::from_slice(
-                            &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
-                                .unwrap_or_else(|_| vec![0u8; 32]),
-                        ),
-                        transaction_id: H512::from_slice(&{
-                            let mut bytes = [0u8; 64];
-                            let tx_bytes =
-                                hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                            bytes[..tx_bytes.len().min(64)]
-                                .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                            bytes
-                        }),
-                        transaction_index: tx_info.tx_index as u64,
-                        log_index: U256::from(redeemer.tx_index),
-                    };
-
-                    info!(
-                        "Found dispatched message in tx {}, message_id: {}",
-                        tx_info.tx_hash,
-                        hex::encode(message_id.as_bytes())
-                    );
-                    results.push((indexed, log_meta));
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(results.into_iter().flatten().collect())
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
