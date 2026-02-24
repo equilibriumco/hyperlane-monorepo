@@ -85,7 +85,11 @@
   "destinationChainNames": "cardanopreview,sepolia",
   "gasPaymentEnforcement": [
     {
-      "type": "none"
+      "type": "onChainFeeQuoting",
+      "gasFraction": {
+        "numerator": 1,
+        "denominator": 1
+      }
     }
   ],
   "metrics": {

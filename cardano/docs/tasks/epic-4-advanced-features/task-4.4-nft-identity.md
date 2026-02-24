@@ -2,7 +2,7 @@
 
 # Task 4.4: NFT-Based Contract Identity
 
-**Status:** ⬜ Not Started
+**Status:** 🟢 Complete
 **Complexity:** High
 **Depends On:** None
 
@@ -26,215 +26,151 @@ When the mailbox code changes:
 4. Registry entries must be updated
 5. Old processed message NFTs are at wrong policy (replay protection breaks)
 
-## Solution: Identity NFT Pattern
+## Solution: State NFT as Identity
 
-Create a one-shot "identity NFT" that represents the mailbox's identity. The NFT never changes - only the contract holding it does.
+The existing **state NFT** already serves as a stable identity token. Its policy ID is derived from a one-shot minting policy (seed UTXO), so it never changes across upgrades. Other contracts are parameterized by this state NFT policy, not the validator script hash.
+
+The `Migrate` redeemer moves the state UTXO (with datum + state NFT) from the old script address to a new one. Since the state NFT policy stays constant, all dependent contracts (processed_message_nft, verified_message_nft, warp routes) continue working without redeployment.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    IDENTITY NFT PATTERN                          │
+│                    STATE NFT AS IDENTITY                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   1. Deploy mailbox_identity_nft policy (one-shot, at genesis)  │
+│                                                                 │
+│   1. State NFT minted at deployment (one-shot, stable policy)   │
 │      - Policy ID is stable forever                              │
-│      - Mints exactly one NFT: "Mailbox Identity"                │
-│                                                                  │
-│   2. Mailbox v1 holds the identity NFT                          │
-│      - Mailbox address can change                               │
-│      - Identity (NFT policy) stays constant                     │
-│                                                                  │
-│   3. Other contracts check for identity NFT, not policy ID      │
-│      - processed_msg_nft: "mailbox_identity_nft in inputs?"     │
-│      - recipient: "mailbox_identity_nft in inputs?"             │
-│                                                                  │
-│   4. Upgrade: migrate identity NFT to new mailbox               │
-│      - Old mailbox releases NFT                                 │
-│      - New mailbox receives NFT                                 │
-│      - All other contracts continue working                     │
-│                                                                  │
+│      - Other contracts parameterized by this policy             │
+│                                                                 │
+│   2. Mailbox v1 holds the state NFT                             │
+│      - Mailbox script hash can change                           │
+│      - State NFT policy stays constant                          │
+│                                                                 │
+│   3. Upgrade: Migrate redeemer moves state to new address       │
+│      - Owner signs migration TX                                 │
+│      - State NFT + datum move to new script address             │
+│      - All dependent contracts continue working                 │
+│                                                                 │
+│   4. All 4 contracts support migration:                         │
+│      - Mailbox: MigrateMailbox { new_address }                  │
+│      - ISM: MigrateIsm { new_address }                          │
+│      - IGP: MigrateIgp { new_address }                          │
+│      - Warp Route: MigrateWarp { new_address }                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation
 
-### 1. New Contract: `mailbox_identity_nft.ak`
-
-A one-shot minting policy for the mailbox identity NFT:
+### 1. Shared Migration Utility — `utils.ak`
 
 ```aiken
-/// One-shot identity NFT for mailbox
-/// Minted once at deployment, held by mailbox contract
-/// Used by other contracts to identify the "real" mailbox
-validator mailbox_identity_nft(seed_utxo: OutputReference) {
-  mint(redeemer: Data, own_policy: ByteArray, tx: Transaction) {
-    // One-shot: can only mint if seed UTXO is consumed
-    let seed_consumed = list.any(tx.inputs, fn(i) {
-      i.output_reference == seed_utxo
-    })
-
-    // Must mint exactly 1 token with empty name
-    let own_mints = assets.tokens(tx.mint, own_policy)
-    let valid_mint = dict.to_pairs(own_mints) == [Pair("", 1)]
-
-    seed_consumed && valid_mint
-  }
-
-  else(_) {
-    fail
-  }
+pub fn validate_migrate(
+  owner: VerificationKeyHash,
+  new_address: Address,
+  tx: Transaction,
+  own_ref: OutputReference,
+  expected_datum: Data,
+) -> Bool {
+  expect is_signed_by(tx, owner)
+  expect Some(own_input) = find_input(tx, own_ref)
+  let own_value = own_input.output.value
+  expect Some(continuation) =
+    list.find(tx.outputs, fn(output) { output.address == new_address })
+  expect InlineDatum(cont_datum_data) = continuation.datum
+  expect cont_datum_data == expected_datum
+  value_preserved(own_value, continuation.value)
 }
 ```
 
-### 2. Modify `processed_message_nft.ak`
+Checks:
+- Owner signature required
+- Continuation output at new address with identical datum
+- Value preserved (state NFT + ADA)
 
-Change from checking policy ID to checking identity NFT:
+### 2. Migrate Redeemers in All Validators
 
-```aiken
-// BEFORE: parameterized by mailbox_policy_id
-validator processed_message_nft(mailbox_policy_id: PolicyId) {
-  mint(_redeemer: Data, own_policy: ByteArray, tx: Transaction) {
-    // Check mailbox NFT (state NFT) is in inputs
-    let mailbox_involved = list.any(tx.inputs, fn(input) {
-      let policy_tokens = assets.tokens(input.output.value, mailbox_policy_id)
-      !dict.is_empty(policy_tokens)
-    })
-    // ...
-  }
-}
+Each validator has a new redeemer variant that delegates to `validate_migrate`:
 
-// AFTER: parameterized by mailbox_identity_nft_policy
-validator processed_message_nft(mailbox_identity_policy: PolicyId) {
-  mint(_redeemer: Data, own_policy: ByteArray, tx: Transaction) {
-    // Check mailbox IDENTITY NFT is in inputs (or reference inputs)
-    let mailbox_involved = list.any(tx.inputs, fn(input) {
-      let identity_tokens = assets.tokens(input.output.value, mailbox_identity_policy)
-      !dict.is_empty(identity_tokens)
-    }) || list.any(tx.reference_inputs, fn(ref) {
-      let identity_tokens = assets.tokens(ref.output.value, mailbox_identity_policy)
-      !dict.is_empty(identity_tokens)
-    })
-    // ...
-  }
-}
+| Validator | Redeemer | Type in `types.ak` |
+|-----------|----------|-------------------|
+| `mailbox.ak` | `MigrateMailbox { new_address }` | `MailboxRedeemer` |
+| `multisig_ism.ak` | `MigrateIsm { new_address }` | `MultisigIsmRedeemer` |
+| `igp.ak` | `MigrateIgp { new_address }` | `IgpRedeemer` |
+| `warp_route.ak` | `MigrateWarp { new_address }` | `WarpRouteRedeemer` |
+
+### 3. CLI Migrate Commands
+
+Each CLI module has a `migrate` subcommand:
+
+```bash
+# Auto-compute new hash from blueprint + deployment params
+cardano-cli mailbox migrate
+cardano-cli ism migrate
+cardano-cli igp migrate
+cardano-cli warp migrate --warp-policy <policy>
+
+# Or specify hash explicitly
+cardano-cli mailbox migrate --new-script-hash <hash>
+
+# Dry run (show hashes, don't submit TX)
+cardano-cli mailbox migrate --dry-run
 ```
 
-### 3. Modify `example_generic_recipient.ak`
+For parameterized contracts (mailbox, warp), the CLI auto-applies deployment parameters from `deployment_info.json` to compute both the current and new script hashes.
 
-Same pattern - check for identity NFT:
+### 4. Script Loading Fix
 
-```aiken
-// BEFORE: parameterized by mailbox_policy_id
-validator example_generic_recipient(mailbox_policy_id: PolicyId) {
-  // ...
-  fn mailbox_is_caller(inputs: List<Input>) -> Bool {
-    list.any(inputs, fn(input) {
-      let tokens = assets.tokens(input.output.value, mailbox_policy_id)
-      !dict.is_empty(tokens)
-    })
-  }
-}
+All mailbox operations (dispatch, set_default_ism, migrate) now correctly apply parameters from `deployment_info.json` when loading inline scripts. Previously, dispatch/set_default_ism would load the unparameterized blueprint code, causing `MissingScriptWitnessesUTXOW` errors when no reference script was available.
 
-// AFTER: parameterized by mailbox_identity_policy
-validator example_generic_recipient(mailbox_identity_policy: PolicyId) {
-  // ...
-  fn mailbox_is_caller(inputs: List<Input>) -> Bool {
-    list.any(inputs, fn(input) {
-      let tokens = assets.tokens(input.output.value, mailbox_identity_policy)
-      !dict.is_empty(tokens)
-    })
-  }
-}
-```
-
-### 4. Mailbox Upgrade Mechanism
-
-Add a `Migrate` redeemer to the mailbox to enable upgrades:
-
-```aiken
-type MailboxRedeemer {
-  Dispatch { destination: Domain, recipient: HyperlaneAddress, body: ByteArray }
-  Process { message: Message, metadata: ByteArray, message_id: ByteArray }
-  SetDefaultIsm { new_ism: ScriptHash }
-  TransferOwnership { new_owner: VerificationKeyHash }
-  Migrate { new_mailbox_address: Address }  // NEW
-}
-
-// In mailbox validator
-Migrate { new_mailbox_address } -> {
-  // Only owner can migrate
-  expect is_signed_by(tx, datum.owner)
-
-  // Identity NFT must go to new address
-  expect identity_nft_sent_to(tx, mailbox_identity_policy, new_mailbox_address)
-
-  // State NFT must go to new address (carries the datum)
-  expect state_nft_sent_to(tx, own_policy, new_mailbox_address)
-
-  True
-}
-```
-
-## Deployment Sequence
-
-### Initial Deployment (New Chain)
-
-1. Mint `mailbox_identity_nft` with seed UTXO
-2. Deploy mailbox holding the identity NFT
-3. Deploy `processed_message_nft(mailbox_identity_policy)`
-4. Deploy recipients with `mailbox_identity_policy` parameter
-
-### Upgrade Existing Deployment
-
-For existing deployments, a migration is needed:
-
-1. Deploy new contracts with identity NFT pattern
-2. Deploy `mailbox_identity_nft`
-3. Initialize new mailbox with identity NFT
-4. Migrate state from old mailbox to new (manual process)
-5. Deploy new recipients with identity policy parameter
-6. Update registry entries
-7. Deprecate old contracts
-
-## Files to Create
-
-| File | Description |
-|------|-------------|
-| `cardano/contracts/validators/mailbox_identity_nft.ak` | One-shot identity NFT policy |
-
-## Files to Modify
+## Files Modified
 
 | File | Changes |
 |------|---------|
-| `cardano/contracts/validators/processed_message_nft.ak` | Check identity NFT instead of state NFT |
-| `cardano/contracts/validators/example_generic_recipient.ak` | Check identity NFT |
-| `cardano/contracts/validators/mailbox.ak` | Add Migrate redeemer |
-| `cardano/cli/src/commands/init.rs` | Deploy identity NFT |
-| `rust/main/chains/hyperlane-cardano/src/tx_builder.rs` | Include identity NFT in transactions |
+| `contracts/lib/types.ak` | Added `MigrateMailbox`, `MigrateIsm`, `MigrateIgp`, `MigrateWarp` redeemer variants |
+| `contracts/lib/utils.ak` | Added `validate_migrate()` shared utility |
+| `contracts/validators/mailbox.ak` | Added `MigrateMailbox` handler |
+| `contracts/validators/multisig_ism.ak` | Added `MigrateIsm` handler |
+| `contracts/validators/igp.ak` | Added `MigrateIgp` handler |
+| `contracts/validators/warp_route.ak` | Added `MigrateWarp` handler |
+| `contracts/plutus.json` | Rebuilt with new validators |
+| `cli/src/commands/mailbox.rs` | Added `migrate` subcommand, fixed param application in dispatch/set_default_ism, fixed state NFT asset name |
+| `cli/src/commands/ism.rs` | Added `migrate` subcommand with blueprint hash validation |
+| `cli/src/commands/igp.rs` | Added `migrate` subcommand with blueprint hash validation |
+| `cli/src/commands/warp.rs` | Added `migrate` subcommand with param auto-application |
+| `cli/src/utils/cbor.rs` | Added `build_migrate_redeemer()` |
+| `cli/src/utils/plutus.rs` | Added `compute_blueprint_hash()` helper |
 
 ## Testing
 
-| Test Case | Expected Result |
-|-----------|-----------------|
-| Deploy with identity NFT | Mailbox holds identity NFT |
-| Process message | Identity NFT found in inputs |
-| Migrate mailbox | Identity NFT moves to new contract |
-| Process after migration | Works with new mailbox |
-| Old mailbox after migration | Cannot process (no identity NFT) |
+Tested end-to-end on preview testnet:
+
+| Test Case | Result |
+|-----------|--------|
+| `mailbox migrate --dry-run` | Shows current vs new hash, no TX |
+| Forward migration (v1→v2) | State moved to new address, all fields preserved |
+| Reverse migration (v2→v1) | State moved back, all fields preserved |
+| Dispatch after round-trip migration | TX succeeds |
+| Relayer delivery after migration (Sepolia→Cardano) | Message delivered, greeting received |
+| Relayer delivery after migration (Cardano→Sepolia) | Message delivered to TestRecipient |
+| Greeting receive after migration | State updated correctly (count: 2) |
 
 ## Definition of Done
 
-- [ ] `mailbox_identity_nft` contract implemented
-- [ ] `processed_message_nft` uses identity NFT
-- [ ] Recipients use identity NFT
-- [ ] Mailbox has Migrate redeemer
-- [ ] CLI deploys identity NFT at initialization
-- [ ] Transaction builder includes identity NFT
-- [ ] Migration tested end-to-end
-- [ ] Documentation updated
+- [x] Shared `validate_migrate()` utility implemented
+- [x] All 4 validators have Migrate redeemers
+- [x] CLI `migrate` subcommands for all contracts
+- [x] Auto-compute new script hash from blueprint + deployment params
+- [x] Parameterized script loading fixed (dispatch, set_default_ism)
+- [x] State NFT asset name handled correctly in all operations
+- [x] Deployment info updated after migration
+- [x] Migration tested end-to-end (round-trip v1→v2→v1)
+- [x] Post-migration messaging verified bidirectionally
 
 ## Acceptance Criteria
 
-1. New deployments use identity NFT pattern
-2. Mailbox can be upgraded without redeploying recipients
-3. Processed message NFTs remain valid across upgrades
-4. Existing security guarantees maintained
+1. ~~New deployments use identity NFT pattern~~ State NFT already serves as stable identity
+2. Mailbox can be upgraded without redeploying dependent contracts ✅
+3. Processed message NFTs remain valid across upgrades ✅
+4. Existing security guarantees maintained ✅
+5. All 4 contract types support migration ✅
+6. Bidirectional messaging works after migration ✅
