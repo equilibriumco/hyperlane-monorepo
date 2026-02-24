@@ -1,79 +1,74 @@
 {
   "network": "preview",
   "mailbox": {
-    "hashBeforeParametrization": "0c278c358645f75ff88704f594824a6ec6801dc62dbf741ca968f894",
-    "hash": "00e792430bbd8232ac493ce1d6ad4924a34759c55b3eed42474b30e3",
-    "address": "addr_test1wqqw0yjrpw7cyv4vfy7wr44dfyj2x36ec4dnam2zga9npccx095n0",
+    "hashBeforeParametrization": "ff6fb6fa8e76b500c374274d1bf6ef36c74022057ff4b0cecbe5b63d",
+    "hash": "b666224149ee55988a143c7630d32bca69240f9d6e4074275aa95313",
+    "address": "addr_test1wzmxvgjpf8h9txy2zs78vvxn909xjfq0n4hyqap8t254xyc8zs685",
     "appliedParameters": [
       {
         "name": "processed_messages_nft_policy",
         "paramType": "PolicyId",
-        "value": "0d5b3db021c67f3d6571dd35878b69a8617bbdaf8319fbfe3030b7b7",
+        "value": "5cd49aefec78205beb4bd522694188cfb1a1310c5c38411ce262b18b",
         "description": "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
       },
       {
         "name": "verified_message_nft_policy",
         "paramType": "PolicyId",
-        "value": "98390dd2d9ec7af2bdb451983810f8538aa95baf4b6a01440b404ecd",
+        "value": "4d7c04b6fc0b433beadfb40e98fde60f01e58573e1d03e3bd52046dc",
         "description": "Policy ID for verified message NFTs (parameterized by mailbox_policy_id)"
       }
     ],
     "stateNft": {
-      "policyId": "949aa1dc65b529de4d6df48ec4804188414155c5780a1c7acc8d3b87",
+      "policyId": "83efbf8220aecf896ef76528c91b8a018fd004e1ce68d58778e6d5e6",
       "assetNameHex": "4d61696c626f78205374617465",
       "assetName": "Mailbox State",
-      "seedUtxo": "07c7a5f119916210dac22efe892d9231cbdd229709838b8e993f23d506f6132b#2"
+      "seedUtxo": "287d0f04a43def77aa8380deb9e62178a804e61a2cbc08e901da14946516586e#1"
     },
-    "stateUtxo": "5235f86aa77124edd015bb735bbfbcba92cd764b36cdd911e749e43028f8142b#0",
-    "referenceScriptUtxo": {
-      "txHash": "abfd793f878f2af4d136b7da626f73c69d7bff5ccae14b3d2ba0e1df3688f73f",
-      "outputIndex": 0,
-      "lovelace": 20000000
-    },
-    "initTxHash": "5235f86aa77124edd015bb735bbfbcba92cd764b36cdd911e749e43028f8142b",
+    "stateUtxo": "97a761aeec92e979e0ab23a01b47e359c2b0af1f5eb768d3e3c32300cc38caf4#0",
+    "initTxHash": "aec8a29fb0e02a3c20fab314198121388c5b47a28d6337314a2590e456d62b3b",
     "initialized": true,
-    "utxo": "5235f86aa77124edd015bb735bbfbcba92cd764b36cdd911e749e43028f8142b#0",
-    "stateNftPolicy": "949aa1dc65b529de4d6df48ec4804188414155c5780a1c7acc8d3b87"
+    "utxo": "aec8a29fb0e02a3c20fab314198121388c5b47a28d6337314a2590e456d62b3b#0",
+    "stateNftPolicy": "83efbf8220aecf896ef76528c91b8a018fd004e1ce68d58778e6d5e6"
   },
   "ism": {
-    "hash": "d495bb450c0919a46acf941fa3d143d4132c93db8aed795e81d16b61",
-    "address": "addr_test1wr2ftw69psy3nfr2e72plg73g02pxtynmw9w6727s8gkkcgtk4t3x",
+    "hash": "4032f381de830d13c6d150376b58d59f0a7f1c61b79da4d1ac55faef",
+    "address": "addr_test1wpqr9uupm6ps6y7x69grw66c6k0s5lcuvxmemfx3432l4mcfxnkgg",
     "stateNft": {
-      "policyId": "67b7ffa6dfc1f9741e5c359c8b5404f13f0ad60a277967ea6bcc26f5",
+      "policyId": "61dfd46ab55c54192a03e9d8e909be00c582994f25a6985453ffff94",
       "assetNameHex": "49534d205374617465",
       "assetName": "ISM State",
-      "seedUtxo": "73ea852263d791b6cf54271b2c542e67d65d4cd7a04d5a26fa597bcf97c6efa9#1"
+      "seedUtxo": "12f0edd1b6fe8b1197f58cf66c43acc74a856306a223921d6095ad94782841c8#4"
     },
-    "stateUtxo": "db4212bfc7c8f73386f82358def40b238383ffd4dcb8f7b3c80c34645c03e529#0",
+    "stateUtxo": "1f568d7a207c485b411a9fd4215affbba6b70f77220e31c1ca581b3e38a65584#0",
     "referenceScriptUtxo": {
-      "txHash": "f81b2ae328fb60fdb6e90b6b9b2327966fa1841efe13cfa7b2b9c9c07980c1af",
+      "txHash": "f29e74afa885ed441227cb99cf94cb2f33ae3e933a9cca68095f7ffc89cd45eb",
       "outputIndex": 0,
-      "lovelace": 13000000
+      "lovelace": 15000000
     },
-    "initTxHash": "db4212bfc7c8f73386f82358def40b238383ffd4dcb8f7b3c80c34645c03e529",
+    "initTxHash": "1f568d7a207c485b411a9fd4215affbba6b70f77220e31c1ca581b3e38a65584",
     "initialized": true,
-    "utxo": "db4212bfc7c8f73386f82358def40b238383ffd4dcb8f7b3c80c34645c03e529#0",
-    "stateNftPolicy": "67b7ffa6dfc1f9741e5c359c8b5404f13f0ad60a277967ea6bcc26f5"
+    "utxo": "1f568d7a207c485b411a9fd4215affbba6b70f77220e31c1ca581b3e38a65584#0",
+    "stateNftPolicy": "61dfd46ab55c54192a03e9d8e909be00c582994f25a6985453ffff94"
   },
   "igp": {
-    "hash": "ec4201ee17e0a800883934d14fb535a8b26e7d72b60d540b0b92d7ad",
-    "address": "addr_test1wrkyyq0wzls2sqyg8y6dzna4xk5tymnaw2mq64qtpwfd0tg9vghvx",
+    "hash": "54ae86f5f086dde832cc26bfa7016e9b7f653770b0d34bc969a4051c",
+    "address": "addr_test1wp22aph47zrdm6pjesntlfcpd6dh7efhwzcdxj7fdxjq28qce95sr",
     "stateNft": {
-      "policyId": "e2d29d92ddf13743dac2119480b4c4892d5a04b3b5d078fd9898953b",
+      "policyId": "76d8f7d54554a7a9c67735e0f8036d0036bcf0a34380830b32198713",
       "assetNameHex": "494750205374617465",
       "assetName": "IGP State",
-      "seedUtxo": "2f9c9a9433a6d78a6c0c3261ca448da1278de71aaaa2478b8475019526e303b0#1"
+      "seedUtxo": "1f568d7a207c485b411a9fd4215affbba6b70f77220e31c1ca581b3e38a65584#1"
     },
-    "stateUtxo": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47#0",
-    "initTxHash": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47",
+    "stateUtxo": "d12a74890faeaab0f8e2a80b12027aee83daa9ad7472c7d407b7401af82391f3#0",
+    "initTxHash": "d12a74890faeaab0f8e2a80b12027aee83daa9ad7472c7d407b7401af82391f3",
     "initialized": true,
-    "utxo": "58f85b25462e7de0af203d9db60436cf31b3b2530dca1f9cebe3c4cc4320ac47#0",
-    "stateNftPolicy": "e2d29d92ddf13743dac2119480b4c4892d5a04b3b5d078fd9898953b"
+    "utxo": "d12a74890faeaab0f8e2a80b12027aee83daa9ad7472c7d407b7401af82391f3#0",
+    "stateNftPolicy": "76d8f7d54554a7a9c67735e0f8036d0036bcf0a34380830b32198713"
   },
   "validator_announce": {
     "hashBeforeParametrization": "db264a22625d7adaf23e0f7724d3e3e80cb0fe72ca1e972f81015a20",
-    "hash": "7703eeedf3ca998ef84cb9bbb60b932a3ab9e2171206769a3d084985",
-    "address": "addr_test1wpms8mhd709fnrhcfjumhdstjv4r4w0zzufqva5685yynpgmttksr",
+    "hash": "78ef4c5539e306fcfcfb47cd4a2141a82816ea0ad4bd1703ef4bca92",
+    "address": "addr_test1wpuw7nz4883sdl8uldru6j3pgx5zs9h2pt2t69craa9u4ysglk2ah",
     "initialized": true
   },
   "warp_routes": [
@@ -81,62 +76,57 @@
       "warpType": "native",
       "decimals": 6,
       "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
-      "scriptHash": "b9344809e57b1057607717e688c8abca2255f3d45759e9248767c963",
-      "address": "addr_test1wzungjqfu4a3q4mqwut7dzxg409zy40n63t4n6fysanujcc3achq6",
-      "nftPolicy": "cc1e4a55ba608b96c498431c42eb4c99fce73e520c0a3abdec00ef35",
-      "initTxHash": "4e2222ae685ef33c4f1946e869a901e7e6818550da6a30bbb88911890bc00409",
+      "scriptHash": "b2c34902e37114810bf7c87ba0dc33de4b0d688e5c381942164141c3",
+      "address": "addr_test1wzevxjgzudc3fqgt7ly8hgxux00ykrtg3ewrsx2zzeq5rsc73l2xh",
+      "nftPolicy": "c027e19fa9075b8f775b459b9f9e895b2465c3864fcc6127ded20050",
+      "initTxHash": "c4a9336dc49597f0c99a78609ddc60957798db9954800e4f540086ad6d4b03b6",
       "referenceScriptUtxo": {
-        "txHash": "4e2222ae685ef33c4f1946e869a901e7e6818550da6a30bbb88911890bc00409",
+        "txHash": "c4a9336dc49597f0c99a78609ddc60957798db9954800e4f540086ad6d4b03b6",
         "outputIndex": 1,
         "lovelace": 20000000
       }
     },
     {
       "warpType": "collateral",
-      "decimals": 6,
+      "decimals": 0,
       "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
-      "scriptHash": "d12893d730e40a1221815641ca845de5817b5482daccce8751fd4d6b",
-      "address": "addr_test1wrgj3y7hxrjq5y3ps9tyrj5ythjcz765stdven58287566crm3xut",
-      "nftPolicy": "8cf6d1a27b03de7985789a5624c5f5fa767cbe3947881593de3280b8",
-      "initTxHash": "10e95b87a243246d939a5f12310600d23f85c8db8cd5bda559e4d768560b90cd",
+      "scriptHash": "b2c34902e37114810bf7c87ba0dc33de4b0d688e5c381942164141c3",
+      "address": "addr_test1wzevxjgzudc3fqgt7ly8hgxux00ykrtg3ewrsx2zzeq5rsc73l2xh",
+      "nftPolicy": "5ad4ad3e93f30e71a78cd8c8442609729d0e5d60de1e175ed13a5c96",
+      "initTxHash": "22941b23376afb74c34a534d3a5a9b6701c5c001d6ab84d8321ec5bf02818068",
       "referenceScriptUtxo": {
-        "txHash": "10e95b87a243246d939a5f12310600d23f85c8db8cd5bda559e4d768560b90cd",
+        "txHash": "22941b23376afb74c34a534d3a5a9b6701c5c001d6ab84d8321ec5bf02818068",
         "outputIndex": 1,
         "lovelace": 20000000
       },
-      "tokenPolicy": "0be3735173e2cd0f66085d88e6dcfbd208f3a808e9e5580949d0c410",
+      "tokenPolicy": "c82a982db7227c661bc731df815362230bd6d8031a71caeb7da2ec10",
       "tokenAsset": "54455354"
     },
     {
       "warpType": "synthetic",
       "decimals": 6,
       "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
-      "scriptHash": "d12893d730e40a1221815641ca845de5817b5482daccce8751fd4d6b",
-      "address": "addr_test1wrgj3y7hxrjq5y3ps9tyrj5ythjcz765stdven58287566crm3xut",
-      "nftPolicy": "f92ba5ea708eedfe4c5597c1e93b4eb1471ef8b65e010a81bd2252d9",
-      "initTxHash": "52d67b319c7ecb2d1fb4594b1e04c8cf8ff160dcd2e6fbcc53de8c5bb6167f48",
+      "scriptHash": "b2c34902e37114810bf7c87ba0dc33de4b0d688e5c381942164141c3",
+      "address": "addr_test1wzevxjgzudc3fqgt7ly8hgxux00ykrtg3ewrsx2zzeq5rsc73l2xh",
+      "nftPolicy": "c2f5d29a117249116bbc98ec2c2de2e30b9b3acfb6bb0036ab5efeac",
+      "initTxHash": "d29ae09dbb24b41ab70b9c8f702c5a175227d0863e7598320988536a5bdf3c66",
       "referenceScriptUtxo": {
-        "txHash": "52d67b319c7ecb2d1fb4594b1e04c8cf8ff160dcd2e6fbcc53de8c5bb6167f48",
+        "txHash": "d29ae09dbb24b41ab70b9c8f702c5a175227d0863e7598320988536a5bdf3c66",
         "outputIndex": 1,
         "lovelace": 20000000
       },
-      "mintingPolicy": "3d8a37dbd0dad9909327fa384e2efff50123b94a99c30a69c2a64611",
-      "mintingRefScriptUtxo": {
-        "txHash": "25f3f7a684e86816866e7e9dbda4c78f90e51fa511981f29c7602421615d95eb",
-        "outputIndex": 0,
-        "lovelace": 12000000
-      }
+      "mintingPolicy": "932c1babb9401d102cadb6012e01cc3cdbbb132e47fc0307b8840964"
     }
   ],
   "recipients": [
     {
       "recipient_type": "greeting",
-      "script_hash": "20efc814e83186a96e8a6fb5c5eb70de378e098f36ced304a35a20bb",
-      "address": "addr_test1wqswljq5aqccd2tw3fhmt30twr0r0rsf3umva5cy5ddzpwcnsagqv",
-      "nft_policy": "3dff7a53d0632cd7f98b06230613fd4956adf61b7c04b8c34973832e",
-      "init_tx_hash": "4fe297ec24cd67ebfe88a00b3ba12831ba74d4a947af5cbb64b4e829bc43d6c7",
+      "script_hash": "553a1d15bcf66f098a396a657b2d3480fe3c0e160cae93af8d52d7bc",
+      "address": "addr_test1wp2n58g4hnmx7zv2894x27edxjq0u0qwzcx2aya034fd00qj0x3x8",
+      "nft_policy": "dc4652c59ee7e96d5bb5cbe17aaadfa2de428c1243fa0afa96a971de",
+      "init_tx_hash": "da441ba40f88fc9ee7aa90116f7ddeb9aeb2d245732f5bdf0f0f17ba74d8bc56",
       "reference_script_utxo": {
-        "txHash": "4fe297ec24cd67ebfe88a00b3ba12831ba74d4a947af5cbb64b4e829bc43d6c7",
+        "txHash": "da441ba40f88fc9ee7aa90116f7ddeb9aeb2d245732f5bdf0f0f17ba74d8bc56",
         "outputIndex": 1,
         "lovelace": 20000000
       }

@@ -1,9 +1,37 @@
 [
   {
     "script_name": "mailbox",
-    "script_hash": "00e792430bbd8232ac493ce1d6ad4924a34759c55b3eed42474b30e3",
-    "tx_hash": "abfd793f878f2af4d136b7da626f73c69d7bff5ccae14b3d2ba0e1df3688f73f",
+    "script_hash": "b666224149ee55988a143c7630d32bca69240f9d6e4074275aa95313",
+    "tx_hash": "c0fc301ffc7716429345915554bd20888030a638f8fd3c38262ba3fb7dc8bcdb",
     "output_index": 0,
-    "lovelace": 20000000
+    "lovelace": 23000000
+  },
+  {
+    "script_name": "multisig_ism",
+    "script_hash": "4032f381de830d13c6d150376b58d59f0a7f1c61b79da4d1ac55faef",
+    "tx_hash": "f29e74afa885ed441227cb99cf94cb2f33ae3e933a9cca68095f7ffc89cd45eb",
+    "output_index": 0,
+    "lovelace": 15000000
+  },
+  {
+    "script_name": "igp",
+    "script_hash": "54ae86f5f086dde832cc26bfa7016e9b7f653770b0d34bc969a4051c",
+    "tx_hash": "252e41415ece3b757a912e7f7903789c96457f97ce01e1fe7265d5dc7cff702c",
+    "output_index": 0,
+    "lovelace": 14000000
+  },
+  {
+    "script_name": "verified_message_nft_applied",
+    "script_hash": "4d7c04b6fc0b433beadfb40e98fde60f01e58573e1d03e3bd52046dc",
+    "tx_hash": "ba17efa7dd125cea7cf4c0f35d43c98144700f35a7526b7f7964cae198d6c9ca",
+    "output_index": 0,
+    "lovelace": 5000000
+  },
+  {
+    "script_name": "processed_message_nft_applied",
+    "script_hash": "5cd49aefec78205beb4bd522694188cfb1a1310c5c38411ce262b18b",
+    "tx_hash": "4e6feefac083ee5f03af7f3695ec06cb1fa73037016dca63ac4250d65c5f1cfb",
+    "output_index": 0,
+    "lovelace": 4000000
   }
 ]
