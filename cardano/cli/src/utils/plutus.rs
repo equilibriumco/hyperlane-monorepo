@@ -458,6 +458,23 @@ impl AppliedValidator {
     }
 }
 
+/// Compute the script hash for a non-parameterized validator directly from the blueprint.
+/// For parameterized validators, use `apply_validator_params` instead.
+pub fn compute_blueprint_hash(
+    contracts_dir: &Path,
+    module: &str,
+    validator: &str,
+) -> Result<String> {
+    let blueprint_path = contracts_dir.join("plutus.json");
+    let blueprint = PlutusBlueprint::from_file(&blueprint_path)?;
+    let title = format!("{}.{}.spend", module, validator);
+    let def = blueprint
+        .find_validator(&title)
+        .ok_or_else(|| anyhow!("Validator {} not found in blueprint", title))?;
+    let hash = script_hash_from_hex(&def.compiled_code)?;
+    Ok(hex::encode(hash))
+}
+
 /// Convert a script hash (hex) to a bech32 address
 pub fn script_hash_to_address(hash_hex: &str, network: pallas_addresses::Network) -> Result<String> {
     let hash_bytes = hex::decode(hash_hex)

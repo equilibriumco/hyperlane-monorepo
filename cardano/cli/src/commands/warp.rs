@@ -10,11 +10,11 @@ use crate::commands::igp::{build_pay_for_gas_redeemer, calculate_gas_payment, ge
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
     build_enroll_remote_route_redeemer, build_igp_datum, build_mailbox_datum,
-    build_mailbox_dispatch_redeemer, build_mint_redeemer, build_transfer_remote_redeemer,
-    build_warp_route_collateral_datum, build_warp_route_collateral_datum_with_routes,
-    build_warp_route_native_datum, build_warp_route_native_datum_with_routes,
-    build_warp_route_synthetic_datum, build_warp_route_synthetic_datum_with_routes,
-    decode_plutus_datum, RemoteRoute,
+    build_mailbox_dispatch_redeemer, build_migrate_redeemer, build_mint_redeemer,
+    build_transfer_remote_redeemer, build_warp_route_collateral_datum,
+    build_warp_route_collateral_datum_with_routes, build_warp_route_native_datum,
+    build_warp_route_native_datum_with_routes, build_warp_route_synthetic_datum,
+    build_warp_route_synthetic_datum_with_routes, decode_plutus_datum, RemoteRoute,
 };
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
@@ -132,6 +132,21 @@ enum WarpCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Migrate warp route state to a new script address
+    Migrate {
+        /// New warp route script hash (28 bytes, hex). Auto-computed from blueprint + deployment params if omitted.
+        #[arg(long)]
+        new_script_hash: Option<String>,
+
+        /// Warp route policy ID
+        #[arg(long)]
+        warp_policy: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -185,6 +200,11 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             warp_policy,
             dry_run,
         } => deploy_minting_ref(ctx, &warp_policy, dry_run).await,
+        WarpCommands::Migrate {
+            new_script_hash,
+            warp_policy,
+            dry_run,
+        } => migrate(ctx, new_script_hash, warp_policy, dry_run).await,
     }
 }
 
@@ -3131,6 +3151,363 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
         "═══════════════════════════════════════════════════════════════".green()
     );
     println!();
+
+    Ok(())
+}
+
+async fn migrate(
+    ctx: &CliContext,
+    new_script_hash: Option<String>,
+    warp_policy: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!("{}", "Migrating Warp Route to new script address".cyan().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+
+    let new_script_hash = match new_script_hash {
+        Some(h) => h.strip_prefix("0x").unwrap_or(&h).to_string(),
+        None => {
+            println!("  Computing new script hash from blueprint + deployment params...");
+            let deployment = ctx.load_deployment_info()?;
+            let mailbox_info = deployment.mailbox.as_ref()
+                .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+            let mailbox_policy_id = mailbox_info.state_nft_policy.as_ref()
+                .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?;
+            let pm_policy = &mailbox_info.applied_parameters
+                .first()
+                .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?
+                .value;
+            let mb_cbor = hex::encode(encode_script_hash_param(mailbox_policy_id)?);
+            let pm_cbor = hex::encode(encode_script_hash_param(pm_policy)?);
+            let applied = apply_validator_params(
+                &ctx.contracts_dir, "warp_route", "warp_route", &[&mb_cbor, &pm_cbor],
+            )?;
+            applied.policy_id
+        }
+    };
+    let hash_bytes = hex::decode(&new_script_hash)?;
+    if hash_bytes.len() != 28 {
+        return Err(anyhow!(
+            "Script hash must be 28 bytes (56 hex chars), got {}",
+            hash_bytes.len()
+        ));
+    }
+
+    let policy_id = get_warp_policy(ctx, warp_policy)?;
+    println!("  Warp Policy: {}", policy_id);
+    println!("  New Script Hash: {}", new_script_hash);
+
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let owner_pkh = keypair.verification_key_hash_hex();
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    println!("\n{}", "Step 1: Finding warp route UTXO...".cyan());
+    let warp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Warp route UTXO not found with policy {}", policy_id))?;
+
+    println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
+    println!("  Address: {}", warp_utxo.address);
+    println!("  Lovelace: {}", warp_utxo.lovelace);
+
+    let current_address = pallas_addresses::Address::from_bech32(&warp_utxo.address)
+        .map_err(|e| anyhow!("Invalid warp route address: {:?}", e))?;
+    let current_hash_hex = match &current_address {
+        pallas_addresses::Address::Shelley(shelley) => hex::encode(shelley.payment().as_hash()),
+        _ => String::new(),
+    };
+    let new_address_bech32 = crate::utils::plutus::script_hash_to_address(
+        &new_script_hash, ctx.pallas_network(),
+    )?;
+
+    println!("\n{}", "Migration summary:".green());
+    println!("  Current hash: {}", current_hash_hex);
+    println!("  New hash:     {}", new_script_hash);
+    println!("  New address:  {}", new_address_bech32);
+
+    if current_hash_hex == new_script_hash {
+        println!(
+            "\n{}",
+            "Warp route is already at the target script hash. No migration needed.".yellow()
+        );
+        return Ok(());
+    }
+
+    println!("\n{}", "Step 2: Parsing datum and verifying owner...".cyan());
+    let datum_json = warp_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
+
+    let (_, _, _, _, current_owner, _) = parse_warp_datum(datum_json)?;
+    println!("  Owner: {}", current_owner);
+    println!("  Signer PKH: {}", owner_pkh);
+    if current_owner != owner_pkh {
+        return Err(anyhow!(
+            "Signing key does not match owner. Expected: {}, Got: {}",
+            current_owner,
+            owner_pkh
+        ));
+    }
+
+    // Read the raw datum CBOR from the UTXO and pass it through unchanged.
+    let datum_cbor = match datum_json {
+        serde_json::Value::String(hex_str) => hex::decode(hex_str)
+            .map_err(|e| anyhow!("Failed to decode datum hex: {}", e))?,
+        _ => {
+            return Err(anyhow!(
+                "Unexpected datum format: expected hex string from Blockfrost"
+            ))
+        }
+    };
+
+    let redeemer_cbor = build_migrate_redeemer(3, &new_script_hash)?;
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        return Ok(());
+    }
+
+    println!("\n{}", "Step 3: Building transaction...".cyan());
+
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or scripts)")
+        })?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
+        })
+        .unwrap_or(collateral_utxo);
+
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
+
+    let new_hash_bytes: [u8; 28] = hash_bytes
+        .try_into()
+        .map_err(|_| anyhow!("Invalid hash length"))?;
+    let new_address = pallas_addresses::Address::Shelley(pallas_addresses::ShelleyAddress::new(
+        ctx.pallas_network(),
+        pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(
+            new_hash_bytes,
+        )),
+        pallas_addresses::ShelleyDelegationPart::Null,
+    ));
+
+    let deployment = ctx.load_deployment_info()?;
+    let warp_ref_script = deployment
+        .warp_routes
+        .iter()
+        .find(|wr| wr.nft_policy == policy_id)
+        .and_then(|wr| wr.reference_script_utxo.as_ref())
+        .map(|rs| format!("{}#{}", rs.tx_hash, rs.output_index))
+        .or_else(|| {
+            deployment
+                .warp_routes
+                .iter()
+                .find(|wr| wr.nft_policy == policy_id)
+                .and_then(|wr| wr.init_tx_hash.as_ref())
+                .map(|init_tx| format!("{}#1", init_tx))
+        });
+
+    let warp_script = if warp_ref_script.is_none() {
+        let processed_messages_nft_policy = deployment
+            .mailbox
+            .as_ref()
+            .and_then(|m| m.applied_parameters.first())
+            .map(|p| p.value.clone())
+            .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
+        let mailbox_policy_id = deployment
+            .mailbox
+            .as_ref()
+            .and_then(|m| m.state_nft_policy.as_ref())
+            .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+        let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
+        let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
+        let warp_route_applied = apply_validator_params(
+            &ctx.contracts_dir,
+            "warp_route",
+            "warp_route",
+            &[
+                &hex::encode(&mailbox_param_cbor),
+                &hex::encode(&pm_nft_param_cbor),
+            ],
+        )?;
+        Some(hex::decode(&warp_route_applied.compiled_code)?)
+    } else {
+        None
+    };
+
+    let cost_model = client.get_plutusv3_cost_model().await?;
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+
+    let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid warp tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let owner_hash: [u8; 28] = hex::decode(&current_owner)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
+
+    // Build migration output at the new script address, preserving all assets and the datum.
+    let mut migration_output =
+        Output::new(new_address, warp_utxo.lovelace).set_inline_datum(datum_cbor);
+
+    for asset in &warp_utxo.assets {
+        let policy: [u8; 28] = hex::decode(&asset.policy_id)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid policy ID: {}", asset.policy_id))?;
+        let asset_name = hex::decode(&asset.asset_name).unwrap_or_default();
+        migration_output = migration_output
+            .add_asset(Hash::new(policy), asset_name, asset.quantity)
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to add asset {}.{}: {:?}",
+                    asset.policy_id,
+                    asset.asset_name,
+                    e
+                )
+            })?;
+    }
+
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(
+            Hash::new(warp_tx_hash),
+            warp_utxo.output_index as u64,
+        ))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
+        .output(migration_output)
+        .add_spend_redeemer(
+            Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64),
+            redeemer_cbor,
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
+        )
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        .disclosed_signer(Hash::new(owner_hash))
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(0);
+
+    if let Some(ref_utxo_str) = warp_ref_script {
+        let parts: Vec<&str> = ref_utxo_str.split('#').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!("Invalid reference script format: {}", ref_utxo_str));
+        }
+        let ref_tx_hash: [u8; 32] = hex::decode(parts[0])?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        let ref_idx: u64 = parts[1].parse()?;
+        println!("  Using warp route reference script: {}", ref_utxo_str);
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx));
+    } else if let Some(script_bytes) = warp_script {
+        println!("  Using inline warp route script ({} bytes)", script_bytes.len());
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    } else {
+        return Err(anyhow!(
+            "No warp route script available (no reference script and no blueprint)"
+        ));
+    }
+
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr, change));
+    }
+
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n  Old address: {}", warp_utxo.address);
+    println!("  New script hash: {}", new_script_hash);
+
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        if let Some(warp) = deployment.warp_routes.iter_mut().find(|wr| wr.nft_policy == policy_id) {
+            warp.script_hash = new_script_hash.clone();
+            warp.address = new_address_bech32.clone();
+            warp.reference_script_utxo = None;
+            if let Err(e) = ctx.save_deployment_info(&deployment) {
+                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+            } else {
+                println!("  Updated deployment_info.json");
+            }
+        }
+    }
+    println!("\n  {}", "Next steps:".yellow());
+    println!("  1. Deploy new reference script for warp route");
+    println!("  2. Update relayer config with new warp route address");
 
     Ok(())
 }

@@ -1097,6 +1097,37 @@ pub fn build_warp_route_native_datum_with_routes(
     Ok(builder.build())
 }
 
+/// Build a Migrate redeemer for any contract.
+///
+/// Each contract has a Migrate variant at a specific constructor index:
+/// - Mailbox: MigrateMailbox (index 4)
+/// - MultisigISM: MigrateIsm (index 3)
+/// - IGP: MigrateIgp (index 3)
+/// - WarpRoute: MigrateWarp (index 3)
+///
+/// The single field is an Address:
+/// `Constr 0 [payment_credential, stake_credential]`
+/// where payment_credential = `Constr 1 [script_hash]` (Script)
+/// and stake_credential = `Constr 1 []` (None)
+pub fn build_migrate_redeemer(constructor_index: u32, new_script_hash: &str) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // Migrate variant at the given constructor index, 1 field (Address)
+    builder.start_constr_definite(constructor_index, 1);
+
+    // Address = Constr 0 [payment_credential, stake_credential]
+    builder.start_constr_definite(0, 2);
+
+    // payment_credential = Script(hash) = Constr 1 [hash]
+    builder.start_constr_definite(1, 1);
+    builder.bytes_hex(new_script_hash)?;
+
+    // stake_credential = None = Constr 1 []
+    builder.start_constr_definite(1, 0);
+
+    Ok(builder.build())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,5 +1260,42 @@ mod tests {
 
         let result = build_igp_datum(owner, beneficiary, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_migrate_redeemer_mailbox() {
+        let hash = "aabbccdd00000000000000000000000000000000000000000000aabb";
+        let result = build_migrate_redeemer(4, hash).unwrap();
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+
+        // MigrateMailbox = constructor 4
+        assert_eq!(decoded["constructor"], 4);
+        let fields = decoded["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 1);
+
+        // Address = Constr 0 [payment_credential, stake_credential]
+        let addr = &fields[0];
+        assert_eq!(addr["constructor"], 0);
+        let addr_fields = addr["fields"].as_array().unwrap();
+        assert_eq!(addr_fields.len(), 2);
+
+        // payment_credential = Script(hash) = Constr 1 [hash]
+        let pay_cred = &addr_fields[0];
+        assert_eq!(pay_cred["constructor"], 1);
+        let pay_fields = pay_cred["fields"].as_array().unwrap();
+        assert_eq!(pay_fields[0]["bytes"].as_str().unwrap(), hash);
+
+        // stake_credential = None = Constr 1 []
+        let stake_cred = &addr_fields[1];
+        assert_eq!(stake_cred["constructor"], 1);
+        assert!(stake_cred["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_migrate_redeemer_igp() {
+        let hash = "ec4201ee17e0a800883934d14fb535a8b26e7d72b60d540b0b92d7ad";
+        let result = build_migrate_redeemer(3, hash).unwrap();
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        assert_eq!(decoded["constructor"], 3);
     }
 }

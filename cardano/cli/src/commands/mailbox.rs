@@ -7,7 +7,7 @@ use pallas_primitives::conway::{PlutusData, BigInt};
 use sha3::{Digest, Keccak256};
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::{build_mailbox_datum, build_mailbox_set_default_ism_redeemer, build_mailbox_dispatch_redeemer};
+use crate::utils::cbor::{build_mailbox_datum, build_mailbox_set_default_ism_redeemer, build_mailbox_dispatch_redeemer, build_migrate_redeemer};
 use crate::utils::context::CliContext;
 
 #[derive(Args)]
@@ -78,6 +78,25 @@ enum MailboxCommands {
         #[arg(long)]
         mailbox_policy: Option<String>,
     },
+
+    /// Migrate mailbox state to a new script address
+    Migrate {
+        /// New mailbox script hash (28 bytes, hex). Auto-computed from blueprint + deployment params if omitted.
+        #[arg(long)]
+        new_script_hash: Option<String>,
+
+        /// Reference script UTXO for the OLD mailbox (format: txhash#index)
+        #[arg(long)]
+        reference_script: Option<String>,
+
+        /// Path to signing key
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub async fn execute(ctx: &CliContext, args: MailboxArgs) -> Result<()> {
@@ -99,6 +118,12 @@ pub async fn execute(ctx: &CliContext, args: MailboxArgs) -> Result<()> {
             dry_run,
         } => set_default_ism(ctx, &ism_hash, mailbox_policy, reference_script, signing_key, dry_run).await,
         MailboxCommands::Show { mailbox_policy } => show_config(ctx, mailbox_policy).await,
+        MailboxCommands::Migrate {
+            new_script_hash,
+            reference_script,
+            signing_key,
+            dry_run,
+        } => migrate(ctx, new_script_hash, reference_script, signing_key, dry_run).await,
     }
 }
 
@@ -312,13 +337,28 @@ async fn dispatch(
             .map(|r| (r.tx_hash, r.output_index as u64))
     };
 
-    // Load mailbox script only if not using reference script
+    // Load mailbox script only if not using reference script.
+    // Mailbox is parameterized, so we must apply params from deployment_info.
     let mailbox_script_bytes = if ref_script_utxo.is_none() {
-        let blueprint = ctx.load_blueprint()?;
-        let mailbox_validator = blueprint
-            .find_validator("mailbox.mailbox.spend")
-            .ok_or_else(|| anyhow!("Mailbox validator not found in blueprint"))?;
-        Some(hex::decode(&mailbox_validator.compiled_code)?)
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment.mailbox.as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
+        if mailbox_info.applied_parameters.len() < 2 {
+            return Err(anyhow!(
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
+                mailbox_info.applied_parameters.len()
+            ));
+        }
+        let pm_policy = &mailbox_info.applied_parameters[0].value;
+        let vm_policy = &mailbox_info.applied_parameters[1].value;
+        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir, "mailbox", "mailbox", &[&pm_cbor, &vm_cbor],
+        )?;
+        println!("  Applied script hash: {}", applied.policy_id);
+        Some(hex::decode(&applied.compiled_code)?)
     } else {
         println!("  Using reference script: {}#{}", ref_script_utxo.as_ref().unwrap().0, ref_script_utxo.as_ref().unwrap().1);
         None
@@ -727,28 +767,28 @@ async fn set_default_ism(
         None
     };
 
-    // Load mailbox script only if not using reference script
+    // Load mailbox script only if not using reference script.
+    // Mailbox is parameterized, so we must apply params from deployment_info.
     let mailbox_script_bytes = if ref_script_utxo.is_none() {
-        let mailbox_script_path = ctx.network_deployments_dir().join("mailbox.plutus");
-        if mailbox_script_path.exists() {
-            println!("  Loading script from: {}", mailbox_script_path.display());
-            let script_json: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(&mailbox_script_path)?
-            )?;
-            let cbor_hex = script_json
-                .get("cborHex")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("Missing cborHex in mailbox.plutus"))?;
-            Some(hex::decode(cbor_hex)?)
-        } else {
-            // Fall back to blueprint
-            println!("  Deployment file not found, falling back to blueprint");
-            let blueprint = ctx.load_blueprint()?;
-            let mailbox_validator = blueprint
-                .find_validator("mailbox.mailbox.spend")
-                .ok_or_else(|| anyhow!("Mailbox validator not found in blueprint"))?;
-            Some(hex::decode(&mailbox_validator.compiled_code)?)
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment.mailbox.as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
+        if mailbox_info.applied_parameters.len() < 2 {
+            return Err(anyhow!(
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
+                mailbox_info.applied_parameters.len()
+            ));
         }
+        let pm_policy = &mailbox_info.applied_parameters[0].value;
+        let vm_policy = &mailbox_info.applied_parameters[1].value;
+        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir, "mailbox", "mailbox", &[&pm_cbor, &vm_cbor],
+        )?;
+        println!("  Applied script hash: {}", applied.policy_id);
+        Some(hex::decode(&applied.compiled_code)?)
     } else {
         println!("  Using reference script: {}#{}", ref_script_utxo.as_ref().unwrap().0, ref_script_utxo.as_ref().unwrap().1);
         None
@@ -783,9 +823,10 @@ async fn set_default_ism(
         .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
 
     // Build mailbox continuation output with new datum and state NFT
+    let asset_name_bytes = hex::decode(&asset_name_hex).unwrap_or_default();
     let mailbox_output = Output::new(mailbox_address, mailbox_utxo.lovelace)
         .set_inline_datum(new_datum_cbor.clone())
-        .add_asset(Hash::new(policy_id_bytes), vec![], 1)
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
         .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
 
     // Calculate change
@@ -854,6 +895,323 @@ async fn set_default_ism(
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Old ISM: {}", mailbox_data.default_ism);
     println!("  New ISM: {}", new_ism_hash);
+
+    Ok(())
+}
+
+async fn migrate(
+    ctx: &CliContext,
+    new_script_hash: Option<String>,
+    reference_script: Option<String>,
+    signing_key: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Migrating Mailbox to new script address...".cyan());
+
+    let new_script_hash = match new_script_hash {
+        Some(h) => h.strip_prefix("0x").unwrap_or(&h).to_string(),
+        None => {
+            println!("  Computing new script hash from blueprint + deployment params...");
+            let deployment = ctx.load_deployment_info()?;
+            let mailbox_info = deployment.mailbox.as_ref()
+                .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+            if mailbox_info.applied_parameters.len() < 2 {
+                return Err(anyhow!(
+                    "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
+                    mailbox_info.applied_parameters.len()
+                ));
+            }
+            let pm_policy = &mailbox_info.applied_parameters[0].value;
+            let vm_policy = &mailbox_info.applied_parameters[1].value;
+            let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+            let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+            let applied = crate::utils::plutus::apply_validator_params(
+                &ctx.contracts_dir, "mailbox", "mailbox", &[&pm_cbor, &vm_cbor],
+            )?;
+            applied.policy_id
+        }
+    };
+    let hash_bytes = hex::decode(&new_script_hash)?;
+    if hash_bytes.len() != 28 {
+        return Err(anyhow!(
+            "Script hash must be 28 bytes (56 hex chars), got {}",
+            hash_bytes.len()
+        ));
+    }
+
+    let policy_id = get_mailbox_policy(ctx, None)?;
+    println!("  Mailbox Policy: {}", policy_id);
+
+    let keypair = if let Some(path) = signing_key {
+        ctx.load_signing_key_from(std::path::Path::new(&path))?
+    } else {
+        ctx.load_signing_key()?
+    };
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let payer_pkh = keypair.pub_key_hash();
+
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let asset_name_hex = ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.mailbox)
+        .and_then(|m| m.state_nft)
+        .map(|nft| nft.asset_name_hex)
+        .unwrap_or_else(|| hex::encode("Mailbox State"));
+
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&policy_id, &asset_name_hex)
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Found Mailbox UTXO:".green());
+    println!("  TX: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+    println!("  Address: {}", mailbox_utxo.address);
+    println!("  Lovelace: {}", mailbox_utxo.lovelace);
+
+    let current_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
+        .map_err(|e| anyhow!("Invalid mailbox address: {:?}", e))?;
+    let current_hash_hex = match &current_address {
+        pallas_addresses::Address::Shelley(shelley) => hex::encode(shelley.payment().as_hash()),
+        _ => String::new(),
+    };
+    let new_address_bech32 = crate::utils::plutus::script_hash_to_address(
+        &new_script_hash, ctx.pallas_network(),
+    )?;
+
+    println!("\n{}", "Migration summary:".green());
+    println!("  Current hash: {}", current_hash_hex);
+    println!("  New hash:     {}", new_script_hash);
+    println!("  New address:  {}", new_address_bech32);
+
+    if current_hash_hex == new_script_hash {
+        println!(
+            "\n{}",
+            "Mailbox is already at the target script hash. No migration needed.".yellow()
+        );
+        return Ok(());
+    }
+
+    let current_datum = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
+
+    let mailbox_data = parse_mailbox_datum(current_datum)?;
+
+    if mailbox_data.owner != hex::encode(&payer_pkh) {
+        return Err(anyhow!(
+            "Signing key does not match mailbox owner. Expected: {}, Got: {}",
+            mailbox_data.owner,
+            hex::encode(&payer_pkh)
+        ));
+    }
+
+    let branches_refs: Vec<&str> = mailbox_data.merkle_branches.iter().map(|s| s.as_str()).collect();
+    let datum_cbor = build_mailbox_datum(
+        mailbox_data.local_domain,
+        &mailbox_data.default_ism,
+        &mailbox_data.owner,
+        mailbox_data.outbound_nonce,
+        &branches_refs,
+        mailbox_data.merkle_count,
+    )?;
+
+    let redeemer_cbor = build_migrate_redeemer(4, &new_script_hash)?;
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        return Ok(());
+    }
+
+    println!("\n{}", "Building transaction...".cyan());
+
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 10_000_000 &&
+            u.assets.is_empty() &&
+            u.reference_script.is_none() &&
+            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+        })
+        .or_else(|| {
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000 &&
+                u.assets.is_empty() &&
+                u.reference_script.is_none() &&
+                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            })
+        })
+        .unwrap_or(collateral_utxo);
+
+    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+
+    let new_hash_bytes: [u8; 28] = hash_bytes
+        .try_into()
+        .map_err(|_| anyhow!("Invalid hash length"))?;
+    let new_address = pallas_addresses::Address::Shelley(pallas_addresses::ShelleyAddress::new(
+        ctx.pallas_network(),
+        pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(new_hash_bytes)),
+        pallas_addresses::ShelleyDelegationPart::Null,
+    ));
+
+    let ref_script_utxo = if let Some(ref ref_script) = reference_script {
+        let parts: Vec<&str> = ref_script.split('#').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!("Invalid reference script format. Use: txhash#index"));
+        }
+        Some((parts[0].to_string(), parts[1].parse::<u64>()?))
+    } else {
+        None
+    };
+
+    let mailbox_script_bytes = if ref_script_utxo.is_none() {
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment.mailbox.as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+        if mailbox_info.applied_parameters.len() < 2 {
+            return Err(anyhow!(
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
+                mailbox_info.applied_parameters.len()
+            ));
+        }
+        let pm_policy = &mailbox_info.applied_parameters[0].value;
+        let vm_policy = &mailbox_info.applied_parameters[1].value;
+        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir, "mailbox", "mailbox", &[&pm_cbor, &vm_cbor],
+        )?;
+        let applied_hash = &applied.policy_id;
+        if applied_hash != &current_hash_hex {
+            return Err(anyhow!(
+                "Applied script hash {} does not match current UTXO address hash {}. \
+                 The blueprint may have changed. Use --reference-script to provide \
+                 the correct script for the current deployment.",
+                applied_hash, current_hash_hex
+            ));
+        }
+        println!("  Applied script hash matches current address: {}", applied_hash);
+        Some(hex::decode(&applied.compiled_code)?)
+    } else {
+        println!(
+            "  Using reference script: {}#{}",
+            ref_script_utxo.as_ref().unwrap().0,
+            ref_script_utxo.as_ref().unwrap().1
+        );
+        None
+    };
+
+    let cost_model = client.get_plutusv3_cost_model().await?;
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+
+    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction, ScriptKind, ExUnits};
+    use pallas_crypto::hash::Hash;
+
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
+        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = hex::decode(&mailbox_data.owner)?
+        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+
+    let asset_name_bytes = hex::decode(&asset_name_hex)
+        .unwrap_or_default();
+    let migration_output = Output::new(new_address, mailbox_utxo.lovelace)
+        .set_inline_datum(datum_cbor.clone())
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64))
+        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .output(migration_output)
+        .add_spend_redeemer(
+            Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
+            redeemer_cbor.clone(),
+            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+        )
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        .disclosed_signer(Hash::new(owner_hash))
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(0);
+
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx));
+    } else if let Some(script_bytes) = mailbox_script_bytes {
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    } else {
+        return Err(anyhow!("No script provided and no reference script specified"));
+    }
+
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr, change));
+    }
+
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n  Old address: {}", mailbox_utxo.address);
+    println!("  New script hash: {}", new_script_hash);
+
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        if let Some(ref mut mailbox) = deployment.mailbox {
+            mailbox.hash = new_script_hash.clone();
+            mailbox.address = new_address_bech32.clone();
+            mailbox.state_utxo = Some(format!("{}#0", tx_hash));
+            mailbox.reference_script_utxo = None;
+            if let Err(e) = ctx.save_deployment_info(&deployment) {
+                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+            } else {
+                println!("  Updated deployment_info.json");
+            }
+        }
+    }
+    println!("\n  {}", "Deploy new reference script: `deploy reference-script mailbox`".yellow());
 
     Ok(())
 }

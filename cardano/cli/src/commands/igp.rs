@@ -9,7 +9,7 @@ use pallas_primitives::MaybeIndefArray;
 use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::build_igp_datum;
+use crate::utils::cbor::{build_igp_datum, build_migrate_redeemer};
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
 use crate::utils::types::Utxo;
@@ -363,6 +363,25 @@ enum IgpCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Migrate IGP state to a new script address
+    Migrate {
+        /// New IGP script hash (28 bytes, hex). Auto-computed from blueprint if omitted.
+        #[arg(long)]
+        new_script_hash: Option<String>,
+
+        /// IGP policy ID
+        #[arg(long)]
+        igp_policy: Option<String>,
+
+        /// Path to signing key
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
@@ -395,6 +414,12 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
             igp_policy,
             dry_run,
         } => claim_fees(ctx, amount, igp_policy, dry_run).await,
+        IgpCommands::Migrate {
+            new_script_hash,
+            igp_policy,
+            signing_key,
+            dry_run,
+        } => migrate_igp(ctx, new_script_hash, igp_policy, signing_key, dry_run).await,
     }
 }
 
@@ -947,6 +972,284 @@ async fn claim_fees(
         new_igp_lovelace as f64 / 1_000_000.0,
         format_number(new_igp_lovelace)
     );
+
+    Ok(())
+}
+
+async fn migrate_igp(
+    ctx: &CliContext,
+    new_script_hash: Option<String>,
+    igp_policy: Option<String>,
+    signing_key: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Migrating IGP to new script address...".cyan());
+
+    let new_script_hash = match new_script_hash {
+        Some(h) => h,
+        None => {
+            println!("  Computing new script hash from blueprint...");
+            crate::utils::plutus::compute_blueprint_hash(
+                &ctx.contracts_dir, "igp", "igp",
+            )?
+        }
+    };
+    println!("  New Script Hash: {}", new_script_hash);
+
+    let new_hash_bytes = hex::decode(&new_script_hash)
+        .map_err(|_| anyhow!("Invalid script hash hex"))?;
+    if new_hash_bytes.len() != 28 {
+        return Err(anyhow!(
+            "Script hash must be 28 bytes (56 hex chars), got {}",
+            new_hash_bytes.len()
+        ));
+    }
+
+    let policy_id = get_igp_policy(ctx, igp_policy)?;
+    println!("  IGP Policy: {}", policy_id);
+
+    let keypair = if let Some(path) = signing_key {
+        ctx.load_signing_key_from(std::path::Path::new(&path))?
+    } else {
+        ctx.load_signing_key()?
+    };
+
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let payer_pkh = keypair.pub_key_hash();
+    println!("  Payer: {}", payer_address);
+
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let igp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("IGP UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Found IGP UTXO:".green());
+    println!("  TX: {}#{}", igp_utxo.tx_hash, igp_utxo.output_index);
+    println!("  Address: {}", igp_utxo.address);
+    println!("  Lovelace: {}", igp_utxo.lovelace);
+
+    let current_hash_hex = match pallas_addresses::Address::from_bech32(&igp_utxo.address) {
+        Ok(pallas_addresses::Address::Shelley(shelley)) => hex::encode(shelley.payment().as_hash()),
+        _ => String::new(),
+    };
+    let new_address = crate::utils::plutus::script_hash_to_address(
+        &new_script_hash, ctx.pallas_network(),
+    )?;
+
+    println!("\n{}", "Migration summary:".green());
+    println!("  Current hash: {}", current_hash_hex);
+    println!("  New hash:     {}", new_script_hash);
+    println!("  New address:  {}", new_address);
+
+    if current_hash_hex == new_script_hash {
+        println!(
+            "\n{}",
+            "IGP is already at the target script hash. No migration needed.".yellow()
+        );
+        return Ok(());
+    }
+
+    let current_datum = igp_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
+
+    let (owner, beneficiary, gas_oracles) = parse_igp_datum(current_datum)?;
+
+    println!("  Owner: {}", hex::encode(&owner));
+
+    if owner != payer_pkh {
+        return Err(anyhow!(
+            "Signing key does not match IGP owner. Expected: {}, Got: {}",
+            hex::encode(&owner),
+            hex::encode(&payer_pkh)
+        ));
+    }
+
+    let new_datum_cbor = build_igp_datum(
+        &hex::encode(&owner),
+        &hex::encode(&beneficiary),
+        &gas_oracles,
+    )?;
+
+    let redeemer_cbor = build_migrate_redeemer(3, &new_script_hash)?;
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        return Ok(());
+    }
+
+    println!("\n{}", "Building transaction...".cyan());
+
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 10_000_000 &&
+            u.assets.is_empty() &&
+            u.reference_script.is_none() &&
+            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+        })
+        .or_else(|| {
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000 &&
+                u.assets.is_empty() &&
+                u.reference_script.is_none() &&
+                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            })
+        })
+        .unwrap_or(collateral_utxo);
+
+    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+
+    // For migration we need the OLD script (the one the UTXO is locked with).
+    // Use the deployed reference script, or fall back to the old .plutus file.
+    let ref_script_utxo = ctx.load_deployment_info()
+        .ok()
+        .and_then(|d| d.igp)
+        .and_then(|igp| igp.reference_script_utxo)
+        .map(|r| (r.tx_hash, r.output_index));
+
+    let old_script_bytes = if ref_script_utxo.is_none() {
+        println!("  Computing script from blueprint...");
+        let blueprint = ctx.load_blueprint()?;
+        let igp_validator = blueprint
+            .find_validator("igp.igp.spend")
+            .ok_or_else(|| anyhow!("IGP validator not found in blueprint"))?;
+        let script_hash = crate::utils::crypto::script_hash_from_hex(&igp_validator.compiled_code)?;
+        let blueprint_hash = hex::encode(script_hash);
+        if blueprint_hash != current_hash_hex {
+            return Err(anyhow!(
+                "Blueprint script hash {} does not match current UTXO address hash {}. \
+                 Use --reference-script to provide the correct script.",
+                blueprint_hash, current_hash_hex
+            ));
+        }
+        Some(hex::decode(&igp_validator.compiled_code)?)
+    } else {
+        None
+    };
+
+    let cost_model = client.get_plutusv3_cost_model().await?;
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+
+    let new_hash_array: [u8; 28] = new_hash_bytes
+        .try_into().map_err(|_| anyhow!("Invalid script hash length"))?;
+    let new_igp_address = pallas_addresses::Address::Shelley(
+        pallas_addresses::ShelleyAddress::new(
+            ctx.pallas_network(),
+            pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(new_hash_array)),
+            pallas_addresses::ShelleyDelegationPart::Null,
+        )
+    );
+
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let igp_tx_hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid IGP tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
+        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = owner.clone()
+        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+
+    let state_nft_asset = igp_utxo
+        .assets
+        .iter()
+        .find(|a| a.policy_id == policy_id)
+        .ok_or_else(|| anyhow!("State NFT not found in IGP UTXO"))?;
+    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name)
+        .unwrap_or_default();
+
+    let igp_output = Output::new(new_igp_address, igp_utxo.lovelace)
+        .set_inline_datum(new_datum_cbor)
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64))
+        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .output(igp_output)
+        .add_spend_redeemer(
+            Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
+            redeemer_cbor,
+            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+        )
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        .disclosed_signer(Hash::new(owner_hash))
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(ctx.network_id());
+
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        println!("  Using reference script: {}#{}", ref_tx_hash, ref_output_idx);
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx as u64));
+    } else if let Some(script_bytes) = old_script_bytes {
+        println!("  Using embedded old script ({} bytes)", script_bytes.len());
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    }
+
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr, change));
+    }
+
+    let tx = staging.build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Transaction Hash: {}", tx_hash);
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n  New Script Hash: {}", new_script_hash);
+
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        if let Some(ref mut igp) = deployment.igp {
+            igp.hash = new_script_hash.clone();
+            igp.address = new_address.clone();
+            igp.state_utxo = Some(format!("{}#0", tx_hash));
+            igp.reference_script_utxo = None;
+            if let Err(e) = ctx.save_deployment_info(&deployment) {
+                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+            } else {
+                println!("  Updated deployment_info.json");
+            }
+        }
+    }
+    println!("\n  {}", "Deploy new reference script: `deploy reference-script igp`".yellow());
 
     Ok(())
 }
