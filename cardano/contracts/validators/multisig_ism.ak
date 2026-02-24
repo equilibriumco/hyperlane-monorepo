@@ -7,8 +7,9 @@ use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use types.{
   Checkpoint, Domain, MultisigIsmDatum, MultisigIsmRedeemer, ValidatorSignature,
   encode_checkpoint, encode_domain_hash, Verify, SetValidators, SetThreshold,
+  MigrateIsm,
 }
-use utils.{assoc_find, find_input, is_signed_by}
+use utils.{assoc_find, find_input, is_signed_by, validate_migrate}
 
 /// Multisig ISM (Interchain Security Module) Validator
 /// Verifies message authenticity using N-of-M validator signatures
@@ -50,6 +51,11 @@ validator multisig_ism {
 
       SetThreshold { domain, threshold } ->
         validate_set_threshold(ism_datum, domain, threshold, tx, own_ref)
+
+      MigrateIsm { new_address } -> {
+        let datum_as_data: Data = ism_datum
+        validate_migrate(ism_datum.owner, new_address, tx, own_ref, datum_as_data)
+      }
     }
   }
 

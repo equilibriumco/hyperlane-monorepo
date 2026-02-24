@@ -3,7 +3,7 @@ use aiken/collection/list
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
-use cardano/transaction.{Input, Output, OutputReference, Transaction}
+use cardano/transaction.{InlineDatum, Input, Output, OutputReference, Transaction}
 use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero}
 
 /// Utility functions for Hyperlane Cardano contracts
@@ -167,4 +167,23 @@ pub fn has_policy_in_inputs(tx: Transaction, policy_id: ByteArray) -> Bool {
       !dict.is_empty(policy_tokens)
     },
   )
+}
+
+/// Validate a migration: move state UTXO to a new script address.
+/// Checks: owner signature, continuation at new_address with same datum and value.
+pub fn validate_migrate(
+  owner: VerificationKeyHash,
+  new_address: Address,
+  tx: Transaction,
+  own_ref: OutputReference,
+  expected_datum: Data,
+) -> Bool {
+  expect is_signed_by(tx, owner)
+  expect Some(own_input) = find_input(tx, own_ref)
+  let own_value = own_input.output.value
+  expect Some(continuation) =
+    list.find(tx.outputs, fn(output) { output.address == new_address })
+  expect InlineDatum(cont_datum_data) = continuation.datum
+  expect cont_datum_data == expected_datum
+  value_preserved(own_value, continuation.value)
 }

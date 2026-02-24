@@ -13,9 +13,9 @@ use types.{
   Checkpoint, Domain, HyperlaneAddress, MailboxDatum, MailboxRedeemer, Message,
   MerkleTreeState, MultisigIsmRedeemer, PolicyId, ScriptHash,
   VerifiedMessageDatum, Verify, encode_message,
-  Dispatch, Process, SetDefaultIsm, TransferOwnership,
+  Dispatch, Process, SetDefaultIsm, TransferOwnership, MigrateMailbox,
 }
-use utils.{find_input, hyperlane_address_to_script_hash, is_signed_by, policy_id_to_hyperlane_address, value_preserved}
+use utils.{find_input, hyperlane_address_to_script_hash, is_signed_by, policy_id_to_hyperlane_address, validate_migrate, value_preserved}
 
 /// Mailbox Validator
 /// Core Hyperlane contract that dispatches and processes messages
@@ -67,6 +67,17 @@ validator mailbox(
 
       TransferOwnership { new_owner } ->
         validate_transfer_ownership(mailbox_datum, new_owner, tx, own_ref)
+
+      MigrateMailbox { new_address } -> {
+        let datum_as_data: Data = mailbox_datum
+        validate_migrate(
+          mailbox_datum.owner,
+          new_address,
+          tx,
+          own_ref,
+          datum_as_data,
+        )
+      }
     }
   }
 

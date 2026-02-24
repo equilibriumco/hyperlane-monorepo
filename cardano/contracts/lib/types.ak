@@ -1,5 +1,6 @@
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
+use cardano/address.{Address}
 use cardano/transaction.{OutputReference}
 
 /// Core types for Hyperlane Cardano implementation
@@ -181,6 +182,8 @@ pub type MailboxRedeemer {
   SetDefaultIsm { new_ism: ScriptHash }
   /// Admin: transfer ownership
   TransferOwnership { new_owner: VerificationKeyHash }
+  /// Admin: migrate state to a new script address (code upgrade)
+  MigrateMailbox { new_address: Address }
 }
 
 /// Processed message marker (separate UTXOs to avoid state bloat)
@@ -281,6 +284,8 @@ pub type MultisigIsmRedeemer {
   SetValidators { domain: Domain, validators: List<ByteArray> }
   /// Admin: set threshold for a domain
   SetThreshold { domain: Domain, threshold: Int }
+  /// Admin: migrate state to a new script address (code upgrade)
+  MigrateIsm { new_address: Address }
 }
 
 // ============================================================================
@@ -314,6 +319,8 @@ pub type IgpRedeemer {
   Claim { amount: Int }
   /// Admin: set gas oracle for a domain
   SetGasOracle { domain: Domain, config: GasOracleConfig }
+  /// Admin: migrate state to a new script address (code upgrade)
+  MigrateIgp { new_address: Address }
 }
 
 // ============================================================================
@@ -367,6 +374,8 @@ pub type WarpRouteRedeemer {
   ReceiveTransfer { message: Message, message_id: ByteArray }
   /// Admin: enroll a remote route
   EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
+  /// Admin: migrate state to a new script address (code upgrade)
+  MigrateWarp { new_address: Address }
 }
 
 /// Message body for warp transfers

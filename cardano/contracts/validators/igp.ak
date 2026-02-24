@@ -3,8 +3,8 @@ use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Script}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
-use types.{Domain, GasOracleConfig, IgpDatum, IgpRedeemer, PayForGas, Claim, SetGasOracle}
-use utils.{find_input, is_signed_by, value_preserved}
+use types.{Domain, GasOracleConfig, IgpDatum, IgpRedeemer, PayForGas, Claim, SetGasOracle, MigrateIgp}
+use utils.{find_input, is_signed_by, validate_migrate, value_preserved}
 
 /// Interchain Gas Paymaster (IGP) Validator
 /// Handles gas payments for cross-chain messages
@@ -38,6 +38,11 @@ validator igp {
 
       SetGasOracle { domain, config } ->
         validate_set_gas_oracle(igp_datum, domain, config, tx, own_ref)
+
+      MigrateIgp { new_address } -> {
+        let datum_as_data: Data = igp_datum
+        validate_migrate(igp_datum.owner, new_address, tx, own_ref, datum_as_data)
+      }
     }
   }
 

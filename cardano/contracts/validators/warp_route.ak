@@ -8,11 +8,11 @@ use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use types.{
   AssetName, Domain, HyperlaneAddress, Message, PolicyId, ScriptHash,
   WarpRouteDatum, WarpRouteRedeemer, WarpTransferBody,
-  TransferRemote, ReceiveTransfer, EnrollRemoteRoute,
+  TransferRemote, ReceiveTransfer, EnrollRemoteRoute, MigrateWarp,
   Collateral, Synthetic, Native,
   encode_message,
 }
-use utils.{assoc_find, find_input, is_signed_by}
+use utils.{assoc_find, find_input, is_signed_by, validate_migrate}
 
 /// Warp Route Validator
 /// Enables token bridging between Cardano and other Hyperlane-connected chains
@@ -62,6 +62,11 @@ validator warp_route(
 
       EnrollRemoteRoute { domain, route } ->
         validate_enroll_remote_route(warp_datum, domain, route, tx, own_ref)
+
+      MigrateWarp { new_address } -> {
+        let datum_as_data: Data = warp_datum
+        validate_migrate(warp_datum.owner, new_address, tx, own_ref, datum_as_data)
+      }
     }
   }
 
