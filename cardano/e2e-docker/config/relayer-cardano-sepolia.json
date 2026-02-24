@@ -86,10 +86,7 @@
   "gasPaymentEnforcement": [
     {
       "type": "onChainFeeQuoting",
-      "gasFraction": {
-        "numerator": 1,
-        "denominator": 1
-      }
+      "gasFraction": "1/1"
     }
   ],
   "metrics": {
