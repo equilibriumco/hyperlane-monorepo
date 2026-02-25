@@ -202,14 +202,16 @@ impl HyperlaneTxBuilder {
             return Ok(());
         }
 
-        let policy_id = match &self.conf.processed_messages_nft_policy_id {
-            Some(id) => id.clone(),
-            None => {
-                info!("No processed_messages_nft_policy_id configured, starting with empty SMT");
-                *guard = Some(crate::smt::SparseMerkleTree::new());
-                return Ok(());
-            }
-        };
+        let policy_id = self
+            .conf
+            .processed_messages_nft_policy_id
+            .clone()
+            .ok_or_else(|| {
+                TxBuilderError::MissingInput(
+                    "processed_messages_nft_policy_id is required for SMT replay protection"
+                        .to_string(),
+                )
+            })?;
         info!(
             "Initializing SMT from on-chain processed_message_nft tokens (policy={})",
             policy_id

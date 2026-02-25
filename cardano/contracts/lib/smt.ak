@@ -39,6 +39,7 @@ pub fn verify_non_membership_and_insert(
   key: ByteArray,
   proof: List<ByteArray>,
 ) -> ByteArray {
+  expect list.length(proof) == 128
   let (computed_old_root, new_root, _) =
     list.foldl(
       proof,
