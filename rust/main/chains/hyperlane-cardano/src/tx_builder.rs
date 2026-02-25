@@ -3295,15 +3295,23 @@ fn build_mailbox_continuation_datum(
     mailbox_utxo: &Utxo,
     new_tree_root: &[u8; 32],
 ) -> Result<Vec<u8>, TxBuilderError> {
-    let datum_json = mailbox_utxo
+    let datum_str = mailbox_utxo
         .inline_datum
         .as_ref()
         .ok_or_else(|| TxBuilderError::Encoding("Mailbox UTXO has no inline datum".to_string()))?;
-    let original_data = json_to_plutus_data(
-        &serde_json::from_str::<serde_json::Value>(datum_json).map_err(|e| {
-            TxBuilderError::Encoding(format!("Failed to parse mailbox datum JSON: {e}"))
-        })?,
-    )?;
+
+    // Blockfrost returns inline_datum as CBOR hex; try CBOR decode first, then JSON
+    let original_data = if let Ok(cbor_bytes) = hex::decode(datum_str) {
+        minicbor::decode::<PlutusData>(&cbor_bytes).map_err(|e| {
+            TxBuilderError::Encoding(format!("Failed to decode mailbox datum CBOR: {e}"))
+        })?
+    } else {
+        json_to_plutus_data(
+            &serde_json::from_str::<serde_json::Value>(datum_str).map_err(|e| {
+                TxBuilderError::Encoding(format!("Failed to parse mailbox datum JSON: {e}"))
+            })?,
+        )?
+    };
 
     // MailboxDatum = Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree, processed_tree_root]
     match original_data {
