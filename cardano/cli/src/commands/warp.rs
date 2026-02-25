@@ -2627,9 +2627,9 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    if fields.len() < 6 {
+    if fields.len() < 5 {
         return Err(anyhow!(
-            "Mailbox datum must have 6 fields, got {}",
+            "Mailbox datum must have at least 5 fields, got {}",
             fields.len()
         ));
     }
@@ -2725,9 +2725,9 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
     };
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 6 {
+    if fields_vec.len() < 5 {
         return Err(anyhow!(
-            "Mailbox datum must have 6 fields, got {}",
+            "Mailbox datum must have at least 5 fields, got {}",
             fields_vec.len()
         ));
     }
