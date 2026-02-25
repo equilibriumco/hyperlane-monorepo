@@ -72,9 +72,11 @@ pub async fn execute(ctx: &CliContext, args: DeployArgs) -> Result<()> {
         DeployCommands::Extract { output, only } => extract(ctx, output, only).await,
         DeployCommands::Info => info(ctx).await,
         DeployCommands::GenerateConfig { output } => generate_config(ctx, output).await,
-        DeployCommands::ReferenceScript { script, lovelace, dry_run } => {
-            deploy_reference_script(ctx, &script, lovelace, dry_run).await
-        }
+        DeployCommands::ReferenceScript {
+            script,
+            lovelace,
+            dry_run,
+        } => deploy_reference_script(ctx, &script, lovelace, dry_run).await,
         DeployCommands::ReferenceScriptsAll { lovelace, dry_run } => {
             deploy_all_reference_scripts(ctx, lovelace, dry_run).await
         }
@@ -94,11 +96,7 @@ fn calculate_min_lovelace_for_ref_script(script_size: usize, coins_per_utxo_byte
     ((with_buffer + 999_999) / 1_000_000) * 1_000_000
 }
 
-async fn extract(
-    ctx: &CliContext,
-    output: Option<String>,
-    only: Option<String>,
-) -> Result<()> {
+async fn extract(ctx: &CliContext, output: Option<String>, only: Option<String>) -> Result<()> {
     println!("{}", "Extracting Hyperlane validators...".cyan());
 
     // Load blueprint
@@ -108,9 +106,7 @@ async fn extract(
     let blueprint = PlutusBlueprint::from_file(&blueprint_path)?;
     println!(
         "  Blueprint: {} v{} ({})",
-        blueprint.preamble.title,
-        blueprint.preamble.version,
-        blueprint.preamble.plutus_version
+        blueprint.preamble.title, blueprint.preamble.version, blueprint.preamble.plutus_version
     );
 
     // Determine output directory
@@ -163,11 +159,7 @@ async fn extract(
             let addr_path = output_dir.join(format!("{}.addr", name));
             std::fs::write(&addr_path, &validator.address)?;
 
-            println!(
-                "{} {}",
-                "✓".green(),
-                format!("{:<20}", name).bold()
-            );
+            println!("{} {}", "✓".green(), format!("{:<20}", name).bold());
             println!("    Hash:    {}", validator.hash);
             println!("    Address: {}", validator.address);
             println!("    File:    {:?}", plutus_path);
@@ -225,9 +217,8 @@ async fn extract(
         DeploymentInfo::new(ctx.network.as_str())
     };
 
-    let should_update = |name: &str| -> bool {
-        filter.as_ref().map_or(true, |f| f.contains(&name))
-    };
+    let should_update =
+        |name: &str| -> bool { filter.as_ref().map_or(true, |f| f.contains(&name)) };
 
     if should_update("mailbox") {
         deployment_info.mailbox = Some(to_script_info(&validators.mailbox));
@@ -365,7 +356,11 @@ async fn generate_config(ctx: &CliContext, output: Option<String>) -> Result<()>
     std::fs::write(&output_path, &content)
         .with_context(|| format!("Failed to write {:?}", output_path))?;
 
-    println!("{} Deployment config saved to {:?}", "✓".green(), output_path);
+    println!(
+        "{} Deployment config saved to {:?}",
+        "✓".green(),
+        output_path
+    );
     println!("\n{}", "Note:".yellow().bold());
     println!("  This config contains script hashes and addresses.");
     println!("  After initialization, update with state NFT policy IDs and UTXOs.");
@@ -393,7 +388,10 @@ async fn deploy_reference_script_internal(
     dry_run: bool,
     exclude_utxos: &[String],
 ) -> Result<Option<(String, String)>> {
-    println!("{}", format!("Deploying reference script: {}", script_name).cyan());
+    println!(
+        "{}",
+        format!("Deploying reference script: {}", script_name).cyan()
+    );
 
     let api_key = ctx.require_api_key()?;
     let keypair = ctx.load_signing_key()?;
@@ -408,8 +406,12 @@ async fn deploy_reference_script_internal(
         None => {
             // Calculate minimum based on script size and protocol params
             let params = client.get_protocol_params().await?;
-            let min_lovelace = calculate_min_lovelace_for_ref_script(script_cbor.len(), params.coins_per_utxo_byte);
-            println!("  Calculated min: {} ADA (script size: {} bytes, {} lovelace/byte)",
+            let min_lovelace = calculate_min_lovelace_for_ref_script(
+                script_cbor.len(),
+                params.coins_per_utxo_byte,
+            );
+            println!(
+                "  Calculated min: {} ADA (script size: {} bytes, {} lovelace/byte)",
                 (min_lovelace as f64) / 1_000_000.0,
                 script_cbor.len(),
                 params.coins_per_utxo_byte
@@ -433,21 +435,43 @@ async fn deploy_reference_script_internal(
             !exclude_utxos.contains(&utxo_ref)
         })
         .collect();
-    println!("  Found {} UTXOs at wallet (excluding {} spent)", utxos.len(), exclude_utxos.len());
+    println!(
+        "  Found {} UTXOs at wallet (excluding {} spent)",
+        utxos.len(),
+        exclude_utxos.len()
+    );
 
     // Find suitable UTXOs (must not have reference scripts)
     let input_utxo = utxos
         .iter()
-        .find(|u| u.lovelace >= lovelace + 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets or reference scripts)", (lovelace + 5_000_000) / 1_000_000))?;
+        .find(|u| {
+            u.lovelace >= lovelace + 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "No suitable UTXO found (need >= {} ADA without assets or reference scripts)",
+                (lovelace + 5_000_000) / 1_000_000
+            )
+        })?;
 
-    println!("  Input UTXO: {}#{}", input_utxo.tx_hash, input_utxo.output_index);
+    println!(
+        "  Input UTXO: {}#{}",
+        input_utxo.tx_hash, input_utxo.output_index
+    );
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTransaction would:");
-        println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        println!("  - Create reference script output with {} ADA", lovelace / 1_000_000);
+        println!(
+            "  - Spend UTXO {}#{}",
+            input_utxo.tx_hash, input_utxo.output_index
+        );
+        println!(
+            "  - Create reference script output with {} ADA",
+            lovelace / 1_000_000
+        );
         println!("  - Script hash: {}", script_hash);
         println!("\nAfter deployment, update the relayer config to use this reference script:");
         println!("  Reference Script UTXO: <tx_hash>#0");
@@ -457,12 +481,7 @@ async fn deploy_reference_script_internal(
     // Build the reference script transaction
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let built_tx = tx_builder
-        .build_reference_script_tx(
-            &keypair,
-            input_utxo,
-            &script_cbor,
-            lovelace,
-        )
+        .build_reference_script_tx(&keypair, input_utxo, &script_cbor, lovelace)
         .await?;
 
     println!("  TX Hash: {}", hex::encode(&built_tx.tx_hash.0));
@@ -496,13 +515,19 @@ async fn deploy_reference_script_internal(
     };
 
     // Update or add the reference script info
-    if let Some(existing) = ref_scripts.iter_mut().find(|r| r.script_hash == script_hash) {
+    if let Some(existing) = ref_scripts
+        .iter_mut()
+        .find(|r| r.script_hash == script_hash)
+    {
         *existing = ref_script_info;
     } else {
         ref_scripts.push(ref_script_info);
     }
 
-    std::fs::write(&ref_scripts_file, serde_json::to_string_pretty(&ref_scripts)?)?;
+    std::fs::write(
+        &ref_scripts_file,
+        serde_json::to_string_pretty(&ref_scripts)?,
+    )?;
     println!("\n{}", "✓ Reference script info saved".green());
     println!("  File: {:?}", ref_scripts_file);
 
@@ -552,7 +577,10 @@ async fn deploy_reference_script_internal(
     println!("  {}#0", tx_hash);
 
     // Return the spent UTXO reference and the new tx_hash
-    Ok(Some((format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index), tx_hash)))
+    Ok(Some((
+        format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+        tx_hash,
+    )))
 }
 
 /// Deploy all core reference scripts (mailbox, ism)
@@ -578,7 +606,8 @@ async fn deploy_all_reference_scripts(
     for script in &scripts {
         println!("\n{}", format!("=== {} ===", script).cyan().bold());
         // Pass lovelace override - if None, each script calculates its own minimum
-        let result = deploy_reference_script_internal(ctx, script, lovelace, dry_run, &spent_utxos).await?;
+        let result =
+            deploy_reference_script_internal(ctx, script, lovelace, dry_run, &spent_utxos).await?;
 
         if let Some((spent_utxo, tx_hash)) = result {
             spent_utxos.push(spent_utxo);
@@ -588,14 +617,25 @@ async fn deploy_all_reference_scripts(
             // the transaction before the address UTXOs are updated
             println!("Waiting for change UTXO to be indexed (timeout: 120s)...");
             // Change output is at index #1 (reference script output is at #0)
-            match client.wait_for_utxo(&wallet_address, &tx_hash, 1, 120).await {
+            match client
+                .wait_for_utxo(&wallet_address, &tx_hash, 1, 120)
+                .await
+            {
                 Ok(utxo) => println!(
                     "{}",
-                    format!("✓ Change UTXO available: {}#{} ({} ADA)", tx_hash, 1, utxo.lovelace / 1_000_000).green()
+                    format!(
+                        "✓ Change UTXO available: {}#{} ({} ADA)",
+                        tx_hash,
+                        1,
+                        utxo.lovelace / 1_000_000
+                    )
+                    .green()
                 ),
                 Err(e) => {
                     println!("{}", format!("Warning: {}", e).yellow());
-                    println!("Continuing anyway, but next deployment may fail if UTXO not yet available");
+                    println!(
+                        "Continuing anyway, but next deployment may fail if UTXO not yet available"
+                    );
                 }
             }
         }
@@ -669,7 +709,8 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
     if !validator.parameters.is_empty() {
         return Err(anyhow!(
             "Validator '{}' is parameterized. Run 'init {}' first to apply parameters.",
-            title, script_name
+            title,
+            script_name
         ));
     }
 

@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
-use pallas_primitives::conway::{PlutusData, Constr, BigInt, BoundedBytes};
+use pallas_primitives::conway::{BigInt, BoundedBytes, Constr, PlutusData};
 use pallas_primitives::MaybeIndefArray;
 
 use crate::utils::blockfrost::BlockfrostClient;
@@ -147,14 +147,35 @@ pub async fn execute(ctx: &CliContext, args: IsmArgs) -> Result<()> {
             ism_policy,
             signing_key,
             dry_run,
-        } => set_validators(ctx, domain, validators, threshold, ism_policy, signing_key, dry_run, &[]).await.map(|_| ()),
+        } => set_validators(
+            ctx,
+            domain,
+            validators,
+            threshold,
+            ism_policy,
+            signing_key,
+            dry_run,
+            &[],
+        )
+        .await
+        .map(|_| ()),
         IsmCommands::SetThreshold {
             domain,
             threshold,
             ism_policy,
             signing_key,
             dry_run,
-        } => set_threshold(ctx, domain, threshold, ism_policy, signing_key, dry_run, &[]).await.map(|_| ()),
+        } => set_threshold(
+            ctx,
+            domain,
+            threshold,
+            ism_policy,
+            signing_key,
+            dry_run,
+            &[],
+        )
+        .await
+        .map(|_| ()),
         IsmCommands::Show { ism_policy, domain } => show_config(ctx, ism_policy, domain).await,
         IsmCommands::AddValidator {
             domain,
@@ -281,8 +302,14 @@ pub(crate) async fn set_validators(
                 validators.len()
             ));
         }
-        println!("\n{}", "NOTE: --threshold provided but SetValidators only updates validators.".yellow());
-        println!("After this transaction, run a separate SetThreshold command to set threshold to {}.", thresh);
+        println!(
+            "\n{}",
+            "NOTE: --threshold provided but SetValidators only updates validators.".yellow()
+        );
+        println!(
+            "After this transaction, run a separate SetThreshold command to set threshold to {}.",
+            thresh
+        );
     }
 
     // Build the new datum
@@ -296,7 +323,10 @@ pub(crate) async fn set_validators(
     if let Some((_, thresh)) = new_thresholds_list.iter().find(|(d, _)| *d == domain) {
         println!("  Current threshold for domain {}: {}", domain, thresh);
     } else {
-        println!("  No threshold set for domain {} (will need SetThreshold)", domain);
+        println!(
+            "  No threshold set for domain {} (will need SetThreshold)",
+            domain
+        );
     }
     println!("  Datum CBOR: {}", hex::encode(&new_datum_cbor));
 
@@ -310,8 +340,14 @@ pub(crate) async fn set_validators(
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTo update ISM, build a transaction that:");
-        println!("1. Spends ISM UTXO: {}#{}", ism_utxo.tx_hash, ism_utxo.output_index);
-        println!("2. Uses SetValidators redeemer: {}", hex::encode(&redeemer_cbor));
+        println!(
+            "1. Spends ISM UTXO: {}#{}",
+            ism_utxo.tx_hash, ism_utxo.output_index
+        );
+        println!(
+            "2. Uses SetValidators redeemer: {}",
+            hex::encode(&redeemer_cbor)
+        );
         println!("3. Creates new ISM UTXO with updated datum");
         println!("4. Requires owner signature: {}", hex::encode(&owner));
         return Ok(None);
@@ -329,7 +365,11 @@ pub(crate) async fn set_validators(
             !exclude_utxos.contains(&ref_str)
         })
         .collect();
-    println!("  Found {} UTXOs at wallet (excluding {} spent)", payer_utxos.len(), exclude_utxos.len());
+    println!(
+        "  Found {} UTXOs at wallet (excluding {} spent)",
+        payer_utxos.len(),
+        exclude_utxos.len()
+    );
     if payer_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found for payer address"));
     }
@@ -338,30 +378,40 @@ pub(crate) async fn set_validators(
     let collateral_utxo = payer_utxos
         .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
 
     // Find fee UTXO (pure ADA, no tokens, no reference script, different from collateral if possible)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
-            u.lovelace >= 10_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             // If no pure ADA UTXO with 10M, try with at least 5M
             payer_utxos.iter().find(|u| {
-                u.lovelace >= 5_000_000 &&
-                u.assets.is_empty() &&
-                u.reference_script.is_none() &&
-                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
             })
         })
         .unwrap_or(collateral_utxo);
 
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // Load ISM script from blueprint
     let blueprint = ctx.load_blueprint()?;
@@ -378,8 +428,8 @@ pub(crate) async fn set_validators(
     let validity_end = current_slot + 7200; // ~2 hours
 
     // Build the transaction using pallas_txbuilder
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction, ScriptKind, ExUnits};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let ism_address = pallas_addresses::Address::from_bech32(&ism_utxo.address)
@@ -388,15 +438,21 @@ pub(crate) async fn set_validators(
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let ism_tx_hash: [u8; 32] = hex::decode(&ism_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid ISM tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid ISM tx hash"))?;
     let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
     let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
-        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
-    let owner_hash: [u8; 28] = owner.clone()
-        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = owner
+        .clone()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
 
     // Build ISM continuation output with new datum and state NFT
     // Get the asset name from the input UTXO (should be "ISM State" hex-encoded)
@@ -405,8 +461,7 @@ pub(crate) async fn set_validators(
         .iter()
         .find(|a| a.policy_id == policy_id)
         .ok_or_else(|| anyhow!("State NFT not found in ISM UTXO"))?;
-    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name)
-        .unwrap_or_default();
+    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name).unwrap_or_default();
 
     let ism_output = Output::new(ism_address, ism_utxo.lovelace)
         .set_inline_datum(new_datum_cbor.clone())
@@ -420,18 +475,30 @@ pub(crate) async fn set_validators(
     // Build staging transaction
     let mut staging = StagingTransaction::new()
         // ISM script input
-        .input(Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(ism_tx_hash),
+            ism_utxo.output_index as u64,
+        ))
         // Fee input
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
         // Collateral
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         // ISM continuation output
         .output(ism_output)
         // Spend redeemer for ISM input (use redeemer_cbor bytes)
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
         )
         // ISM script
         .script(ScriptKind::PlutusV3, ism_script_bytes)
@@ -450,7 +517,8 @@ pub(crate) async fn set_validators(
     }
 
     // Build the transaction
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -459,18 +527,25 @@ pub(crate) async fn set_validators(
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
     let spent_ref = format!("{}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Domain: {}", domain);
-    println!("  Validators: {} (threshold {})", validators.len(), threshold.unwrap_or(0));
+    println!(
+        "  Validators: {} (threshold {})",
+        validators.len(),
+        threshold.unwrap_or(0)
+    );
 
     Ok(Some(spent_ref))
 }
@@ -557,7 +632,14 @@ pub(crate) async fn set_threshold(
             ));
         }
     } else {
-        println!("{}", format!("Warning: No validators set for domain {}. Set validators first.", domain).yellow());
+        println!(
+            "{}",
+            format!(
+                "Warning: No validators set for domain {}. Set validators first.",
+                domain
+            )
+            .yellow()
+        );
     }
 
     // Build new datum with updated threshold for this domain
@@ -584,8 +666,14 @@ pub(crate) async fn set_threshold(
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTo update ISM threshold, build a transaction that:");
-        println!("1. Spends ISM UTXO: {}#{}", ism_utxo.tx_hash, ism_utxo.output_index);
-        println!("2. Uses SetThreshold redeemer: {}", hex::encode(&redeemer_cbor));
+        println!(
+            "1. Spends ISM UTXO: {}#{}",
+            ism_utxo.tx_hash, ism_utxo.output_index
+        );
+        println!(
+            "2. Uses SetThreshold redeemer: {}",
+            hex::encode(&redeemer_cbor)
+        );
         println!("3. Creates new ISM UTXO with updated datum");
         println!("4. Requires owner signature: {}", hex::encode(&owner));
         return Ok(None);
@@ -603,7 +691,11 @@ pub(crate) async fn set_threshold(
             !exclude_utxos.contains(&ref_str)
         })
         .collect();
-    println!("  Found {} UTXOs at wallet (excluding {} spent)", payer_utxos.len(), exclude_utxos.len());
+    println!(
+        "  Found {} UTXOs at wallet (excluding {} spent)",
+        payer_utxos.len(),
+        exclude_utxos.len()
+    );
     if payer_utxos.is_empty() {
         return Err(anyhow!("No UTXOs found for payer address"));
     }
@@ -612,29 +704,39 @@ pub(crate) async fn set_threshold(
     let collateral_utxo = payer_utxos
         .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
 
     // Find fee UTXO (pure ADA, no tokens, no reference script, different from collateral if possible)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
-            u.lovelace >= 10_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             payer_utxos.iter().find(|u| {
-                u.lovelace >= 5_000_000 &&
-                u.assets.is_empty() &&
-                u.reference_script.is_none() &&
-                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
             })
         })
         .unwrap_or(collateral_utxo);
 
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // Load ISM script from blueprint
     let blueprint = ctx.load_blueprint()?;
@@ -651,8 +753,8 @@ pub(crate) async fn set_threshold(
     let validity_end = current_slot + 7200; // ~2 hours
 
     // Build the transaction using pallas_txbuilder
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction, ScriptKind, ExUnits};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let ism_address = pallas_addresses::Address::from_bech32(&ism_utxo.address)
@@ -661,15 +763,21 @@ pub(crate) async fn set_threshold(
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let ism_tx_hash: [u8; 32] = hex::decode(&ism_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid ISM tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid ISM tx hash"))?;
     let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
     let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
-        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
-    let owner_hash: [u8; 28] = owner.clone()
-        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = owner
+        .clone()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
 
     // Get asset name from the ISM UTXO
     let state_nft_asset = ism_utxo
@@ -677,8 +785,7 @@ pub(crate) async fn set_threshold(
         .iter()
         .find(|a| a.policy_id == policy_id)
         .ok_or_else(|| anyhow!("State NFT not found in ISM UTXO"))?;
-    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name)
-        .unwrap_or_default();
+    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name).unwrap_or_default();
 
     // Build ISM continuation output with new datum and state NFT
     let ism_output = Output::new(ism_address, ism_utxo.lovelace)
@@ -691,7 +798,8 @@ pub(crate) async fn set_threshold(
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
     // Check for reference script UTXO in deployment info
-    let ref_script_utxo = ctx.load_deployment_info()
+    let ref_script_utxo = ctx
+        .load_deployment_info()
         .ok()
         .and_then(|d| d.ism)
         .and_then(|ism| ism.reference_script_utxo)
@@ -700,18 +808,30 @@ pub(crate) async fn set_threshold(
     // Build staging transaction
     let mut staging = StagingTransaction::new()
         // ISM script input
-        .input(Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(ism_tx_hash),
+            ism_utxo.output_index as u64,
+        ))
         // Fee input
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
         // Collateral
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         // ISM continuation output
         .output(ism_output)
         // Spend redeemer for ISM input
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
         )
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -724,10 +844,17 @@ pub(crate) async fn set_threshold(
 
     // Add reference script OR embedded script
     if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
-        println!("  Using reference script: {}#{}", ref_tx_hash, ref_output_idx);
+        println!(
+            "  Using reference script: {}#{}",
+            ref_tx_hash, ref_output_idx
+        );
         let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
-            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
-        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx as u64));
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(
+            Hash::new(ref_tx_hash_bytes),
+            ref_output_idx as u64,
+        ));
     } else {
         println!("  Using embedded script (no reference script found)");
         staging = staging.script(ScriptKind::PlutusV3, ism_script_bytes);
@@ -739,7 +866,8 @@ pub(crate) async fn set_threshold(
     }
 
     // Build the transaction
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -748,13 +876,16 @@ pub(crate) async fn set_threshold(
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
     let spent_ref = format!("{}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
@@ -823,7 +954,10 @@ async fn show_config(
                 // Fallback: show raw datum if parsing fails
                 println!("\n{}", "Inline Datum (raw):".yellow());
                 println!("{}", serde_json::to_string_pretty(datum)?);
-                println!("\n{}", format!("Note: Could not parse datum: {}", e).yellow());
+                println!(
+                    "\n{}",
+                    format!("Note: Could not parse datum: {}", e).yellow()
+                );
             }
         }
     } else {
@@ -859,7 +993,10 @@ async fn add_validator(
     println!("  Current validators: {:?}", current_validators);
 
     // Add new validator
-    let normalized = validator.strip_prefix("0x").unwrap_or(validator).to_lowercase();
+    let normalized = validator
+        .strip_prefix("0x")
+        .unwrap_or(validator)
+        .to_lowercase();
     if current_validators.contains(&normalized) {
         println!("{}", "Validator already exists!".yellow());
         return Ok(());
@@ -871,7 +1008,18 @@ async fn add_validator(
     println!("  New validators: {:?}", new_validators);
 
     // Call set_validators with updated list
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, &[]).await.map(|_| ())
+    set_validators(
+        ctx,
+        domain,
+        new_validators,
+        None,
+        ism_policy,
+        None,
+        dry_run,
+        &[],
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn remove_validator(
@@ -895,7 +1043,10 @@ async fn remove_validator(
         .ok_or_else(|| anyhow!("ISM UTXO not found"))?;
 
     let current_validators = parse_validators_from_datum(&ism_utxo.inline_datum, domain)?;
-    let normalized = validator.strip_prefix("0x").unwrap_or(validator).to_lowercase();
+    let normalized = validator
+        .strip_prefix("0x")
+        .unwrap_or(validator)
+        .to_lowercase();
 
     if !current_validators.contains(&normalized) {
         println!("{}", "Validator not found in current set!".yellow());
@@ -913,7 +1064,18 @@ async fn remove_validator(
 
     println!("  New validators: {:?}", new_validators);
 
-    set_validators(ctx, domain, new_validators, None, ism_policy, None, dry_run, &[]).await.map(|_| ())
+    set_validators(
+        ctx,
+        domain,
+        new_validators,
+        None,
+        ism_policy,
+        None,
+        dry_run,
+        &[],
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn migrate(
@@ -930,14 +1092,16 @@ async fn migrate(
         None => {
             println!("  Computing new script hash from blueprint...");
             crate::utils::plutus::compute_blueprint_hash(
-                &ctx.contracts_dir, "multisig_ism", "multisig_ism",
+                &ctx.contracts_dir,
+                "multisig_ism",
+                "multisig_ism",
             )?
         }
     };
     println!("  New Script Hash: {}", new_script_hash);
 
-    let new_hash_bytes = hex::decode(&new_script_hash)
-        .map_err(|_| anyhow!("Invalid script hash hex"))?;
+    let new_hash_bytes =
+        hex::decode(&new_script_hash).map_err(|_| anyhow!("Invalid script hash hex"))?;
     if new_hash_bytes.len() != 28 {
         return Err(anyhow!(
             "Script hash must be 28 bytes (56 hex chars), got {}",
@@ -975,9 +1139,8 @@ async fn migrate(
         Ok(pallas_addresses::Address::Shelley(shelley)) => hex::encode(shelley.payment().as_hash()),
         _ => String::new(),
     };
-    let new_address = crate::utils::plutus::script_hash_to_address(
-        &new_script_hash, ctx.pallas_network(),
-    )?;
+    let new_address =
+        crate::utils::plutus::script_hash_to_address(&new_script_hash, ctx.pallas_network())?;
 
     println!("\n{}", "Migration summary:".green());
     println!("  Current hash: {}", current_hash_hex);
@@ -1031,32 +1194,43 @@ async fn migrate(
     let collateral_utxo = payer_utxos
         .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
 
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
-            u.lovelace >= 10_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             payer_utxos.iter().find(|u| {
-                u.lovelace >= 5_000_000 &&
-                u.assets.is_empty() &&
-                u.reference_script.is_none() &&
-                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
             })
         })
         .unwrap_or(collateral_utxo);
 
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // For migration we need the OLD script (the one the UTXO is locked with).
     // Use the deployed reference script, or fall back to embedding from the old .plutus file.
-    let ref_script_utxo = ctx.load_deployment_info()
+    let ref_script_utxo = ctx
+        .load_deployment_info()
         .ok()
         .and_then(|d| d.ism)
         .and_then(|ism| ism.reference_script_utxo)
@@ -1074,7 +1248,8 @@ async fn migrate(
             return Err(anyhow!(
                 "Blueprint script hash {} does not match current UTXO address hash {}. \
                  Use --reference-script to provide the correct script.",
-                blueprint_hash, current_hash_hex
+                blueprint_hash,
+                current_hash_hex
             ));
         }
         Some(hex::decode(&ism_validator.compiled_code)?)
@@ -1086,41 +1261,48 @@ async fn migrate(
     let current_slot = client.get_latest_slot().await?;
     let validity_end = current_slot + 7200;
 
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction, ScriptKind, ExUnits};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
 
     // Build new script address from the provided hash
     let new_hash_array: [u8; 28] = new_hash_bytes
-        .try_into().map_err(|_| anyhow!("Invalid script hash length"))?;
-    let new_ism_address = pallas_addresses::Address::Shelley(
-        pallas_addresses::ShelleyAddress::new(
+        .try_into()
+        .map_err(|_| anyhow!("Invalid script hash length"))?;
+    let new_ism_address =
+        pallas_addresses::Address::Shelley(pallas_addresses::ShelleyAddress::new(
             ctx.pallas_network(),
-            pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(new_hash_array)),
+            pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(
+                new_hash_array,
+            )),
             pallas_addresses::ShelleyDelegationPart::Null,
-        )
-    );
+        ));
 
     let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let ism_tx_hash: [u8; 32] = hex::decode(&ism_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid ISM tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid ISM tx hash"))?;
     let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
     let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
-        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
-    let owner_hash: [u8; 28] = owner.clone()
-        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = owner
+        .clone()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
 
     let state_nft_asset = ism_utxo
         .assets
         .iter()
         .find(|a| a.policy_id == policy_id)
         .ok_or_else(|| anyhow!("State NFT not found in ISM UTXO"))?;
-    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name)
-        .unwrap_or_default();
+    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name).unwrap_or_default();
 
     let ism_output = Output::new(new_ism_address, ism_utxo.lovelace)
         .set_inline_datum(new_datum_cbor)
@@ -1131,14 +1313,26 @@ async fn migrate(
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
     let mut staging = StagingTransaction::new()
-        .input(Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64))
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(ism_tx_hash),
+            ism_utxo.output_index as u64,
+        ))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         .output(ism_output)
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor,
-            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -1147,10 +1341,17 @@ async fn migrate(
         .network_id(0);
 
     if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
-        println!("  Using reference script: {}#{}", ref_tx_hash, ref_output_idx);
+        println!(
+            "  Using reference script: {}#{}",
+            ref_tx_hash, ref_output_idx
+        );
         let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
-            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
-        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx as u64));
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(
+            Hash::new(ref_tx_hash_bytes),
+            ref_output_idx as u64,
+        ));
     } else if let Some(script_bytes) = old_script_bytes {
         println!("  Using embedded old script ({} bytes)", script_bytes.len());
         staging = staging.script(ScriptKind::PlutusV3, script_bytes);
@@ -1160,7 +1361,8 @@ async fn migrate(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -1168,11 +1370,14 @@ async fn migrate(
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
@@ -1185,13 +1390,19 @@ async fn migrate(
             ism.state_utxo = Some(format!("{}#0", tx_hash));
             ism.reference_script_utxo = None;
             if let Err(e) = ctx.save_deployment_info(&deployment) {
-                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+                println!(
+                    "  {}",
+                    format!("Warning: failed to update deployment_info.json: {}", e).yellow()
+                );
             } else {
                 println!("  Updated deployment_info.json");
             }
         }
     }
-    println!("\n  {}", "Deploy new reference script: `deploy reference-script ism`".yellow());
+    println!(
+        "\n  {}",
+        "Deploy new reference script: `deploy reference-script ism`".yellow()
+    );
 
     Ok(())
 }
@@ -1208,7 +1419,9 @@ fn get_ism_policy(ctx: &CliContext, ism_policy: Option<String>) -> Result<String
     deployment
         .ism
         .and_then(|i| i.state_nft_policy)
-        .ok_or_else(|| anyhow!("ISM policy not found. Use --ism-policy or update deployment_info.json"))
+        .ok_or_else(|| {
+            anyhow!("ISM policy not found. Use --ism-policy or update deployment_info.json")
+        })
 }
 
 fn parse_validators_from_datum(
@@ -1280,17 +1493,26 @@ fn parse_ism_datum_full(
 
     // Parse validators (field 0) - maintain order!
     let mut validators_list: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
-    if let Some(validators_arr) = fields.get(0).and_then(|v| v.get("list")).and_then(|l| l.as_array()) {
+    if let Some(validators_arr) = fields
+        .get(0)
+        .and_then(|v| v.get("list"))
+        .and_then(|l| l.as_array())
+    {
         for entry in validators_arr {
             if let Some(entry_fields) = entry.get("fields").and_then(|f| f.as_array()) {
                 let domain = entry_fields
                     .get(0)
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid domain in validators"))? as u32;
+                    .ok_or_else(|| anyhow!("Invalid domain in validators"))?
+                    as u32;
 
                 let mut validator_keys = Vec::new();
-                if let Some(keys) = entry_fields.get(1).and_then(|a| a.get("list")).and_then(|l| l.as_array()) {
+                if let Some(keys) = entry_fields
+                    .get(1)
+                    .and_then(|a| a.get("list"))
+                    .and_then(|l| l.as_array())
+                {
                     for key in keys {
                         if let Some(bytes_str) = key.get("bytes").and_then(|b| b.as_str()) {
                             let bytes = hex::decode(bytes_str)?;
@@ -1305,20 +1527,26 @@ fn parse_ism_datum_full(
 
     // Parse thresholds (field 1) - maintain order!
     let mut thresholds_list: Vec<(u32, u32)> = Vec::new();
-    if let Some(thresholds_arr) = fields.get(1).and_then(|v| v.get("list")).and_then(|l| l.as_array()) {
+    if let Some(thresholds_arr) = fields
+        .get(1)
+        .and_then(|v| v.get("list"))
+        .and_then(|l| l.as_array())
+    {
         for entry in thresholds_arr {
             if let Some(entry_fields) = entry.get("fields").and_then(|f| f.as_array()) {
                 let domain = entry_fields
                     .get(0)
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid domain in thresholds"))? as u32;
+                    .ok_or_else(|| anyhow!("Invalid domain in thresholds"))?
+                    as u32;
 
                 let threshold = entry_fields
                     .get(1)
                     .and_then(|t| t.get("int"))
                     .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid threshold"))? as u32;
+                    .ok_or_else(|| anyhow!("Invalid threshold"))?
+                    as u32;
 
                 thresholds_list.push((domain, threshold));
             }
@@ -1357,7 +1585,10 @@ fn parse_ism_datum_from_cbor(
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
     if fields_vec.len() < 3 {
-        return Err(anyhow!("ISM datum must have 3 fields, got {}", fields_vec.len()));
+        return Err(anyhow!(
+            "ISM datum must have 3 fields, got {}",
+            fields_vec.len()
+        ));
     }
 
     // Parse validators (field 0) - MAINTAIN ORDER
@@ -1508,10 +1739,7 @@ fn update_assoc<V: Clone>(list: &[(u32, V)], key: u32, value: V) -> Vec<(u32, V)
 
 /// Build SetValidators redeemer as PlutusData
 /// SetValidators { domain: Domain, validators: List<ByteArray> }
-fn build_set_validators_redeemer_plutus(
-    domain: u32,
-    validators: &[Vec<u8>],
-) -> Result<PlutusData> {
+fn build_set_validators_redeemer_plutus(domain: u32, validators: &[Vec<u8>]) -> Result<PlutusData> {
     // SetValidators is Constr 1 (Verify=0, SetValidators=1, SetThreshold=2)
     let validators_data: Vec<PlutusData> = validators
         .iter()
@@ -1530,10 +1758,7 @@ fn build_set_validators_redeemer_plutus(
 
 /// Build SetThreshold redeemer as PlutusData
 /// SetThreshold { domain: Domain, threshold: Int }
-fn build_set_threshold_redeemer_plutus(
-    domain: u32,
-    threshold: u32,
-) -> PlutusData {
+fn build_set_threshold_redeemer_plutus(domain: u32, threshold: u32) -> PlutusData {
     // SetThreshold is Constr 2 (Verify=0, SetValidators=1, SetThreshold=2)
     PlutusData::Constr(Constr {
         tag: 123, // Constr 2

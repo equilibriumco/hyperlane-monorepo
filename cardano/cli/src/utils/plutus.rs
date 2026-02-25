@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::crypto::{script_hash_from_hex, script_address_bech32};
+use super::crypto::{script_address_bech32, script_hash_from_hex};
 
 /// Plutus blueprint (plutus.json output from Aiken)
 #[derive(Debug, Clone, Deserialize)]
@@ -43,8 +43,7 @@ impl PlutusBlueprint {
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read plutus.json: {:?}", path))?;
-        serde_json::from_str(&content)
-            .with_context(|| "Failed to parse plutus.json")
+        serde_json::from_str(&content).with_context(|| "Failed to parse plutus.json")
     }
 
     /// Find a validator by title (e.g., "mailbox.mailbox.spend")
@@ -97,7 +96,8 @@ impl ExtractedValidator {
         let address = script_address_bech32(&hash, network);
 
         // Extract short name from title (e.g., "mailbox.mailbox.spend" -> "mailbox")
-        let name = def.title
+        let name = def
+            .title
             .split('.')
             .next()
             .unwrap_or(&def.title)
@@ -138,8 +138,7 @@ impl ExtractedValidator {
         };
 
         let content = serde_json::to_string_pretty(&file)?;
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write {:?}", path))?;
+        std::fs::write(path, content).with_context(|| format!("Failed to write {:?}", path))?;
         Ok(())
     }
 }
@@ -156,7 +155,10 @@ pub struct HyperlaneValidators {
 
 impl HyperlaneValidators {
     /// Extract all Hyperlane validators from blueprint
-    pub fn extract(blueprint: &PlutusBlueprint, network: pallas_addresses::Network) -> Result<Self> {
+    pub fn extract(
+        blueprint: &PlutusBlueprint,
+        network: pallas_addresses::Network,
+    ) -> Result<Self> {
         let find = |name: &str| -> Result<ExtractedValidator> {
             let title = format!("{}.{}.spend", name, name);
             let def = blueprint
@@ -257,7 +259,12 @@ pub fn apply_validator_param_with_purpose(
             &temp_filename, // Use just filename since we're in contracts_dir
         ])
         .output()
-        .with_context(|| format!("Failed to run aiken blueprint apply ({})", aiken_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to run aiken blueprint apply ({})",
+                aiken_path.display()
+            )
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -292,7 +299,10 @@ pub fn apply_validator_param_with_purpose(
             if purpose.is_none() {
                 for p in ["mint", "spend"] {
                     let pattern = format!("{}.{}.{}", module, validator, p);
-                    if let Some(v) = validators.iter().find(|v| v["title"].as_str() == Some(&pattern)) {
+                    if let Some(v) = validators
+                        .iter()
+                        .find(|v| v["title"].as_str() == Some(&pattern))
+                    {
                         return Some(v);
                     }
                 }
@@ -365,7 +375,12 @@ pub fn apply_validator_params(
             .current_dir(contracts_dir)
             .args(&args)
             .output()
-            .with_context(|| format!("Failed to run aiken blueprint apply ({})", aiken_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to run aiken blueprint apply ({})",
+                    aiken_path.display()
+                )
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -373,9 +388,14 @@ pub fn apply_validator_params(
             let combined = if stderr.is_empty() { stdout } else { stderr };
             // Clean up temp files
             for j in 0..=i {
-                let _ = std::fs::remove_file(contracts_dir.join(format!("{}_{}.json", temp_base, j)));
+                let _ =
+                    std::fs::remove_file(contracts_dir.join(format!("{}_{}.json", temp_base, j)));
             }
-            return Err(anyhow!("aiken blueprint apply failed (param {}): {}", i + 1, combined));
+            return Err(anyhow!(
+                "aiken blueprint apply failed (param {}): {}",
+                i + 1,
+                combined
+            ));
         }
 
         // Clean up previous temp file
@@ -406,7 +426,10 @@ pub fn apply_validator_params(
         .or_else(|| {
             for p in ["mint", "spend"] {
                 let pattern = format!("{}.{}.{}", module, validator, p);
-                if let Some(v) = validators.iter().find(|v| v["title"].as_str() == Some(&pattern)) {
+                if let Some(v) = validators
+                    .iter()
+                    .find(|v| v["title"].as_str() == Some(&pattern))
+                {
                     return Some(v);
                 }
             }
@@ -452,8 +475,7 @@ impl AppliedValidator {
     pub fn save_plutus_file(&self, path: &Path, description: &str) -> Result<()> {
         let json = self.to_plutus_json(description);
         let content = serde_json::to_string_pretty(&json)?;
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write {:?}", path))?;
+        std::fs::write(path, content).with_context(|| format!("Failed to write {:?}", path))?;
         Ok(())
     }
 }
@@ -476,12 +498,18 @@ pub fn compute_blueprint_hash(
 }
 
 /// Convert a script hash (hex) to a bech32 address
-pub fn script_hash_to_address(hash_hex: &str, network: pallas_addresses::Network) -> Result<String> {
-    let hash_bytes = hex::decode(hash_hex)
-        .map_err(|e| anyhow!("Invalid script hash hex: {}", e))?;
+pub fn script_hash_to_address(
+    hash_hex: &str,
+    network: pallas_addresses::Network,
+) -> Result<String> {
+    let hash_bytes =
+        hex::decode(hash_hex).map_err(|e| anyhow!("Invalid script hash hex: {}", e))?;
 
     if hash_bytes.len() != 28 {
-        return Err(anyhow!("Script hash must be 28 bytes, got {}", hash_bytes.len()));
+        return Err(anyhow!(
+            "Script hash must be 28 bytes, got {}",
+            hash_bytes.len()
+        ));
     }
 
     let mut hash_array = [0u8; 28];
@@ -492,11 +520,13 @@ pub fn script_hash_to_address(hash_hex: &str, network: pallas_addresses::Network
 
 /// Encode a script hash (28 bytes) as CBOR for validator parameters
 pub fn encode_script_hash_param(script_hash_hex: &str) -> Result<Vec<u8>> {
-    let hash_bytes = hex::decode(script_hash_hex)
-        .with_context(|| "Invalid script hash hex")?;
+    let hash_bytes = hex::decode(script_hash_hex).with_context(|| "Invalid script hash hex")?;
 
     if hash_bytes.len() != 28 {
-        return Err(anyhow!("Script hash must be 28 bytes, got {}", hash_bytes.len()));
+        return Err(anyhow!(
+            "Script hash must be 28 bytes, got {}",
+            hash_bytes.len()
+        ));
     }
 
     // CBOR encoding for ByteArray (28 bytes):
@@ -509,8 +539,7 @@ pub fn encode_script_hash_param(script_hash_hex: &str) -> Result<Vec<u8>> {
 
 /// Encode an output reference as CBOR for state_nft parameter
 pub fn encode_output_reference(tx_hash: &str, output_index: u32) -> Result<Vec<u8>> {
-    let tx_hash_bytes = hex::decode(tx_hash)
-        .with_context(|| "Invalid tx hash hex")?;
+    let tx_hash_bytes = hex::decode(tx_hash).with_context(|| "Invalid tx hash hex")?;
 
     if tx_hash_bytes.len() != 32 {
         return Err(anyhow!("TX hash must be 32 bytes"));

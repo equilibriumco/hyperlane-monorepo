@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
-use k256::ecdsa::{SigningKey, Signature, signature::hazmat::PrehashSigner};
+use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use pallas_crypto::hash::Hash;
 use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 use tiny_keccak::{Hasher, Keccak};
@@ -71,7 +71,17 @@ pub async fn execute(ctx: &CliContext, args: ValidatorArgs) -> Result<()> {
             validator_key,
             signing_key,
             dry_run,
-        } => announce_validator(ctx, &storage_location, &validator_key, signing_key, dry_run, &[]).await,
+        } => {
+            announce_validator(
+                ctx,
+                &storage_location,
+                &validator_key,
+                signing_key,
+                dry_run,
+                &[],
+            )
+            .await
+        }
         ValidatorCommands::Show { validator } => show_announcements(ctx, validator).await,
     }
 }
@@ -93,12 +103,17 @@ pub(crate) async fn announce_validator(
     }
 
     // Parse the secp256k1 validator key
-    let validator_key_hex = validator_key_hex.strip_prefix("0x").unwrap_or(validator_key_hex);
-    let validator_key_bytes = hex::decode(validator_key_hex)
-        .map_err(|e| anyhow!("Invalid validator key hex: {}", e))?;
+    let validator_key_hex = validator_key_hex
+        .strip_prefix("0x")
+        .unwrap_or(validator_key_hex);
+    let validator_key_bytes =
+        hex::decode(validator_key_hex).map_err(|e| anyhow!("Invalid validator key hex: {}", e))?;
 
     if validator_key_bytes.len() != 32 {
-        return Err(anyhow!("Validator key must be 32 bytes, got {}", validator_key_bytes.len()));
+        return Err(anyhow!(
+            "Validator key must be 32 bytes, got {}",
+            validator_key_bytes.len()
+        ));
     }
 
     let signing_key_secp = SigningKey::from_slice(&validator_key_bytes)
@@ -173,27 +188,22 @@ pub(crate) async fn announce_validator(
     println!("  Script Address: {}", va_address);
 
     // Compute the announcement digest (matching contract's formula)
-    let announcement_digest = compute_announcement_digest(
-        mailbox_policy_id,
-        local_domain,
-        storage_location,
-    )?;
+    let announcement_digest =
+        compute_announcement_digest(mailbox_policy_id, local_domain, storage_location)?;
     println!("\n{}", "Announcement Digest:".green());
     println!("  Hash: 0x{}", hex::encode(&announcement_digest));
 
     // Sign the digest with secp256k1 (EIP-191 style already included in digest)
     // Use sign_prehash since the digest is already a hash - don't hash again!
-    let signature: Signature = signing_key_secp.sign_prehash(&announcement_digest)
+    let signature: Signature = signing_key_secp
+        .sign_prehash(&announcement_digest)
         .map_err(|e| anyhow!("Failed to sign announcement: {:?}", e))?;
     let signature_bytes = signature.to_bytes().to_vec();
     println!("  Signature: 0x{}", hex::encode(&signature_bytes));
 
     // Check for existing announcement from this validator
-    let existing_announcement: Option<Utxo> = find_existing_announcement(
-        &client,
-        &va_address,
-        &eth_address,
-    ).await?;
+    let existing_announcement: Option<Utxo> =
+        find_existing_announcement(&client, &va_address, &eth_address).await?;
 
     // Check for bare UTXO at script address (for new announcements)
     let bare_utxo: Option<Utxo> = if existing_announcement.is_none() {
@@ -239,11 +249,17 @@ pub(crate) async fn announce_validator(
         }
         (None, None) => {
             // Need to create a seed UTXO first
-            println!("\n{}", "No spendable UTXO found at validator announce address.".yellow());
+            println!(
+                "\n{}",
+                "No spendable UTXO found at validator announce address.".yellow()
+            );
             println!("Creating seed UTXO for new announcement...");
 
             if dry_run {
-                println!("\n{}", "[Dry run - would create seed UTXO, then announce]".yellow());
+                println!(
+                    "\n{}",
+                    "[Dry run - would create seed UTXO, then announce]".yellow()
+                );
                 return Ok(());
             }
 
@@ -253,7 +269,10 @@ pub(crate) async fn announce_validator(
             println!("  Waiting for confirmation...");
 
             // Track the spent UTXO so we don't try to reuse it
-            spent_utxos.push((seed_result.spent_utxo_hash.clone(), seed_result.spent_utxo_index));
+            spent_utxos.push((
+                seed_result.spent_utxo_hash.clone(),
+                seed_result.spent_utxo_index,
+            ));
 
             // Wait for confirmation with retry
             let mut retries = 0;
@@ -265,8 +284,11 @@ pub(crate) async fn announce_validator(
                 }
                 retries += 1;
                 if retries >= max_retries {
-                    return Err(anyhow!("Seed UTXO not found after {}s. TX: {}. Please retry.",
-                        retries * 5, seed_result.tx_hash));
+                    return Err(anyhow!(
+                        "Seed UTXO not found after {}s. TX: {}. Please retry.",
+                        retries * 5,
+                        seed_result.tx_hash
+                    ));
                 }
                 print!(".");
                 std::io::Write::flush(&mut std::io::stdout())?;
@@ -295,7 +317,9 @@ pub(crate) async fn announce_validator(
         .into_iter()
         .filter(|u| {
             let ref_str = format!("{}#{}", u.tx_hash, u.output_index);
-            !spent_utxos.iter().any(|(hash, idx)| &u.tx_hash == hash && u.output_index == *idx as u32)
+            !spent_utxos
+                .iter()
+                .any(|(hash, idx)| &u.tx_hash == hash && u.output_index == *idx as u32)
                 && !exclude_utxos.contains(&ref_str)
         })
         .collect();
@@ -307,21 +331,30 @@ pub(crate) async fn announce_validator(
     let collateral_utxo = payer_utxos
         .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
 
     // Find fee UTXO (must not have reference script)
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
-            u.lovelace >= 5_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         .unwrap_or(collateral_utxo);
 
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // Get PlutusV3 cost model
     let cost_model = client.get_plutusv3_cost_model().await?;
@@ -337,18 +370,20 @@ pub(crate) async fn announce_validator(
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let script_tx_hash: [u8; 32] = hex::decode(&script_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid script tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid script tx hash"))?;
     let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
 
     // Output lovelace (minimum for datum UTXO)
     let output_lovelace = std::cmp::max(script_utxo.lovelace, 2_000_000);
 
     // Build continuation output with datum
-    let va_output = Output::new(va_addr, output_lovelace)
-        .set_inline_datum(datum_cbor.clone());
+    let va_output = Output::new(va_addr, output_lovelace).set_inline_datum(datum_cbor.clone());
 
     // Calculate change (script execution requires higher fee for ECDSA verification)
     let fee_estimate = 2_000_000u64;
@@ -360,18 +395,30 @@ pub(crate) async fn announce_validator(
     // Build staging transaction
     let mut staging = StagingTransaction::new()
         // Script input
-        .input(Input::new(Hash::new(script_tx_hash), script_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(script_tx_hash),
+            script_utxo.output_index as u64,
+        ))
         // Fee input
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
         // Collateral
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         // Continuation output
         .output(va_output)
         // Spend redeemer (with higher execution units for ECDSA)
         .add_spend_redeemer(
             Input::new(Hash::new(script_tx_hash), script_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(pallas_txbuilder::ExUnits { mem: 14_000_000, steps: 10_000_000_000 }),
+            Some(pallas_txbuilder::ExUnits {
+                mem: 14_000_000,
+                steps: 10_000_000_000,
+            }),
         )
         // Script (embedded since not deployed as reference script)
         .script(ScriptKind::PlutusV3, script_bytes)
@@ -388,7 +435,8 @@ pub(crate) async fn announce_validator(
     }
 
     // Build the transaction
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -397,18 +445,24 @@ pub(crate) async fn announce_validator(
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = cardano_keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(cardano_keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(cardano_keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
     println!("\n  Validator Address: 0x{}", hex::encode(&eth_address));
     println!("  Storage Location: {}", storage_location);
-    println!("  Action: {}", if is_update { "Updated" } else { "Created" });
+    println!(
+        "  Action: {}",
+        if is_update { "Updated" } else { "Created" }
+    );
 
     // Update deployment_info.json with the parametrized validator_announce hash
     if let Ok(mut deployment) = ctx.load_deployment_info() {
@@ -418,7 +472,10 @@ pub(crate) async fn announce_validator(
             va.address = va_address.clone();
             va.initialized = true;
             ctx.save_deployment_info(&deployment)?;
-            println!("{}", "✓ Deployment info updated with parametrized validator_announce hash".green());
+            println!(
+                "{}",
+                "✓ Deployment info updated with parametrized validator_announce hash".green()
+            );
         }
     }
 
@@ -485,7 +542,8 @@ async fn show_announcements(ctx: &CliContext, validator_filter: Option<String>) 
             if let Some((validator_addr, storage_location)) = parse_announcement_datum(datum_val)? {
                 // Apply filter if specified
                 if let Some(ref filter) = validator_filter {
-                    let filter_normalized = filter.strip_prefix("0x").unwrap_or(filter).to_lowercase();
+                    let filter_normalized =
+                        filter.strip_prefix("0x").unwrap_or(filter).to_lowercase();
                     if !hex::encode(&validator_addr).contains(&filter_normalized) {
                         continue;
                     }
@@ -524,7 +582,11 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
 
 /// Convert uncompressed secp256k1 public key (64 bytes) to Ethereum address (20 bytes)
 fn pubkey_to_eth_address(uncompressed_pubkey: &[u8]) -> Vec<u8> {
-    assert_eq!(uncompressed_pubkey.len(), 64, "Expected 64-byte uncompressed pubkey");
+    assert_eq!(
+        uncompressed_pubkey.len(),
+        64,
+        "Expected 64-byte uncompressed pubkey"
+    );
     let hash = keccak256(uncompressed_pubkey);
     hash[12..32].to_vec()
 }
@@ -582,12 +644,14 @@ fn compute_announcement_digest(
 
 /// Parse local domain from mailbox datum
 fn parse_mailbox_domain(datum: &Option<serde_json::Value>) -> Result<u32> {
-    let datum = datum.as_ref().ok_or_else(|| anyhow!("Mailbox has no inline datum"))?;
+    let datum = datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox has no inline datum"))?;
 
     // Handle CBOR hex string format
     if let Some(hex_str) = datum.as_str() {
         let cbor_bytes = hex::decode(hex_str)?;
-        use pallas_primitives::conway::{PlutusData, BigInt};
+        use pallas_primitives::conway::{BigInt, PlutusData};
         let parsed: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
             .map_err(|e| anyhow!("Failed to decode mailbox datum: {:?}", e))?;
 
@@ -616,11 +680,14 @@ fn parse_mailbox_domain(datum: &Option<serde_json::Value>) -> Result<u32> {
 
 /// Encode policy ID (28 bytes) as CBOR parameter
 fn encode_policy_id_param(policy_id_hex: &str) -> Result<Vec<u8>> {
-    let hash_bytes = hex::decode(policy_id_hex)
-        .map_err(|e| anyhow!("Invalid policy ID hex: {}", e))?;
+    let hash_bytes =
+        hex::decode(policy_id_hex).map_err(|e| anyhow!("Invalid policy ID hex: {}", e))?;
 
     if hash_bytes.len() != 28 {
-        return Err(anyhow!("Policy ID must be 28 bytes, got {}", hash_bytes.len()));
+        return Err(anyhow!(
+            "Policy ID must be 28 bytes, got {}",
+            hash_bytes.len()
+        ));
     }
 
     // CBOR encoding: 581c (28-byte bytestring prefix) + bytes
@@ -656,7 +723,10 @@ fn build_validator_announce_datum(
         // Extract last 20 bytes if given a 32-byte H256
         validator_address[12..32].to_vec()
     } else {
-        return Err(anyhow!("Invalid validator address length: {}", validator_address.len()));
+        return Err(anyhow!(
+            "Invalid validator address length: {}",
+            validator_address.len()
+        ));
     };
     builder.bytes_hex(&hex::encode(&eth_address))?;
 
@@ -733,10 +803,7 @@ async fn find_existing_announcement(
 }
 
 /// Find bare UTXO (no datum) at script address
-async fn find_bare_utxo(
-    client: &BlockfrostClient,
-    address: &str,
-) -> Result<Option<Utxo>> {
+async fn find_bare_utxo(client: &BlockfrostClient, address: &str) -> Result<Option<Utxo>> {
     let utxos = client.get_utxos(address).await?;
 
     for utxo in utxos {
@@ -758,8 +825,10 @@ fn parse_announcement_datum(datum_val: &serde_json::Value) -> Result<Option<(Vec
                 if let PlutusData::Constr(c) = parsed {
                     let fields: Vec<&PlutusData> = c.fields.iter().collect();
                     if fields.len() >= 4 {
-                        if let (PlutusData::BoundedBytes(validator), PlutusData::BoundedBytes(storage)) =
-                            (fields[0], fields[3])
+                        if let (
+                            PlutusData::BoundedBytes(validator),
+                            PlutusData::BoundedBytes(storage),
+                        ) = (fields[0], fields[3])
                         {
                             let storage_bytes: &[u8] = storage.as_ref();
                             let storage_str = String::from_utf8(storage_bytes.to_vec())
@@ -781,8 +850,8 @@ fn parse_announcement_datum(datum_val: &serde_json::Value) -> Result<Option<(Vec
             if let (Some(v_hex), Some(s_hex)) = (validator_hex, storage_hex) {
                 let validator = hex::decode(v_hex)?;
                 let storage_bytes = hex::decode(s_hex)?;
-                let storage = String::from_utf8(storage_bytes)
-                    .unwrap_or_else(|_| s_hex.to_string());
+                let storage =
+                    String::from_utf8(storage_bytes).unwrap_or_else(|_| s_hex.to_string());
                 return Ok(Some((validator, storage)));
             }
         }
@@ -821,18 +890,25 @@ async fn create_seed_utxo(
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
 
     // Build simple transaction: send 2 ADA to script address
     let seed_amount = 2_000_000u64;
     let fee_estimate = 250_000u64; // Increased to cover varying tx sizes
-    let change = fee_utxo.lovelace.saturating_sub(seed_amount).saturating_sub(fee_estimate);
+    let change = fee_utxo
+        .lovelace
+        .saturating_sub(seed_amount)
+        .saturating_sub(fee_estimate);
 
     let current_slot = client.get_latest_slot().await?;
     let validity_end = current_slot + 7200;
 
     let mut staging = StagingTransaction::new()
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
         .output(Output::new(script_addr, seed_amount))
         .fee(fee_estimate)
         .invalid_from_slot(validity_end)
@@ -842,15 +918,19 @@ async fn create_seed_utxo(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build seed transaction: {:?}", e))?;
 
     // Sign and submit
     let signature = keypair.sign(&tx.tx_hash.0);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign seed transaction: {:?}", e))?;
 
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
     Ok(SeedCreationResult {
         tx_hash,
         spent_utxo_hash: fee_utxo.tx_hash.clone(),

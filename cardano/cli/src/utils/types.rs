@@ -55,7 +55,6 @@ pub struct Utxo {
     pub reference_script: Option<String>,
 }
 
-
 /// Native asset
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
@@ -63,7 +62,6 @@ pub struct Asset {
     pub asset_name: String,
     pub quantity: u64,
 }
-
 
 /// Parameter applied to a script
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,4 +280,3 @@ impl Default for ProtocolParams {
         }
     }
 }
-

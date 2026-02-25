@@ -172,7 +172,10 @@ fn resolve_nft_policy(ctx: &CliContext, override_policy: Option<String>) -> Resu
     if let Some(p) = override_policy {
         return Ok(p);
     }
-    println!("{}", "Auto-deriving verified message NFT policy from deployment_info...".dimmed());
+    println!(
+        "{}",
+        "Auto-deriving verified message NFT policy from deployment_info...".dimmed()
+    );
     let infra = resolve_message_infra(ctx)?;
     Ok(infra.verified_message_nft_policy)
 }
@@ -435,7 +438,10 @@ async fn receive_message(
         recipient_ref_script
     } else {
         // Look for ref script NFT: same policy, asset name "726566" ("ref")
-        match client.find_utxo_by_asset(recipient_policy, "726566").await? {
+        match client
+            .find_utxo_by_asset(recipient_policy, "726566")
+            .await?
+        {
             Some(ref_utxo) => {
                 let ref_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
                 println!("  Auto-discovered recipient ref script: {}", ref_str);
@@ -451,7 +457,9 @@ async fn receive_message(
         .iter()
         .find(|u| u.assets.is_empty() && u.lovelace >= 5_000_000 && u.reference_script.is_none())
         .ok_or_else(|| {
-            anyhow!("No suitable fee UTXO found (need >= 5 ADA without tokens or reference scripts)")
+            anyhow!(
+                "No suitable fee UTXO found (need >= 5 ADA without tokens or reference scripts)"
+            )
         })?;
 
     println!("\n{}", "Fee UTXO:".green());
@@ -541,7 +549,6 @@ async fn receive_message(
 
     Ok(())
 }
-
 
 pub fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
     let parts: Vec<&str> = s.split('#').collect();

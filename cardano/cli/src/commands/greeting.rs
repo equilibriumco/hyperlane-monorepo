@@ -17,7 +17,7 @@ use crate::utils::plutus::{
 use crate::utils::tx_builder::HyperlaneTxBuilder;
 
 use super::message::{
-    decode_body_utf8, parse_verified_message_datum, parse_utxo_ref, resolve_message_infra,
+    decode_body_utf8, parse_utxo_ref, parse_verified_message_datum, resolve_message_infra,
 };
 
 #[derive(Args)]
@@ -66,7 +66,8 @@ fn resolve_greeting_policy(ctx: &CliContext, override_policy: Option<String>) ->
     if let Some(policy) = override_policy {
         return Ok(policy);
     }
-    let deployment = ctx.load_deployment_info()
+    let deployment = ctx
+        .load_deployment_info()
         .map_err(|_| anyhow!("No --greeting-policy provided and deployment_info.json not found"))?;
     deployment
         .recipients
@@ -116,7 +117,8 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
         .find(|r| r.recipient_type == "greeting" && r.nft_policy == greeting_policy)
         .ok_or_else(|| anyhow!("Greeting recipient not found in deployment_info.json"))?;
 
-    let greeting_address = script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
+    let greeting_address =
+        script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
 
     println!("  Greeting address: {}", greeting_address);
     println!("  NFT Policy: {}", infra.verified_message_nft_policy);
@@ -183,10 +185,7 @@ async fn list_greetings(ctx: &CliContext, greeting_policy: &str, format: &str) -
                     println!("  Message ID: {}", parsed.message_id);
                     if let Some(decoded) = decode_body_utf8(&parsed.body) {
                         println!("  Body:   {}", decoded.cyan());
-                        println!(
-                            "  Result: {}",
-                            format!("Hello, {}", decoded).green()
-                        );
+                        println!("  Result: {}", format!("Hello, {}", decoded).green());
                     } else {
                         println!("  Body (hex): {}", parsed.body);
                     }
@@ -216,7 +215,8 @@ async fn receive_greeting(
         .find(|r| r.recipient_type == "greeting" && r.nft_policy == greeting_policy)
         .ok_or_else(|| anyhow!("Greeting recipient not found in deployment_info.json"))?;
 
-    let greeting_address = script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
+    let greeting_address =
+        script_hash_to_address(&greeting_info.script_hash, ctx.pallas_network())?;
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -234,9 +234,7 @@ async fn receive_greeting(
             let utxos = client.get_utxos(&greeting_address).await?;
             let pending: Vec<_> = utxos
                 .iter()
-                .filter(|u| {
-                    u.assets.iter().any(|a| a.policy_id == *message_nft_policy)
-                })
+                .filter(|u| u.assets.iter().any(|a| a.policy_id == *message_nft_policy))
                 .collect();
             match pending.len() {
                 0 => return Err(anyhow!("No pending greeting messages found")),
@@ -337,7 +335,7 @@ async fn receive_greeting(
     // Reconstruct the full Message from VerifiedMessageDatum + known constants
     let version = 3u32; // Hyperlane message version
     let destination = 2003u32; // Cardano Preview domain
-    // Recipient H256: 0x02000000 + script_hash
+                               // Recipient H256: 0x02000000 + script_hash
     let recipient_h256 = format!("02000000{}", greeting_info.script_hash);
     let recipient_redeemer = build_greeting_redeemer(
         version,
@@ -361,21 +359,17 @@ async fn receive_greeting(
     let new_count = old_count + 1;
 
     let new_datum = build_greeting_datum(&greeting_hex, new_count)?;
-    println!(
-        "  Built new greeting datum (count: {})",
-        new_count
-    );
+    println!("  Built new greeting datum (count: {})", new_count);
 
     // 5. Auto-discover recipient reference script
-    let recipient_ref_script =
-        match client.find_utxo_by_asset(greeting_policy, "726566").await? {
-            Some(ref_utxo) => {
-                let ref_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
-                println!("  Auto-discovered greeting ref script: {}", ref_str);
-                Some(ref_str)
-            }
-            None => None,
-        };
+    let recipient_ref_script = match client.find_utxo_by_asset(greeting_policy, "726566").await? {
+        Some(ref_utxo) => {
+            let ref_str = format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index);
+            println!("  Auto-discovered greeting ref script: {}", ref_str);
+            Some(ref_str)
+        }
+        None => None,
+    };
 
     // 6. Find fee UTXO
     let fee_utxos = client.get_utxos(&payer_address).await?;
@@ -383,7 +377,9 @@ async fn receive_greeting(
         .iter()
         .find(|u| u.assets.is_empty() && u.lovelace >= 5_000_000 && u.reference_script.is_none())
         .ok_or_else(|| {
-            anyhow!("No suitable fee UTXO found (need >= 5 ADA without tokens or reference scripts)")
+            anyhow!(
+                "No suitable fee UTXO found (need >= 5 ADA without tokens or reference scripts)"
+            )
         })?;
 
     println!("\n{}", "Fee UTXO:".green());

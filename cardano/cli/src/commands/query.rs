@@ -119,9 +119,13 @@ pub async fn execute(ctx: &CliContext, args: QueryArgs) -> Result<()> {
             message_id,
             mailbox_address,
         } => query_message(ctx, &message_id, mailbox_address).await,
-        QueryCommands::Recipient { script_hash, policy, history, history_limit, raw } => {
-            query_recipient(ctx, script_hash, policy, history, history_limit, raw).await
-        }
+        QueryCommands::Recipient {
+            script_hash,
+            policy,
+            history,
+            history_limit,
+            raw,
+        } => query_recipient(ctx, script_hash, policy, history, history_limit, raw).await,
     }
 }
 
@@ -148,7 +152,10 @@ async fn query_mailbox(ctx: &CliContext, mailbox_policy: Option<String>) -> Resu
         .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
 
     println!("\n{}", "Mailbox UTXO:".green());
-    println!("  TX: {}#{}", mailbox_utxo.tx_hash, mailbox_utxo.output_index);
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
     println!("  Address: {}", mailbox_utxo.address);
     println!("  Lovelace: {}", mailbox_utxo.lovelace);
 
@@ -156,16 +163,20 @@ async fn query_mailbox(ctx: &CliContext, mailbox_policy: Option<String>) -> Resu
         println!("\n{}", "Mailbox State:".green());
 
         if let Some(fields) = datum.get("fields").and_then(|f| f.as_array()) {
-            let local_domain = fields.get(0)
+            let local_domain = fields
+                .get(0)
                 .and_then(|d| d.get("int"))
                 .and_then(|i| i.as_u64());
-            let default_ism = fields.get(1)
+            let default_ism = fields
+                .get(1)
                 .and_then(|i| i.get("bytes"))
                 .and_then(|b| b.as_str());
-            let owner = fields.get(2)
+            let owner = fields
+                .get(2)
                 .and_then(|o| o.get("bytes"))
                 .and_then(|b| b.as_str());
-            let outbound_nonce = fields.get(3)
+            let outbound_nonce = fields
+                .get(3)
                 .and_then(|n| n.get("int"))
                 .and_then(|i| i.as_u64());
             // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
@@ -173,11 +184,13 @@ async fn query_mailbox(ctx: &CliContext, mailbox_policy: Option<String>) -> Resu
             let (merkle_branches_count, merkle_count) = if let Some(mt) = merkle_tree {
                 let mt_fields = mt.get("fields").and_then(|f| f.as_array());
                 if let Some(mtf) = mt_fields {
-                    let branches_count = mtf.get(0)
+                    let branches_count = mtf
+                        .get(0)
                         .and_then(|b| b.get("list"))
                         .and_then(|l| l.as_array())
                         .map(|arr| arr.len());
-                    let count = mtf.get(1)
+                    let count = mtf
+                        .get(1)
                         .and_then(|c| c.get("int"))
                         .and_then(|i| i.as_u64());
                     (branches_count, count)
@@ -276,7 +289,11 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
             }
 
             let total: u64 = utxos.iter().map(|u| u.lovelace).sum();
-            println!("\nTotal: {} lovelace ({:.2} ADA)", total, total as f64 / 1_000_000.0);
+            println!(
+                "\nTotal: {} lovelace ({:.2} ADA)",
+                total,
+                total as f64 / 1_000_000.0
+            );
         }
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&utxos)?);
@@ -372,7 +389,14 @@ async fn query_asset(ctx: &CliContext, unit: &str) -> Result<()> {
     if let Some(u) = utxo {
         println!("\n{}", "Asset Found:".green());
         println!("  Policy ID: {}", policy_id);
-        println!("  Asset Name: {}", if asset_name.is_empty() { "(empty)" } else { asset_name });
+        println!(
+            "  Asset Name: {}",
+            if asset_name.is_empty() {
+                "(empty)"
+            } else {
+                asset_name
+            }
+        );
         println!("  Location: {}#{}", u.tx_hash, u.output_index);
         println!("  Address: {}", u.address);
     } else {
@@ -414,8 +438,17 @@ async fn query_message(
         if let Some(datum) = &utxo.inline_datum {
             // Check if this is a ProcessedMessageDatum with matching message_id
             if let Some(fields) = datum.get("fields").and_then(|f| f.as_array()) {
-                if let Some(id) = fields.get(0).and_then(|i| i.get("bytes")).and_then(|b| b.as_str()) {
-                    if id.to_lowercase() == message_id.to_lowercase().strip_prefix("0x").unwrap_or(message_id) {
+                if let Some(id) = fields
+                    .get(0)
+                    .and_then(|i| i.get("bytes"))
+                    .and_then(|b| b.as_str())
+                {
+                    if id.to_lowercase()
+                        == message_id
+                            .to_lowercase()
+                            .strip_prefix("0x")
+                            .unwrap_or(message_id)
+                    {
                         println!("\n{}", "Message PROCESSED:".green().bold());
                         println!("  UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
                         return Ok(());
@@ -470,9 +503,13 @@ async fn query_recipient(
     };
 
     println!("\n{}", "Recipient UTXO:".green());
-    println!("  TX: {}#{}", recipient_utxo.tx_hash, recipient_utxo.output_index);
+    println!(
+        "  TX: {}#{}",
+        recipient_utxo.tx_hash, recipient_utxo.output_index
+    );
     println!("  Address: {}", recipient_utxo.address);
-    println!("  Lovelace: {} ({:.2} ADA)",
+    println!(
+        "  Lovelace: {} ({:.2} ADA)",
         recipient_utxo.lovelace,
         recipient_utxo.lovelace as f64 / 1_000_000.0
     );
@@ -491,7 +528,8 @@ async fn query_recipient(
                     Err(_) => asset.asset_name.clone(),
                 }
             };
-            println!("  {} x {} (policy: {}...)",
+            println!(
+                "  {} x {} (policy: {}...)",
                 asset.quantity,
                 name_display,
                 &asset.policy_id[..16]
@@ -517,9 +555,15 @@ async fn query_recipient(
         };
 
         if let Some((ism, nonce, messages_received, last_message)) = parsed {
-            println!("  ISM Override: {}", ism.as_deref().unwrap_or("None (using default)"));
-            println!("  Last Processed Nonce: {}",
-                nonce.map(|n| n.to_string()).unwrap_or_else(|| "None".to_string())
+            println!(
+                "  ISM Override: {}",
+                ism.as_deref().unwrap_or("None (using default)")
+            );
+            println!(
+                "  Last Processed Nonce: {}",
+                nonce
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "None".to_string())
             );
 
             println!("\n{}", "Message Statistics:".cyan());
@@ -531,13 +575,19 @@ async fn query_recipient(
 
                 // Try to decode as UTF-8
                 if let Ok(text) = String::from_utf8(msg_bytes.clone()) {
-                    if text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t') {
+                    if text
+                        .chars()
+                        .all(|c| !c.is_control() || c == '\n' || c == '\t')
+                    {
                         println!("  UTF-8: {}", text);
                     }
                 }
                 println!("  Length: {} bytes", msg_bytes.len());
             } else {
-                println!("\n{}", "Last Message: None (no messages received yet)".yellow());
+                println!(
+                    "\n{}",
+                    "Last Message: None (no messages received yet)".yellow()
+                );
             }
         } else {
             println!("  (Could not parse datum structure)");
@@ -554,11 +604,16 @@ async fn query_recipient(
     // Show message history if requested
     if history {
         println!("\n{}", "=".repeat(60));
-        println!("{}", "Message History (from transaction history):".cyan().bold());
+        println!(
+            "{}",
+            "Message History (from transaction history):".cyan().bold()
+        );
         println!("{}", "=".repeat(60));
 
         // Get transaction history for this address
-        let txs = client.get_address_transactions(&recipient_address, history_limit).await?;
+        let txs = client
+            .get_address_transactions(&recipient_address, history_limit)
+            .await?;
         println!("Scanning {} transactions...\n", txs.len());
 
         let mut messages: Vec<(String, u64, Option<i64>, Option<Vec<u8>>)> = Vec::new();
@@ -584,7 +639,12 @@ async fn query_recipient(
                                 // This filters out the initialization transaction
                                 if nonce.is_some() {
                                     // Store: tx_hash, block_time, nonce, message
-                                    messages.push((tx.tx_hash.clone(), tx.block_time, nonce, last_msg));
+                                    messages.push((
+                                        tx.tx_hash.clone(),
+                                        tx.block_time,
+                                        nonce,
+                                        last_msg,
+                                    ));
                                 }
                             }
                         }
@@ -609,7 +669,9 @@ async fn query_recipient(
             println!("Found {} messages:\n", messages.len());
 
             for (i, (tx_hash, block_time, nonce, msg)) in messages.iter().enumerate() {
-                let nonce_str = nonce.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string());
+                let nonce_str = nonce
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string());
 
                 // Format timestamp
                 let datetime = chrono::DateTime::from_timestamp(*block_time as i64, 0)
@@ -617,7 +679,11 @@ async fn query_recipient(
                     .unwrap_or_else(|| block_time.to_string());
 
                 println!("{}. [Nonce {}] - {}", i + 1, nonce_str, datetime);
-                println!("   TX: {}...{}", &tx_hash[..8], &tx_hash[tx_hash.len()-8..]);
+                println!(
+                    "   TX: {}...{}",
+                    &tx_hash[..8],
+                    &tx_hash[tx_hash.len() - 8..]
+                );
 
                 if let Some(msg_bytes) = msg {
                     let hex_str = hex::encode(msg_bytes);
@@ -629,7 +695,10 @@ async fn query_recipient(
 
                     // Try UTF-8 decode
                     if let Ok(text) = String::from_utf8(msg_bytes.clone()) {
-                        if text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t') {
+                        if text
+                            .chars()
+                            .all(|c| !c.is_control() || c == '\n' || c == '\t')
+                        {
                             if text.len() <= 80 {
                                 println!("   UTF-8: {}", text);
                             } else {
@@ -664,7 +733,10 @@ fn parse_option_bytes(value: Option<&serde_json::Value>) -> Option<String> {
         // Some
         let fields = v.get("fields")?.as_array()?;
         let inner = fields.get(0)?;
-        inner.get("bytes").and_then(|b| b.as_str()).map(String::from)
+        inner
+            .get("bytes")
+            .and_then(|b| b.as_str())
+            .map(String::from)
     } else {
         None
     }
@@ -689,7 +761,9 @@ fn parse_option_int(value: Option<&serde_json::Value>) -> Option<i64> {
 
 /// Parse HyperlaneRecipientDatum from CBOR hex string
 /// Returns: (ism: Option<String>, nonce: Option<i64>, messages_received: u64, last_message: Option<Vec<u8>>)
-fn parse_cbor_recipient_datum(hex_str: &str) -> Option<(Option<String>, Option<i64>, u64, Option<Vec<u8>>)> {
+fn parse_cbor_recipient_datum(
+    hex_str: &str,
+) -> Option<(Option<String>, Option<i64>, u64, Option<Vec<u8>>)> {
     use ciborium::Value;
 
     let bytes = hex::decode(hex_str).ok()?;
@@ -740,13 +814,16 @@ fn parse_cbor_recipient_datum(hex_str: &str) -> Option<(Option<String>, Option<i
                 // Constructor 0 with fields: [messages_received, last_message]
                 if let Value::Tag(121, inner_box) = &fields[2] {
                     if let Value::Array(inner_fields) = inner_box.as_ref() {
-                        let messages_received = inner_fields.first().and_then(|v| {
-                            if let Value::Integer(i) = v {
-                                u64::try_from(*i).ok()
-                            } else {
-                                None
-                            }
-                        }).unwrap_or(0);
+                        let messages_received = inner_fields
+                            .first()
+                            .and_then(|v| {
+                                if let Value::Integer(i) = v {
+                                    u64::try_from(*i).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
 
                         let last_message = inner_fields.get(1).and_then(|v| {
                             // Option<ByteArray>
@@ -778,7 +855,9 @@ fn parse_cbor_recipient_datum(hex_str: &str) -> Option<(Option<String>, Option<i
 }
 
 /// Parse HyperlaneRecipientDatum from JSON (when Blockfrost decodes it)
-fn parse_json_recipient_datum(datum: &serde_json::Value) -> Option<(Option<String>, Option<i64>, u64, Option<Vec<u8>>)> {
+fn parse_json_recipient_datum(
+    datum: &serde_json::Value,
+) -> Option<(Option<String>, Option<i64>, u64, Option<Vec<u8>>)> {
     let fields = datum.get("fields")?.as_array()?;
 
     // Field 0: ism (Option<ScriptHash>)
@@ -791,13 +870,14 @@ fn parse_json_recipient_datum(datum: &serde_json::Value) -> Option<(Option<Strin
     let inner = fields.get(2)?;
     let inner_fields = inner.get("fields")?.as_array()?;
 
-    let messages_received = inner_fields.get(0)
+    let messages_received = inner_fields
+        .get(0)
         .and_then(|m| m.get("int"))
         .and_then(|i| i.as_u64())
         .unwrap_or(0);
 
-    let last_message = parse_option_bytes(inner_fields.get(1))
-        .and_then(|hex_str| hex::decode(&hex_str).ok());
+    let last_message =
+        parse_option_bytes(inner_fields.get(1)).and_then(|hex_str| hex::decode(&hex_str).ok());
 
     Some((ism, nonce, messages_received, last_message))
 }

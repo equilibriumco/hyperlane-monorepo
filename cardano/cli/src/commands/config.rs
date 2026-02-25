@@ -106,29 +106,37 @@ pub async fn execute(ctx: &CliContext, args: ConfigArgs) -> Result<()> {
             metrics_port,
             index_from,
             dry_run,
-        } => update_validator(ctx, config_path, chain_name, validator_key, checkpoint_path, db_path, metrics_port, index_from, dry_run).await,
+        } => {
+            update_validator(
+                ctx,
+                config_path,
+                chain_name,
+                validator_key,
+                checkpoint_path,
+                db_path,
+                metrics_port,
+                index_from,
+                dry_run,
+            )
+            .await
+        }
         ConfigCommands::Show {
             config_path,
             chain_name,
         } => show_config(ctx, config_path, chain_name).await,
-        ConfigCommands::GenerateEnv {
-            output,
-            dry_run,
-        } => generate_env(ctx, output, dry_run).await,
+        ConfigCommands::GenerateEnv { output, dry_run } => generate_env(ctx, output, dry_run).await,
     }
 }
 
 fn get_config_path(ctx: &CliContext, config_path: Option<String>, filename: &str) -> PathBuf {
-    config_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // Default: go up from deployments dir and into config
-            ctx.deployments_dir
-                .parent()
-                .unwrap_or(&ctx.deployments_dir)
-                .join("config")
-                .join(filename)
-        })
+    config_path.map(PathBuf::from).unwrap_or_else(|| {
+        // Default: go up from deployments dir and into config
+        ctx.deployments_dir
+            .parent()
+            .unwrap_or(&ctx.deployments_dir)
+            .join("config")
+            .join(filename)
+    })
 }
 
 fn get_relayer_config_path(ctx: &CliContext, config_path: Option<String>) -> PathBuf {
@@ -153,7 +161,10 @@ async fn update_relayer(
 
     // Load deployment info
     let deployment = ctx.load_deployment_info()?;
-    println!("  Loaded deployment info for network: {}", deployment.network);
+    println!(
+        "  Loaded deployment info for network: {}",
+        deployment.network
+    );
 
     let config_file = get_relayer_config_path(ctx, config_path);
     let chain = get_chain_name(ctx, chain_name);
@@ -165,10 +176,12 @@ async fn update_relayer(
     let mut config: Value = if config_file.exists() {
         let content = std::fs::read_to_string(&config_file)
             .with_context(|| format!("Failed to read config file: {:?}", config_file))?;
-        serde_json::from_str(&content)
-            .with_context(|| "Failed to parse relayer config")?
+        serde_json::from_str(&content).with_context(|| "Failed to parse relayer config")?
     } else {
-        println!("  {} Config file does not exist, creating new one", "[NEW]".yellow());
+        println!(
+            "  {} Config file does not exist, creating new one",
+            "[NEW]".yellow()
+        );
         create_default_config()
     };
 
@@ -178,15 +191,24 @@ async fn update_relayer(
     }
 
     // Get or create the chain config
-    let chains = config["chains"].as_object_mut()
+    let chains = config["chains"]
+        .as_object_mut()
         .ok_or_else(|| anyhow!("chains must be an object"))?;
 
     if !chains.contains_key(&chain) {
-        println!("  {} Chain '{}' does not exist, creating", "[NEW]".yellow(), chain);
-        chains.insert(chain.clone(), create_default_cardano_chain(&chain, ctx.network()));
+        println!(
+            "  {} Chain '{}' does not exist, creating",
+            "[NEW]".yellow(),
+            chain
+        );
+        chains.insert(
+            chain.clone(),
+            create_default_cardano_chain(&chain, ctx.network()),
+        );
     }
 
-    let chain_config = chains.get_mut(&chain)
+    let chain_config = chains
+        .get_mut(&chain)
         .ok_or_else(|| anyhow!("Chain config not found"))?;
 
     // Update the connection object
@@ -194,14 +216,16 @@ async fn update_relayer(
         chain_config["connection"] = json!({});
     }
 
-    let connection = chain_config["connection"].as_object_mut()
+    let connection = chain_config["connection"]
+        .as_object_mut()
         .ok_or_else(|| anyhow!("connection must be an object"))?;
 
     println!("\n{}", "Updating Cardano configuration:".green());
 
     // Helper to get old value before updating
     fn get_old_value(connection: &serde_json::Map<String, Value>, key: &str) -> String {
-        connection.get(key)
+        connection
+            .get(key)
             .and_then(|v| v.as_str())
             .unwrap_or("(not set)")
             .to_string()
@@ -254,7 +278,11 @@ async fn update_relayer(
 
         // Update Hyperlane-format mailbox address (0x02000000 prefix for Cardano)
         let hyperlane_mailbox = format!("0x02000000{}", mailbox.hash);
-        chain_updates.push(("mailbox".to_string(), json!(hyperlane_mailbox.clone()), hyperlane_mailbox));
+        chain_updates.push((
+            "mailbox".to_string(),
+            json!(hyperlane_mailbox.clone()),
+            hyperlane_mailbox,
+        ));
     }
 
     // Update ISM info
@@ -300,7 +328,11 @@ async fn update_relayer(
 
         // Update Hyperlane-format ISM address
         let hyperlane_ism = format!("0x02000000{}", ism.hash);
-        chain_updates.push(("interchainSecurityModule".to_string(), json!(hyperlane_ism.clone()), hyperlane_ism));
+        chain_updates.push((
+            "interchainSecurityModule".to_string(),
+            json!(hyperlane_ism.clone()),
+            hyperlane_ism,
+        ));
     }
 
     // Generate processed_message_nft policy (parameterized with mailbox_policy_id)
@@ -310,10 +342,14 @@ async fn update_relayer(
         println!("\n{}", "Generating processed_message_nft policy...".cyan());
 
         // Get the mailbox_policy_id (state NFT policy) - this is stable across upgrades
-        let mailbox_policy_id = mailbox.state_nft.as_ref()
+        let mailbox_policy_id = mailbox
+            .state_nft
+            .as_ref()
             .map(|nft| nft.policy_id.clone())
             .or_else(|| mailbox.state_nft_policy.clone())
-            .ok_or_else(|| anyhow!("Mailbox state NFT policy not found. Ensure mailbox is initialized."))?;
+            .ok_or_else(|| {
+                anyhow!("Mailbox state NFT policy not found. Ensure mailbox is initialized.")
+            })?;
 
         // Apply mailbox_policy_id parameter to processed_message_nft validator
         let mailbox_policy_param = encode_script_hash_param(&mailbox_policy_id)
@@ -328,7 +364,10 @@ async fn update_relayer(
             &mailbox_policy_param_hex,
         ) {
             Ok(applied) => {
-                println!("  Applied mailbox_policy_id parameter: {}", mailbox_policy_id);
+                println!(
+                    "  Applied mailbox_policy_id parameter: {}",
+                    mailbox_policy_id
+                );
                 println!("  Resulting policy ID: {}", applied.policy_id.green());
 
                 let old_policy = get_old_value(connection, "processedMessagesNftPolicyId");
@@ -348,13 +387,24 @@ async fn update_relayer(
                 connection_updates.push((
                     "processedMessagesNftScriptCbor".to_string(),
                     json!(applied.compiled_code.clone()),
-                    if old_cbor.len() > 40 { format!("{}...", &old_cbor[..40]) } else { old_cbor },
+                    if old_cbor.len() > 40 {
+                        format!("{}...", &old_cbor[..40])
+                    } else {
+                        old_cbor
+                    },
                     cbor_display,
                 ));
             }
             Err(e) => {
-                println!("  {} Failed to apply processed_message_nft parameter: {}", "[WARN]".yellow(), e);
-                println!("  {} NFT-based message lookup will not be available", "[WARN]".yellow());
+                println!(
+                    "  {} Failed to apply processed_message_nft parameter: {}",
+                    "[WARN]".yellow(),
+                    e
+                );
+                println!(
+                    "  {} NFT-based message lookup will not be available",
+                    "[WARN]".yellow()
+                );
             }
         }
     }
@@ -385,7 +435,9 @@ async fn update_relayer(
 
     // Generate verified_message_nft policy
     if let Some(ref mailbox) = deployment.mailbox {
-        let mailbox_policy_id = mailbox.state_nft.as_ref()
+        let mailbox_policy_id = mailbox
+            .state_nft
+            .as_ref()
             .map(|nft| nft.policy_id.clone())
             .or_else(|| mailbox.state_nft_policy.clone());
 
@@ -403,7 +455,10 @@ async fn update_relayer(
                 &param_hex,
             ) {
                 Ok(applied) => {
-                    println!("  Verified message NFT policy: {}", applied.policy_id.green());
+                    println!(
+                        "  Verified message NFT policy: {}",
+                        applied.policy_id.green()
+                    );
 
                     let old = get_old_value(connection, "verifiedMessageNftPolicyId");
                     connection_updates.push((
@@ -422,12 +477,20 @@ async fn update_relayer(
                     connection_updates.push((
                         "verifiedMessageNftScriptCbor".to_string(),
                         json!(applied.compiled_code.clone()),
-                        if old_cbor.len() > 40 { format!("{}...", &old_cbor[..40]) } else { old_cbor },
+                        if old_cbor.len() > 40 {
+                            format!("{}...", &old_cbor[..40])
+                        } else {
+                            old_cbor
+                        },
                         cbor_display,
                     ));
                 }
                 Err(e) => {
-                    println!("  {} Failed to generate verified_message_nft policy: {}", "[WARN]".yellow(), e);
+                    println!(
+                        "  {} Failed to generate verified_message_nft policy: {}",
+                        "[WARN]".yellow(),
+                        e
+                    );
                 }
             }
         }
@@ -512,7 +575,10 @@ async fn update_validator(
 
     // Load deployment info
     let deployment = ctx.load_deployment_info()?;
-    println!("  Loaded deployment info for network: {}", deployment.network);
+    println!(
+        "  Loaded deployment info for network: {}",
+        deployment.network
+    );
 
     let config_file = get_validator_config_path(ctx, config_path);
     let chain = get_chain_name(ctx, chain_name.clone());
@@ -521,9 +587,13 @@ async fn update_validator(
     println!("  Chain name: {}", chain);
 
     // Validate required fields
-    let mailbox = deployment.mailbox.as_ref()
+    let mailbox = deployment
+        .mailbox
+        .as_ref()
         .ok_or_else(|| anyhow!("Mailbox not deployed. Run 'deploy mailbox' first."))?;
-    let ism = deployment.ism.as_ref()
+    let ism = deployment
+        .ism
+        .as_ref()
         .ok_or_else(|| anyhow!("ISM not deployed. Run 'deploy ism' first."))?;
 
     // Get or prompt for validator key
@@ -540,13 +610,17 @@ async fn update_validator(
             println!("\n{}", "No validator key provided!".yellow());
             println!("  Use --validator-key or set VALIDATOR_HEX_KEY environment variable");
             println!("  Example: --validator-key 0x1234...abcd");
-            return Err(anyhow!("Validator key is required. Use --validator-key or VALIDATOR_HEX_KEY env var."));
+            return Err(anyhow!(
+                "Validator key is required. Use --validator-key or VALIDATOR_HEX_KEY env var."
+            ));
         }
     };
 
     // Validate key format (should be 64 hex chars + 0x prefix = 66 chars)
     if validator_key.len() != 66 || !validator_key[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(anyhow!("Invalid validator key format. Expected 32 bytes (64 hex chars) with 0x prefix."));
+        return Err(anyhow!(
+            "Invalid validator key format. Expected 32 bytes (64 hex chars) with 0x prefix."
+        ));
     }
 
     println!("\n{}", "Building validator configuration:".green());
@@ -593,7 +667,8 @@ async fn update_validator(
 
     // Add mailbox reference script UTXO
     if let Some(ref ref_utxo) = mailbox.reference_script_utxo {
-        connection["mailboxReferenceScriptUtxo"] = json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+        connection["mailboxReferenceScriptUtxo"] =
+            json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
     }
 
     // Add ISM NFT info
@@ -604,7 +679,8 @@ async fn update_validator(
 
     // Add ISM reference script UTXO
     if let Some(ref ref_utxo) = ism.reference_script_utxo {
-        connection["ismReferenceScriptUtxo"] = json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+        connection["ismReferenceScriptUtxo"] =
+            json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
     }
 
     // Add processed messages NFT policy (for O(1) lookups)
@@ -626,7 +702,11 @@ async fn update_validator(
                 connection["processedMessagesNftScriptCbor"] = json!(applied.compiled_code);
             }
             Err(e) => {
-                println!("  {} Failed to generate processed_message_nft policy: {}", "[WARN]".yellow(), e);
+                println!(
+                    "  {} Failed to generate processed_message_nft policy: {}",
+                    "[WARN]".yellow(),
+                    e
+                );
             }
         }
     }
@@ -711,12 +791,23 @@ async fn update_validator(
         std::fs::write(&config_file, content)
             .with_context(|| format!("Failed to write config file: {:?}", config_file))?;
 
-        println!("\n{}", "Validator configuration generated successfully!".green().bold());
+        println!(
+            "\n{}",
+            "Validator configuration generated successfully!"
+                .green()
+                .bold()
+        );
         println!("  File: {:?}", config_file);
         println!("\n{}", "Next steps:".cyan());
         println!("  1. Set BLOCKFROST_API_KEY environment variable");
-        println!("  2. Create checkpoint directory: mkdir -p {}", checkpoint_path);
-        println!("  3. Run validator: CONFIG_FILES={:?} ./validator", config_file);
+        println!(
+            "  2. Create checkpoint directory: mkdir -p {}",
+            checkpoint_path
+        );
+        println!(
+            "  3. Run validator: CONFIG_FILES={:?} ./validator",
+            config_file
+        );
     }
 
     Ok(())
@@ -741,12 +832,10 @@ async fn show_config(
 
     let content = std::fs::read_to_string(&config_file)
         .with_context(|| format!("Failed to read config file: {:?}", config_file))?;
-    let config: Value = serde_json::from_str(&content)
-        .with_context(|| "Failed to parse relayer config")?;
+    let config: Value =
+        serde_json::from_str(&content).with_context(|| "Failed to parse relayer config")?;
 
-    let chain_config = config
-        .get("chains")
-        .and_then(|c| c.get(&chain));
+    let chain_config = config.get("chains").and_then(|c| c.get(&chain));
 
     match chain_config {
         Some(cc) => {
@@ -754,10 +843,16 @@ async fn show_config(
             println!("{}", serde_json::to_string_pretty(cc)?);
         }
         None => {
-            println!("\n{}", format!("Chain '{}' not found in config", chain).yellow());
+            println!(
+                "\n{}",
+                format!("Chain '{}' not found in config", chain).yellow()
+            );
 
             if let Some(chains) = config.get("chains").and_then(|c| c.as_object()) {
-                println!("Available chains: {}", chains.keys().cloned().collect::<Vec<_>>().join(", "));
+                println!(
+                    "Available chains: {}",
+                    chains.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
             }
         }
     }
@@ -821,11 +916,7 @@ fn create_default_cardano_chain(chain_name: &str, network: &str) -> Value {
     })
 }
 
-async fn generate_env(
-    ctx: &CliContext,
-    output: Option<String>,
-    dry_run: bool,
-) -> Result<()> {
+async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -> Result<()> {
     println!("{}", "Generating .env file from deployment info...".cyan());
 
     let deployment = ctx.load_deployment_info()?;
@@ -852,7 +943,10 @@ async fn generate_env(
             lines.push(format!("CARDANO_MAILBOX_POLICY_ID={}", pid));
         }
         if let Some(ref ref_utxo) = mailbox.reference_script_utxo {
-            lines.push(format!("CARDANO_MAILBOX_REF_UTXO={}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+            lines.push(format!(
+                "CARDANO_MAILBOX_REF_UTXO={}#{}",
+                ref_utxo.tx_hash, ref_utxo.output_index
+            ));
         }
         lines.push(String::new());
     }
@@ -866,7 +960,10 @@ async fn generate_env(
             lines.push(format!("CARDANO_ISM_POLICY_ID={}", nft.policy_id));
         }
         if let Some(ref ref_utxo) = ism.reference_script_utxo {
-            lines.push(format!("CARDANO_ISM_REF_UTXO={}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
+            lines.push(format!(
+                "CARDANO_ISM_REF_UTXO={}#{}",
+                ref_utxo.tx_hash, ref_utxo.output_index
+            ));
         }
         lines.push(String::new());
     }
@@ -892,7 +989,9 @@ async fn generate_env(
 
     // Derived parameterized values
     if let Some(ref mailbox) = deployment.mailbox {
-        let mailbox_policy_id = mailbox.state_nft.as_ref()
+        let mailbox_policy_id = mailbox
+            .state_nft
+            .as_ref()
             .map(|nft| nft.policy_id.clone())
             .or_else(|| mailbox.state_nft_policy.clone());
 
@@ -902,21 +1001,33 @@ async fn generate_env(
 
             // Processed messages NFT
             if let Ok(applied) = apply_validator_param_with_purpose(
-                &ctx.contracts_dir, "processed_message_nft", "processed_message_nft",
-                Some("mint"), &param_hex,
+                &ctx.contracts_dir,
+                "processed_message_nft",
+                "processed_message_nft",
+                Some("mint"),
+                &param_hex,
             ) {
                 lines.push("# Processed Messages NFT".to_string());
-                lines.push(format!("CARDANO_PROCESSED_MSG_POLICY_ID={}", applied.policy_id));
+                lines.push(format!(
+                    "CARDANO_PROCESSED_MSG_POLICY_ID={}",
+                    applied.policy_id
+                ));
                 lines.push(String::new());
             }
 
             // Verified message NFT
             if let Ok(verified_applied) = apply_validator_param_with_purpose(
-                &ctx.contracts_dir, "verified_message_nft", "verified_message_nft",
-                Some("mint"), &param_hex,
+                &ctx.contracts_dir,
+                "verified_message_nft",
+                "verified_message_nft",
+                Some("mint"),
+                &param_hex,
             ) {
                 lines.push("# Verified Message NFT".to_string());
-                lines.push(format!("CARDANO_VERIFIED_MSG_POLICY_ID={}", verified_applied.policy_id));
+                lines.push(format!(
+                    "CARDANO_VERIFIED_MSG_POLICY_ID={}",
+                    verified_applied.policy_id
+                ));
                 lines.push(String::new());
             }
         }
@@ -932,12 +1043,18 @@ async fn generate_env(
         } else {
             format!("CARDANO_{}_WARP", label)
         };
-        lines.push(format!("# Warp Route: {} ({})", warp.warp_type, warp.address));
+        lines.push(format!(
+            "# Warp Route: {} ({})",
+            warp.warp_type, warp.address
+        ));
         lines.push(format!("{}_NFT_POLICY={}", prefix, warp.nft_policy));
         lines.push(format!("{}_SCRIPT_HASH={}", prefix, warp.script_hash));
         lines.push(format!("{}_ADDRESS={}", prefix, warp.address));
         if let Some(ref ref_utxo) = warp.reference_script_utxo {
-            lines.push(format!("{}_REF_UTXO={}#{}", prefix, ref_utxo.tx_hash, ref_utxo.output_index));
+            lines.push(format!(
+                "{}_REF_UTXO={}#{}",
+                prefix, ref_utxo.tx_hash, ref_utxo.output_index
+            ));
         }
         if let Some(ref tp) = warp.token_policy {
             lines.push(format!("{}_TOKEN_POLICY={}", prefix, tp));
@@ -981,7 +1098,13 @@ async fn generate_env(
 
         println!("\n{}", "Environment file generated!".green().bold());
         println!("  File: {}", output_path);
-        println!("  Variables: {}", lines.iter().filter(|l| l.contains('=') && !l.starts_with('#')).count());
+        println!(
+            "  Variables: {}",
+            lines
+                .iter()
+                .filter(|l| l.contains('=') && !l.starts_with('#'))
+                .count()
+        );
     }
 
     Ok(())

@@ -102,13 +102,18 @@ async fn deploy_token(
                 .cloned()
                 .ok_or_else(|| anyhow!("UTXO not found"))?
         }
-        None => {
-            utxos
-                .iter()
-                .find(|u| u.lovelace >= min_required && u.assets.is_empty() && u.reference_script.is_none())
-                .cloned()
-                .ok_or_else(|| anyhow!("No suitable UTXO found (need >= {} ADA without assets or reference scripts)", min_required / 1_000_000))?
-        }
+        None => utxos
+            .iter()
+            .find(|u| {
+                u.lovelace >= min_required && u.assets.is_empty() && u.reference_script.is_none()
+            })
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "No suitable UTXO found (need >= {} ADA without assets or reference scripts)",
+                    min_required / 1_000_000
+                )
+            })?,
     };
 
     // Find collateral UTXO
@@ -123,8 +128,16 @@ async fn deploy_token(
         .cloned()
         .ok_or_else(|| anyhow!("No suitable collateral UTXO found (need a second UTXO with >= 5 ADA without reference scripts)"))?;
 
-    println!("  Input UTXO: {}#{} ({} ADA)", input_utxo.tx_hash, input_utxo.output_index, input_utxo.lovelace / 1_000_000);
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
+    println!(
+        "  Input UTXO: {}#{} ({} ADA)",
+        input_utxo.tx_hash,
+        input_utxo.output_index,
+        input_utxo.lovelace / 1_000_000
+    );
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
 
     // Encode output reference for test_token parameter
     let output_ref_cbor = encode_output_reference(&input_utxo.tx_hash, input_utxo.output_index)?;
@@ -133,7 +146,12 @@ async fn deploy_token(
 
     // Apply parameter to test_token minting policy
     println!("\n{}", "Applying test_token parameter...".cyan());
-    let applied = apply_validator_param(&ctx.contracts_dir, "test_token", "test_token", &output_ref_hex)?;
+    let applied = apply_validator_param(
+        &ctx.contracts_dir,
+        "test_token",
+        "test_token",
+        &output_ref_hex,
+    )?;
     println!("  Test Token Policy ID: {}", applied.policy_id.green());
 
     // Asset name bytes
@@ -143,8 +161,14 @@ async fn deploy_token(
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
         println!("\nTransaction would:");
-        println!("  - Spend UTXO {}#{}", input_utxo.tx_hash, input_utxo.output_index);
-        println!("  - Mint {} tokens with policy {}", amount, applied.policy_id);
+        println!(
+            "  - Spend UTXO {}#{}",
+            input_utxo.tx_hash, input_utxo.output_index
+        );
+        println!(
+            "  - Mint {} tokens with policy {}",
+            amount, applied.policy_id
+        );
         println!("  - Send tokens to {}", payer_address);
         println!("\nTo bridge these tokens, use:");
         println!("  hyperlane-cardano warp deploy \\");
@@ -156,8 +180,8 @@ async fn deploy_token(
 
     // Build and submit transaction
     println!("\n{}", "Building transaction...".cyan());
-    let mint_script_cbor = hex::decode(&applied.compiled_code)
-        .with_context(|| "Invalid script CBOR")?;
+    let mint_script_cbor =
+        hex::decode(&applied.compiled_code).with_context(|| "Invalid script CBOR")?;
 
     let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
     let built_tx = tx_builder
@@ -197,9 +221,15 @@ async fn deploy_token(
     });
     std::fs::write(&token_info_path, serde_json::to_string_pretty(&token_info)?)?;
 
-    println!("\n{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!("{}", "Test Token Deployment Summary".green().bold());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!();
     println!("{}", "Token Info:".cyan());
     println!("  Policy ID: {}", applied.policy_id.green());
@@ -210,9 +240,15 @@ async fn deploy_token(
     println!("{}", "Saved to:".cyan());
     println!("  {:?}", token_info_path);
     println!();
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!("{}", "To deploy a warp route for this token, run:".yellow());
-    println!("{}", "═══════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
     println!();
     println!("  hyperlane-cardano warp deploy \\");
     println!("    --policy-id {} \\", applied.policy_id);

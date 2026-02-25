@@ -4,7 +4,9 @@ use anyhow::{anyhow, Context, Result};
 use blake2::digest::{consts::U28, Digest};
 use blake2::Blake2b;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use pallas_addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart};
+use pallas_addresses::{
+    Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+};
 use pallas_crypto::key::ed25519::{PublicKey as PallasPublicKey, SecretKey as PallasSecretKey};
 use std::path::Path;
 
@@ -34,7 +36,11 @@ impl Keypair {
         let public_key_bytes = signing_key.verifying_key().to_bytes();
         let payment_cred_hash = blake2b_224(&public_key_bytes);
 
-        Ok(Self { signing_key, pallas_public, payment_cred_hash })
+        Ok(Self {
+            signing_key,
+            pallas_public,
+            payment_cred_hash,
+        })
     }
 
     /// Load keypair from a file (supports Cardano CLI JSON format or raw hex)
@@ -47,8 +53,7 @@ impl Keypair {
             if let Some(cbor_hex) = json.get("cborHex").and_then(|v| v.as_str()) {
                 // CBOR format: 5820 (32-byte bytestring prefix) + key
                 let hex_key = cbor_hex.strip_prefix("5820").unwrap_or(cbor_hex);
-                let bytes = hex::decode(hex_key)
-                    .with_context(|| "Failed to decode cborHex")?;
+                let bytes = hex::decode(hex_key).with_context(|| "Failed to decode cborHex")?;
                 return Self::from_secret_key(&bytes);
             }
         }
@@ -57,8 +62,7 @@ impl Keypair {
         let trimmed = content.trim();
         let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
         if hex_str.len() == 64 {
-            let bytes = hex::decode(hex_str)
-                .with_context(|| "Failed to decode hex key")?;
+            let bytes = hex::decode(hex_str).with_context(|| "Failed to decode hex key")?;
             return Self::from_secret_key(&bytes);
         }
 
@@ -96,7 +100,11 @@ impl Keypair {
     pub fn address(&self, network: Network) -> Address {
         let vkh = self.verification_key_hash();
         let payment = ShelleyPaymentPart::key_hash(pallas_crypto::hash::Hash::new(vkh));
-        Address::Shelley(ShelleyAddress::new(network, payment, ShelleyDelegationPart::Null))
+        Address::Shelley(ShelleyAddress::new(
+            network,
+            payment,
+            ShelleyDelegationPart::Null,
+        ))
     }
 
     /// Get the bech32 address string
@@ -142,20 +150,25 @@ pub fn script_hash(cbor_code: &[u8]) -> [u8; 28] {
 
 /// Compute script hash from hex-encoded CBOR
 pub fn script_hash_from_hex(cbor_hex: &str) -> Result<[u8; 28]> {
-    let cbor = hex::decode(cbor_hex)
-        .with_context(|| "Failed to decode CBOR hex")?;
+    let cbor = hex::decode(cbor_hex).with_context(|| "Failed to decode CBOR hex")?;
     Ok(script_hash(&cbor))
 }
 
 /// Derive script address from script hash
 pub fn script_address(hash: &[u8; 28], network: Network) -> Address {
     let payment = ShelleyPaymentPart::script_hash(pallas_crypto::hash::Hash::new(*hash));
-    Address::Shelley(ShelleyAddress::new(network, payment, ShelleyDelegationPart::Null))
+    Address::Shelley(ShelleyAddress::new(
+        network,
+        payment,
+        ShelleyDelegationPart::Null,
+    ))
 }
 
 /// Derive script address bech32 from script hash
 pub fn script_address_bech32(hash: &[u8; 28], network: Network) -> String {
-    script_address(hash, network).to_bech32().unwrap_or_default()
+    script_address(hash, network)
+        .to_bech32()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

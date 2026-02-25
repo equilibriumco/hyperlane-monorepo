@@ -67,13 +67,19 @@ impl IgpTxContext {
     /// Print common info about IGP UTXO
     fn print_igp_utxo_info(&self) {
         println!("\n{}", "Found IGP UTXO:".green());
-        println!("  TX: {}#{}", self.igp_utxo.tx_hash, self.igp_utxo.output_index);
+        println!(
+            "  TX: {}#{}",
+            self.igp_utxo.tx_hash, self.igp_utxo.output_index
+        );
         println!("  Address: {}", self.igp_utxo.address);
         println!("  Lovelace: {}", self.igp_utxo.lovelace);
     }
 
     /// Build the new IGP datum CBOR
-    fn build_new_datum(&self, updated_oracles: Option<&Vec<(u32, u64, u64, u64)>>) -> Result<Vec<u8>> {
+    fn build_new_datum(
+        &self,
+        updated_oracles: Option<&Vec<(u32, u64, u64, u64)>>,
+    ) -> Result<Vec<u8>> {
         let oracles = updated_oracles.unwrap_or(&self.gas_oracles);
         build_igp_datum(
             &hex::encode(&self.owner),
@@ -97,8 +103,14 @@ impl IgpTxContext {
     fn find_collateral_utxo<'a>(&self, utxos: &'a [Utxo]) -> Result<&'a Utxo> {
         utxos
             .iter()
-            .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-            .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))
+            .find(|u| {
+                u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none()
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"
+                )
+            })
     }
 
     /// Find fee/payment UTXO distinct from collateral (must not have reference script)
@@ -114,7 +126,8 @@ impl IgpTxContext {
                 u.lovelace >= min_lovelace
                     && u.assets.is_empty()
                     && u.reference_script.is_none()
-                    && (u.tx_hash != collateral.tx_hash || u.output_index != collateral.output_index)
+                    && (u.tx_hash != collateral.tx_hash
+                        || u.output_index != collateral.output_index)
             })
             .unwrap_or(collateral)
     }
@@ -181,7 +194,11 @@ impl IgpTxContext {
         let fee_is_separate = fee_utxo.tx_hash != self.igp_utxo.tx_hash
             || fee_utxo.output_index != self.igp_utxo.output_index;
         let total_input_lovelace = self.igp_utxo.lovelace
-            + if fee_is_separate { fee_utxo.lovelace } else { 0 };
+            + if fee_is_separate {
+                fee_utxo.lovelace
+            } else {
+                0
+            };
 
         // Build staging transaction
         let mut staging = StagingTransaction::new()
@@ -263,7 +280,10 @@ impl IgpTxContext {
 
         // Submit the transaction
         println!("{}", "Submitting transaction...".cyan());
-        let tx_hash = self.client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+        let tx_hash = self
+            .client
+            .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+            .await?;
 
         Ok(tx_hash)
     }
@@ -399,7 +419,18 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
             gas_overhead,
             igp_policy,
             dry_run,
-        } => set_oracle(ctx, domain, gas_price, exchange_rate, gas_overhead, igp_policy, dry_run).await,
+        } => {
+            set_oracle(
+                ctx,
+                domain,
+                gas_price,
+                exchange_rate,
+                gas_overhead,
+                igp_policy,
+                dry_run,
+            )
+            .await
+        }
         IgpCommands::PayForGas {
             message_id,
             destination,
@@ -407,7 +438,15 @@ pub async fn execute(ctx: &CliContext, args: IgpArgs) -> Result<()> {
             igp_policy,
             dry_run,
         } => {
-            pay_for_gas(ctx, &message_id, destination, gas_limit, igp_policy, dry_run).await
+            pay_for_gas(
+                ctx,
+                &message_id,
+                destination,
+                gas_limit,
+                igp_policy,
+                dry_run,
+            )
+            .await
         }
         IgpCommands::Claim {
             amount,
@@ -518,7 +557,10 @@ async fn quote_gas(
     // Find oracle for destination
     let oracle = gas_oracles.iter().find(|(d, _, _, _)| *d == destination);
 
-    println!("\n{}", format!("Quote for destination {}:", destination).green());
+    println!(
+        "\n{}",
+        format!("Quote for destination {}:", destination).green()
+    );
     println!("  Gas limit (app): {}", format_number(gas_limit));
 
     let (gas_price, exchange_rate, gas_overhead, total_gas, required_lovelace) = match oracle {
@@ -530,12 +572,19 @@ async fn quote_gas(
         None => {
             let default_gas_price = 1u64;
             let default_exchange_rate = 1_000_000u64;
-            let lovelace = calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
+            let lovelace =
+                calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
             println!(
                 "  {}",
                 "Warning: No oracle configured for this destination, using defaults".yellow()
             );
-            (default_gas_price, default_exchange_rate, 0, gas_limit, lovelace)
+            (
+                default_gas_price,
+                default_exchange_rate,
+                0,
+                gas_limit,
+                lovelace,
+            )
         }
     };
 
@@ -615,7 +664,10 @@ async fn set_oracle(
     println!("\n{}", "New IGP Datum:".green());
     println!("  Gas oracles: {} configured", gas_oracles.len());
     for (d, gp, er, oh) in &gas_oracles {
-        println!("    Domain {}: gas_price={}, exchange_rate={}, gas_overhead={}", d, gp, er, oh);
+        println!(
+            "    Domain {}: gas_price={}, exchange_rate={}, gas_overhead={}",
+            d, gp, er, oh
+        );
     }
     println!(
         "  Datum CBOR: {}...",
@@ -636,9 +688,15 @@ async fn set_oracle(
             "1. Spends IGP UTXO: {}#{}",
             igp_ctx.igp_utxo.tx_hash, igp_ctx.igp_utxo.output_index
         );
-        println!("2. Uses SetGasOracle redeemer: {}", hex::encode(&redeemer_cbor));
+        println!(
+            "2. Uses SetGasOracle redeemer: {}",
+            hex::encode(&redeemer_cbor)
+        );
         println!("3. Creates new IGP UTXO with updated datum");
-        println!("4. Requires owner signature: {}", hex::encode(&igp_ctx.owner));
+        println!(
+            "4. Requires owner signature: {}",
+            hex::encode(&igp_ctx.owner)
+        );
         return Ok(());
     }
 
@@ -658,7 +716,10 @@ async fn set_oracle(
         "  Collateral: {}#{}",
         collateral_utxo.tx_hash, collateral_utxo.output_index
     );
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     let tx_hash = igp_ctx
         .build_sign_submit(
@@ -666,7 +727,7 @@ async fn set_oracle(
             new_datum_cbor,
             redeemer_cbor,
             igp_ctx.igp_utxo.lovelace, // Same lovelace - no payment change
-            None,                       // No additional output
+            None,                      // No additional output
             fee_utxo,
             collateral_utxo,
             &igp_ctx.owner,
@@ -736,7 +797,13 @@ async fn pay_for_gas(
                 "  {}",
                 "Warning: No oracle configured for this destination, using defaults".yellow()
             );
-            (default_gas_price, default_exchange_rate, 0, gas_limit, lovelace)
+            (
+                default_gas_price,
+                default_exchange_rate,
+                0,
+                gas_limit,
+                lovelace,
+            )
         }
     };
 
@@ -936,7 +1003,10 @@ async fn claim_fees(
         "  Collateral: {}#{}",
         collateral_utxo.tx_hash, collateral_utxo.output_index
     );
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // New IGP output value = old value - claimed amount
     let new_igp_lovelace = igp_ctx.igp_utxo.lovelace - amount;
@@ -989,15 +1059,13 @@ async fn migrate_igp(
         Some(h) => h,
         None => {
             println!("  Computing new script hash from blueprint...");
-            crate::utils::plutus::compute_blueprint_hash(
-                &ctx.contracts_dir, "igp", "igp",
-            )?
+            crate::utils::plutus::compute_blueprint_hash(&ctx.contracts_dir, "igp", "igp")?
         }
     };
     println!("  New Script Hash: {}", new_script_hash);
 
-    let new_hash_bytes = hex::decode(&new_script_hash)
-        .map_err(|_| anyhow!("Invalid script hash hex"))?;
+    let new_hash_bytes =
+        hex::decode(&new_script_hash).map_err(|_| anyhow!("Invalid script hash hex"))?;
     if new_hash_bytes.len() != 28 {
         return Err(anyhow!(
             "Script hash must be 28 bytes (56 hex chars), got {}",
@@ -1035,9 +1103,8 @@ async fn migrate_igp(
         Ok(pallas_addresses::Address::Shelley(shelley)) => hex::encode(shelley.payment().as_hash()),
         _ => String::new(),
     };
-    let new_address = crate::utils::plutus::script_hash_to_address(
-        &new_script_hash, ctx.pallas_network(),
-    )?;
+    let new_address =
+        crate::utils::plutus::script_hash_to_address(&new_script_hash, ctx.pallas_network())?;
 
     println!("\n{}", "Migration summary:".green());
     println!("  Current hash: {}", current_hash_hex);
@@ -1092,32 +1159,43 @@ async fn migrate_igp(
     let collateral_utxo = payer_utxos
         .iter()
         .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
-        .ok_or_else(|| anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)"))?;
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
 
     let fee_utxo = payer_utxos
         .iter()
         .find(|u| {
-            u.lovelace >= 10_000_000 &&
-            u.assets.is_empty() &&
-            u.reference_script.is_none() &&
-            (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
         })
         .or_else(|| {
             payer_utxos.iter().find(|u| {
-                u.lovelace >= 5_000_000 &&
-                u.assets.is_empty() &&
-                u.reference_script.is_none() &&
-                (u.tx_hash != collateral_utxo.tx_hash || u.output_index != collateral_utxo.output_index)
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
             })
         })
         .unwrap_or(collateral_utxo);
 
-    println!("  Collateral: {}#{}", collateral_utxo.tx_hash, collateral_utxo.output_index);
-    println!("  Fee input: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
 
     // For migration we need the OLD script (the one the UTXO is locked with).
     // Use the deployed reference script, or fall back to the old .plutus file.
-    let ref_script_utxo = ctx.load_deployment_info()
+    let ref_script_utxo = ctx
+        .load_deployment_info()
         .ok()
         .and_then(|d| d.igp)
         .and_then(|igp| igp.reference_script_utxo)
@@ -1135,7 +1213,8 @@ async fn migrate_igp(
             return Err(anyhow!(
                 "Blueprint script hash {} does not match current UTXO address hash {}. \
                  Use --reference-script to provide the correct script.",
-                blueprint_hash, current_hash_hex
+                blueprint_hash,
+                current_hash_hex
             ));
         }
         Some(hex::decode(&igp_validator.compiled_code)?)
@@ -1148,36 +1227,43 @@ async fn migrate_igp(
     let validity_end = current_slot + 7200;
 
     let new_hash_array: [u8; 28] = new_hash_bytes
-        .try_into().map_err(|_| anyhow!("Invalid script hash length"))?;
-    let new_igp_address = pallas_addresses::Address::Shelley(
-        pallas_addresses::ShelleyAddress::new(
+        .try_into()
+        .map_err(|_| anyhow!("Invalid script hash length"))?;
+    let new_igp_address =
+        pallas_addresses::Address::Shelley(pallas_addresses::ShelleyAddress::new(
             ctx.pallas_network(),
-            pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(new_hash_array)),
+            pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(
+                new_hash_array,
+            )),
             pallas_addresses::ShelleyDelegationPart::Null,
-        )
-    );
+        ));
 
     let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
 
     let igp_tx_hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid IGP tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid IGP tx hash"))?;
     let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
     let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
-        .try_into().map_err(|_| anyhow!("Invalid fee tx hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
     let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
-        .try_into().map_err(|_| anyhow!("Invalid policy ID"))?;
-    let owner_hash: [u8; 28] = owner.clone()
-        .try_into().map_err(|_| anyhow!("Invalid owner hash"))?;
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = owner
+        .clone()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
 
     let state_nft_asset = igp_utxo
         .assets
         .iter()
         .find(|a| a.policy_id == policy_id)
         .ok_or_else(|| anyhow!("State NFT not found in IGP UTXO"))?;
-    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name)
-        .unwrap_or_default();
+    let asset_name_bytes = hex::decode(&state_nft_asset.asset_name).unwrap_or_default();
 
     let igp_output = Output::new(new_igp_address, igp_utxo.lovelace)
         .set_inline_datum(new_datum_cbor)
@@ -1188,14 +1274,26 @@ async fn migrate_igp(
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
     let mut staging = StagingTransaction::new()
-        .input(Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64))
-        .input(Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64))
-        .collateral_input(Input::new(Hash::new(collateral_tx_hash), collateral_utxo.output_index as u64))
+        .input(Input::new(
+            Hash::new(igp_tx_hash),
+            igp_utxo.output_index as u64,
+        ))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
         .output(igp_output)
         .add_spend_redeemer(
             Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
             redeemer_cbor,
-            Some(ExUnits { mem: 5_000_000, steps: 2_000_000_000 }),
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -1204,10 +1302,17 @@ async fn migrate_igp(
         .network_id(ctx.network_id());
 
     if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
-        println!("  Using reference script: {}#{}", ref_tx_hash, ref_output_idx);
+        println!(
+            "  Using reference script: {}#{}",
+            ref_tx_hash, ref_output_idx
+        );
         let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
-            .try_into().map_err(|_| anyhow!("Invalid reference script tx hash"))?;
-        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx as u64));
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(
+            Hash::new(ref_tx_hash_bytes),
+            ref_output_idx as u64,
+        ));
     } else if let Some(script_bytes) = old_script_bytes {
         println!("  Using embedded old script ({} bytes)", script_bytes.len());
         staging = staging.script(ScriptKind::PlutusV3, script_bytes);
@@ -1217,7 +1322,8 @@ async fn migrate_igp(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
@@ -1225,11 +1331,14 @@ async fn migrate_igp(
     println!("{}", "Signing transaction...".cyan());
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
-    let signed_tx = tx.add_signature(keypair.pallas_public_key().clone(), signature)
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!("\n{}", "SUCCESS!".green().bold());
     println!("  Transaction Hash: {}", tx_hash);
@@ -1243,13 +1352,19 @@ async fn migrate_igp(
             igp.state_utxo = Some(format!("{}#0", tx_hash));
             igp.reference_script_utxo = None;
             if let Err(e) = ctx.save_deployment_info(&deployment) {
-                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+                println!(
+                    "  {}",
+                    format!("Warning: failed to update deployment_info.json: {}", e).yellow()
+                );
             } else {
                 println!("  Updated deployment_info.json");
             }
         }
     }
-    println!("\n  {}", "Deploy new reference script: `deploy reference-script igp`".yellow());
+    println!(
+        "\n  {}",
+        "Deploy new reference script: `deploy reference-script igp`".yellow()
+    );
 
     Ok(())
 }
@@ -1288,7 +1403,12 @@ fn build_claim_redeemer(amount: u64) -> PlutusData {
 /// Build SetGasOracle redeemer
 /// Structure: Constr 2 [domain: Int, config: Constr 0 [gas_price: Int, exchange_rate: Int, gas_overhead: Int]]
 /// IGP redeemers: PayForGas=0, Claim=1, SetGasOracle=2
-fn build_set_gas_oracle_redeemer(domain: u32, gas_price: u64, exchange_rate: u64, gas_overhead: u64) -> PlutusData {
+fn build_set_gas_oracle_redeemer(
+    domain: u32,
+    gas_price: u64,
+    exchange_rate: u64,
+    gas_overhead: u64,
+) -> PlutusData {
     PlutusData::Constr(Constr {
         tag: 123, // Constr 2 (SetGasOracle)
         any_constructor: None,
@@ -1419,8 +1539,7 @@ mod tests {
             ]
         });
 
-        let (owner, beneficiary, gas_oracles) =
-            parse_igp_datum(&datum).unwrap();
+        let (owner, beneficiary, gas_oracles) = parse_igp_datum(&datum).unwrap();
 
         assert_eq!(
             hex::encode(&owner),
@@ -1460,8 +1579,7 @@ mod tests {
             ]
         });
 
-        let (owner, beneficiary, gas_oracles) =
-            parse_igp_datum(&datum).unwrap();
+        let (owner, beneficiary, gas_oracles) = parse_igp_datum(&datum).unwrap();
 
         assert_eq!(hex::encode(&owner), "aabbccdd");
         assert_eq!(hex::encode(&beneficiary), "11223344");
@@ -1528,7 +1646,10 @@ mod tests {
 
         let result = parse_igp_datum(&datum);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must have 3 fields"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must have 3 fields"));
     }
 
     #[test]
@@ -1574,7 +1695,10 @@ mod tests {
 
         let result = parse_igp_datum(&datum);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid beneficiary"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid beneficiary"));
     }
 
     #[test]
@@ -1737,10 +1861,9 @@ mod tests {
 
     #[test]
     fn test_build_pay_for_gas_redeemer_encodes_correctly() {
-        let message_id = hex::decode(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
+        let message_id =
+            hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap();
         let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000);
         let cbor = pallas_codec::minicbor::to_vec(&redeemer).unwrap();
 

@@ -100,11 +100,14 @@ pub async fn execute(ctx: &CliContext, args: TxArgs) -> Result<()> {
 }
 
 async fn submit(ctx: &CliContext, tx_file: &str, wait: bool, timeout: u64) -> Result<()> {
-    println!("{}", format!("Submitting transaction from {}...", tx_file).cyan());
+    println!(
+        "{}",
+        format!("Submitting transaction from {}...", tx_file).cyan()
+    );
 
     // Read transaction file
-    let content = std::fs::read_to_string(tx_file)
-        .with_context(|| format!("Failed to read {}", tx_file))?;
+    let content =
+        std::fs::read_to_string(tx_file).with_context(|| format!("Failed to read {}", tx_file))?;
 
     // Parse as JSON envelope
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -115,8 +118,7 @@ async fn submit(ctx: &CliContext, tx_file: &str, wait: bool, timeout: u64) -> Re
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Missing 'cborHex' field in transaction file"))?;
 
-    let cbor = hex::decode(cbor_hex)
-        .with_context(|| "Failed to decode CBOR hex")?;
+    let cbor = hex::decode(cbor_hex).with_context(|| "Failed to decode CBOR hex")?;
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -142,7 +144,10 @@ async fn submit(ctx: &CliContext, tx_file: &str, wait: bool, timeout: u64) -> Re
 }
 
 async fn status(ctx: &CliContext, tx_hash: &str) -> Result<()> {
-    println!("{}", format!("Checking transaction status: {}", tx_hash).cyan());
+    println!(
+        "{}",
+        format!("Checking transaction status: {}", tx_hash).cyan()
+    );
 
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
@@ -197,7 +202,10 @@ async fn wait_for_tx(ctx: &CliContext, tx_hash: &str, timeout: u64) -> Result<()
 }
 
 async fn sign(ctx: &CliContext, tx_file: &str, output: Option<String>) -> Result<()> {
-    println!("{}", format!("Signing transaction from {}...", tx_file).cyan());
+    println!(
+        "{}",
+        format!("Signing transaction from {}...", tx_file).cyan()
+    );
 
     let content = std::fs::read_to_string(tx_file)?;
     let json: serde_json::Value = serde_json::from_str(&content)?;
@@ -216,15 +224,16 @@ async fn sign(ctx: &CliContext, tx_file: &str, output: Option<String>) -> Result
     println!("\ncardano-cli conway transaction sign \\");
     println!("  --testnet-magic {} \\", ctx.network_magic());
     println!("  --tx-body-file {} \\", tx_file);
-    println!(
-        "  --signing-key-file <signing-key> \\",
-    );
+    println!("  --signing-key-file <signing-key> \\",);
     println!(
         "  --out-file {}",
         output.unwrap_or_else(|| tx_file.replace(".raw", ".signed"))
     );
 
-    println!("\nTransaction CBOR (first 100 chars): {}...", &cbor_hex[..100.min(cbor_hex.len())]);
+    println!(
+        "\nTransaction CBOR (first 100 chars): {}...",
+        &cbor_hex[..100.min(cbor_hex.len())]
+    );
 
     Ok(())
 }
@@ -252,7 +261,10 @@ async fn decode(input: &str) -> Result<()> {
 
     println!("\n{}", "Transaction CBOR:".green());
     println!("  Length: {} bytes", cbor.len());
-    println!("  Hex (first 200 chars): {}...", &cbor_hex[..200.min(cbor_hex.len())]);
+    println!(
+        "  Hex (first 200 chars): {}...",
+        &cbor_hex[..200.min(cbor_hex.len())]
+    );
 
     // Basic CBOR structure analysis
     println!("\n{}", "Structure:".green());
@@ -332,8 +344,10 @@ async fn build_payment(
         .try_into()
         .map_err(|_| anyhow!("Invalid tx hash"))?;
 
-    let to_addr = Address::from_bech32(to).map_err(|e| anyhow!("Invalid recipient address: {:?}", e))?;
-    let from_addr = Address::from_bech32(&from).map_err(|e| anyhow!("Invalid sender address: {:?}", e))?;
+    let to_addr =
+        Address::from_bech32(to).map_err(|e| anyhow!("Invalid recipient address: {:?}", e))?;
+    let from_addr =
+        Address::from_bech32(&from).map_err(|e| anyhow!("Invalid sender address: {:?}", e))?;
 
     let change_amount = suitable.lovelace - amount - fee_estimate;
 

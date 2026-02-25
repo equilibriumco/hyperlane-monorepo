@@ -129,7 +129,11 @@ async fn list(ctx: &CliContext, collateral: bool, min_lovelace: Option<u64>) -> 
         })
         .collect();
 
-    println!("\n{} UTXOs found ({} after filtering):", utxos.len(), filtered.len());
+    println!(
+        "\n{} UTXOs found ({} after filtering):",
+        utxos.len(),
+        filtered.len()
+    );
     println!("{}", "-".repeat(100));
 
     for utxo in &filtered {
@@ -156,7 +160,11 @@ async fn list(ctx: &CliContext, collateral: bool, min_lovelace: Option<u64>) -> 
     }
 
     let total: u64 = filtered.iter().map(|u| u.lovelace).sum();
-    println!("\nTotal: {} lovelace ({:.6} ADA)", total, total as f64 / 1_000_000.0);
+    println!(
+        "\nTotal: {} lovelace ({:.6} ADA)",
+        total,
+        total as f64 / 1_000_000.0
+    );
 
     if collateral {
         println!("\n{}", "Tip:".yellow());
@@ -173,8 +181,8 @@ async fn split(
     amount: Option<u64>,
     dry_run: bool,
 ) -> Result<()> {
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
 
     println!("{}", "Splitting UTXO...".cyan());
 
@@ -224,11 +232,17 @@ async fn split(
     }
 
     let total_outputs = per_output * count as u64;
-    let change = source_utxo.lovelace.saturating_sub(total_outputs).saturating_sub(fee);
+    let change = source_utxo
+        .lovelace
+        .saturating_sub(total_outputs)
+        .saturating_sub(fee);
 
     if dry_run {
         println!("\n{}", "[Dry run - not submitting transaction]".yellow());
-        println!("\nWould create {} outputs of {} lovelace each", count, per_output);
+        println!(
+            "\nWould create {} outputs of {} lovelace each",
+            count, per_output
+        );
         println!("Change: {} lovelace", change);
         return Ok(());
     }
@@ -249,7 +263,13 @@ async fn split(
         .input(input)
         .fee(fee)
         .invalid_from_slot(validity_end)
-        .network_id(if ctx.pallas_network() == pallas_addresses::Network::Testnet { 0 } else { 1 });
+        .network_id(
+            if ctx.pallas_network() == pallas_addresses::Network::Testnet {
+                0
+            } else {
+                1
+            },
+        );
 
     // Add split outputs
     for _ in 0..count {
@@ -261,7 +281,8 @@ async fn split(
         staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     // Sign the transaction
@@ -269,14 +290,18 @@ async fn split(
     let signature = keypair.sign(tx_hash_bytes);
     let public_key = keypair.pallas_public_key();
 
-    let signed = tx.add_signature(public_key.clone(), signature)
+    let signed = tx
+        .add_signature(public_key.clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     let tx_cbor = signed.tx_bytes.0.clone();
 
     println!("\n{}", "Submitting transaction...".cyan());
     client.submit_and_confirm(&tx_cbor, ctx.no_wait).await?;
-    println!("{}", format!("Created {} UTXOs of {} lovelace each", count, per_output).green());
+    println!(
+        "{}",
+        format!("Created {} UTXOs of {} lovelace each", count, per_output).green()
+    );
 
     Ok(())
 }
@@ -300,7 +325,10 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
         .collect();
 
     if pure_ada.len() < 2 {
-        println!("{}", "Not enough UTXOs to consolidate (need at least 2)".yellow());
+        println!(
+            "{}",
+            "Not enough UTXOs to consolidate (need at least 2)".yellow()
+        );
         return Ok(());
     }
 
@@ -313,8 +341,8 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
     use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, Input, Output, StagingTransaction};
 
     let payer_addr = pallas_addresses::Address::from_bech32(&address)
         .map_err(|e| anyhow!("Invalid address: {}", e))?;
@@ -329,32 +357,51 @@ async fn consolidate(ctx: &CliContext, max: u32, dry_run: bool) -> Result<()> {
     let mut staging = StagingTransaction::new()
         .fee(fee)
         .invalid_from_slot(validity_end)
-        .network_id(if ctx.pallas_network() == pallas_addresses::Network::Testnet { 0 } else { 1 });
+        .network_id(
+            if ctx.pallas_network() == pallas_addresses::Network::Testnet {
+                0
+            } else {
+                1
+            },
+        );
 
     for utxo in &pure_ada {
         let tx_hash_bytes: [u8; 32] = hex::decode(&utxo.tx_hash)?
             .try_into()
             .map_err(|_| anyhow!("Invalid tx hash"))?;
-        staging = staging.input(Input::new(Hash::new(tx_hash_bytes), utxo.output_index as u64));
+        staging = staging.input(Input::new(
+            Hash::new(tx_hash_bytes),
+            utxo.output_index as u64,
+        ));
     }
 
     staging = staging.output(Output::new(payer_addr.clone(), output_amount));
 
-    let tx = staging.build_conway_raw()
+    let tx = staging
+        .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
 
     let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
     let signature = keypair.sign(tx_hash_bytes);
     let public_key = keypair.pallas_public_key();
 
-    let signed = tx.add_signature(public_key.clone(), signature)
+    let signed = tx
+        .add_signature(public_key.clone(), signature)
         .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
 
     let tx_cbor = signed.tx_bytes.0.clone();
 
     println!("\n{}", "Submitting consolidation transaction...".cyan());
     client.submit_and_confirm(&tx_cbor, ctx.no_wait).await?;
-    println!("{}", format!("Consolidated {} UTXOs into {} lovelace", pure_ada.len(), output_amount).green());
+    println!(
+        "{}",
+        format!(
+            "Consolidated {} UTXOs into {} lovelace",
+            pure_ada.len(),
+            output_amount
+        )
+        .green()
+    );
 
     Ok(())
 }
