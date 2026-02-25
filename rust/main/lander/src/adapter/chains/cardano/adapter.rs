@@ -143,7 +143,7 @@ impl AdaptsChain for CardanoAdapter {
         // Try to build the transaction components to verify it can be built
         match self
             .tx_builder
-            .build_process_tx(&message, &precursor.metadata, &self.signer)
+            .build_process_tx(&message, &precursor.metadata, &self.signer, None)
             .await
         {
             Ok(_components) => {
