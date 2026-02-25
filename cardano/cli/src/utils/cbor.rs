@@ -201,6 +201,7 @@ pub fn build_mailbox_datum(
     outbound_nonce: u32,
     branches: &[&str], // 32 branch hashes (each 64 hex chars = 32 bytes)
     merkle_count: u32,
+    processed_tree_root: &str, // 32-byte hex SMT root
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -225,6 +226,9 @@ pub fn build_mailbox_datum(
     builder.uint(merkle_count as u64);
 
     builder.end_constr(); // End MerkleTreeState
+
+    // processed_tree_root: ByteArray (32-byte SMT root for replay protection)
+    builder.bytes_hex(processed_tree_root)?;
 
     builder.end_constr(); // End MailboxDatum
 
@@ -301,16 +305,14 @@ pub fn build_mailbox_set_default_ism_redeemer(new_ism_hash: &str) -> Result<Vec<
 /// sender_ref is encoded as Constr 0 [ByteArray(tx_hash), Int(output_index)]
 pub fn build_mailbox_dispatch_redeemer(
     destination: u32,
-    recipient_hex: &str,       // 32 bytes hex (64 chars)
-    body_hex: &str,            // variable length hex
-    sender_tx_hash: &str,      // 32 bytes hex (64 chars) - sender UTXO tx hash
-    sender_output_index: u32,  // sender UTXO output index
-    hook_metadata: &[u8],      // CBOR-encoded hook metadata (empty when no IGP)
+    recipient_hex: &str,      // 32 bytes hex (64 chars)
+    body_hex: &str,           // variable length hex
+    sender_tx_hash: &str,     // 32 bytes hex (64 chars) - sender UTXO tx hash
+    sender_output_index: u32, // sender UTXO output index
+    hook_metadata: &[u8],     // CBOR-encoded hook metadata (empty when no IGP)
 ) -> Result<Vec<u8>> {
-    let sender_ref_cbor = crate::utils::plutus::encode_output_reference(
-        sender_tx_hash,
-        sender_output_index,
-    )?;
+    let sender_ref_cbor =
+        crate::utils::plutus::encode_output_reference(sender_tx_hash, sender_output_index)?;
 
     let mut builder = CborBuilder::new();
 
@@ -350,9 +352,9 @@ pub fn build_mailbox_dispatch_redeemer(
 ///   gas_oracles: List<[Int, Constr 0 [Int, Int, Int]]>,
 /// ]
 pub fn build_igp_datum(
-    owner_pkh: &str,                       // 28 bytes hex (verification key hash)
-    beneficiary: &str,                     // 28 bytes hex (verification key hash)
-    gas_oracles: &[(u32, u64, u64, u64)],  // (domain, gas_price, exchange_rate, gas_overhead)
+    owner_pkh: &str,                      // 28 bytes hex (verification key hash)
+    beneficiary: &str,                    // 28 bytes hex (verification key hash)
+    gas_oracles: &[(u32, u64, u64, u64)], // (domain, gas_price, exchange_rate, gas_overhead)
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 

@@ -6,7 +6,9 @@ use colored::Colorize;
 use pallas_primitives::conway::{BigInt, PlutusData};
 use sha3::{Digest, Keccak256};
 
-use crate::commands::igp::{build_pay_for_gas_redeemer, calculate_gas_payment, get_igp_policy, parse_igp_datum};
+use crate::commands::igp::{
+    build_pay_for_gas_redeemer, calculate_gas_payment, get_igp_policy, parse_igp_datum,
+};
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
     build_enroll_remote_route_redeemer, build_igp_datum, build_mailbox_datum,
@@ -195,7 +197,18 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             warp_policy,
             gas_limit,
             dry_run,
-        } => transfer(ctx, domain, &recipient, amount, warp_policy, gas_limit, dry_run).await,
+        } => {
+            transfer(
+                ctx,
+                domain,
+                &recipient,
+                amount,
+                warp_policy,
+                gas_limit,
+                dry_run,
+            )
+            .await
+        }
         WarpCommands::DeployMintingRef {
             warp_policy,
             dry_run,
@@ -466,7 +479,10 @@ async fn finalize_warp_deployment(
 
     let warp_signed = tx_builder.sign_tx(warp_tx, &deploy_ctx.keypair)?;
     println!("  Submitting warp route transaction...");
-    let warp_tx_hash = deploy_ctx.client.submit_and_confirm(&warp_signed, ctx.no_wait).await?;
+    let warp_tx_hash = deploy_ctx
+        .client
+        .submit_and_confirm(&warp_signed, ctx.no_wait)
+        .await?;
     println!("  ✓ Warp route deployed");
 
     // Update deployment_info.json
@@ -814,7 +830,10 @@ async fn deploy_synthetic_route(
     );
 
     // Auto-deploy minting policy reference script (required for relayer)
-    println!("\n{}", "Auto-deploying minting policy reference script...".cyan());
+    println!(
+        "\n{}",
+        "Auto-deploying minting policy reference script...".cyan()
+    );
     deploy_minting_ref(ctx, &deploy_ctx.warp_nft_applied.policy_id, false).await?;
 
     Ok(())
@@ -1678,6 +1697,7 @@ async fn transfer(
         mailbox_data.outbound_nonce + 1,
         &branches_refs,
         new_merkle.count,
+        &mailbox_data.processed_tree_root,
     )?;
     println!("  Mailbox Datum: {} bytes", new_mailbox_datum.len());
 
@@ -1761,14 +1781,15 @@ async fn transfer(
         println!("  Gas Limit (app): {}", gas_lim);
         println!("  Gas Overhead: {}", gas_overhead);
         println!("  Total Gas: {}", total_gas);
-        println!("  Payment: {} lovelace ({} ADA)", igp_payment, igp_payment as f64 / 1_000_000.0);
+        println!(
+            "  Payment: {} lovelace ({} ADA)",
+            igp_payment,
+            igp_payment as f64 / 1_000_000.0
+        );
 
         // Build IGP redeemer (gas_amount = total gas including overhead)
-        let igp_redeemer = build_pay_for_gas_redeemer(
-            &hex::decode(&message_id)?,
-            domain,
-            total_gas,
-        );
+        let igp_redeemer =
+            build_pay_for_gas_redeemer(&hex::decode(&message_id)?, domain, total_gas);
         let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
             .map_err(|e| anyhow!("Failed to encode IGP redeemer: {:?}", e))?;
 
@@ -1779,14 +1800,23 @@ async fn transfer(
             &gas_oracles,
         )?;
 
-        Some((igp_utxo, igp_policy_id, igp_payment, igp_redeemer_cbor, new_igp_datum))
+        Some((
+            igp_utxo,
+            igp_policy_id,
+            igp_payment,
+            igp_redeemer_cbor,
+            new_igp_datum,
+        ))
     } else {
         None
     };
 
     // Step 9: Build and submit transaction
     let step_num = if igp_data.is_some() { 9 } else { 8 };
-    println!("\n{}", format!("Step {}: Building Transaction...", step_num).cyan());
+    println!(
+        "\n{}",
+        format!("Step {}: Building Transaction...", step_num).cyan()
+    );
 
     // Find payer UTXOs for fees and collateral
     let payer_utxos = client.get_utxos(&payer_address).await?;
@@ -1843,7 +1873,11 @@ async fn transfer(
     // For other types, just need enough for fees
     // With IGP: add igp_payment + 2M buffer for larger TX
     let igp_payment = igp_data.as_ref().map(|(_, _, p, _, _)| *p).unwrap_or(0);
-    let fee_estimate = if igp_data.is_some() { 5_000_000u64 } else { 3_000_000u64 };
+    let fee_estimate = if igp_data.is_some() {
+        5_000_000u64
+    } else {
+        3_000_000u64
+    };
     let min_change = 2_000_000u64;
     let min_fee_utxo_lovelace = match &token_type {
         WarpTokenTypeInfo::Native => amount + igp_payment + fee_estimate + min_change,
@@ -2116,7 +2150,14 @@ async fn transfer(
         .network_id(0); // Testnet
 
     // Add IGP input, output, redeemer, and script if atomic IGP requested
-    if let Some((ref igp_utxo, ref igp_policy_id, igp_pay, ref igp_redeemer_cbor, ref new_igp_datum)) = igp_data {
+    if let Some((
+        ref igp_utxo,
+        ref igp_policy_id,
+        igp_pay,
+        ref igp_redeemer_cbor,
+        ref new_igp_datum,
+    )) = igp_data
+    {
         println!("  Adding IGP input/output...");
 
         let igp_tx_hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
@@ -2143,7 +2184,10 @@ async fn transfer(
             .map_err(|e| anyhow!("Failed to add IGP NFT: {:?}", e))?;
 
         staging = staging
-            .input(Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64))
+            .input(Input::new(
+                Hash::new(igp_tx_hash),
+                igp_utxo.output_index as u64,
+            ))
             .output(igp_output)
             .add_spend_redeemer(
                 Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
@@ -2157,14 +2201,15 @@ async fn transfer(
         // Add IGP script via reference or inline
         if let Some(ref igp_deploy) = deployment.igp {
             if let Some(ref rs) = igp_deploy.reference_script_utxo {
-                println!("  Using IGP reference script: {}#{}", rs.tx_hash, rs.output_index);
+                println!(
+                    "  Using IGP reference script: {}#{}",
+                    rs.tx_hash, rs.output_index
+                );
                 let ref_tx_hash: [u8; 32] = hex::decode(&rs.tx_hash)?
                     .try_into()
                     .map_err(|_| anyhow!("Invalid IGP ref script tx hash"))?;
-                staging = staging.reference_input(Input::new(
-                    Hash::new(ref_tx_hash),
-                    rs.output_index as u64,
-                ));
+                staging = staging
+                    .reference_input(Input::new(Hash::new(ref_tx_hash), rs.output_index as u64));
             } else {
                 // Load IGP script from blueprint
                 let blueprint = ctx.load_blueprint()?;
@@ -2356,7 +2401,9 @@ async fn transfer(
 
     // Submit the transaction
     println!("{}", "Submitting transaction...".cyan());
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
 
     println!(
         "\n{}",
@@ -2425,6 +2472,7 @@ struct MailboxDataForTransfer {
     outbound_nonce: u32,
     merkle_branches: Vec<String>,
     merkle_count: u32,
+    processed_tree_root: String,
 }
 
 /// Merkle tree state after update
@@ -2579,9 +2627,9 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    if fields.len() < 5 {
+    if fields.len() < 6 {
         return Err(anyhow!(
-            "Mailbox datum must have 5 fields, got {}",
+            "Mailbox datum must have 6 fields, got {}",
             fields.len()
         ));
     }
@@ -2647,6 +2695,13 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
 
+    let processed_tree_root = fields
+        .get(5)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .unwrap_or("5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f")
+        .to_string();
+
     Ok(MailboxDataForTransfer {
         local_domain,
         default_ism,
@@ -2654,6 +2709,7 @@ fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<Mailbox
         outbound_nonce,
         merkle_branches,
         merkle_count,
+        processed_tree_root,
     })
 }
 
@@ -2663,16 +2719,15 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
     let datum: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
         .map_err(|e| anyhow!("Failed to decode CBOR datum: {:?}", e))?;
 
-    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree]
     let fields = match &datum {
         PlutusData::Constr(c) if c.tag == 121 => &c.fields,
         _ => return Err(anyhow!("Expected Constr 0 datum")),
     };
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 5 {
+    if fields_vec.len() < 6 {
         return Err(anyhow!(
-            "Mailbox datum must have 5 fields, got {}",
+            "Mailbox datum must have 6 fields, got {}",
             fields_vec.len()
         ));
     }
@@ -2704,6 +2759,12 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
 
     let merkle_count = extract_u32_for_transfer(merkle_tree_fields[1])?;
 
+    let processed_tree_root = if fields_vec.len() > 5 {
+        extract_bytes_hex_for_transfer(fields_vec[5])?
+    } else {
+        "5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f".to_string()
+    };
+
     Ok(MailboxDataForTransfer {
         local_domain,
         default_ism,
@@ -2711,6 +2772,7 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
         outbound_nonce,
         merkle_branches,
         merkle_count,
+        processed_tree_root,
     })
 }
 
@@ -3089,7 +3151,9 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
 
     // Submit the transaction
     println!("  Submitting transaction...");
-    let tx_hash = client.submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait).await?;
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
     println!("  ✓ Transaction submitted");
 
     // Build reference script UTXO info
@@ -3165,7 +3229,10 @@ async fn migrate(
         "\n{}",
         "═══════════════════════════════════════════════════════════════".cyan()
     );
-    println!("{}", "Migrating Warp Route to new script address".cyan().bold());
+    println!(
+        "{}",
+        "Migrating Warp Route to new script address".cyan().bold()
+    );
     println!(
         "{}",
         "═══════════════════════════════════════════════════════════════".cyan()
@@ -3176,18 +3243,26 @@ async fn migrate(
         None => {
             println!("  Computing new script hash from blueprint + deployment params...");
             let deployment = ctx.load_deployment_info()?;
-            let mailbox_info = deployment.mailbox.as_ref()
+            let mailbox_info = deployment
+                .mailbox
+                .as_ref()
                 .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-            let mailbox_policy_id = mailbox_info.state_nft_policy.as_ref()
+            let mailbox_policy_id = mailbox_info
+                .state_nft_policy
+                .as_ref()
                 .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?;
-            let pm_policy = &mailbox_info.applied_parameters
+            let pm_policy = &mailbox_info
+                .applied_parameters
                 .first()
                 .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?
                 .value;
             let mb_cbor = hex::encode(encode_script_hash_param(mailbox_policy_id)?);
             let pm_cbor = hex::encode(encode_script_hash_param(pm_policy)?);
             let applied = apply_validator_params(
-                &ctx.contracts_dir, "warp_route", "warp_route", &[&mb_cbor, &pm_cbor],
+                &ctx.contracts_dir,
+                "warp_route",
+                "warp_route",
+                &[&mb_cbor, &pm_cbor],
             )?;
             applied.policy_id
         }
@@ -3227,9 +3302,8 @@ async fn migrate(
         pallas_addresses::Address::Shelley(shelley) => hex::encode(shelley.payment().as_hash()),
         _ => String::new(),
     };
-    let new_address_bech32 = crate::utils::plutus::script_hash_to_address(
-        &new_script_hash, ctx.pallas_network(),
-    )?;
+    let new_address_bech32 =
+        crate::utils::plutus::script_hash_to_address(&new_script_hash, ctx.pallas_network())?;
 
     println!("\n{}", "Migration summary:".green());
     println!("  Current hash: {}", current_hash_hex);
@@ -3244,7 +3318,10 @@ async fn migrate(
         return Ok(());
     }
 
-    println!("\n{}", "Step 2: Parsing datum and verifying owner...".cyan());
+    println!(
+        "\n{}",
+        "Step 2: Parsing datum and verifying owner...".cyan()
+    );
     let datum_json = warp_utxo
         .inline_datum
         .as_ref()
@@ -3263,8 +3340,9 @@ async fn migrate(
 
     // Read the raw datum CBOR from the UTXO and pass it through unchanged.
     let datum_cbor = match datum_json {
-        serde_json::Value::String(hex_str) => hex::decode(hex_str)
-            .map_err(|e| anyhow!("Failed to decode datum hex: {}", e))?,
+        serde_json::Value::String(hex_str) => {
+            hex::decode(hex_str).map_err(|e| anyhow!("Failed to decode datum hex: {}", e))?
+        }
         _ => {
             return Err(anyhow!(
                 "Unexpected datum format: expected hex string from Blockfrost"
@@ -3458,7 +3536,10 @@ async fn migrate(
         println!("  Using warp route reference script: {}", ref_utxo_str);
         staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx));
     } else if let Some(script_bytes) = warp_script {
-        println!("  Using inline warp route script ({} bytes)", script_bytes.len());
+        println!(
+            "  Using inline warp route script ({} bytes)",
+            script_bytes.len()
+        );
         staging = staging.script(ScriptKind::PlutusV3, script_bytes);
     } else {
         return Err(anyhow!(
@@ -3494,12 +3575,19 @@ async fn migrate(
     println!("  New script hash: {}", new_script_hash);
 
     if let Ok(mut deployment) = ctx.load_deployment_info() {
-        if let Some(warp) = deployment.warp_routes.iter_mut().find(|wr| wr.nft_policy == policy_id) {
+        if let Some(warp) = deployment
+            .warp_routes
+            .iter_mut()
+            .find(|wr| wr.nft_policy == policy_id)
+        {
             warp.script_hash = new_script_hash.clone();
             warp.address = new_address_bech32.clone();
             warp.reference_script_utxo = None;
             if let Err(e) = ctx.save_deployment_info(&deployment) {
-                println!("  {}", format!("Warning: failed to update deployment_info.json: {}", e).yellow());
+                println!(
+                    "  {}",
+                    format!("Warning: failed to update deployment_info.json: {}", e).yellow()
+                );
             } else {
                 println!("  Updated deployment_info.json");
             }
