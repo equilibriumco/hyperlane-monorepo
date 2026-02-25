@@ -267,12 +267,29 @@ impl CardanoMailbox {
             ChainCommunicationError::from_other_str("Missing merkle_tree in mailbox datum")
         })?)?;
 
+        let processed_tree_root = fields
+            .get(5)
+            .and_then(|v| v.get("bytes"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| hex::decode(s).ok())
+            .and_then(|bytes| {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Some(arr)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(crate::smt::EMPTY_ROOT);
+
         Ok(MailboxDatum {
             local_domain,
             default_ism,
             owner,
             outbound_nonce,
             merkle_tree,
+            processed_tree_root,
         })
     }
 

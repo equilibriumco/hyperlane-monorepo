@@ -25,6 +25,7 @@ mod merkle_tree_hook;
 mod multisig_ism;
 mod provider;
 pub mod recipient_resolver;
+pub mod smt;
 mod trait_builder;
 pub mod tx_builder;
 pub mod types;

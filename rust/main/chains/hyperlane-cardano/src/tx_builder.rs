@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::{debug, info, instrument, warn};
 
 /// Per-redeemer ExUnits from evaluation, keyed by "spend:N" or "mint:N"
@@ -119,6 +119,9 @@ pub struct HyperlaneTxBuilder {
     /// Cache for script serialised sizes (script_hash → bytes).
     /// Script sizes are immutable once deployed, so this never needs invalidation.
     script_size_cache: RwLock<HashMap<String, u64>>,
+    /// Sparse Merkle Tree for replay protection. Initialized lazily on first use
+    /// by scanning on-chain processed_message_nft tokens.
+    smt: Mutex<Option<crate::smt::SparseMerkleTree>>,
 }
 
 impl HyperlaneTxBuilder {
@@ -136,6 +139,7 @@ impl HyperlaneTxBuilder {
             coins_per_utxo_byte: OnceCell::new(),
             evaluate_available: AtomicBool::new(true),
             script_size_cache: RwLock::new(HashMap::new()),
+            smt: Mutex::new(None),
         }
     }
 
@@ -188,6 +192,57 @@ impl HyperlaneTxBuilder {
             .insert(script_hash.to_string(), size);
         debug!("Cached script size: {} = {} bytes", script_hash, size);
         Ok(size)
+    }
+
+    /// Get or initialize the Sparse Merkle Tree by scanning on-chain
+    /// processed_message_nft tokens.
+    async fn get_or_init_smt(&self) -> Result<(), TxBuilderError> {
+        let mut guard = self.smt.lock().await;
+        if guard.is_some() {
+            return Ok(());
+        }
+
+        let policy_id = match &self.conf.processed_messages_nft_policy_id {
+            Some(id) => id.clone(),
+            None => {
+                info!("No processed_messages_nft_policy_id configured, starting with empty SMT");
+                *guard = Some(crate::smt::SparseMerkleTree::new());
+                return Ok(());
+            }
+        };
+        info!(
+            "Initializing SMT from on-chain processed_message_nft tokens (policy={})",
+            policy_id
+        );
+
+        let asset_ids = self
+            .provider
+            .get_policy_asset_ids(&policy_id)
+            .await
+            .unwrap_or_default();
+
+        let mut message_ids: Vec<[u8; 32]> = Vec::new();
+        for asset_id in &asset_ids {
+            // Asset ID format: {policy_hex}{asset_name_hex}
+            // Asset name is the 32-byte message_id (64 hex chars)
+            if asset_id.len() == 56 + 64 {
+                let asset_name_hex = &asset_id[56..];
+                if let Ok(bytes) = hex::decode(asset_name_hex) {
+                    if bytes.len() == 32 {
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(&bytes);
+                        message_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Reconstructed SMT from {} processed message IDs",
+            message_ids.len()
+        );
+        *guard = Some(crate::smt::SparseMerkleTree::from_message_ids(&message_ids));
+        Ok(())
     }
 
     /// Compute total reference script size for all scripts used in a process TX.
@@ -489,11 +544,31 @@ impl HyperlaneTxBuilder {
         // 5. No additional inputs in new architecture (derived from datum)
         let additional_utxos: Vec<(Utxo, bool)> = Vec::new();
 
+        // 5b. Generate SMT non-membership proof for replay protection
+        self.get_or_init_smt().await?;
+        let smt_proof = {
+            let guard = self.smt.lock().await;
+            let tree = guard.as_ref().expect("SMT initialized above");
+            let mut key = [0u8; 16];
+            key.copy_from_slice(&message_id[..16]);
+            if tree.contains(&key) {
+                return Err(TxBuilderError::UndeliverableMessage(
+                    "Message already in SMT (duplicate message_id)".to_string(),
+                ));
+            }
+            tree.prove_non_membership(&key)
+        };
+        debug!(
+            "Generated SMT non-membership proof ({} siblings)",
+            smt_proof.len()
+        );
+
         // 6. Encode redeemers
         let mailbox_redeemer = MailboxRedeemer::Process {
             message: msg.clone(),
             metadata: metadata.to_vec(),
             message_id,
+            smt_proof: smt_proof.clone(),
         };
         let mailbox_redeemer_cbor = encode_mailbox_redeemer(&mailbox_redeemer)?;
 
@@ -696,6 +771,21 @@ impl HyperlaneTxBuilder {
             .compute_total_ref_script_size(&recipient_ref_script_utxo, &warp_token_type)
             .await;
 
+        // Compute new SMT root for the mailbox continuation datum.
+        // The on-chain validator applies the same insertion, so the continuation
+        // datum must contain the updated root.
+        let mailbox_continuation_datum_cbor = {
+            let mut key = [0u8; 16];
+            key.copy_from_slice(&message_id[..16]);
+            let guard = self.smt.lock().await;
+            let tree = guard.as_ref().expect("SMT initialized");
+            let old_root = tree.root();
+            // Verify and insert on-chain equivalent
+            let new_root =
+                crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &smt_proof);
+            build_mailbox_continuation_datum(&mailbox_utxo, &new_root)?
+        };
+
         Ok(ProcessTxComponents {
             mailbox_utxo,
             mailbox_redeemer_cbor,
@@ -717,6 +807,7 @@ impl HyperlaneTxBuilder {
             verified_message_datum_cbor,
             recipient_script_hash,
             total_ref_script_size,
+            mailbox_continuation_datum_cbor: Some(mailbox_continuation_datum_cbor),
         })
     }
 
@@ -826,6 +917,20 @@ impl HyperlaneTxBuilder {
         let tx_hash = self.submit_transaction(&signed_tx).await?;
 
         info!("Transaction submitted successfully: {}", tx_hash);
+
+        // Update SMT with the newly processed message
+        {
+            let mut guard = self.smt.lock().await;
+            if let Some(ref mut tree) = *guard {
+                let mut key = [0u8; 16];
+                key.copy_from_slice(&components.message_id[..16]);
+                tree.insert(key);
+                debug!(
+                    "SMT updated with message_id {}",
+                    hex::encode(components.message_id)
+                );
+            }
+        }
 
         // Convert tx_hash string to H512
         let mut tx_id_bytes = [0u8; 64];
@@ -1377,12 +1482,19 @@ impl HyperlaneTxBuilder {
 
         // Create outputs
 
-        // 1. Mailbox continuation output (same address, same datum, same value)
-        let mailbox_output = create_continuation_output(
-            &components.mailbox_utxo,
-            &self.conf.mailbox_policy_id,
-            min_lovelace,
-        )?;
+        // 1. Mailbox continuation output (same address, updated datum for Process)
+        let mailbox_output = match &components.mailbox_continuation_datum_cbor {
+            Some(updated_datum) => create_continuation_output_with_datum(
+                &components.mailbox_utxo,
+                updated_datum,
+                min_lovelace,
+            )?,
+            None => create_continuation_output(
+                &components.mailbox_utxo,
+                &self.conf.mailbox_policy_id,
+                min_lovelace,
+            )?,
+        };
         tx = tx.output(mailbox_output);
 
         // 2. Recipient continuation output (WarpRoute only)
@@ -2599,6 +2711,10 @@ pub struct ProcessTxComponents {
     /// Total size (bytes) of all reference scripts used in the TX.
     /// Used for Conway-era fee calculation (`min_fee_ref_script_cost_per_byte`).
     pub total_ref_script_size: u64,
+    /// Updated mailbox continuation datum (CBOR) with new processed_tree_root.
+    /// When Some, the mailbox continuation output uses this datum instead of
+    /// copying the original UTXO's datum.
+    pub mailbox_continuation_datum_cbor: Option<Vec<u8>>,
 }
 
 // ============================================================================
@@ -2735,6 +2851,82 @@ fn encode_constructor_0_redeemer() -> Vec<u8> {
     let mut encoded = Vec::new();
     minicbor::encode(&redeemer, &mut encoded).expect("Failed to encode constructor 0 redeemer");
     encoded
+}
+
+/// Build updated mailbox datum CBOR with a new processed_tree_root.
+/// Parses the existing datum from the UTXO, replaces the last field
+/// (processed_tree_root), and re-encodes to CBOR.
+fn build_mailbox_continuation_datum(
+    mailbox_utxo: &Utxo,
+    new_tree_root: &[u8; 32],
+) -> Result<Vec<u8>, TxBuilderError> {
+    let datum_json = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| TxBuilderError::Encoding("Mailbox UTXO has no inline datum".to_string()))?;
+    let original_data = json_to_plutus_data(
+        &serde_json::from_str::<serde_json::Value>(datum_json).map_err(|e| {
+            TxBuilderError::Encoding(format!("Failed to parse mailbox datum JSON: {e}"))
+        })?,
+    )?;
+
+    // MailboxDatum = Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree, processed_tree_root]
+    match original_data {
+        PlutusData::Constr(mut constr) => {
+            let mut fields: Vec<PlutusData> = match constr.fields {
+                MaybeIndefArray::Def(f) => f,
+                MaybeIndefArray::Indef(f) => f,
+            };
+            if fields.len() < 6 {
+                return Err(TxBuilderError::Encoding(format!(
+                    "MailboxDatum expected 6 fields, got {}",
+                    fields.len()
+                )));
+            }
+            // Replace last field with new processed_tree_root
+            *fields.last_mut().unwrap() = PlutusData::BoundedBytes(new_tree_root.to_vec().into());
+            constr.fields = MaybeIndefArray::Def(fields);
+            encode_plutus_data(&PlutusData::Constr(constr))
+        }
+        _ => Err(TxBuilderError::Encoding(
+            "MailboxDatum is not a Constr".to_string(),
+        )),
+    }
+}
+
+/// Create a continuation output with an explicitly provided datum CBOR.
+/// Preserves address and value from the original UTXO but uses the given datum.
+fn create_continuation_output_with_datum(
+    utxo: &Utxo,
+    datum_cbor: &[u8],
+    min_lovelace: u64,
+) -> Result<Output, TxBuilderError> {
+    let address = parse_address(&utxo.address)?;
+    let lovelace = utxo.lovelace();
+
+    let mut output = Output::new(address, lovelace.max(min_lovelace));
+    output = output.set_inline_datum(datum_cbor.to_vec());
+
+    for value in &utxo.value {
+        if value.unit != "lovelace" && value.unit.len() >= 56 {
+            let policy_hex = &value.unit[..56];
+            let asset_name_hex = &value.unit[56..];
+
+            let policy_hash = parse_policy_id(policy_hex)?;
+            let asset_name = hex::decode(asset_name_hex)
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid asset name hex: {e}")))?;
+            let quantity: u64 = value
+                .quantity
+                .parse()
+                .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
+
+            output = output
+                .add_asset(policy_hash, asset_name, quantity)
+                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add asset: {e:?}")))?;
+        }
+    }
+
+    Ok(output)
 }
 
 /// Create a continuation output for a script UTXO
@@ -3468,8 +3660,13 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             message,
             metadata,
             message_id,
+            smt_proof,
         } => {
             // Constructor 1: Process
+            let proof_list: Vec<PlutusData> = smt_proof
+                .iter()
+                .map(|hash| PlutusData::BoundedBytes(hash.to_vec().into()))
+                .collect();
             PlutusData::Constr(Constr {
                 tag: 122, // Constructor 1 alternative encoding
                 any_constructor: None,
@@ -3477,6 +3674,7 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
                     encode_message_as_plutus_data(message),
                     PlutusData::BoundedBytes(metadata.clone().into()),
                     PlutusData::BoundedBytes(message_id.to_vec().into()),
+                    PlutusData::Array(MaybeIndefArray::Def(proof_list)),
                 ]),
             })
         }

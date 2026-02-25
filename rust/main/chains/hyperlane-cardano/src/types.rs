@@ -122,6 +122,8 @@ pub struct MailboxDatum {
     pub outbound_nonce: u32,
     /// Full merkle tree state (branches + count)
     pub merkle_tree: MerkleTreeState,
+    /// 32-byte Sparse Merkle Tree root for replay protection
+    pub processed_tree_root: [u8; 32],
 }
 
 /// Mailbox redeemer (matches Aiken MailboxRedeemer)
@@ -138,6 +140,7 @@ pub enum MailboxRedeemer {
         message: Message,
         metadata: Vec<u8>,
         message_id: [u8; 32],
+        smt_proof: Vec<[u8; 32]>,
     },
     SetDefaultIsm {
         new_ism: ScriptHash,
