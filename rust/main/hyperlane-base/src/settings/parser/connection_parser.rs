@@ -1096,5 +1096,9 @@ pub fn build_cardano_connection_conf(
         verified_message_nft_script_cbor,
         confirmation_block_delay,
         max_batch_size,
+        op_submission_config: OpSubmissionConfig {
+            max_batch_size,
+            ..Default::default()
+        },
     }))
 }

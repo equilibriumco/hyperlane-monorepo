@@ -1,4 +1,6 @@
-use hyperlane_core::config::{ConfigErrResultExt, ConfigPath, ConfigResult, FromRawConf};
+use hyperlane_core::config::{
+    ConfigErrResultExt, ConfigPath, ConfigResult, FromRawConf, OpSubmissionConfig,
+};
 use url::Url;
 
 use crate::blockfrost_provider::CardanoNetwork;
@@ -70,6 +72,8 @@ pub struct ConnectionConf {
     /// Each process TX is ~2-6KB; Cardano block size is ~80KB.
     /// Defaults to 4.
     pub max_batch_size: u32,
+    /// Operation submission config for the relayer's batching infrastructure.
+    pub op_submission_config: OpSubmissionConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -232,6 +236,10 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
 
         let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(2);
         let max_batch_size = raw.max_batch_size.unwrap_or(4);
+        let op_submission_config = OpSubmissionConfig {
+            max_batch_size,
+            ..Default::default()
+        };
 
         Ok(Self {
             url,
@@ -257,6 +265,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             verified_message_nft_script_cbor,
             confirmation_block_delay,
             max_batch_size,
+            op_submission_config,
         })
     }
 }
