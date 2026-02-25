@@ -164,6 +164,8 @@ pub type MailboxDatum {
   outbound_nonce: Int,
   /// Full merkle tree state (branches + count)
   merkle_tree: MerkleTreeState,
+  /// 32-byte Sparse Merkle Tree root for replay protection
+  processed_tree_root: ByteArray,
 }
 
 /// Mailbox redeemer actions
@@ -177,7 +179,12 @@ pub type MailboxRedeemer {
     hook_metadata: ByteArray,
   }
   /// Inbound: process a message from another chain
-  Process { message: Message, metadata: ByteArray, message_id: ByteArray }
+  Process {
+    message: Message,
+    metadata: ByteArray,
+    message_id: ByteArray,
+    smt_proof: List<ByteArray>,
+  }
   /// Admin: set default ISM
   SetDefaultIsm { new_ism: ScriptHash }
   /// Admin: transfer ownership

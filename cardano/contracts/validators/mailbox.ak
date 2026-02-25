@@ -9,6 +9,7 @@ use cardano/transaction.{
   InlineDatum, OutputReference, Spend, Transaction,
 }
 use merkle
+use smt
 use types.{
   Checkpoint, Domain, HyperlaneAddress, MailboxDatum, MailboxRedeemer, Message,
   MerkleTreeState, MultisigIsmRedeemer, PolicyId, ScriptHash,
@@ -28,6 +29,7 @@ use utils.{find_input, hyperlane_address_to_script_hash, is_signed_by, policy_id
 validator mailbox(
   processed_messages_nft_policy: PolicyId,
   verified_message_nft_policy: PolicyId,
+  ism_nft_policy: PolicyId,
 ) {
   spend(
     datum: Option<MailboxDatum>,
@@ -50,16 +52,18 @@ validator mailbox(
           own_ref,
         )
 
-      Process { message, metadata, message_id } ->
+      Process { message, metadata, message_id, smt_proof } ->
         validate_process(
           mailbox_datum,
           message,
           metadata,
           message_id,
+          smt_proof,
           tx,
           own_ref,
           processed_messages_nft_policy,
           verified_message_nft_policy,
+          ism_nft_policy,
         )
 
       SetDefaultIsm { new_ism } ->
@@ -134,10 +138,12 @@ fn validate_process(
   message: Message,
   metadata: ByteArray,
   message_id: ByteArray,
+  smt_proof: List<ByteArray>,
   tx: Transaction,
   own_ref: OutputReference,
   processed_messages_nft_policy: PolicyId,
   verified_message_nft_policy: PolicyId,
+  ism_nft_policy: PolicyId,
 ) -> Bool {
   // 1. Verify message is for this domain
   expect message.destination == datum.local_domain
@@ -146,14 +152,21 @@ fn validate_process(
   let computed_id = keccak_256(encode_message(message))
   expect computed_id == message_id
 
-  // 3. Verify message not already processed
-  expect !is_message_processed(message_id, tx, processed_messages_nft_policy)
+  // 3. Verify message not already processed via SMT non-membership proof.
+  //    Uses first 16 bytes of message_id as the 128-bit key.
+  let smt_key = bytearray.take(message_id, 16)
+  let new_tree_root =
+    smt.verify_non_membership_and_insert(
+      datum.processed_tree_root,
+      smt_key,
+      smt_proof,
+    )
 
-  // 4. Verify ISM approves the message
+  // 4. Verify ISM approves the message (with NFT authenticity check)
   let ism_hash = get_recipient_ism(message.recipient, datum.default_ism, tx)
-  expect verify_ism_for_message(ism_hash, message_id, tx, metadata)
+  expect verify_ism_for_message(ism_hash, ism_nft_policy, message_id, tx, metadata)
 
-  // 5. Verify processed message NFT is being minted
+  // 5. Verify processed message NFT is being minted (for queryability)
   expect processed_nft_minted(message_id, tx, processed_messages_nft_policy)
 
   // 6. For script-hash recipients (0x02 prefix), verify verified message delivery.
@@ -172,8 +185,9 @@ fn validate_process(
       True
     }
 
-  // 7. Validate mailbox continuation (datum unchanged for process)
-  validate_continuation(datum, datum, tx, own_ref)
+  // 7. Validate mailbox continuation with updated processed_tree_root
+  let new_datum = MailboxDatum { ..datum, processed_tree_root: new_tree_root }
+  validate_continuation(datum, new_datum, tx, own_ref)
 }
 
 fn validate_set_default_ism(
@@ -222,6 +236,7 @@ fn validate_continuation(
       cont_datum.outbound_nonce == new_datum.outbound_nonce,
       cont_datum.merkle_tree.branches == new_datum.merkle_tree.branches,
       cont_datum.merkle_tree.count == new_datum.merkle_tree.count,
+      cont_datum.processed_tree_root == new_datum.processed_tree_root,
     }
 
   value_preserved(own_value, continuation.value)
@@ -312,23 +327,6 @@ fn find_state_nft_policy(value: assets.Value) -> Option<ByteArray> {
   )
 }
 
-fn is_message_processed(
-  message_id: ByteArray,
-  tx: Transaction,
-  processed_messages_nft_policy: PolicyId,
-) -> Bool {
-  list.any(
-    tx.reference_inputs,
-    fn(ref_input) {
-      let policy_tokens = assets.tokens(ref_input.output.value, processed_messages_nft_policy)
-      when dict.get(policy_tokens, message_id) is {
-        Some(quantity) -> quantity > 0
-        None -> False
-      }
-    },
-  )
-}
-
 fn get_recipient_ism(
   _recipient: HyperlaneAddress,
   default_ism: ScriptHash,
@@ -339,6 +337,7 @@ fn get_recipient_ism(
 
 fn verify_ism_for_message(
   ism_hash: ScriptHash,
+  ism_nft_policy: PolicyId,
   message_id: ByteArray,
   tx: Transaction,
   metadata: ByteArray,
@@ -351,7 +350,14 @@ fn verify_ism_for_message(
       when input.output.address.payment_credential is {
         Script(hash) ->
           if hash == ism_hash {
-            verify_ism_redeemer_message_id(input.output_reference, message_id, tx)
+            // Verify this is the authentic ISM UTXO (contains the one-shot NFT)
+            let has_nft =
+              !dict.is_empty(assets.tokens(input.output.value, ism_nft_policy))
+            has_nft && verify_ism_redeemer_message_id(
+              input.output_reference,
+              message_id,
+              tx,
+            )
           } else {
             False
           }

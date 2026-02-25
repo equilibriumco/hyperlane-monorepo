@@ -43,8 +43,10 @@ validator multisig_ism {
     expect Some(ism_datum) = datum
 
     when redeemer is {
-      Verify { checkpoint, validator_signatures } ->
-        verify_checkpoint(ism_datum, checkpoint, validator_signatures)
+      Verify { checkpoint, validator_signatures } -> {
+        expect verify_checkpoint(ism_datum, checkpoint, validator_signatures)
+        validate_ism_continuation(ism_datum, ism_datum, tx, own_ref)
+      }
 
       SetValidators { domain, validators } ->
         validate_set_validators(ism_datum, domain, validators, tx, own_ref)
@@ -110,48 +112,44 @@ fn compute_checkpoint_hash(checkpoint: Checkpoint) -> ByteArray {
   keccak_256(prefixed)
 }
 
-/// Count how many signatures are valid and from trusted validators
+/// Count how many unique, valid signatures are from trusted validators.
+/// Tracks seen Ethereum addresses to prevent duplicate signatures from
+/// inflating the count (which would effectively halve the threshold).
 fn count_valid_signatures(
   validator_signatures: List<ValidatorSignature>,
   validator_addresses: List<ByteArray>,
   message_hash: ByteArray,
 ) -> Int {
-  list.foldl(
-    validator_signatures,
-    0,
-    fn(val_sig, acc) {
-      let ValidatorSignature { compressed_pubkey, uncompressed_pubkey, signature } = val_sig
+  let (valid_count, _seen) =
+    list.foldl(
+      validator_signatures,
+      (0, []),
+      fn(val_sig, acc) {
+        let (count, seen) = acc
+        let ValidatorSignature { compressed_pubkey, uncompressed_pubkey, signature } =
+          val_sig
 
-      // Step 1: Verify the compressed and uncompressed keys match
-      // The x-coordinate should be the same: compressed[1:33] == uncompressed[0:32]
-      let compressed_x = bytearray.drop(compressed_pubkey, 1)
-      let uncompressed_x = bytearray.take(uncompressed_pubkey, 32)
-      expect compressed_x == uncompressed_x
+        let compressed_x = bytearray.drop(compressed_pubkey, 1)
+        let uncompressed_x = bytearray.take(uncompressed_pubkey, 32)
+        expect compressed_x == uncompressed_x
 
-      // Step 2: Verify the signature using compressed pubkey (per CIP-49)
-      let sig_valid = verify_ecdsa_secp256k1_signature(
-        compressed_pubkey,
-        message_hash,
-        signature,
-      )
+        let sig_valid =
+          verify_ecdsa_secp256k1_signature(compressed_pubkey, message_hash, signature)
 
-      if sig_valid {
-        // Step 3: Compute Ethereum address from uncompressed public key
-        let address = pubkey_to_eth_address(uncompressed_pubkey)
+        if sig_valid {
+          let address = pubkey_to_eth_address(uncompressed_pubkey)
 
-        // Step 4: Check if this address is in the trusted validators list
-        if list.has(validator_addresses, address) {
-          acc + 1
+          if list.has(validator_addresses, address) && !list.has(seen, address) {
+            (count + 1, [address, ..seen])
+          } else {
+            (count, seen)
+          }
         } else {
-          // Signature valid but address not trusted
-          acc
+          (count, seen)
         }
-      } else {
-        // Signature verification failed
-        acc
-      }
-    },
-  )
+      },
+    )
+  valid_count
 }
 
 /// Convert an uncompressed secp256k1 public key (64 bytes) to Ethereum address (20 bytes)
