@@ -539,6 +539,114 @@ impl BlockfrostProvider {
         })
     }
 
+    /// Evaluate a transaction with additional UTXO context.
+    /// Required for chained TX evaluation where inputs are outputs of prior
+    /// unsubmitted TXs. Posts to Blockfrost's `/utils/txs/evaluate/utxos`.
+    ///
+    /// `additional_utxos` are serialized as an Ogmios-compatible array of
+    /// `[[{txId, index}, {address, value, ...}], ...]`.
+    #[instrument(skip(self, tx_cbor, additional_utxos))]
+    pub async fn evaluate_tx_with_additional_utxos(
+        &self,
+        tx_cbor: &[u8],
+        additional_utxos: &[Utxo],
+    ) -> Result<serde_json::Value, BlockfrostProviderError> {
+        self.rate_limit().await;
+        let url = format!("{}/utils/txs/evaluate/utxos", self.base_url);
+
+        let utxo_set: Vec<serde_json::Value> = additional_utxos
+            .iter()
+            .map(|u| {
+                let mut value = serde_json::json!({
+                    "coins": u.lovelace(),
+                });
+                // Add native assets if present
+                let assets: Vec<&UtxoValue> =
+                    u.value.iter().filter(|v| v.unit != "lovelace").collect();
+                if !assets.is_empty() {
+                    let mut asset_map = serde_json::Map::new();
+                    for a in assets {
+                        if a.unit.len() >= 56 {
+                            let policy = &a.unit[..56];
+                            let name = &a.unit[56..];
+                            let policy_entry = asset_map
+                                .entry(policy.to_string())
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let Some(obj) = policy_entry.as_object_mut() {
+                                obj.insert(
+                                    name.to_string(),
+                                    serde_json::json!(a.quantity.parse::<u64>().unwrap_or(0)),
+                                );
+                            }
+                        }
+                    }
+                    value["assets"] = serde_json::Value::Object(asset_map);
+                }
+
+                let mut output = serde_json::json!({
+                    "address": u.address,
+                    "value": value,
+                });
+                if let Some(ref datum) = u.inline_datum {
+                    output["datum"] = serde_json::json!(datum);
+                }
+
+                serde_json::json!([
+                    { "txId": u.tx_hash, "index": u.output_index },
+                    output
+                ])
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "cbor": hex::encode(tx_cbor),
+            "additionalUtxoSet": utxo_set,
+        });
+
+        let response = tokio::time::timeout(
+            BLOCKFROST_REQUEST_TIMEOUT,
+            reqwest::Client::new()
+                .post(&url)
+                .header("project_id", &self.api_key)
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&body).unwrap_or_default())
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            BlockfrostProviderError::Timeout(
+                "Blockfrost evaluate/utxos request timed out".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            BlockfrostProviderError::Api(BlockfrostError::from(
+                Box::new(e) as Box<dyn std::error::Error>
+            ))
+        })?;
+
+        let status = response.status();
+        let resp_body = response.text().await.map_err(|e| {
+            BlockfrostProviderError::Deserialization(format!("Failed to read response body: {e}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(BlockfrostProviderError::Api(BlockfrostError::Response {
+                url,
+                reason: blockfrost::error::ResponseError {
+                    status_code: status.as_u16(),
+                    error: status.canonical_reason().unwrap_or("Unknown").to_string(),
+                    message: resp_body,
+                },
+            }));
+        }
+
+        serde_json::from_str(&resp_body).map_err(|e| {
+            BlockfrostProviderError::Deserialization(format!(
+                "Failed to parse evaluate/utxos response: {e}"
+            ))
+        })
+    }
+
     /// Get protocol parameters (returns JSON for flexibility)
     #[instrument(skip(self))]
     pub async fn get_protocol_parameters(

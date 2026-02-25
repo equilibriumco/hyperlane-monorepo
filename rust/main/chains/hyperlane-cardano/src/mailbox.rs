@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use hyperlane_core::accumulator::incremental::IncrementalMerkle;
 use hyperlane_core::accumulator::TREE_DEPTH;
 use hyperlane_core::{
-    ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber, HyperlaneChain,
-    HyperlaneContract, HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, Mailbox, Metadata,
-    ReorgPeriod, TxCostEstimate, TxOutcome, H256, U256,
+    BatchItem, BatchResult, ChainCommunicationError, ChainResult, ContractLocator,
+    FixedPointNumber, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneMessage,
+    HyperlaneProvider, Mailbox, Metadata, QueueOperation, ReorgPeriod, TxCostEstimate, TxOutcome,
+    H256, U256,
 };
 use serde_json::Value;
 use std::fmt::{Debug, Formatter};
@@ -72,7 +73,7 @@ impl CardanoMailbox {
         payer: &crate::cardano::Keypair,
     ) -> ChainResult<ProcessTxComponents> {
         self.tx_builder
-            .build_process_tx(message, metadata, payer)
+            .build_process_tx(message, metadata, payer, None)
             .await
             .map_err(ChainCommunicationError::from_other)
     }
@@ -510,6 +511,61 @@ impl Mailbox for CardanoMailbox {
         );
 
         Ok(outcome)
+    }
+
+    fn supports_batching(&self) -> bool {
+        self.conf.max_batch_size > 1
+    }
+
+    async fn process_batch<'a>(&self, ops: Vec<&'a QueueOperation>) -> ChainResult<BatchResult> {
+        let payer = self.payer.as_ref().ok_or_else(|| {
+            ChainCommunicationError::from_other_str(
+                "No payer keypair configured for batch processing",
+            )
+        })?;
+
+        let items: Vec<BatchItem<HyperlaneMessage>> = ops
+            .iter()
+            .map(|op| op.try_batch())
+            .collect::<ChainResult<_>>()?;
+
+        let max = self.conf.max_batch_size as usize;
+        let batch_items: Vec<_> = items.iter().take(max).collect();
+
+        info!(
+            "Processing batch of {} messages (max {})",
+            batch_items.len(),
+            max
+        );
+
+        let messages: Vec<(&HyperlaneMessage, &[u8])> = batch_items
+            .iter()
+            .map(|item| (&item.data, item.submission_data.metadata.as_ref()))
+            .collect();
+
+        let results = self
+            .tx_builder
+            .build_and_submit_chained_process_txs(&messages, payer)
+            .await
+            .map_err(ChainCommunicationError::from_other)?;
+
+        let mut failed_indexes: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| if r.is_err() { Some(i) } else { None })
+            .collect();
+
+        // Messages beyond max_batch_size are also "failed" (not attempted)
+        for i in max..ops.len() {
+            failed_indexes.push(i);
+        }
+
+        let outcome = results.into_iter().find_map(|r| r.ok());
+
+        Ok(BatchResult {
+            outcome,
+            failed_indexes,
+        })
     }
 
     async fn process_estimate_costs(

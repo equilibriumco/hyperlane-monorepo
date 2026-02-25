@@ -66,6 +66,10 @@ pub struct ConnectionConf {
     /// finished indexing for address-transaction queries (25-40s lag).
     /// Defaults to 2 (~40s at ~20s/block on preview).
     pub confirmation_block_delay: u32,
+    /// Maximum number of messages to chain in a single batch.
+    /// Each process TX is ~2-6KB; Cardano block size is ~80KB.
+    /// Defaults to 4.
+    pub max_batch_size: u32,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -93,6 +97,7 @@ pub struct RawConnectionConf {
     verified_message_nft_policy_id: Option<String>,
     verified_message_nft_script_cbor: Option<String>,
     confirmation_block_delay: Option<u32>,
+    max_batch_size: Option<u32>,
 }
 
 /// An error type when parsing a connection configuration.
@@ -226,6 +231,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let verified_message_nft_script_cbor = raw.verified_message_nft_script_cbor;
 
         let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(2);
+        let max_batch_size = raw.max_batch_size.unwrap_or(4);
 
         Ok(Self {
             url,
@@ -250,6 +256,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             verified_message_nft_policy_id,
             verified_message_nft_script_cbor,
             confirmation_block_delay,
+            max_batch_size,
         })
     }
 }

@@ -48,6 +48,7 @@ fn compute_zero_hashes() -> [[u8; 32]; DEPTH + 1] {
 
 /// 128-bit key Sparse Merkle Tree for replay protection.
 /// Keys are the first 16 bytes of message IDs; values are boolean (present/absent).
+#[derive(Clone)]
 pub struct SparseMerkleTree {
     leaves: HashMap<[u8; 16], bool>,
     zero_hashes: [[u8; 32]; DEPTH + 1],
