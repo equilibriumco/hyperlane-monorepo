@@ -33,5 +33,19 @@
     "tx_hash": "4e6feefac083ee5f03af7f3695ec06cb1fa73037016dca63ac4250d65c5f1cfb",
     "output_index": 0,
     "lovelace": 4000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "f81818c739b109d06782ae082791857616b5355cd917f7bf813c4dbc",
+    "tx_hash": "ec8f2700727a74d636c58f00a13cfaf5dfbd334aaa2fcaeb687da6aaf1a10502",
+    "output_index": 0,
+    "lovelace": 26000000
+  },
+  {
+    "script_name": "multisig_ism",
+    "script_hash": "48b62ff9474899cd6ffa7abcadd9e07634a6feb1e7f03b3a0253d14c",
+    "tx_hash": "7f4dced2b40f98782107156aeed64067b096f2c7af06c6ae1f9000ceae04cfcc",
+    "output_index": 0,
+    "lovelace": 15000000
   }
 ]
