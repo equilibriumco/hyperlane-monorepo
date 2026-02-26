@@ -36,6 +36,25 @@ impl OpQueue {
         self.queue.lock().await.push(Reverse(op));
     }
 
+    /// Push multiple elements onto the queue atomically (single lock acquisition).
+    /// This ensures concurrent consumers see all ops together in `pop_many`.
+    pub async fn push_many(&self, ops: Vec<(QueueOperation, Option<PendingOperationStatus>)>) {
+        let prepared: Vec<_> = ops
+            .into_iter()
+            .map(|(mut op, new_status)| {
+                let new_metric =
+                    Arc::new(self.get_new_operation_metric(op.as_ref(), new_status.clone()));
+                op.set_status_and_update_metrics(new_status, new_metric);
+                op
+            })
+            .collect();
+
+        let mut queue = self.queue.lock().await;
+        for op in prepared {
+            queue.push(Reverse(op));
+        }
+    }
+
     /// Pop an element from the queue and update metrics
     #[instrument(skip(self), ret, fields(queue_label=%self.queue_metrics_label), level = "trace")]
     pub async fn pop(&mut self) -> Option<QueueOperation> {
