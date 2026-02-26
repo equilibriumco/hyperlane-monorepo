@@ -234,7 +234,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let verified_message_nft_policy_id = raw.verified_message_nft_policy_id;
         let verified_message_nft_script_cbor = raw.verified_message_nft_script_cbor;
 
-        let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(2);
+        let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(5);
         let max_batch_size = raw.max_batch_size.unwrap_or(4);
         let op_submission_config = OpSubmissionConfig {
             max_batch_size,
