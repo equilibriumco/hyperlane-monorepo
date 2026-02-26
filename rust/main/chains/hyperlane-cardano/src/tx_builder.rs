@@ -1257,7 +1257,7 @@ impl HyperlaneTxBuilder {
                 let shortfall = batch_needed - cs.payer_total_input;
                 let mut sorted: Vec<_> = fresh
                     .iter()
-                    .filter(|u| u.value.len() <= 1)
+                    .filter(|u| u.value.len() <= 1 && u.reference_script_hash.is_none())
                     .cloned()
                     .collect();
                 sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
