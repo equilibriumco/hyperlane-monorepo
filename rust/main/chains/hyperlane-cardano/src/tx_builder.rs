@@ -631,14 +631,17 @@ impl HyperlaneTxBuilder {
         // 5. No additional inputs in new architecture (derived from datum)
         let additional_utxos: Vec<(Utxo, bool)> = Vec::new();
 
-        // 5b. Generate SMT non-membership proof for replay protection
+        // 5b. Generate SMT non-membership proof for replay protection.
         // When chaining, the proof and root are pre-computed by the batch orchestrator.
-        let smt_proof = if let Some(ci) = chained {
+        // For the unchained path, compute both proof AND new_root under a single lock to
+        // prevent a race where the submit task updates the tree between two separate
+        // lock acquisitions (which would cause verify_and_insert_static to panic).
+        let (smt_proof, precomputed_smt_root) = if let Some(ci) = chained {
             debug!(
                 "Using pre-computed SMT proof ({} siblings) for chained TX",
                 ci.smt_proof.len()
             );
-            ci.smt_proof.clone()
+            (ci.smt_proof.clone(), None)
         } else {
             self.get_or_init_smt().await?;
             let guard = self.smt.lock().await;
@@ -651,11 +654,14 @@ impl HyperlaneTxBuilder {
                 ));
             }
             let proof = tree.prove_non_membership(&key);
+            let old_root = tree.root();
+            let new_root =
+                crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof);
             debug!(
                 "Generated SMT non-membership proof ({} siblings)",
                 proof.len()
             );
-            proof
+            (proof, Some(new_root))
         };
 
         // 6. Encode redeemers
@@ -877,13 +883,8 @@ impl HyperlaneTxBuilder {
                 &ci.new_smt_root,
             )?
         } else {
-            let mut key = [0u8; 16];
-            key.copy_from_slice(&message_id[..16]);
-            let guard = self.smt.lock().await;
-            let tree = guard.as_ref().expect("SMT initialized");
-            let old_root = tree.root();
-            let new_root =
-                crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &smt_proof);
+            // new_root was computed atomically with the proof under the same lock above.
+            let new_root = precomputed_smt_root.expect("SMT root pre-computed in unchained path");
             build_mailbox_continuation_datum(&mailbox_utxo, &new_root)?
         };
 
