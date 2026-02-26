@@ -1345,7 +1345,42 @@ impl HyperlaneTxBuilder {
                 .build_complete_process_tx(&components, payer, None, chained_payer.as_ref())
                 .await?;
 
-            let signed_tx = self.sign_transaction(built_tx, payer)?;
+            let mut signed_tx = self.sign_transaction(built_tx, payer)?;
+            let mut actual_fee = ESTIMATED_FEE_LOVELACE;
+
+            // For TX 0 with no cached ExUnits, evaluate to get real budgets.
+            // Static defaults (2.5M mem) may be too low for complex scripts.
+            // The rebuild also populates cached_process_ex_units so TX 1+ use
+            // accurate per-role ExUnits instead of static placeholders.
+            if i == 0
+                && self.evaluate_available.load(Ordering::Relaxed)
+                && self.cached_process_ex_units.lock().await.is_none()
+            {
+                match self
+                    .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
+                    .await
+                {
+                    Ok((real_fee, ex_units_map)) => {
+                        let rebuilt = self
+                            .build_complete_process_tx(
+                                &components,
+                                payer,
+                                Some((real_fee, &ex_units_map)),
+                                chained_payer.as_ref(),
+                            )
+                            .await?;
+                        signed_tx = self.sign_transaction(rebuilt, payer)?;
+                        actual_fee = real_fee;
+                        info!(
+                            "Batch TX 0: evaluated fee {} lovelace, ExUnits cached for batch",
+                            real_fee
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Batch TX 0: evaluation failed, using static ExUnits: {e}");
+                    }
+                }
+            }
 
             // Check TX size
             let max_tx_size = self.get_max_tx_size().await;
@@ -1368,7 +1403,7 @@ impl HyperlaneTxBuilder {
                 )?,
             );
 
-            built_txs.push((signed_tx, components, ESTIMATED_FEE_LOVELACE));
+            built_txs.push((signed_tx, components, actual_fee));
         }
 
         // Phase 2: Submit all TXs sequentially (order matters for mempool acceptance)
@@ -2957,6 +2992,12 @@ impl HyperlaneTxBuilder {
         for utxo in sorted {
             // Skip UTXOs with tokens (keep it simple, use pure ADA UTXOs)
             if utxo.value.len() > 1 {
+                continue;
+            }
+
+            // Skip UTXOs that hold a reference script — spending them would clash
+            // with the same UTXO being added as a reference input in the TX.
+            if utxo.reference_script_hash.is_some() {
                 continue;
             }
 
