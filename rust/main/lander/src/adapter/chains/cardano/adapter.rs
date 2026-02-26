@@ -251,7 +251,7 @@ impl AdaptsChain for CardanoAdapter {
         }
 
         // If we have a tx_hash, check if it's on-chain
-        let tx_hash = precursor.tx_hash.unwrap();
+        let tx_hash = precursor.tx_hash.expect("checked above");
         match self.get_tx_hash_status(tx_hash).await {
             Ok(TransactionStatus::Finalized) => {
                 // Transaction is already on-chain, no need to resubmit
@@ -267,7 +267,7 @@ impl AdaptsChain for CardanoAdapter {
                 // delivered by the original transaction that's still propagating.
                 // Wait a reasonable time before considering resubmission.
                 if let Some(last_attempt) = tx.last_submission_attempt {
-                    let elapsed = chrono::Utc::now() - last_attempt;
+                    let elapsed = chrono::Utc::now().signed_duration_since(last_attempt);
                     // Wait at least 2 minutes (6 Cardano slots) before considering resubmission
                     let min_wait = chrono::Duration::seconds(120);
                     if elapsed < min_wait {
@@ -380,7 +380,7 @@ fn create_signer(conf: &ChainConf) -> Result<Keypair, LanderError> {
             let key_bytes = key.as_bytes();
 
             let keypair = Keypair::from_secret_key(key_bytes).map_err(|e| {
-                LanderError::ConfigError(format!("Failed to create Cardano keypair: {:?}", e))
+                LanderError::ConfigError(format!("Failed to create Cardano keypair: {e:?}"))
             })?;
 
             Ok(keypair)
@@ -390,7 +390,7 @@ fn create_signer(conf: &ChainConf) -> Result<Keypair, LanderError> {
             let key_bytes = key.as_bytes();
 
             let keypair = Keypair::from_secret_key(key_bytes).map_err(|e| {
-                LanderError::ConfigError(format!("Failed to create Cardano keypair: {:?}", e))
+                LanderError::ConfigError(format!("Failed to create Cardano keypair: {e:?}"))
             })?;
 
             Ok(keypair)
@@ -417,10 +417,22 @@ fn decode_hyperlane_message(bytes: &[u8]) -> Result<HyperlaneMessage, String> {
     }
 
     let version = bytes[0];
-    let nonce = u32::from_be_bytes(bytes[1..5].try_into().unwrap());
-    let origin = u32::from_be_bytes(bytes[5..9].try_into().unwrap());
+    let nonce = u32::from_be_bytes(
+        bytes[1..5]
+            .try_into()
+            .map_err(|_| "Invalid nonce bytes".to_string())?,
+    );
+    let origin = u32::from_be_bytes(
+        bytes[5..9]
+            .try_into()
+            .map_err(|_| "Invalid origin bytes".to_string())?,
+    );
     let sender = H256::from_slice(&bytes[9..41]);
-    let destination = u32::from_be_bytes(bytes[41..45].try_into().unwrap());
+    let destination = u32::from_be_bytes(
+        bytes[41..45]
+            .try_into()
+            .map_err(|_| "Invalid destination bytes".to_string())?,
+    );
     let recipient = H256::from_slice(&bytes[45..77]);
     let body = bytes[77..].to_vec();
 
