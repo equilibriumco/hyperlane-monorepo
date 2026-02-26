@@ -32,6 +32,56 @@ use tracing::{debug, info, instrument, warn};
 /// Per-redeemer ExUnits from evaluation, keyed by "spend:N" or "mint:N"
 type EvaluatedExUnits = HashMap<String, (u64, u64)>;
 
+/// Cached per-role ExUnits from the last successful Blockfrost evaluation.
+/// Used when the evaluate endpoint can't process tracked-state TXs (UTXOs
+/// not yet indexed) so we fall back to these known-good budgets instead of
+/// the static placeholders which may be too small for the mailbox script.
+#[derive(Clone, Debug)]
+struct CachedProcessExUnits {
+    mailbox_spend: (u64, u64),
+    ism_spend: (u64, u64),
+    processed_nft_mint: Option<(u64, u64)>,
+    verified_nft_mint: Option<(u64, u64)>,
+    recipient_spend: Option<(u64, u64)>,
+    synthetic_mint: Option<(u64, u64)>,
+}
+
+impl CachedProcessExUnits {
+    fn total_mem(&self) -> u64 {
+        let mut total = self.mailbox_spend.0 + self.ism_spend.0;
+        if let Some((m, _)) = self.processed_nft_mint {
+            total += m;
+        }
+        if let Some((m, _)) = self.verified_nft_mint {
+            total += m;
+        }
+        if let Some((m, _)) = self.recipient_spend {
+            total += m;
+        }
+        if let Some((m, _)) = self.synthetic_mint {
+            total += m;
+        }
+        total
+    }
+
+    fn total_steps(&self) -> u64 {
+        let mut total = self.mailbox_spend.1 + self.ism_spend.1;
+        if let Some((_, s)) = self.processed_nft_mint {
+            total += s;
+        }
+        if let Some((_, s)) = self.verified_nft_mint {
+            total += s;
+        }
+        if let Some((_, s)) = self.recipient_spend {
+            total += s;
+        }
+        if let Some((_, s)) = self.synthetic_mint {
+            total += s;
+        }
+        total
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum TxBuilderError {
     #[error("Blockfrost error: {0}")]
@@ -122,6 +172,13 @@ pub struct HyperlaneTxBuilder {
     /// Sparse Merkle Tree for replay protection. Initialized lazily on first use
     /// by scanning on-chain processed_message_nft tokens.
     smt: Mutex<Option<crate::smt::SparseMerkleTree>>,
+    /// Predicted UTXO state (mailbox, ISM, payer, datum) from the last
+    /// successfully-submitted TX. Avoids querying Blockfrost between rapid
+    /// submissions, working around the 25-40s index lag in Blockfrost's API.
+    last_tx_state: Mutex<Option<ChainedUtxoState>>,
+    /// Cached per-role ExUnits from the last successful evaluation.
+    /// Reused when Blockfrost evaluate fails for tracked-state TXs.
+    cached_process_ex_units: Mutex<Option<CachedProcessExUnits>>,
 }
 
 impl HyperlaneTxBuilder {
@@ -140,7 +197,17 @@ impl HyperlaneTxBuilder {
             evaluate_available: AtomicBool::new(true),
             script_size_cache: RwLock::new(HashMap::new()),
             smt: Mutex::new(None),
+            last_tx_state: Mutex::new(None),
+            cached_process_ex_units: Mutex::new(None),
         }
+    }
+
+    async fn set_last_tx_state(&self, state: ChainedUtxoState) {
+        *self.last_tx_state.lock().await = Some(state);
+    }
+
+    async fn peek_last_tx_state(&self) -> Option<ChainedUtxoState> {
+        self.last_tx_state.lock().await.clone()
     }
 
     /// Get the coins per UTXO byte from protocol parameters.
@@ -856,19 +923,68 @@ impl HyperlaneTxBuilder {
         metadata: &[u8],
         payer: &Keypair,
     ) -> Result<TxOutcome, TxBuilderError> {
-        // 1. Build transaction components
+        // 1. Take tracked UTXO state from previous TX (if any).
+        //    Provides mailbox, ISM, and payer UTXOs so we don't query stale Blockfrost.
+        let tracked_state = self.peek_last_tx_state().await;
+        let (tracked_chained, tracked_payer) = if let Some(ref ts) = tracked_state {
+            info!(
+                "Using tracked state: mailbox={}#{}, ism={}#{}, payer={}#{} ({} lovelace)",
+                ts.mailbox_utxo.tx_hash,
+                ts.mailbox_utxo.output_index,
+                ts.ism_utxo.tx_hash,
+                ts.ism_utxo.output_index,
+                ts.payer_utxo.tx_hash,
+                ts.payer_utxo.output_index,
+                ts.payer_total_input,
+            );
+            // Build ChainedInputs with tracked mailbox/ISM but fresh SMT proof.
+            // SMT proof must be generated from the live tree, not pre-computed.
+            let message_id = crate::types::Message::from_hyperlane_message(message).id();
+            self.get_or_init_smt().await?;
+            let (smt_proof, new_smt_root) = {
+                let guard = self.smt.lock().await;
+                let tree = guard.as_ref().expect("SMT initialized");
+                let mut key = [0u8; 16];
+                key.copy_from_slice(&message_id[..16]);
+                if tree.contains(&key) {
+                    return Err(TxBuilderError::UndeliverableMessage(
+                        "Message already in SMT (duplicate message_id)".to_string(),
+                    ));
+                }
+                let proof = tree.prove_non_membership(&key);
+                let old_root = tree.root();
+                let new_root =
+                    crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof);
+                (proof, new_root)
+            };
+            let chained = ChainedInputs {
+                mailbox_utxo: ts.mailbox_utxo.clone(),
+                ism_utxo: ts.ism_utxo.clone(),
+                smt_proof,
+                new_smt_root,
+                prev_mailbox_datum_cbor: ts.mailbox_datum_cbor.clone(),
+            };
+            let payer = ChainedPayer {
+                utxos: vec![ts.payer_utxo.clone()],
+                total_input: ts.payer_total_input,
+            };
+            (Some(chained), Some(payer))
+        } else {
+            (None, None)
+        };
+
+        // 2. Build transaction components
         info!(
             "Building process transaction components for message nonce {}",
             message.nonce
         );
         let components = self
-            .build_process_tx(message, metadata, payer, None)
+            .build_process_tx(message, metadata, payer, tracked_chained.as_ref())
             .await?;
 
-        // 2. Build the complete transaction
         info!("Constructing full transaction with pallas-txbuilder");
         let built_tx = self
-            .build_complete_process_tx(&components, payer, None, None)
+            .build_complete_process_tx(&components, payer, None, tracked_payer.as_ref())
             .await?;
 
         // 3. Sign the transaction
@@ -896,7 +1012,7 @@ impl HyperlaneTxBuilder {
                             &components,
                             payer,
                             Some((real_fee, &ex_units_map)),
-                            None,
+                            tracked_payer.as_ref(),
                         )
                         .await?;
                     signed_tx = self.sign_transaction(rebuilt, payer)?;
@@ -923,7 +1039,7 @@ impl HyperlaneTxBuilder {
                                 &components,
                                 payer,
                                 Some((corrected_fee, &ex_units_map)),
-                                None,
+                                tracked_payer.as_ref(),
                             )
                             .await?;
                         signed_tx = self.sign_transaction(corrected, payer)?;
@@ -933,10 +1049,81 @@ impl HyperlaneTxBuilder {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Fee evaluation failed, using static {} lovelace: {}",
-                        ESTIMATED_FEE_LOVELACE, e
-                    );
+                    // Evaluate failed (common for tracked-state TXs whose UTXOs
+                    // aren't indexed yet). If we have cached ExUnits from a
+                    // previous successful evaluate, compute a proper fee and
+                    // rebuild — the first build already used cached ExUnits for
+                    // correct script budgets but still has a 3M placeholder fee.
+                    let cached_opt = self.cached_process_ex_units.lock().await.clone();
+                    if let Some(ref cached) = cached_opt {
+                        let total_mem = cached.total_mem();
+                        let total_steps = cached.total_steps();
+                        match self
+                            .compute_fee_from_evaluation(
+                                signed_tx.len() as u64,
+                                total_mem,
+                                total_steps,
+                                ref_script_size,
+                            )
+                            .await
+                        {
+                            Ok(cached_fee) => {
+                                info!(
+                                    "Evaluate failed ({}), using cached ExUnits with fee {} lovelace",
+                                    e, cached_fee
+                                );
+                                // Rebuild with proper fee. Pass fee via
+                                // eval_overrides with an empty ExUnits map so
+                                // redeemer lookups fall through to cached values.
+                                let empty_map = HashMap::new();
+                                let rebuilt = self
+                                    .build_complete_process_tx(
+                                        &components,
+                                        payer,
+                                        Some((cached_fee, &empty_map)),
+                                        tracked_payer.as_ref(),
+                                    )
+                                    .await?;
+                                signed_tx = self.sign_transaction(rebuilt, payer)?;
+
+                                // Recompute from actual rebuilt TX size
+                                let corrected = self
+                                    .compute_fee_from_evaluation(
+                                        signed_tx.len() as u64,
+                                        total_mem,
+                                        total_steps,
+                                        ref_script_size,
+                                    )
+                                    .await
+                                    .unwrap_or(cached_fee);
+                                if corrected > cached_fee {
+                                    let rebuilt2 = self
+                                        .build_complete_process_tx(
+                                            &components,
+                                            payer,
+                                            Some((corrected, &empty_map)),
+                                            tracked_payer.as_ref(),
+                                        )
+                                        .await?;
+                                    signed_tx = self.sign_transaction(rebuilt2, payer)?;
+                                    actual_fee = corrected;
+                                } else {
+                                    actual_fee = cached_fee;
+                                }
+                            }
+                            Err(fee_err) => {
+                                warn!(
+                                    "Fee evaluation failed ({}), fee computation from cache also failed ({}), using static {} lovelace",
+                                    e, fee_err, ESTIMATED_FEE_LOVELACE
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Fee evaluation failed, no cached ExUnits, using static {} lovelace: {}",
+                            ESTIMATED_FEE_LOVELACE, e
+                        );
+                    }
                 }
             }
         }
@@ -955,6 +1142,30 @@ impl HyperlaneTxBuilder {
         let tx_hash = self.submit_transaction(&signed_tx).await?;
 
         info!("Transaction submitted successfully: {}", tx_hash);
+
+        // Track full UTXO state (mailbox, ISM, payer, datum) for the next submission
+        let datum_cbor = components
+            .mailbox_continuation_datum_cbor
+            .as_deref()
+            .expect("mailbox continuation datum always set");
+        match self.extract_chained_state(&components, &signed_tx, datum_cbor) {
+            Ok(state) => {
+                debug!(
+                    "Tracking TX state: mailbox={}#{}, ism={}#{}, payer={}#{} ({} lovelace)",
+                    state.mailbox_utxo.tx_hash,
+                    state.mailbox_utxo.output_index,
+                    state.ism_utxo.tx_hash,
+                    state.ism_utxo.output_index,
+                    state.payer_utxo.tx_hash,
+                    state.payer_utxo.output_index,
+                    state.payer_total_input,
+                );
+                self.set_last_tx_state(state).await;
+            }
+            Err(e) => {
+                debug!("Could not extract TX state for tracking: {e:?}");
+            }
+        }
 
         // Update SMT with the newly processed message
         {
@@ -1010,9 +1221,66 @@ impl HyperlaneTxBuilder {
             guard.as_ref().expect("SMT initialized above").clone()
         };
 
-        let mut chained_state: Option<ChainedUtxoState> = None;
+        // Use tracked UTXO state from a previous submission for TX 0,
+        // avoiding stale Blockfrost queries for mailbox, ISM, and payer.
+        let initial_tracked_state = self.peek_last_tx_state().await;
+        if let Some(ref ts) = initial_tracked_state {
+            info!(
+                "Using tracked state for batch TX 0: mailbox={}#{}, ism={}#{}, payer={}#{} ({} lovelace)",
+                ts.mailbox_utxo.tx_hash, ts.mailbox_utxo.output_index,
+                ts.ism_utxo.tx_hash, ts.ism_utxo.output_index,
+                ts.payer_utxo.tx_hash, ts.payer_utxo.output_index,
+                ts.payer_total_input,
+            );
+        }
+
+        // For TX 0, promote tracked state into chained_state so the loop
+        // builds ChainedInputs from it instead of querying Blockfrost.
+        let mut chained_state: Option<ChainedUtxoState> = initial_tracked_state;
         let mut built_txs: Vec<(Vec<u8>, ProcessTxComponents, u64)> =
             Vec::with_capacity(batch_size);
+
+        // Pre-check: if tracked payer can't fund the full batch, fetch
+        // supplementary wallet UTXOs for TX 0 so the change cascades.
+        // ~7 ADA/TX is conservative (fee 3M + processed 1.5M + verified 4M).
+        const ESTIMATED_COST_PER_CHAINED_TX: u64 = 7_000_000;
+        let batch_needed = batch_size as u64 * ESTIMATED_COST_PER_CHAINED_TX + 1_500_000;
+        let supplementary_utxos: Vec<Utxo> = if let Some(ref cs) = chained_state {
+            if cs.payer_total_input < batch_needed {
+                info!(
+                    "Tracked payer {} lovelace < ~{} needed for {} TXs, fetching supplementary UTXOs",
+                    cs.payer_total_input, batch_needed, batch_size
+                );
+                let payer_address = payer.address_bech32(self.network_to_pallas());
+                let fresh = self.provider.get_utxos_at_address(&payer_address).await?;
+                let shortfall = batch_needed - cs.payer_total_input;
+                let mut sorted: Vec<_> = fresh
+                    .iter()
+                    .filter(|u| u.value.len() <= 1)
+                    .cloned()
+                    .collect();
+                sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
+                let mut selected = Vec::new();
+                let mut extra_total = 0u64;
+                for utxo in sorted {
+                    selected.push(utxo.clone());
+                    extra_total += utxo.lovelace();
+                    if extra_total >= shortfall {
+                        break;
+                    }
+                }
+                info!(
+                    "Selected {} supplementary UTXOs ({} lovelace) for batch",
+                    selected.len(),
+                    extra_total
+                );
+                selected
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
 
         // Phase 1: Build and sign all TXs sequentially (each depends on the prior)
         for (i, (message, metadata)) in messages.iter().enumerate() {
@@ -1054,10 +1322,22 @@ impl HyperlaneTxBuilder {
                 .build_process_tx(message, metadata, payer, chained_inputs.as_ref())
                 .await?;
 
-            // Build the complete TX with chained payer if applicable
-            let chained_payer = chained_state.as_ref().map(|cs| ChainedPayer {
-                utxo: cs.payer_utxo.clone(),
-                total_input: cs.payer_total_input,
+            // Build the complete TX with chained payer if applicable.
+            // For TX 0, include supplementary UTXOs so the change output
+            // is large enough for all remaining TXs in the chain.
+            let chained_payer = chained_state.as_ref().map(|cs| {
+                let mut utxos = vec![cs.payer_utxo.clone()];
+                let mut total = cs.payer_total_input;
+                if i == 0 {
+                    for u in &supplementary_utxos {
+                        utxos.push(u.clone());
+                        total += u.lovelace();
+                    }
+                }
+                ChainedPayer {
+                    utxos,
+                    total_input: total,
+                }
             });
 
             let built_tx = self
@@ -1127,6 +1407,33 @@ impl HyperlaneTxBuilder {
                         ))));
                     }
                     break;
+                }
+            }
+        }
+
+        // Track full UTXO state from the last successfully submitted TX
+        if success_count > 0 {
+            let last_idx = success_count - 1;
+            let (ref signed_tx, ref components, _) = built_txs[last_idx];
+            let datum_cbor = components
+                .mailbox_continuation_datum_cbor
+                .as_deref()
+                .expect("mailbox continuation datum always set");
+            match self.extract_chained_state(components, signed_tx, datum_cbor) {
+                Ok(state) => {
+                    debug!(
+                        "Tracking batch TX {} state: mailbox={}#{}, payer={}#{} ({} lovelace)",
+                        last_idx,
+                        state.mailbox_utxo.tx_hash,
+                        state.mailbox_utxo.output_index,
+                        state.payer_utxo.tx_hash,
+                        state.payer_utxo.output_index,
+                        state.payer_total_input,
+                    );
+                    self.set_last_tx_state(state).await;
+                }
+                Err(e) => {
+                    debug!("Could not extract TX state from batch: {e:?}");
                 }
             }
         }
@@ -1313,6 +1620,11 @@ impl HyperlaneTxBuilder {
         eval_overrides: Option<(u64, &EvaluatedExUnits)>,
         chained_payer: Option<&ChainedPayer>,
     ) -> Result<BuiltTransaction, TxBuilderError> {
+        // Load cached per-role ExUnits as fallback when position-based lookup
+        // misses (e.g., evaluate failed for tracked-state UTXOs, or caller
+        // passes fee-only overrides with an empty ExUnits map).
+        let cached_ex = self.cached_process_ex_units.lock().await.clone();
+
         // Pre-fetch coins_per_utxo_byte once, then compute all min_lovelace values synchronously
         let coins_per_byte = self.get_coins_per_utxo_byte().await;
         let min_lovelace = Self::calculate_min_lovelace_sync(coins_per_byte, OutputType::SimpleAda);
@@ -1481,13 +1793,35 @@ impl HyperlaneTxBuilder {
             + verified_message_min_lovelace;
 
         // Find payer UTXOs for fee payment (coin selection)
-        // When chaining, use the change UTXO from the previous TX
+        // When chaining, use the change UTXO(s) from the previous TX
         let (payer_utxos, selected_utxos, total_input) = if let Some(cp) = chained_payer {
-            debug!(
-                "Using chained payer UTXO: {}#{} ({} lovelace)",
-                cp.utxo.tx_hash, cp.utxo.output_index, cp.total_input
-            );
-            (vec![cp.utxo.clone()], vec![cp.utxo.clone()], cp.total_input)
+            let needed = ESTIMATED_FEE_LOVELACE + min_lovelace + total_payer_extra;
+            if cp.total_input >= needed {
+                debug!(
+                    "Using chained payer: {} UTXOs, {} lovelace",
+                    cp.utxos.len(),
+                    cp.total_input
+                );
+                (cp.utxos.clone(), cp.utxos.clone(), cp.total_input)
+            } else {
+                // Chained payer insufficient — supplement with fresh wallet UTXOs.
+                // This happens when the tracked change from a previous batch is too
+                // small for the current batch's total cost.
+                warn!(
+                    "Chained payer {} lovelace < {} needed, supplementing from wallet",
+                    cp.total_input, needed
+                );
+                let fresh_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
+                let shortfall = needed - cp.total_input;
+                let (extra, extra_total) =
+                    self.select_utxos_for_fee_with_extra(&fresh_utxos, shortfall, 0)?;
+                let mut selected = cp.utxos.clone();
+                selected.extend(extra);
+                let total = cp.total_input + extra_total;
+                let mut all = cp.utxos.clone();
+                all.extend(fresh_utxos);
+                (all, selected, total)
+            }
         } else {
             let utxos = self.provider.get_utxos_at_address(&payer_address).await?;
             let (selected, total) =
@@ -1769,11 +2103,21 @@ impl HyperlaneTxBuilder {
             let key = format!("spend:{mailbox_sorted_idx}");
             if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                 ExUnits { mem, steps }
+            } else if let Some(ref c) = cached_ex {
+                ExUnits {
+                    mem: c.mailbox_spend.0,
+                    steps: c.mailbox_spend.1,
+                }
             } else {
                 ExUnits {
                     mem: DEFAULT_MEM_UNITS,
                     steps: DEFAULT_STEP_UNITS,
                 }
+            }
+        } else if let Some(ref c) = cached_ex {
+            ExUnits {
+                mem: c.mailbox_spend.0,
+                steps: c.mailbox_spend.1,
             }
         } else {
             ExUnits {
@@ -1799,12 +2143,26 @@ impl HyperlaneTxBuilder {
                 let key = format!("spend:{sorted_idx}");
                 if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                     ExUnits { mem, steps }
+                } else if let Some(ref c) = cached_ex {
+                    c.recipient_spend
+                        .map(|(m, s)| ExUnits { mem: m, steps: s })
+                        .unwrap_or(ExUnits {
+                            mem: DEFAULT_MEM_UNITS,
+                            steps: DEFAULT_STEP_UNITS,
+                        })
                 } else {
                     ExUnits {
                         mem: DEFAULT_MEM_UNITS,
                         steps: DEFAULT_STEP_UNITS,
                     }
                 }
+            } else if let Some(ref c) = cached_ex {
+                c.recipient_spend
+                    .map(|(m, s)| ExUnits { mem: m, steps: s })
+                    .unwrap_or(ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    })
             } else {
                 ExUnits {
                     mem: DEFAULT_MEM_UNITS,
@@ -1825,11 +2183,21 @@ impl HyperlaneTxBuilder {
             let key = format!("spend:{ism_sorted_idx}");
             if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                 ExUnits { mem, steps }
+            } else if let Some(ref c) = cached_ex {
+                ExUnits {
+                    mem: c.ism_spend.0,
+                    steps: c.ism_spend.1,
+                }
             } else {
                 ExUnits {
                     mem: ISM_MEM_UNITS,
                     steps: ISM_STEP_UNITS,
                 }
+            }
+        } else if let Some(ref c) = cached_ex {
+            ExUnits {
+                mem: c.ism_spend.0,
+                steps: c.ism_spend.1,
             }
         } else {
             ExUnits {
@@ -1995,12 +2363,26 @@ impl HyperlaneTxBuilder {
                         let key = format!("mint:{sorted_idx}");
                         if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                             ExUnits { mem, steps }
+                        } else if let Some(ref c) = cached_ex {
+                            c.synthetic_mint
+                                .map(|(m, s)| ExUnits { mem: m, steps: s })
+                                .unwrap_or(ExUnits {
+                                    mem: DEFAULT_MEM_UNITS,
+                                    steps: DEFAULT_STEP_UNITS,
+                                })
                         } else {
                             ExUnits {
                                 mem: DEFAULT_MEM_UNITS,
                                 steps: DEFAULT_STEP_UNITS,
                             }
                         }
+                    } else if let Some(ref c) = cached_ex {
+                        c.synthetic_mint
+                            .map(|(m, s)| ExUnits { mem: m, steps: s })
+                            .unwrap_or(ExUnits {
+                                mem: DEFAULT_MEM_UNITS,
+                                steps: DEFAULT_STEP_UNITS,
+                            })
                     } else {
                         ExUnits {
                             mem: DEFAULT_MEM_UNITS,
@@ -2098,12 +2480,26 @@ impl HyperlaneTxBuilder {
                 let key = format!("mint:{sorted_idx}");
                 if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                     ExUnits { mem, steps }
+                } else if let Some(ref c) = cached_ex {
+                    c.processed_nft_mint
+                        .map(|(m, s)| ExUnits { mem: m, steps: s })
+                        .unwrap_or(ExUnits {
+                            mem: DEFAULT_MEM_UNITS,
+                            steps: DEFAULT_STEP_UNITS,
+                        })
                 } else {
                     ExUnits {
                         mem: DEFAULT_MEM_UNITS,
                         steps: DEFAULT_STEP_UNITS,
                     }
                 }
+            } else if let Some(ref c) = cached_ex {
+                c.processed_nft_mint
+                    .map(|(m, s)| ExUnits { mem: m, steps: s })
+                    .unwrap_or(ExUnits {
+                        mem: DEFAULT_MEM_UNITS,
+                        steps: DEFAULT_STEP_UNITS,
+                    })
             } else {
                 ExUnits {
                     mem: DEFAULT_MEM_UNITS,
@@ -2165,12 +2561,26 @@ impl HyperlaneTxBuilder {
                     let key = format!("mint:{sorted_idx}");
                     if let Some(&(mem, steps)) = ex_units_map.get(&key) {
                         ExUnits { mem, steps }
+                    } else if let Some(ref c) = cached_ex {
+                        c.verified_nft_mint
+                            .map(|(m, s)| ExUnits { mem: m, steps: s })
+                            .unwrap_or(ExUnits {
+                                mem: DEFAULT_MEM_UNITS,
+                                steps: DEFAULT_STEP_UNITS,
+                            })
                     } else {
                         ExUnits {
                             mem: DEFAULT_MEM_UNITS,
                             steps: DEFAULT_STEP_UNITS,
                         }
                     }
+                } else if let Some(ref c) = cached_ex {
+                    c.verified_nft_mint
+                        .map(|(m, s)| ExUnits { mem: m, steps: s })
+                        .unwrap_or(ExUnits {
+                            mem: DEFAULT_MEM_UNITS,
+                            steps: DEFAULT_STEP_UNITS,
+                        })
                 } else {
                     ExUnits {
                         mem: DEFAULT_MEM_UNITS,
@@ -2249,6 +2659,33 @@ impl HyperlaneTxBuilder {
         let fee = eval_overrides
             .map(|(f, _)| f)
             .unwrap_or(ESTIMATED_FEE_LOVELACE);
+
+        // Cache per-role ExUnits from a successful evaluate for reuse when
+        // evaluate fails on tracked-state TXs. Only update when the map is
+        // non-empty (callers may pass fee-only overrides with an empty map).
+        if let Some((_, ex_units_map)) = eval_overrides {
+            if !ex_units_map.is_empty() {
+                let to_cache = CachedProcessExUnits {
+                    mailbox_spend: *ex_units_map
+                        .get(&format!("spend:{mailbox_sorted_idx}"))
+                        .unwrap_or(&(DEFAULT_MEM_UNITS, DEFAULT_STEP_UNITS)),
+                    ism_spend: *ex_units_map
+                        .get(&format!("spend:{ism_sorted_idx}"))
+                        .unwrap_or(&(ISM_MEM_UNITS, ISM_STEP_UNITS)),
+                    processed_nft_mint: processed_nft_mint_idx
+                        .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
+                    verified_nft_mint: verified_nft_mint_idx
+                        .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
+                    recipient_spend: recipient_sorted_idx
+                        .and_then(|idx| ex_units_map.get(&format!("spend:{idx}")).copied()),
+                    synthetic_mint: synthetic_mint_idx
+                        .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
+                };
+                debug!("Caching per-role ExUnits: {:?}", to_cache);
+                *self.cached_process_ex_units.lock().await = Some(to_cache);
+            }
+        }
+
         let processed_marker_cost = processed_marker_min_lovelace;
 
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
@@ -2321,6 +2758,13 @@ impl HyperlaneTxBuilder {
         let change_amount = total_input.saturating_sub(
             fee + processed_marker_cost + recipient_shortfall + verified_message_min_lovelace,
         );
+        if chained_payer.is_some() && change_amount < min_lovelace {
+            return Err(TxBuilderError::TxBuild(format!(
+                "Chained payer change {change_amount} < min_lovelace {min_lovelace} \
+                 (total_input={total_input}, fee={fee}, processed={processed_marker_cost}, \
+                 shortfall={recipient_shortfall}, verified={verified_message_min_lovelace})",
+            )));
+        }
 
         if change_amount >= min_lovelace {
             let change_output = Output::new(parse_address(&payer_address)?, change_amount);
@@ -3104,14 +3548,16 @@ pub struct ChainedInputs {
     pub prev_mailbox_datum_cbor: Vec<u8>,
 }
 
-/// Chained payer UTXO from the previous TX's change output.
-/// Used instead of querying Blockfrost for wallet UTXOs.
+/// Chained payer UTXOs from the previous TX's change output,
+/// optionally supplemented with fresh wallet UTXOs when the
+/// change alone is insufficient for the remaining chain.
 pub struct ChainedPayer {
-    pub utxo: Utxo,
+    pub utxos: Vec<Utxo>,
     pub total_input: u64,
 }
 
 /// State extracted from a built TX to feed into the next TX in a chain.
+#[derive(Clone)]
 pub struct ChainedUtxoState {
     pub mailbox_utxo: Utxo,
     pub ism_utxo: Utxo,
