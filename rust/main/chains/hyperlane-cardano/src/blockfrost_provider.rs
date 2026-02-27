@@ -628,8 +628,9 @@ impl BlockfrostProvider {
             })
             .collect();
 
+        let cbor_hex = hex::encode(tx_cbor);
         let body = serde_json::json!({
-            "cbor": hex::encode(tx_cbor),
+            "cbor": cbor_hex,
             "additionalUtxoSet": utxo_set,
         });
 
