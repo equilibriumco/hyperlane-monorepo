@@ -47,11 +47,11 @@ struct CachedProcessExUnits {
 }
 
 impl CachedProcessExUnits {
-    /// Apply a 10% step margin so cached ExUnits remain valid when subsequent
-    /// chained TXs have extra inputs (e.g. wallet supplement), which increases
-    /// TxInfo size and thus Plutus CPU consumption slightly.
+    /// Apply a 10% margin to both mem and steps so cached ExUnits remain valid
+    /// when subsequent chained TXs have extra inputs (e.g. wallet supplement)
+    /// or slightly larger SMT proofs for later nonces.
     fn with_step_margin(self) -> Self {
-        let m = |v: (u64, u64)| (v.0, v.1 * 11 / 10);
+        let m = |v: (u64, u64)| (v.0 * 11 / 10, v.1 * 11 / 10);
         let mo = |v: Option<(u64, u64)>| v.map(m);
         Self {
             mailbox_spend: m(self.mailbox_spend),
