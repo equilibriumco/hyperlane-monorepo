@@ -2178,9 +2178,14 @@ impl HyperlaneTxBuilder {
             tx = tx.input(input);
         }
 
-        // Add collateral input (use one of the payer's UTXOs for collateral)
-        // Collateral is required for Plutus script execution
-        if let Some(collateral_utxo) = selected_utxos.first() {
+        // Cardano requires collateral inputs to be pure ADA — token-bearing UTxOs
+        // cause CollateralContainsNonADA errors. Search all payer UTxOs for the
+        // largest pure-ADA one, independent of which UTxOs were selected for fees.
+        let collateral_utxo = payer_utxos
+            .iter()
+            .filter(|u| u.value.len() == 1)
+            .max_by_key(|u| u.lovelace());
+        if let Some(collateral_utxo) = collateral_utxo {
             let collateral_input = utxo_to_input(collateral_utxo)?;
             tx = tx.collateral_input(collateral_input);
             debug!(
@@ -2189,7 +2194,9 @@ impl HyperlaneTxBuilder {
             );
         } else {
             return Err(TxBuilderError::MissingInput(
-                "No UTXOs available for collateral".to_string(),
+                "No pure-ADA UTXO available for collateral; fund the relayer wallet \
+                 with a pure-ADA UTXO (one without native tokens)"
+                    .to_string(),
             ));
         }
 
@@ -3027,7 +3034,33 @@ impl HyperlaneTxBuilder {
         }
 
         if change_amount >= min_lovelace {
-            let change_output = Output::new(parse_address(&payer_address)?, change_amount);
+            let mut change_output = Output::new(parse_address(&payer_address)?, change_amount);
+            // If any selected fee UTxOs carry native tokens, pass them through to
+            // the change output so the TX satisfies value-conservation.
+            for utxo in &selected_utxos {
+                for v in &utxo.value {
+                    if v.unit == "lovelace" || v.unit.len() < 56 {
+                        continue;
+                    }
+                    let policy_hex = &v.unit[..56];
+                    let asset_name_hex = &v.unit[56..];
+                    let policy_hash = parse_policy_id(policy_hex)?;
+                    let asset_name = hex::decode(asset_name_hex).map_err(|e| {
+                        TxBuilderError::Encoding(format!("Invalid asset name hex: {e}"))
+                    })?;
+                    let quantity: u64 = v
+                        .quantity
+                        .parse()
+                        .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
+                    change_output = change_output
+                        .add_asset(policy_hash, asset_name, quantity)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to add token to change output: {e:?}"
+                            ))
+                        })?;
+                }
+            }
             tx = tx.output(change_output);
         }
 
@@ -3224,12 +3257,6 @@ impl HyperlaneTxBuilder {
         })
         .collect();
 
-        // Sort UTXOs by lovelace amount (largest first) for efficient selection
-        let mut sorted: Vec<_> = utxos.iter().collect();
-        sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
-
-        let mut selected = Vec::new();
-        let mut total: u64 = 0;
         // Need enough for fee + min UTXO for change + extra (e.g., synthetic recipient shortfall)
         let needed = ESTIMATED_FEE_LOVELACE + min_lovelace + extra;
         debug!(
@@ -3237,20 +3264,52 @@ impl HyperlaneTxBuilder {
             needed, ESTIMATED_FEE_LOVELACE, min_lovelace, extra
         );
 
-        for utxo in sorted {
-            // Skip UTXOs with tokens (keep it simple, use pure ADA UTXOs)
+        // Sort UTXOs by lovelace amount (largest first) for efficient selection
+        let mut sorted: Vec<_> = utxos.iter().collect();
+        sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
+
+        // First pass: prefer pure-ADA UTxOs. Selecting pure-ADA avoids the need to
+        // carry native tokens through to the change output.
+        let mut selected = Vec::new();
+        let mut total: u64 = 0;
+        for utxo in &sorted {
             if utxo.value.len() > 1 {
                 continue;
             }
-
-            // Skip UTxOs that are the specific configured reference inputs.
             if blocked.contains(&(utxo.tx_hash.clone(), utxo.output_index)) {
                 continue;
             }
-
-            selected.push(utxo.clone());
+            selected.push((*utxo).clone());
             total += utxo.lovelace();
+            if total >= needed {
+                break;
+            }
+        }
 
+        if total >= needed {
+            return Ok((selected, total));
+        }
+
+        // Second pass: wallet has no (or insufficient) pure-ADA UTxOs.
+        // Allow token-bearing UTxOs that are NOT reference-script UTxOs; their
+        // native assets must be preserved in the change output (value-conservation).
+        // Reference-script UTxOs are never spent as fee inputs — consuming them
+        // would destroy the scripts needed by future transactions.
+        debug!(
+            "Pure-ADA selection yielded only {} lovelace (need {}), trying token UTxOs (excluding ref-scripts)",
+            total, needed
+        );
+        selected.clear();
+        total = 0;
+        for utxo in &sorted {
+            if utxo.reference_script_hash.is_some() {
+                continue;
+            }
+            if blocked.contains(&(utxo.tx_hash.clone(), utxo.output_index)) {
+                continue;
+            }
+            selected.push((*utxo).clone());
+            total += utxo.lovelace();
             if total >= needed {
                 break;
             }
@@ -3481,7 +3540,31 @@ impl HyperlaneTxBuilder {
             .saturating_sub(ESTIMATED_FEE_LOVELACE);
 
         if change_amount >= min_lovelace {
-            let change_output = Output::new(parse_address(&payer_address)?, change_amount);
+            let mut change_output = Output::new(parse_address(&payer_address)?, change_amount);
+            for utxo in &selected_utxos {
+                for v in &utxo.value {
+                    if v.unit == "lovelace" || v.unit.len() < 56 {
+                        continue;
+                    }
+                    let policy_hex = &v.unit[..56];
+                    let asset_name_hex = &v.unit[56..];
+                    let policy_hash = parse_policy_id(policy_hex)?;
+                    let asset_name = hex::decode(asset_name_hex).map_err(|e| {
+                        TxBuilderError::Encoding(format!("Invalid asset name hex: {e}"))
+                    })?;
+                    let quantity: u64 = v
+                        .quantity
+                        .parse()
+                        .map_err(|e| TxBuilderError::Encoding(format!("Invalid quantity: {e}")))?;
+                    change_output = change_output
+                        .add_asset(policy_hash, asset_name, quantity)
+                        .map_err(|e| {
+                            TxBuilderError::TxBuild(format!(
+                                "Failed to add token to change output: {e:?}"
+                            ))
+                        })?;
+                }
+            }
             tx = tx.output(change_output);
         }
 
