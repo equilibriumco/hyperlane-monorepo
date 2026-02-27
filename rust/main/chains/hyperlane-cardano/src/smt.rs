@@ -46,6 +46,80 @@ fn compute_zero_hashes() -> [[u8; 32]; DEPTH + 1] {
     zeros
 }
 
+/// Compare keys in tree traversal order: bit 127 most significant, bit 0 least significant.
+/// This ordering ensures each level's left/right split is a contiguous partition of the sorted
+/// slice, enabling O(N log N) root and proof computation via binary search (partition_point).
+fn cmp_tree_order(a: &[u8; 16], b: &[u8; 16]) -> std::cmp::Ordering {
+    for bit in (0..DEPTH).rev() {
+        match get_bit(a, bit).cmp(&get_bit(b, bit)) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Compute the hash of a subtree at the given height from a tree-order sorted key slice.
+/// O(N) per call; O(N * DEPTH) total across all recursive calls for a single root computation.
+fn compute_subtree_hash_sorted(
+    sorted: &[[u8; 16]],
+    level: usize,
+    zeros: &[[u8; 32]; DEPTH + 1],
+) -> [u8; 32] {
+    if sorted.is_empty() {
+        return zeros[level];
+    }
+    if level == 0 {
+        return PRESENT_LEAF;
+    }
+    let split_pos = sorted.partition_point(|k| !get_bit(k, level - 1));
+    let left = compute_subtree_hash_sorted(&sorted[..split_pos], level - 1, zeros);
+    let right = compute_subtree_hash_sorted(&sorted[split_pos..], level - 1, zeros);
+    hash_pair(&left, &right)
+}
+
+/// Collect sibling hashes for a non-membership proof, top-down (to be reversed by caller).
+/// At each level, computes the sibling subtree hash and recurses into the side containing key.
+fn collect_proof_path(
+    sorted: &[[u8; 16]],
+    key: &[u8; 16],
+    level: usize,
+    zeros: &[[u8; 32]; DEPTH + 1],
+    siblings: &mut Vec<[u8; 32]>,
+) {
+    if level == 0 {
+        return;
+    }
+    let split_pos = sorted.partition_point(|k| !get_bit(k, level - 1));
+    let (our_keys, sibling_keys) = if !get_bit(key, level - 1) {
+        (&sorted[..split_pos], &sorted[split_pos..])
+    } else {
+        (&sorted[split_pos..], &sorted[..split_pos])
+    };
+    siblings.push(compute_subtree_hash_sorted(sibling_keys, level - 1, zeros));
+    collect_proof_path(our_keys, key, level - 1, zeros, siblings);
+}
+
+/// Verify a non-membership proof against root and return the new root after inserting key.
+fn verify_and_insert_key(root: &[u8; 32], key: &[u8; 16], proof: &[[u8; 32]]) -> [u8; 32] {
+    let mut old_hash = EMPTY_LEAF;
+    let mut new_hash = PRESENT_LEAF;
+    for (idx, sibling) in proof.iter().enumerate() {
+        if !get_bit(key, idx) {
+            old_hash = hash_pair(&old_hash, sibling);
+            new_hash = hash_pair(&new_hash, sibling);
+        } else {
+            old_hash = hash_pair(sibling, &old_hash);
+            new_hash = hash_pair(sibling, &new_hash);
+        }
+    }
+    assert_eq!(
+        &old_hash, root,
+        "SMT non-membership proof failed: computed root doesn't match"
+    );
+    new_hash
+}
+
 /// 128-bit key Sparse Merkle Tree for replay protection.
 /// Keys are the first 16 bytes of message IDs; values are boolean (present/absent).
 #[derive(Clone)]
@@ -72,7 +146,8 @@ impl SparseMerkleTree {
         if self.leaves.is_empty() {
             return EMPTY_ROOT;
         }
-        self.compute_root_recursive(0, &self.sorted_keys())
+        let sorted = self.sorted_keys_tree_order();
+        compute_subtree_hash_sorted(&sorted, DEPTH, &self.zero_hashes)
     }
 
     pub fn insert(&mut self, key: [u8; 16]) {
@@ -86,7 +161,7 @@ impl SparseMerkleTree {
         key: &[u8; 16],
         proof: &[[u8; 32]],
     ) -> [u8; 32] {
-        SparseMerkleTreeVerifier::verify_and_insert(root, key, proof)
+        verify_and_insert_key(root, key, proof)
     }
 
     pub fn contains(&self, key: &[u8; 16]) -> bool {
@@ -100,12 +175,11 @@ impl SparseMerkleTree {
             !self.contains(key),
             "Cannot prove non-membership for existing key"
         );
-        let mut proof = Vec::with_capacity(DEPTH);
-        for level in 0..DEPTH {
-            let sibling = self.compute_sibling(key, level);
-            proof.push(sibling);
-        }
-        proof
+        let sorted = self.sorted_keys_tree_order();
+        let mut siblings = Vec::with_capacity(DEPTH);
+        collect_proof_path(&sorted, key, DEPTH, &self.zero_hashes, &mut siblings);
+        siblings.reverse();
+        siblings
     }
 
     /// Reconstruct SMT from a set of message IDs (first 16 bytes of each).
@@ -119,209 +193,11 @@ impl SparseMerkleTree {
         tree
     }
 
-    fn sorted_keys(&self) -> Vec<[u8; 16]> {
+    fn sorted_keys_tree_order(&self) -> Vec<[u8; 16]> {
         let mut keys: Vec<[u8; 16]> = self.leaves.keys().copied().collect();
-        keys.sort();
+        keys.sort_by(cmp_tree_order);
         keys
     }
-
-    fn leaf_hash(&self, key: &[u8; 16]) -> [u8; 32] {
-        if self.leaves.contains_key(key) {
-            PRESENT_LEAF
-        } else {
-            EMPTY_LEAF
-        }
-    }
-
-    fn compute_sibling(&self, key: &[u8; 16], level: usize) -> [u8; 32] {
-        let mut sibling_key = *key;
-        let byte_idx = level / 8;
-        let bit_pos = 7 - (level % 8);
-        sibling_key[byte_idx] ^= 1 << bit_pos;
-
-        self.compute_subtree_hash(&sibling_key, level)
-    }
-
-    fn compute_subtree_hash(&self, prefix_key: &[u8; 16], level: usize) -> [u8; 32] {
-        if level == 0 {
-            return self.leaf_hash(prefix_key);
-        }
-
-        let keys_in_subtree: Vec<[u8; 16]> = self
-            .leaves
-            .keys()
-            .filter(|k| self.shares_prefix(k, prefix_key, level))
-            .copied()
-            .collect();
-
-        if keys_in_subtree.is_empty() {
-            return self.zero_hashes[level];
-        }
-
-        let mut zero_key = *prefix_key;
-        let byte_idx = (level - 1) / 8;
-        let bit_pos = 7 - ((level - 1) % 8);
-
-        let mut left_key = zero_key;
-        left_key[byte_idx] &= !(1 << bit_pos);
-        let mut right_key = zero_key;
-        right_key[byte_idx] |= 1 << bit_pos;
-
-        // Clear bits below level-1 for the prefix comparison
-        for l in 0..(level - 1) {
-            let bi = l / 8;
-            let bp = 7 - (l % 8);
-            left_key[bi] &= !(1 << bp);
-            right_key[bi] &= !(1 << bp);
-            zero_key[bi] &= !(1 << bp);
-        }
-
-        let left_hash = self.compute_subtree_hash(&left_key, level - 1);
-        let right_hash = self.compute_subtree_hash(&right_key, level - 1);
-        hash_pair(&left_hash, &right_hash)
-    }
-
-    fn shares_prefix(&self, a: &[u8; 16], b: &[u8; 16], level: usize) -> bool {
-        for l in (level..DEPTH).rev() {
-            if get_bit(a, l) != get_bit(b, l) {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn compute_root_recursive(&self, _start_level: usize, _keys: &[[u8; 16]]) -> [u8; 32] {
-        // Compute root by building proofs bottom-up.
-        // For correctness, we verify by inserting all keys into an empty tree
-        // and computing the root via the proof mechanism.
-        let mut root = EMPTY_ROOT;
-        let mut temp_tree = SparseMerkleTreeVerifier::new();
-        for key in self.leaves.keys() {
-            let proof = temp_tree.prove_non_membership_direct(key, &self.zero_hashes);
-            root = SparseMerkleTreeVerifier::verify_and_insert(&root, key, &proof);
-            temp_tree.insert(*key);
-        }
-        root
-    }
-}
-
-/// Lightweight verifier used internally for root computation.
-struct SparseMerkleTreeVerifier {
-    leaves: HashMap<[u8; 16], bool>,
-}
-
-impl SparseMerkleTreeVerifier {
-    fn new() -> Self {
-        Self {
-            leaves: HashMap::new(),
-        }
-    }
-
-    fn insert(&mut self, key: [u8; 16]) {
-        self.leaves.insert(key, true);
-    }
-
-    /// Compute a non-membership proof for a key against the current tree state.
-    fn prove_non_membership_direct(
-        &self,
-        key: &[u8; 16],
-        zero_hashes: &[[u8; 32]; DEPTH + 1],
-    ) -> Vec<[u8; 32]> {
-        let mut proof = Vec::with_capacity(DEPTH);
-        for level in 0..DEPTH {
-            let sibling = self.compute_sibling_direct(key, level, zero_hashes);
-            proof.push(sibling);
-        }
-        proof
-    }
-
-    fn compute_sibling_direct(
-        &self,
-        key: &[u8; 16],
-        level: usize,
-        zero_hashes: &[[u8; 32]; DEPTH + 1],
-    ) -> [u8; 32] {
-        let mut sibling_prefix = *key;
-        let byte_idx = level / 8;
-        let bit_pos = 7 - (level % 8);
-        sibling_prefix[byte_idx] ^= 1 << bit_pos;
-
-        self.compute_subtree_direct(&sibling_prefix, level, zero_hashes)
-    }
-
-    fn compute_subtree_direct(
-        &self,
-        prefix_key: &[u8; 16],
-        level: usize,
-        zero_hashes: &[[u8; 32]; DEPTH + 1],
-    ) -> [u8; 32] {
-        if level == 0 {
-            return if self.leaves.contains_key(prefix_key) {
-                PRESENT_LEAF
-            } else {
-                EMPTY_LEAF
-            };
-        }
-
-        let has_keys = self
-            .leaves
-            .keys()
-            .any(|k| shares_prefix_static(k, prefix_key, level));
-
-        if !has_keys {
-            return zero_hashes[level];
-        }
-
-        let byte_idx = (level - 1) / 8;
-        let bit_pos = 7 - ((level - 1) % 8);
-
-        let mut left_key = *prefix_key;
-        left_key[byte_idx] &= !(1 << bit_pos);
-        let mut right_key = *prefix_key;
-        right_key[byte_idx] |= 1 << bit_pos;
-
-        for l in 0..(level - 1) {
-            let bi = l / 8;
-            let bp = 7 - (l % 8);
-            left_key[bi] &= !(1 << bp);
-            right_key[bi] &= !(1 << bp);
-        }
-
-        let left = self.compute_subtree_direct(&left_key, level - 1, zero_hashes);
-        let right = self.compute_subtree_direct(&right_key, level - 1, zero_hashes);
-        hash_pair(&left, &right)
-    }
-
-    fn verify_and_insert(root: &[u8; 32], key: &[u8; 16], proof: &[[u8; 32]]) -> [u8; 32] {
-        let mut old_hash = EMPTY_LEAF;
-        let mut new_hash = PRESENT_LEAF;
-
-        for (idx, sibling) in proof.iter().enumerate() {
-            let bit = get_bit(key, idx);
-            if !bit {
-                old_hash = hash_pair(&old_hash, sibling);
-                new_hash = hash_pair(&new_hash, sibling);
-            } else {
-                old_hash = hash_pair(sibling, &old_hash);
-                new_hash = hash_pair(sibling, &new_hash);
-            }
-        }
-
-        assert_eq!(
-            &old_hash, root,
-            "SMT non-membership proof failed: computed root doesn't match"
-        );
-        new_hash
-    }
-}
-
-fn shares_prefix_static(a: &[u8; 16], b: &[u8; 16], level: usize) -> bool {
-    for l in (level..DEPTH).rev() {
-        if get_bit(a, l) != get_bit(b, l) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -361,8 +237,7 @@ mod tests {
         let proof = tree.prove_non_membership(&key);
         assert_eq!(proof.len(), DEPTH);
 
-        // Verify the proof matches on-chain logic
-        let new_root = SparseMerkleTreeVerifier::verify_and_insert(&EMPTY_ROOT, &key, &proof);
+        let new_root = SparseMerkleTree::verify_and_insert_static(&EMPTY_ROOT, &key, &proof);
         assert_ne!(new_root, EMPTY_ROOT);
     }
 
@@ -372,17 +247,13 @@ mod tests {
         let key1 = [0x01u8; 16];
         let key2 = [0x02u8; 16];
 
-        // Insert key1 using proof
         let proof1 = tree.prove_non_membership(&key1);
-        let root_after_1 =
-            SparseMerkleTreeVerifier::verify_and_insert(&tree.root(), &key1, &proof1);
+        let root_after_1 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key1, &proof1);
         tree.insert(key1);
         assert_eq!(tree.root(), root_after_1);
 
-        // Insert key2 using proof
         let proof2 = tree.prove_non_membership(&key2);
-        let root_after_2 =
-            SparseMerkleTreeVerifier::verify_and_insert(&tree.root(), &key2, &proof2);
+        let root_after_2 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key2, &proof2);
         tree.insert(key2);
         assert_eq!(tree.root(), root_after_2);
     }
@@ -434,5 +305,24 @@ mod tests {
         }
 
         assert_eq!(tree1.root(), tree2.root());
+    }
+
+    #[test]
+    fn test_many_keys_proof_correctness() {
+        let mut tree = SparseMerkleTree::new();
+        for i in 0u32..50 {
+            let mut key = [0u8; 16];
+            key[0..4].copy_from_slice(&i.to_be_bytes());
+            tree.insert(key);
+        }
+
+        let absent_key = [0xFFu8; 16];
+        let proof = tree.prove_non_membership(&absent_key);
+        assert_eq!(proof.len(), DEPTH);
+
+        let new_root =
+            SparseMerkleTree::verify_and_insert_static(&tree.root(), &absent_key, &proof);
+        tree.insert(absent_key);
+        assert_eq!(tree.root(), new_root);
     }
 }
