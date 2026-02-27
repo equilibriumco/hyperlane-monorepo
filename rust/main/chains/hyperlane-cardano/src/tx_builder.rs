@@ -23,8 +23,8 @@ use pallas_txbuilder::{
     BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::{debug, info, instrument, warn};
@@ -47,6 +47,22 @@ struct CachedProcessExUnits {
 }
 
 impl CachedProcessExUnits {
+    /// Apply a 10% step margin so cached ExUnits remain valid when subsequent
+    /// chained TXs have extra inputs (e.g. wallet supplement), which increases
+    /// TxInfo size and thus Plutus CPU consumption slightly.
+    fn with_step_margin(self) -> Self {
+        let m = |v: (u64, u64)| (v.0, v.1 * 11 / 10);
+        let mo = |v: Option<(u64, u64)>| v.map(m);
+        Self {
+            mailbox_spend: m(self.mailbox_spend),
+            ism_spend: m(self.ism_spend),
+            processed_nft_mint: mo(self.processed_nft_mint),
+            verified_nft_mint: mo(self.verified_nft_mint),
+            recipient_spend: mo(self.recipient_spend),
+            synthetic_mint: mo(self.synthetic_mint),
+        }
+    }
+
     fn total_mem(&self) -> u64 {
         let mut total = self.mailbox_spend.0 + self.ism_spend.0;
         if let Some((m, _)) = self.processed_nft_mint {
@@ -163,9 +179,6 @@ pub struct HyperlaneTxBuilder {
     conf: ConnectionConf,
     /// Cached protocol parameter: lovelace cost per UTXO byte
     coins_per_utxo_byte: OnceCell<u64>,
-    /// Whether the Blockfrost evaluate endpoint is available.
-    /// Set to false after first HTTP 500 to avoid repeated failing calls.
-    evaluate_available: AtomicBool,
     /// Cache for script serialised sizes (script_hash → bytes).
     /// Script sizes are immutable once deployed, so this never needs invalidation.
     script_size_cache: RwLock<HashMap<String, u64>>,
@@ -179,6 +192,10 @@ pub struct HyperlaneTxBuilder {
     /// Cached per-role ExUnits from the last successful evaluation.
     /// Reused when Blockfrost evaluate fails for tracked-state TXs.
     cached_process_ex_units: Mutex<Option<CachedProcessExUnits>>,
+    /// UTxOs spent in recently-submitted TXs, keyed by (tx_hash, output_index).
+    /// Entries expire after SPENT_UTXO_CACHE_TTL_SECS. Used to filter Blockfrost
+    /// UTxO results that are stale due to the 25-40s indexer lag.
+    recently_spent: Mutex<HashMap<(String, u32), Instant>>,
 }
 
 impl HyperlaneTxBuilder {
@@ -194,11 +211,11 @@ impl HyperlaneTxBuilder {
             resolver,
             conf: conf.clone(),
             coins_per_utxo_byte: OnceCell::new(),
-            evaluate_available: AtomicBool::new(true),
             script_size_cache: RwLock::new(HashMap::new()),
             smt: Mutex::new(None),
             last_tx_state: Mutex::new(None),
             cached_process_ex_units: Mutex::new(None),
+            recently_spent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -208,6 +225,47 @@ impl HyperlaneTxBuilder {
 
     async fn peek_last_tx_state(&self) -> Option<ChainedUtxoState> {
         self.last_tx_state.lock().await.clone()
+    }
+
+    /// TTL for recently-spent UTxO cache entries (2× Blockfrost lag)
+    const SPENT_UTXO_CACHE_TTL_SECS: u64 = 120;
+
+    /// Record all inputs of a just-submitted TX as recently-spent.
+    /// Prevents Blockfrost's 25-40s UTXO index lag from causing
+    /// `BadInputsUTxO` errors when the same UTXO is selected again.
+    async fn record_spent_utxos(&self, signed_tx: &[u8]) {
+        use pallas_primitives::conway::Tx;
+        use pallas_primitives::Fragment;
+        // Extract inputs before the await so the non-Send Tx<'_> is dropped first.
+        let inputs: Vec<(String, u32)> = Tx::decode_fragment(signed_tx)
+            .map(|tx| {
+                tx.transaction_body
+                    .inputs
+                    .iter()
+                    .map(|i| (hex::encode(i.transaction_id.as_ref()), i.index as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut spent = self.recently_spent.lock().await;
+        let now = Instant::now();
+        spent.retain(|_, t| now.duration_since(*t).as_secs() < Self::SPENT_UTXO_CACHE_TTL_SECS);
+        for (hash, idx) in inputs {
+            spent.insert((hash, idx), now);
+        }
+    }
+
+    /// Filter UTxOs that appear in the recently-spent cache.
+    async fn filter_recently_spent(&self, utxos: Vec<Utxo>) -> Vec<Utxo> {
+        let spent = self.recently_spent.lock().await;
+        let now = Instant::now();
+        utxos
+            .into_iter()
+            .filter(|u| match spent.get(&(u.tx_hash.clone(), u.output_index)) {
+                Some(t) => now.duration_since(*t).as_secs() >= Self::SPENT_UTXO_CACHE_TTL_SECS,
+                None => true,
+            })
+            .collect()
     }
 
     /// Get the coins per UTXO byte from protocol parameters.
@@ -262,11 +320,13 @@ impl HyperlaneTxBuilder {
     }
 
     /// Get or initialize the Sparse Merkle Tree by scanning on-chain
-    /// processed_message_nft tokens.
+    /// processed_message_nft tokens, validated against the mailbox datum's root.
     async fn get_or_init_smt(&self) -> Result<(), TxBuilderError> {
-        let mut guard = self.smt.lock().await;
-        if guard.is_some() {
-            return Ok(());
+        {
+            let guard = self.smt.lock().await;
+            if guard.is_some() {
+                return Ok(());
+            }
         }
 
         let policy_id = self
@@ -279,39 +339,79 @@ impl HyperlaneTxBuilder {
                         .to_string(),
                 )
             })?;
+
+        let mailbox_utxo = self.find_mailbox_utxo().await.map_err(|e| {
+            TxBuilderError::UtxoNotFound(format!(
+                "Could not fetch mailbox UTXO for SMT root validation: {e}"
+            ))
+        })?;
+        let expected_root = read_processed_tree_root_from_utxo(&mailbox_utxo)?;
+
         info!(
-            "Initializing SMT from on-chain processed_message_nft tokens (policy={})",
-            policy_id
+            "Initializing SMT from on-chain processed_message_nft tokens (policy={}, expected_root={})",
+            policy_id,
+            hex::encode(expected_root)
         );
 
-        let asset_ids = self
-            .provider
-            .get_policy_asset_ids(&policy_id)
-            .await
-            .unwrap_or_default();
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY: Duration = Duration::from_secs(5);
 
-        let mut message_ids: Vec<[u8; 32]> = Vec::new();
-        for asset_id in &asset_ids {
-            // Asset ID format: {policy_hex}{asset_name_hex}
-            // Asset name is the 32-byte message_id (64 hex chars)
-            if asset_id.len() == 56 + 64 {
-                let asset_name_hex = &asset_id[56..];
-                if let Ok(bytes) = hex::decode(asset_name_hex) {
-                    if bytes.len() == 32 {
-                        let mut id = [0u8; 32];
-                        id.copy_from_slice(&bytes);
-                        message_ids.push(id);
+        for attempt in 0..=MAX_RETRIES {
+            let asset_ids = self
+                .provider
+                .get_policy_asset_ids(&policy_id)
+                .await
+                .unwrap_or_default();
+
+            let mut message_ids: Vec<[u8; 32]> = Vec::new();
+            for asset_id in &asset_ids {
+                if asset_id.len() == 56 + 64 {
+                    let asset_name_hex = &asset_id[56..];
+                    if let Ok(bytes) = hex::decode(asset_name_hex) {
+                        if bytes.len() == 32 {
+                            let mut id = [0u8; 32];
+                            id.copy_from_slice(&bytes);
+                            message_ids.push(id);
+                        }
                     }
                 }
             }
+
+            let smt = crate::smt::SparseMerkleTree::from_message_ids(&message_ids);
+            if smt.root() == expected_root {
+                let mut guard = self.smt.lock().await;
+                if guard.is_none() {
+                    info!(
+                        count = message_ids.len(),
+                        "SMT initialized and verified against on-chain root"
+                    );
+                    *guard = Some(smt);
+                }
+                return Ok(());
+            }
+
+            if attempt < MAX_RETRIES {
+                warn!(
+                    loaded = message_ids.len(),
+                    attempt = attempt + 1,
+                    max = MAX_RETRIES,
+                    "SMT root mismatch — Blockfrost indexer lag? Retrying in {}s",
+                    RETRY_DELAY.as_secs()
+                );
+                {
+                    let guard = self.smt.lock().await;
+                    if guard.is_some() {
+                        return Ok(());
+                    }
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
 
-        info!(
-            "Reconstructed SMT from {} processed message IDs",
-            message_ids.len()
-        );
-        *guard = Some(crate::smt::SparseMerkleTree::from_message_ids(&message_ids));
-        Ok(())
+        Err(TxBuilderError::Encoding(format!(
+            "SMT root mismatch after {MAX_RETRIES} retries: Blockfrost has not indexed \
+             all processed_message_nft tokens yet. Will retry on next message."
+        )))
     }
 
     /// Compute total reference script size for all scripts used in a process TX.
@@ -992,12 +1092,15 @@ impl HyperlaneTxBuilder {
         info!("Signing transaction");
         let mut signed_tx = self.sign_transaction(built_tx, payer)?;
         let mut actual_fee = ESTIMATED_FEE_LOVELACE;
+        // Captured from the evaluate step so the FeeTooSmallUTxO retry path can
+        // rebuild the TX with the exact fee the node requires.
+        let mut submitted_ex_units: Option<EvaluatedExUnits> = None;
 
-        // 3b. Evaluate and rebuild with real fee if endpoint is available.
+        // 3b. Evaluate and rebuild with real fee.
         // The first build uses ESTIMATED_FEE_LOVELACE (3M) as a conservative placeholder.
         // Evaluating the signed TX gives us actual ExUnits, so we can compute the real
         // fee (~0.3-0.8M) and rebuild — saving the relayer ~2+ ADA per TX.
-        if self.evaluate_available.load(Ordering::Relaxed) {
+        {
             let ref_script_size = components.total_ref_script_size;
             match self
                 .evaluate_and_compute_fee(&signed_tx, ref_script_size)
@@ -1048,6 +1151,7 @@ impl HyperlaneTxBuilder {
                     } else {
                         actual_fee = real_fee;
                     }
+                    submitted_ex_units = Some(ex_units_map);
                 }
                 Err(e) => {
                     // Evaluate failed (common for tracked-state TXs whose UTXOs
@@ -1140,16 +1244,51 @@ impl HyperlaneTxBuilder {
 
         // 4. Submit to Blockfrost
         info!("Submitting transaction to Blockfrost");
-        let tx_hash = self.submit_transaction(&signed_tx).await?;
+        let tx_hash = match self.submit_transaction(&signed_tx).await {
+            Ok(hash) => hash,
+            Err(submit_err) => {
+                // The node tells us the exact required fee in FeeTooSmallUTxO errors.
+                // Rebuild with that fee and retry once before propagating.
+                // When submitted_ex_units is None (cached/default path), pass an
+                // empty map so build_complete_process_tx falls back to cached ExUnits.
+                let err_str = submit_err.to_string();
+                if let Some(exact_fee) = parse_fee_too_small_expected(&err_str) {
+                    warn!(
+                        supplied = actual_fee,
+                        needed = exact_fee,
+                        "FeeTooSmallUTxO: rebuilding with node-specified fee"
+                    );
+                    let empty_map = HashMap::new();
+                    let ex_map = submitted_ex_units.as_ref().unwrap_or(&empty_map);
+                    let corrected = self
+                        .build_complete_process_tx(
+                            &components,
+                            payer,
+                            Some((exact_fee, ex_map)),
+                            tracked_payer.as_ref(),
+                        )
+                        .await?;
+                    signed_tx = self.sign_transaction(corrected, payer)?;
+                    actual_fee = exact_fee;
+                    self.submit_transaction(&signed_tx).await?
+                } else {
+                    return Err(submit_err);
+                }
+            }
+        };
 
         info!("Transaction submitted successfully: {}", tx_hash);
+
+        // Record spent UTxOs so subsequent fee-selection queries don't re-pick
+        // them from Blockfrost (which has a 25-40s UTXO indexer lag).
+        self.record_spent_utxos(&signed_tx).await;
 
         // Track full UTXO state (mailbox, ISM, payer, datum) for the next submission
         let datum_cbor = components
             .mailbox_continuation_datum_cbor
             .as_deref()
             .expect("mailbox continuation datum always set");
-        match self.extract_chained_state(&components, &signed_tx, datum_cbor) {
+        match self.extract_chained_state(&components, &signed_tx, datum_cbor, &tx_hash) {
             Ok(state) => {
                 debug!(
                     "Tracking TX state: mailbox={}#{}, ism={}#{}, payer={}#{} ({} lovelace)",
@@ -1238,8 +1377,6 @@ impl HyperlaneTxBuilder {
         // For TX 0, promote tracked state into chained_state so the loop
         // builds ChainedInputs from it instead of querying Blockfrost.
         let mut chained_state: Option<ChainedUtxoState> = initial_tracked_state;
-        let mut built_txs: Vec<(Vec<u8>, ProcessTxComponents, u64)> =
-            Vec::with_capacity(batch_size);
 
         // Pre-check: if tracked payer can't fund the full batch, fetch
         // supplementary wallet UTXOs for TX 0 so the change cascades.
@@ -1254,10 +1391,19 @@ impl HyperlaneTxBuilder {
                 );
                 let payer_address = payer.address_bech32(self.network_to_pallas());
                 let fresh = self.provider.get_utxos_at_address(&payer_address).await?;
+                let fresh = self.filter_recently_spent(fresh).await;
                 let shortfall = batch_needed - cs.payer_total_input;
+                // Filter out the tracked payer UTXO to prevent duplicates — Blockfrost
+                // has a 25-40s lag so the tracked change output may still appear in
+                // fresh_utxos even though it is already in chained_payer.utxos.
+                let tracked_key = (cs.payer_utxo.tx_hash.clone(), cs.payer_utxo.output_index);
                 let mut sorted: Vec<_> = fresh
                     .iter()
-                    .filter(|u| u.value.len() <= 1 && u.reference_script_hash.is_none())
+                    .filter(|u| {
+                        u.value.len() <= 1
+                            && u.reference_script_hash.is_none()
+                            && (u.tx_hash.clone(), u.output_index) != tracked_key
+                    })
                     .cloned()
                     .collect();
                 sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
@@ -1283,8 +1429,19 @@ impl HyperlaneTxBuilder {
             Vec::new()
         };
 
-        // Phase 1: Build and sign all TXs sequentially (each depends on the prior)
-        for (i, (message, metadata)) in messages.iter().enumerate() {
+        // Merged build + submit loop: each TX is built, submitted, and its actual
+        // Blockfrost hash used to seed the next TX's chained inputs. This avoids
+        // CBOR re-encoding hash mismatches (encode_fragment can diverge from the
+        // original body bytes, giving a different TX ID than Blockfrost reports).
+        let mut results: Vec<Result<TxOutcome, TxBuilderError>> = Vec::with_capacity(batch_size);
+        let mut success_count = 0usize;
+        let mut last_good_state: Option<ChainedUtxoState> = None;
+        let mut success_message_ids: Vec<[u8; 32]> = Vec::new();
+
+        const SUBMIT_MAX_RETRIES: u32 = 5;
+        const SUBMIT_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+        'batch: for (i, (message, metadata)) in messages.iter().enumerate() {
             info!(
                 "Building chained TX {}/{} (nonce {})",
                 i + 1,
@@ -1352,10 +1509,7 @@ impl HyperlaneTxBuilder {
             // Static defaults (2.5M mem) may be too low for complex scripts.
             // The rebuild also populates cached_process_ex_units so TX 1+ use
             // accurate per-role ExUnits instead of static placeholders.
-            if i == 0
-                && self.evaluate_available.load(Ordering::Relaxed)
-                && self.cached_process_ex_units.lock().await.is_none()
-            {
+            if i == 0 && self.cached_process_ex_units.lock().await.is_none() {
                 match self
                     .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
                     .await
@@ -1391,100 +1545,147 @@ impl HyperlaneTxBuilder {
                 )));
             }
 
-            // Extract chained state for next TX by parsing the signed TX outputs
-            chained_state = Some(
-                self.extract_chained_state(
-                    &components,
-                    &signed_tx,
-                    components
-                        .mailbox_continuation_datum_cbor
-                        .as_deref()
-                        .expect("mailbox continuation datum always set"),
-                )?,
+            // Submit with BadInputsUTxO retry (predecessor may not be in mempool yet)
+            info!("Submitting chained TX {}/{}", i + 1, batch_size);
+            let actual_hash = {
+                let mut last_submit_err = None;
+                let mut submitted_hash: Option<String> = None;
+                for attempt in 0..=SUBMIT_MAX_RETRIES {
+                    match self.submit_transaction(&signed_tx).await {
+                        Ok(h) => {
+                            submitted_hash = Some(h);
+                            break;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("BadInputsUTxO") && attempt < SUBMIT_MAX_RETRIES {
+                                warn!(
+                                    "Chained TX {}/{} got BadInputsUTxO (attempt {}/{}): predecessor not yet in mempool, retrying in {}s",
+                                    i + 1, batch_size, attempt + 1, SUBMIT_MAX_RETRIES, SUBMIT_RETRY_DELAY.as_secs()
+                                );
+                                tokio::time::sleep(SUBMIT_RETRY_DELAY).await;
+                                last_submit_err = Some(e);
+                            } else {
+                                warn!(
+                                    "Chained TX {}/{} failed: {}. Remaining TXs depend on this one — aborting batch.",
+                                    i + 1, batch_size, e
+                                );
+                                results.push(Err(e));
+                                for j in (i + 1)..batch_size {
+                                    results.push(Err(TxBuilderError::SubmissionFailed(format!(
+                                        "Skipped: predecessor TX {j} failed"
+                                    ))));
+                                }
+                                break 'batch;
+                            }
+                        }
+                    }
+                }
+                match submitted_hash {
+                    Some(h) => h,
+                    None => {
+                        let e = last_submit_err.unwrap();
+                        warn!(
+                            "Chained TX {}/{} failed after {} retries: {}. Aborting batch.",
+                            i + 1,
+                            batch_size,
+                            SUBMIT_MAX_RETRIES,
+                            e
+                        );
+                        results.push(Err(e));
+                        for j in (i + 1)..batch_size {
+                            results.push(Err(TxBuilderError::SubmissionFailed(format!(
+                                "Skipped: predecessor TX {j} failed"
+                            ))));
+                        }
+                        break 'batch;
+                    }
+                }
+            };
+
+            info!(
+                "Chained TX {}/{} submitted: {}",
+                i + 1,
+                batch_size,
+                actual_hash
             );
 
-            built_txs.push((signed_tx, components, actual_fee));
-        }
+            // Record spent UTXOs so Blockfrost's 25-40s indexing lag doesn't
+            // cause stale UTXO re-selection if we fall back to wallet queries.
+            self.record_spent_utxos(&signed_tx).await;
 
-        // Phase 2: Submit all TXs sequentially (order matters for mempool acceptance)
-        let mut results: Vec<Result<TxOutcome, TxBuilderError>> = Vec::with_capacity(batch_size);
-        let mut success_count = 0usize;
+            success_count += 1;
 
-        for (i, (signed_tx, _components, fee)) in built_txs.iter().enumerate() {
-            info!("Submitting chained TX {}/{}", i + 1, batch_size);
-            match self.submit_transaction(signed_tx).await {
-                Ok(tx_hash) => {
-                    info!("Chained TX {}/{} submitted: {}", i + 1, batch_size, tx_hash);
-                    success_count += 1;
-
-                    let mut tx_id_bytes = [0u8; 64];
-                    if let Ok(hash_bytes) = hex::decode(&tx_hash) {
-                        tx_id_bytes[32..64]
-                            .copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
-                    }
-                    results.push(Ok(TxOutcome {
-                        transaction_id: H512::from(tx_id_bytes),
-                        executed: true,
-                        gas_used: U256::from(*fee),
-                        gas_price: FixedPointNumber::try_from(U256::from(1u64))
-                            .unwrap_or_else(|_| FixedPointNumber::zero()),
-                    }));
-                }
-                Err(e) => {
-                    warn!(
-                        "Chained TX {}/{} failed: {}. Remaining TXs depend on this one — aborting batch.",
-                        i + 1, batch_size, e
-                    );
-                    results.push(Err(e));
-                    // Remaining TXs can't succeed since their inputs are from this TX
-                    for j in (i + 1)..batch_size {
-                        results.push(Err(TxBuilderError::SubmissionFailed(format!(
-                            "Skipped: predecessor TX {j} failed"
-                        ))));
-                    }
-                    break;
-                }
+            let mut tx_id_bytes = [0u8; 64];
+            if let Ok(hash_bytes) = hex::decode(&actual_hash) {
+                tx_id_bytes[32..64].copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
             }
-        }
+            results.push(Ok(TxOutcome {
+                transaction_id: H512::from(tx_id_bytes),
+                executed: true,
+                gas_used: U256::from(actual_fee),
+                gas_price: FixedPointNumber::try_from(U256::from(1u64))
+                    .unwrap_or_else(|_| FixedPointNumber::zero()),
+            }));
 
-        // Track full UTXO state from the last successfully submitted TX
-        if success_count > 0 {
-            let last_idx = success_count - 1;
-            let (ref signed_tx, ref components, _) = built_txs[last_idx];
+            success_message_ids.push(message_id);
+
+            // Extract chained state using the ACTUAL Blockfrost-reported hash so
+            // the next TX's inputs reference the correct UTXO IDs.
             let datum_cbor = components
                 .mailbox_continuation_datum_cbor
                 .as_deref()
                 .expect("mailbox continuation datum always set");
-            match self.extract_chained_state(components, signed_tx, datum_cbor) {
+            match self.extract_chained_state(&components, &signed_tx, datum_cbor, &actual_hash) {
                 Ok(state) => {
-                    debug!(
-                        "Tracking batch TX {} state: mailbox={}#{}, payer={}#{} ({} lovelace)",
-                        last_idx,
-                        state.mailbox_utxo.tx_hash,
-                        state.mailbox_utxo.output_index,
-                        state.payer_utxo.tx_hash,
-                        state.payer_utxo.output_index,
-                        state.payer_total_input,
-                    );
-                    self.set_last_tx_state(state).await;
+                    chained_state = Some(state.clone());
+                    last_good_state = Some(state);
                 }
                 Err(e) => {
-                    debug!("Could not extract TX state from batch: {e:?}");
+                    // Without chained state, subsequent TXs can't reference correct
+                    // inputs — abort cleanly rather than building against stale Blockfrost data.
+                    warn!(
+                        "Chained TX {}/{}: failed to extract state after submission (hash {}): {e:?}. \
+                         Aborting {} remaining TX(s).",
+                        i + 1, batch_size, actual_hash, batch_size - i - 1
+                    );
+                    for j in (i + 1)..batch_size {
+                        results.push(Err(TxBuilderError::SubmissionFailed(format!(
+                            "Skipped: chained state lost after TX {} ({})",
+                            i + 1,
+                            actual_hash
+                        ))));
+                        let _ = j;
+                    }
+                    break 'batch;
                 }
             }
         }
 
-        // Phase 3: Update the real SMT with successfully submitted message IDs
+        // Track UTXO state from the last successfully submitted TX
+        if let Some(state) = last_good_state {
+            debug!(
+                "Tracking batch last TX state: mailbox={}#{}, payer={}#{} ({} lovelace)",
+                state.mailbox_utxo.tx_hash,
+                state.mailbox_utxo.output_index,
+                state.payer_utxo.tx_hash,
+                state.payer_utxo.output_index,
+                state.payer_total_input,
+            );
+            self.set_last_tx_state(state).await;
+        }
+
+        // Update the real SMT with successfully submitted message IDs
         {
             let mut guard = self.smt.lock().await;
             if let Some(ref mut tree) = *guard {
-                for (_, components, _) in built_txs.iter().take(success_count) {
+                for message_id in &success_message_ids {
                     let mut key = [0u8; 16];
-                    key.copy_from_slice(&components.message_id[..16]);
+                    key.copy_from_slice(&message_id[..16]);
                     tree.insert(key);
                     debug!(
                         "SMT updated with chained message_id {}",
-                        hex::encode(components.message_id)
+                        hex::encode(message_id)
                     );
                 }
             }
@@ -1501,11 +1702,18 @@ impl HyperlaneTxBuilder {
     ///
     /// Uses the known output layout (mailbox=0, ISM=computed, change=last) and
     /// parses the signed TX CBOR to get the body hash for constructing Utxo refs.
+    /// Extract chained UTXO state using a hash already returned by Blockfrost.
+    ///
+    /// Using the locally computed body hash is unreliable — CBOR re-encoding via
+    /// `encode_fragment()` can produce different bytes than the original encoding,
+    /// causing the derived TX ID to diverge from the hash Blockfrost reports after
+    /// submission. Callers must pass the actual submitted TX hash.
     fn extract_chained_state(
         &self,
         components: &ProcessTxComponents,
         signed_tx: &[u8],
         mailbox_datum_cbor: &[u8],
+        actual_hash: &str,
     ) -> Result<ChainedUtxoState, TxBuilderError> {
         use pallas_primitives::conway::Tx;
         use pallas_primitives::Fragment;
@@ -1514,19 +1722,20 @@ impl HyperlaneTxBuilder {
             TxBuilderError::Encoding(format!("Failed to decode signed TX for chaining: {e:?}"))
         })?;
 
-        // Body hash is the TX ID (before witnesses are added)
-        let body_cbor = tx
-            .transaction_body
-            .encode_fragment()
-            .map_err(|e| TxBuilderError::Encoding(format!("Failed to encode TX body: {e:?}")))?;
-        let tx_hash = hex::encode(pallas_crypto::hash::Hasher::<256>::hash(&body_cbor));
-
         let outputs = &tx.transaction_body.outputs;
         let indices = compute_output_indices(components);
 
+        info!(
+            "extract_chained_state: {} outputs in TX, expecting ism={}, change={} (actual_hash={})",
+            outputs.len(),
+            indices.ism,
+            indices.change,
+            actual_hash
+        );
+
         // Mailbox continuation is always output #0
         let mailbox_utxo = self.output_to_utxo(
-            &tx_hash,
+            actual_hash,
             0,
             outputs.first().ok_or_else(|| {
                 TxBuilderError::Encoding("TX has no outputs for mailbox continuation".to_string())
@@ -1536,7 +1745,7 @@ impl HyperlaneTxBuilder {
         // ISM continuation
         let ism_idx = indices.ism as usize;
         let ism_utxo = self.output_to_utxo(
-            &tx_hash,
+            actual_hash,
             indices.ism,
             outputs.get(ism_idx).ok_or_else(|| {
                 TxBuilderError::Encoding(format!(
@@ -1556,7 +1765,7 @@ impl HyperlaneTxBuilder {
                 outputs.len()
             ))
         })?;
-        let payer_utxo = self.output_to_utxo(&tx_hash, indices.change, change_output)?;
+        let payer_utxo = self.output_to_utxo(actual_hash, indices.change, change_output)?;
         let payer_total_input = payer_utxo.lovelace();
 
         Ok(ChainedUtxoState {
@@ -1848,6 +2057,19 @@ impl HyperlaneTxBuilder {
                     cp.total_input, needed
                 );
                 let fresh_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
+                // Blockfrost has a 25-40s indexing lag, so fresh_utxos may still contain
+                // UTXOs that are already in cp.utxos (the tracked change output). Filter
+                // them out to prevent duplicate inputs in the transaction.
+                let cp_utxo_set: std::collections::HashSet<_> = cp
+                    .utxos
+                    .iter()
+                    .map(|u| (u.tx_hash.clone(), u.output_index))
+                    .collect();
+                let fresh_utxos = self.filter_recently_spent(fresh_utxos).await;
+                let fresh_utxos: Vec<_> = fresh_utxos
+                    .into_iter()
+                    .filter(|u| !cp_utxo_set.contains(&(u.tx_hash.clone(), u.output_index)))
+                    .collect();
                 let shortfall = needed - cp.total_input;
                 let (extra, extra_total) =
                     self.select_utxos_for_fee_with_extra(&fresh_utxos, shortfall, 0)?;
@@ -1860,6 +2082,7 @@ impl HyperlaneTxBuilder {
             }
         } else {
             let utxos = self.provider.get_utxos_at_address(&payer_address).await?;
+            let utxos = self.filter_recently_spent(utxos).await;
             let (selected, total) =
                 self.select_utxos_for_fee_with_extra(&utxos, total_payer_extra, min_lovelace)?;
             debug!(
@@ -2717,7 +2940,11 @@ impl HyperlaneTxBuilder {
                     synthetic_mint: synthetic_mint_idx
                         .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
                 };
-                debug!("Caching per-role ExUnits: {:?}", to_cache);
+                let to_cache = to_cache.with_step_margin();
+                debug!(
+                    "Caching per-role ExUnits (with 10% step margin): {:?}",
+                    to_cache
+                );
                 *self.cached_process_ex_units.lock().await = Some(to_cache);
             }
         }
@@ -2976,6 +3203,30 @@ impl HyperlaneTxBuilder {
         extra: u64,
         min_lovelace: u64,
     ) -> Result<(Vec<Utxo>, u64), TxBuilderError> {
+        // Build a block-list of the specific UTxO IDs that are configured as
+        // reference inputs. These must NOT be spent as fee inputs because the TX
+        // adds them as reference_inputs and Cardano rejects UTxOs that appear in
+        // both inputs and reference_inputs.
+        //
+        // We intentionally do NOT blanket-filter by reference_script_hash because
+        // the wallet accumulates reference-script UTxOs from contract deployments
+        // (e.g., old/unused warp route ref scripts). Those are safe to spend as
+        // long as they aren't the specific UTxOs referenced by this TX.
+        let blocked: std::collections::HashSet<(String, u32)> = [
+            self.conf.mailbox_reference_script_utxo.as_deref(),
+            self.conf.ism_reference_script_utxo.as_deref(),
+            self.conf.warp_route_reference_script_utxo.as_deref(),
+        ]
+        .iter()
+        .filter_map(|s| *s)
+        .filter_map(|s| {
+            let mut parts = s.splitn(2, '#');
+            let hash = parts.next()?.to_string();
+            let idx: u32 = parts.next()?.parse().ok()?;
+            Some((hash, idx))
+        })
+        .collect();
+
         // Sort UTXOs by lovelace amount (largest first) for efficient selection
         let mut sorted: Vec<_> = utxos.iter().collect();
         sorted.sort_by_key(|u| std::cmp::Reverse(u.lovelace()));
@@ -2995,9 +3246,8 @@ impl HyperlaneTxBuilder {
                 continue;
             }
 
-            // Skip UTXOs that hold a reference script — spending them would clash
-            // with the same UTXO being added as a reference input in the TX.
-            if utxo.reference_script_hash.is_some() {
+            // Skip UTxOs that are the specific configured reference inputs.
+            if blocked.contains(&(utxo.tx_hash.clone(), utxo.output_index)) {
                 continue;
             }
 
@@ -3273,12 +3523,6 @@ impl HyperlaneTxBuilder {
             .build_process_tx(message, metadata, payer, None)
             .await?;
 
-        if !self.evaluate_available.load(Ordering::Relaxed) {
-            return Err(TxBuilderError::TxBuild(
-                "TX evaluate endpoint unavailable (disabled after previous failure)".to_string(),
-            ));
-        }
-
         let built_tx = self
             .build_complete_process_tx(&components, payer, None, None)
             .await?;
@@ -3359,14 +3603,6 @@ impl HyperlaneTxBuilder {
         let eval_result = match self.provider.evaluate_tx(signed_tx).await {
             Ok(result) => result,
             Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("500") || err_str.contains("Internal Server Error") {
-                    self.evaluate_available.store(false, Ordering::Relaxed);
-                    warn!(
-                        "Blockfrost evaluate endpoint returned HTTP 500 — disabling. \
-                         Falling back to static fee estimation."
-                    );
-                }
                 return Err(e.into());
             }
         };
@@ -3521,6 +3757,19 @@ fn parse_per_redeemer_ex_units(
     Err(TxBuilderError::Encoding(format!(
         "Could not parse per-redeemer evaluation result: {result}"
     )))
+}
+
+/// Extract the node-required fee from a FeeTooSmallUTxO error string.
+/// The Cardano node returns the exact minimum fee it computed, allowing us to
+/// rebuild the TX with that exact amount and retry once.
+fn parse_fee_too_small_expected(err: &str) -> Option<u64> {
+    let needle = "mismatchExpected = Coin ";
+    let pos = err.find(needle)?;
+    let after = &err[pos + needle.len()..];
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    after[..end].parse().ok()
 }
 
 /// Components needed to build a Process transaction
@@ -3774,6 +4023,61 @@ fn encode_constructor_0_redeemer() -> Vec<u8> {
     let mut encoded = Vec::new();
     minicbor::encode(&redeemer, &mut encoded).expect("Failed to encode constructor 0 redeemer");
     encoded
+}
+
+/// Extract the `processed_tree_root` from a mailbox UTXO's inline datum.
+/// Used to validate that the locally-reconstructed SMT matches on-chain state.
+fn read_processed_tree_root_from_utxo(utxo: &Utxo) -> Result<[u8; 32], TxBuilderError> {
+    let datum_str = utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| TxBuilderError::Encoding("Mailbox UTXO has no inline datum".to_string()))?;
+
+    let data = if let Ok(cbor_bytes) = hex::decode(datum_str) {
+        minicbor::decode::<PlutusData>(&cbor_bytes).map_err(|e| {
+            TxBuilderError::Encoding(format!("Failed to decode mailbox datum CBOR: {e}"))
+        })?
+    } else {
+        json_to_plutus_data(
+            &serde_json::from_str::<serde_json::Value>(datum_str).map_err(|e| {
+                TxBuilderError::Encoding(format!("Failed to parse mailbox datum JSON: {e}"))
+            })?,
+        )?
+    };
+
+    match data {
+        PlutusData::Constr(constr) => {
+            let fields: Vec<PlutusData> = match constr.fields {
+                MaybeIndefArray::Def(f) => f,
+                MaybeIndefArray::Indef(f) => f,
+            };
+            if fields.len() < 6 {
+                return Err(TxBuilderError::Encoding(format!(
+                    "MailboxDatum expected 6 fields, got {}",
+                    fields.len()
+                )));
+            }
+            match &fields[5] {
+                PlutusData::BoundedBytes(bytes) => {
+                    if bytes.len() != 32 {
+                        return Err(TxBuilderError::Encoding(format!(
+                            "processed_tree_root expected 32 bytes, got {}",
+                            bytes.len()
+                        )));
+                    }
+                    let mut root = [0u8; 32];
+                    root.copy_from_slice(bytes);
+                    Ok(root)
+                }
+                _ => Err(TxBuilderError::Encoding(
+                    "processed_tree_root is not BoundedBytes".to_string(),
+                )),
+            }
+        }
+        _ => Err(TxBuilderError::Encoding(
+            "MailboxDatum is not a Constr".to_string(),
+        )),
+    }
 }
 
 /// Build updated mailbox datum CBOR with a new processed_tree_root.
