@@ -322,11 +322,12 @@ impl HyperlaneTxBuilder {
     /// Get or initialize the Sparse Merkle Tree by scanning on-chain
     /// processed_message_nft tokens, validated against the mailbox datum's root.
     async fn get_or_init_smt(&self) -> Result<(), TxBuilderError> {
-        {
-            let guard = self.smt.lock().await;
-            if guard.is_some() {
-                return Ok(());
-            }
+        // Hold the lock for the entire initialization to prevent concurrent inits.
+        // Concurrent callers block here; after the first one completes they see
+        // is_some() and return immediately.
+        let mut guard = self.smt.lock().await;
+        if guard.is_some() {
+            return Ok(());
         }
 
         let policy_id = self
@@ -379,14 +380,11 @@ impl HyperlaneTxBuilder {
 
             let smt = crate::smt::SparseMerkleTree::from_message_ids(&message_ids);
             if smt.root() == expected_root {
-                let mut guard = self.smt.lock().await;
-                if guard.is_none() {
-                    info!(
-                        count = message_ids.len(),
-                        "SMT initialized and verified against on-chain root"
-                    );
-                    *guard = Some(smt);
-                }
+                info!(
+                    count = message_ids.len(),
+                    "SMT initialized and verified against on-chain root"
+                );
+                *guard = Some(smt);
                 return Ok(());
             }
 
@@ -398,12 +396,6 @@ impl HyperlaneTxBuilder {
                     "SMT root mismatch — Blockfrost indexer lag? Retrying in {}s",
                     RETRY_DELAY.as_secs()
                 );
-                {
-                    let guard = self.smt.lock().await;
-                    if guard.is_some() {
-                        return Ok(());
-                    }
-                }
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
@@ -578,9 +570,14 @@ impl HyperlaneTxBuilder {
 
         let utxos = self.provider.get_utxos_at_address(&script_address).await?;
 
-        // Find the first UTXO with an inline datum (the mailbox state UTXO)
+        // Find the UTXO holding the mailbox state NFT. The script address accumulates many UTXOs
+        // (message receipt UTXOs from parallel processing), so we must match the specific NFT.
         for utxo in utxos {
-            if utxo.inline_datum.is_some() {
+            if utxo.has_asset(
+                &self.conf.mailbox_policy_id,
+                &self.conf.mailbox_asset_name_hex,
+            ) && utxo.inline_datum.is_some()
+            {
                 debug!(
                     "Found mailbox UTXO by script address: {}#{}",
                     utxo.tx_hash, utxo.output_index
