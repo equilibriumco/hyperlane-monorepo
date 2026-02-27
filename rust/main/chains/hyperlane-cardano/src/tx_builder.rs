@@ -2179,12 +2179,21 @@ impl HyperlaneTxBuilder {
         }
 
         // Cardano requires collateral inputs to be pure ADA — token-bearing UTxOs
-        // cause CollateralContainsNonADA errors. Search all payer UTxOs for the
-        // largest pure-ADA one, independent of which UTxOs were selected for fees.
+        // cause CollateralContainsNonADA errors. Pick the smallest pure-ADA UTxO
+        // that exceeds 5 ADA (covers 150% of ~3 ADA max fee), minimising the
+        // ADA at risk if a script fails and collateral is slashed.
+        const COLLATERAL_MIN_LOVELACE: u64 = 5_000_000;
         let collateral_utxo = payer_utxos
             .iter()
-            .filter(|u| u.value.len() == 1)
-            .max_by_key(|u| u.lovelace());
+            .filter(|u| u.value.len() == 1 && u.lovelace() >= COLLATERAL_MIN_LOVELACE)
+            .min_by_key(|u| u.lovelace())
+            .or_else(|| {
+                // Fall back to any pure-ADA UTxO if none meets the threshold
+                payer_utxos
+                    .iter()
+                    .filter(|u| u.value.len() == 1)
+                    .max_by_key(|u| u.lovelace())
+            });
         if let Some(collateral_utxo) = collateral_utxo {
             let collateral_input = utxo_to_input(collateral_utxo)?;
             tx = tx.collateral_input(collateral_input);
