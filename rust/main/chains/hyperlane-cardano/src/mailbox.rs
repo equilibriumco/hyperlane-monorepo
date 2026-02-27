@@ -529,7 +529,7 @@ impl Mailbox for CardanoMailbox {
     }
 
     fn supports_batching(&self) -> bool {
-        self.conf.max_batch_size > 1
+        false
     }
 
     async fn process_batch<'a>(&self, ops: Vec<&'a QueueOperation>) -> ChainResult<BatchResult> {

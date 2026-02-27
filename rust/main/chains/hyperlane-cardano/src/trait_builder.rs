@@ -68,9 +68,9 @@ pub struct ConnectionConf {
     /// finished indexing for address-transaction queries (25-40s lag).
     /// Defaults to 2 (~40s at ~20s/block on preview).
     pub confirmation_block_delay: u32,
-    /// Maximum number of messages to chain in a single batch.
-    /// Each process TX is ~2-6KB; Cardano block size is ~80KB.
-    /// Defaults to 4.
+    /// Unused — Cardano does not support message batching.
+    /// Sequential TX chaining is used instead. Setting this > 1 emits a warning.
+    /// Defaults to 1.
     pub max_batch_size: u32,
     /// Operation submission config for the relayer's batching infrastructure.
     pub op_submission_config: OpSubmissionConfig,
@@ -235,7 +235,14 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
         let verified_message_nft_script_cbor = raw.verified_message_nft_script_cbor;
 
         let confirmation_block_delay = raw.confirmation_block_delay.unwrap_or(5);
-        let max_batch_size = raw.max_batch_size.unwrap_or(4);
+        let max_batch_size = raw.max_batch_size.unwrap_or(1);
+        if max_batch_size > 1 {
+            tracing::warn!(
+                max_batch_size,
+                "Cardano does not support message batching; max_batch_size > 1 has no effect. \
+                 Sequential TX chaining is used instead."
+            );
+        }
         let op_submission_config = OpSubmissionConfig {
             max_batch_size,
             ..Default::default()
