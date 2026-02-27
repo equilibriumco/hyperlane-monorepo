@@ -1056,7 +1056,7 @@ pub fn build_cardano_connection_conf(
         .chain(&mut local_err)
         .get_opt_key("confirmationBlockDelay")
         .parse_u32()
-        .unwrap_or(2);
+        .unwrap_or(5);
 
     let max_batch_size = conn
         .chain(&mut local_err)

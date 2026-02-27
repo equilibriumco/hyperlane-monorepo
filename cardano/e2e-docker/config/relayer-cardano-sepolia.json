@@ -29,7 +29,7 @@
         "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
         "verifiedMessageNftPolicyId": "${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}",
         "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}",
-        "confirmationBlockDelay": 2,
+        "confirmationBlockDelay": 5,
         "maxBatchSize": 10
       },
       "domainId": 2003,
@@ -94,5 +94,5 @@
   },
   "originChainNames": "cardanopreview,sepolia",
   "relayChains": "cardanopreview,sepolia",
-  "blacklist": "[{\"messageid\":\"0xb7b96c6812e8b7b8eea5afc675688a5022222db1b6af28ccf33b6406fa5f35fd\"},{\"messageid\":\"0x8e8e28db881dbdb71696df6226c4c9c472873668fab6e74083b1c9f9d6178aa3\"},{\"messageid\":\"0x23768ad3c8d857dcd96cc5bdece98c14536b53b7d9ddb26a1d6de4b86fd59e61\"},{\"messageid\":\"0x197e7e5b0e6ea47b7789e1f9df8e980fc4ab10a3f3dabb2c777b05dbd6d867ad\"},{\"messageid\":\"0xb7627877c9aab0fa90727fa49ee2dab399c4aa827bf446ea70b538821ca6c905\"}]"
+  "blacklist": "[]"
 }
