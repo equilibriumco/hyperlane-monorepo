@@ -1099,8 +1099,15 @@ impl HyperlaneTxBuilder {
         // fee (~0.3-0.8M) and rebuild — saving the relayer ~2+ ADA per TX.
         {
             let ref_script_size = components.total_ref_script_size;
+            let additional_utxos: Option<Vec<Utxo>> = tracked_state.as_ref().map(|ts| {
+                vec![
+                    ts.mailbox_utxo.clone(),
+                    ts.ism_utxo.clone(),
+                    ts.payer_utxo.clone(),
+                ]
+            });
             match self
-                .evaluate_and_compute_fee(&signed_tx, ref_script_size)
+                .evaluate_and_compute_fee(&signed_tx, ref_script_size, additional_utxos.as_deref())
                 .await
             {
                 Ok((real_fee, ex_units_map)) => {
@@ -1502,13 +1509,27 @@ impl HyperlaneTxBuilder {
             let mut signed_tx = self.sign_transaction(built_tx, payer)?;
             let mut actual_fee = ESTIMATED_FEE_LOVELACE;
 
-            // For TX 0 with no cached ExUnits, evaluate to get real budgets.
-            // Static defaults (2.5M mem) may be too low for complex scripts.
-            // The rebuild also populates cached_process_ex_units so TX 1+ use
-            // accurate per-role ExUnits instead of static placeholders.
-            if i == 0 && self.cached_process_ex_units.lock().await.is_none() {
+            // Evaluate to get accurate ExUnits and fee.
+            // When chained UTxOs are available, use /utils/txs/evaluate/utxos so
+            // the evaluator can resolve predecessor outputs not yet on-chain.
+            // For cold-start TX 0 (no predecessor), the basic endpoint suffices.
+            // Skip only when it is TX 0 with no predecessor and cache is populated.
+            let additional_utxos: Option<Vec<Utxo>> = chained_state.as_ref().map(|cs| {
+                vec![
+                    cs.mailbox_utxo.clone(),
+                    cs.ism_utxo.clone(),
+                    cs.payer_utxo.clone(),
+                ]
+            });
+            let should_evaluate = additional_utxos.is_some()
+                || (i == 0 && self.cached_process_ex_units.lock().await.is_none());
+            if should_evaluate {
                 match self
-                    .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
+                    .evaluate_and_compute_fee(
+                        &signed_tx,
+                        components.total_ref_script_size,
+                        additional_utxos.as_deref(),
+                    )
                     .await
                 {
                     Ok((real_fee, ex_units_map)) => {
@@ -1522,13 +1543,10 @@ impl HyperlaneTxBuilder {
                             .await?;
                         signed_tx = self.sign_transaction(rebuilt, payer)?;
                         actual_fee = real_fee;
-                        info!(
-                            "Batch TX 0: evaluated fee {} lovelace, ExUnits cached for batch",
-                            real_fee
-                        );
+                        info!("Batch TX {i}: evaluated fee {real_fee} lovelace",);
                     }
                     Err(e) => {
-                        warn!("Batch TX 0: evaluation failed, using static ExUnits: {e}");
+                        warn!("Batch TX {i}: evaluation failed, using cached/static ExUnits: {e}");
                     }
                 }
             }
@@ -3635,7 +3653,7 @@ impl HyperlaneTxBuilder {
         );
 
         let (fee, _ex_units_map) = self
-            .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size)
+            .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size, None)
             .await?;
 
         // Add minUTxO costs for outputs the relayer creates (mirrors build_complete_process_tx)
@@ -3683,17 +3701,31 @@ impl HyperlaneTxBuilder {
 
     /// Evaluate a signed TX via Blockfrost and compute the real fee.
     /// Returns (fee, per_redeemer_ex_units_map).
-    /// Disables the evaluate endpoint on HTTP 500 (Blockfrost plan limitation).
+    ///
+    /// When `additional_utxos` is provided (non-empty), uses
+    /// `/utils/txs/evaluate/utxos` so the evaluation can reference
+    /// unconfirmed predecessor outputs (chained TX inputs).
     async fn evaluate_and_compute_fee(
         &self,
         signed_tx: &[u8],
         ref_script_size: u64,
+        additional_utxos: Option<&[Utxo]>,
     ) -> Result<(u64, EvaluatedExUnits), TxBuilderError> {
-        let eval_result = match self.provider.evaluate_tx(signed_tx).await {
-            Ok(result) => result,
-            Err(e) => {
-                return Err(e.into());
+        let eval_result = match additional_utxos {
+            Some(utxos) if !utxos.is_empty() => {
+                match self
+                    .provider
+                    .evaluate_tx_with_additional_utxos(signed_tx, utxos)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return Err(e.into()),
+                }
             }
+            _ => match self.provider.evaluate_tx(signed_tx).await {
+                Ok(result) => result,
+                Err(e) => return Err(e.into()),
+            },
         };
 
         let per_redeemer_units = parse_per_redeemer_ex_units(&eval_result)?;
