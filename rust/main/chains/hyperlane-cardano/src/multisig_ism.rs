@@ -6,6 +6,7 @@ use crate::types::MultisigIsmDatum;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::OnceCell;
 
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract,
@@ -19,6 +20,8 @@ pub struct CardanoMultisigIsm {
     domain: HyperlaneDomain,
     conf: ConnectionConf,
     address: H256,
+    /// Cached ISM datum. Initialized exactly once; concurrent callers await the first fetch.
+    cached_ism_datum: Arc<OnceCell<MultisigIsmDatum>>,
 }
 
 impl CardanoMultisigIsm {
@@ -31,6 +34,7 @@ impl CardanoMultisigIsm {
             domain: locator.domain.clone(),
             conf: conf.clone(),
             address: locator.address,
+            cached_ism_datum: Arc::new(OnceCell::new()),
         }
     }
 
@@ -84,9 +88,12 @@ impl CardanoMultisigIsm {
                 ))
             })?;
 
-        // Find the first UTXO with an inline datum (the ISM state UTXO)
+        // Find the UTXO holding the ISM state NFT. The script address may accumulate other
+        // UTXOs over time, so we must match the specific NFT rather than any inline datum.
         for utxo in utxos {
-            if utxo.inline_datum.is_some() {
+            if utxo.has_asset(&self.conf.ism_policy_id, &self.conf.ism_asset_name_hex)
+                && utxo.inline_datum.is_some()
+            {
                 info!(
                     "Found ISM UTXO by script address: {}#{}",
                     utxo.tx_hash, utxo.output_index
@@ -522,9 +529,14 @@ impl MultisigIsm for CardanoMultisigIsm {
         &self,
         message: &HyperlaneMessage,
     ) -> ChainResult<(Vec<H256>, u8)> {
-        // Find and parse the ISM UTXO
-        let utxo = self.find_ism_utxo().await?;
-        let datum = self.parse_ism_datum(&utxo).await?;
+        let datum = self
+            .cached_ism_datum
+            .get_or_try_init(|| async {
+                let utxo = self.find_ism_utxo().await?;
+                self.parse_ism_datum(&utxo).await
+            })
+            .await?
+            .clone();
 
         // Get validators and threshold for the message's origin domain
         let origin_domain = message.origin;

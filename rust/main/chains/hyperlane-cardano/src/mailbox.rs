@@ -20,6 +20,7 @@ use serde_json::Value;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
 
 pub struct CardanoMailbox {
@@ -31,6 +32,9 @@ pub struct CardanoMailbox {
     payer: Option<Keypair>,
     tx_builder: HyperlaneTxBuilder,
     resolver: RecipientResolver,
+    /// Cached default ISM address. Initialized exactly once on the first successful fetch;
+    /// concurrent callers await the first one rather than all fetching independently.
+    cached_default_ism: Arc<OnceCell<H256>>,
 }
 
 impl CardanoMailbox {
@@ -58,6 +62,7 @@ impl CardanoMailbox {
             payer,
             tx_builder,
             resolver,
+            cached_default_ism: Arc::new(OnceCell::new()),
         })
     }
 
@@ -142,10 +147,16 @@ impl CardanoMailbox {
                 ))
             })?;
 
-        // Find the first UTXO with an inline datum (the mailbox state UTXO)
-        // In production with proper NFTs, there should be exactly one
+        // Find the UTXO holding the mailbox state NFT among all UTXOs at the script address.
+        // The script address accumulates many UTXOs over time (e.g. message receipt UTXOs from
+        // parallel inbound processing), so we must check for the specific state NFT rather than
+        // picking any UTXO with an inline datum.
         for utxo in utxos {
-            if utxo.inline_datum.is_some() {
+            if utxo.has_asset(
+                &self.conf.mailbox_policy_id,
+                &self.conf.mailbox_asset_name_hex,
+            ) && utxo.inline_datum.is_some()
+            {
                 info!(
                     "Found mailbox UTXO by script address: {}#{}",
                     utxo.tx_hash, utxo.output_index
@@ -446,15 +457,19 @@ impl Mailbox for CardanoMailbox {
     }
 
     async fn default_ism(&self) -> ChainResult<H256> {
-        // Get the default ISM from the mailbox datum
-        let utxo = self.find_mailbox_utxo().await?;
-        let datum = self.parse_mailbox_datum(&utxo).await?;
+        // Fetch exactly once; concurrent callers await the first successful result.
+        self.cached_default_ism
+            .get_or_try_init(|| async {
+                let utxo = self.find_mailbox_utxo().await?;
+                let datum = self.parse_mailbox_datum(&utxo).await?;
 
-        // Convert 28-byte script hash to H256 with script prefix
-        let mut h = [0u8; 32];
-        h[0] = 0x02; // Script credential prefix
-        h[4..32].copy_from_slice(&datum.default_ism);
-        Ok(H256(h))
+                let mut h = [0u8; 32];
+                h[0] = 0x02;
+                h[4..32].copy_from_slice(&datum.default_ism);
+                Ok::<H256, ChainCommunicationError>(H256(h))
+            })
+            .await
+            .copied()
     }
 
     async fn recipient_ism(&self, recipient: H256) -> ChainResult<H256> {
