@@ -275,51 +275,81 @@ impl BlockfrostProvider {
         asset_name: &str,
     ) -> Result<Vec<Utxo>, BlockfrostProviderError> {
         let asset_id = format!("{policy_id}{asset_name}");
-        let mut all_addresses = Vec::new();
+
+        // Step 1: find the address holding the asset (NFTs have exactly one holder)
+        self.rate_limit().await;
+        let addresses = match self
+            .with_timeout(
+                self.api
+                    .assets_addresses(&asset_id, Pagination::new(Order::Asc, 1, 1)),
+            )
+            .await
+        {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                let error_str = format!("{e:?}");
+                if error_str.contains("404") || error_str.contains("Not Found") {
+                    return Ok(Vec::new());
+                }
+                return Err(e);
+            }
+        };
+
+        let Some(addr_info) = addresses.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+
+        // Step 2: fetch only the UTXOs at that address that contain the specific asset.
+        // Using /addresses/{address}/utxos/{asset} avoids scanning all UTXOs at the address
+        // (script addresses can accumulate hundreds of UTXOs from message receipts).
+        let mut result = Vec::new();
         let mut page = 1;
         const PAGE_SIZE: usize = 100;
-
-        // Manually paginate through asset addresses
         loop {
             self.rate_limit().await;
             let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
-
-            let addresses = match self
-                .with_timeout(self.api.assets_addresses(&asset_id, pagination))
+            let utxos = match self
+                .with_timeout(self.api.addresses_utxos_asset(
+                    &addr_info.address,
+                    &asset_id,
+                    pagination,
+                ))
                 .await
             {
-                Ok(addrs) => addrs,
+                Ok(u) => u,
                 Err(e) => {
                     let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
-                        return Ok(Vec::new());
-                    }
-                    // Handle 429 rate limit - return what we have if possible
-                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!("Rate limited while fetching asset addresses, continuing with {} addresses", all_addresses.len());
                         break;
                     }
                     return Err(e);
                 }
             };
-
-            let page_len = addresses.len();
-            all_addresses.extend(addresses);
-
+            let page_len = utxos.len();
+            for u in utxos {
+                result.push(Utxo {
+                    tx_hash: u.tx_hash,
+                    output_index: u.output_index as u32,
+                    address: addr_info.address.clone(),
+                    value: u
+                        .amount
+                        .into_iter()
+                        .map(|a| UtxoValue {
+                            unit: a.unit,
+                            quantity: a.quantity,
+                        })
+                        .collect(),
+                    inline_datum: u.inline_datum,
+                    data_hash: u.data_hash,
+                    reference_script_hash: u.reference_script_hash,
+                    collateral: false,
+                    reference: false,
+                });
+            }
             if page_len < PAGE_SIZE {
                 break;
             }
             page += 1;
-        }
-
-        let mut result = Vec::new();
-        for addr_info in all_addresses {
-            let utxos = self.get_utxos_at_address(&addr_info.address).await?;
-            for utxo in utxos {
-                if utxo.has_asset(policy_id, asset_name) {
-                    result.push(utxo);
-                }
-            }
         }
 
         Ok(result)
