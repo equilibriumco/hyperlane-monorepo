@@ -124,8 +124,6 @@ pub enum TxBuilderError {
     SubmissionFailed(String),
     #[error("Message permanently undeliverable: {0}")]
     UndeliverableMessage(String),
-    #[error("Evaluate skipped (chained TX or cache warm)")]
-    EvaluateSkipped,
 }
 
 /// Default execution units for script evaluation
@@ -1100,22 +1098,22 @@ impl HyperlaneTxBuilder {
         // Evaluating the signed TX gives us actual ExUnits, so we can compute the real
         // fee (~0.3-0.8M) and rebuild — saving the relayer ~2+ ADA per TX.
         //
-        // Blockfrost's evaluate/utxos endpoint does not support UTxOs with native assets
-        // in additionalUtxoSet. Since mailbox and ISM UTxOs always carry NFTs, we cannot
-        // evaluate chained TXs whose inputs are not yet confirmed. For chained TXs, skip
-        // evaluate and go straight to the cached-ExUnits path.
+        // For chained TXs whose inputs are not yet confirmed, provide the predecessor
+        // UTxOs via /utils/txs/evaluate/utxos (Ogmios v5 format: policy IDs as
+        // top-level keys in the value object).
         {
             let ref_script_size = components.total_ref_script_size;
-            // Only evaluate when: not chained (all inputs confirmed on-chain) AND
-            // cache is empty (otherwise cached path is cheaper and equivalent).
-            let evaluate_result: Result<(u64, EvaluatedExUnits), TxBuilderError> =
-                if tracked_state.is_none() && self.cached_process_ex_units.lock().await.is_none() {
-                    self.evaluate_and_compute_fee(&signed_tx, ref_script_size, None)
-                        .await
-                } else {
-                    Err(TxBuilderError::EvaluateSkipped)
-                };
-            match evaluate_result {
+            let additional_utxos: Option<Vec<Utxo>> = tracked_state.as_ref().map(|ts| {
+                vec![
+                    ts.mailbox_utxo.clone(),
+                    ts.ism_utxo.clone(),
+                    ts.payer_utxo.clone(),
+                ]
+            });
+            match self
+                .evaluate_and_compute_fee(&signed_tx, ref_script_size, additional_utxos.as_deref())
+                .await
+            {
                 Ok((real_fee, ex_units_map)) => {
                     info!(
                         "Evaluated fee: {} lovelace (was {}), rebuilding TX with actual ExUnits",
@@ -1164,11 +1162,7 @@ impl HyperlaneTxBuilder {
                     submitted_ex_units = Some(ex_units_map);
                 }
                 Err(e) => {
-                    // EvaluateSkipped means this is a chained TX (skipped intentionally).
-                    // Otherwise evaluate failed — log a warning for genuine failures.
-                    if !matches!(e, TxBuilderError::EvaluateSkipped) {
-                        warn!("Fee evaluation failed: {e}");
-                    }
+                    warn!("Fee evaluation failed: {e}");
                     // Use cached ExUnits to compute a proper fee and rebuild.
                     // The first build already used cached ExUnits for correct script
                     // budgets but still has a 3M placeholder fee.
@@ -1512,35 +1506,42 @@ impl HyperlaneTxBuilder {
             let mut actual_fee = ESTIMATED_FEE_LOVELACE;
 
             // Evaluate to get accurate ExUnits and fee.
-            // Evaluate only for cold-start TX 0 with no predecessor and empty cache.
-            // Chained TXs skip evaluate: their mailbox/ISM inputs are unconfirmed and
-            // carry NFTs, which Blockfrost's evaluate/utxos does not support.
-            let is_chained = chained_state.is_some();
-            if !is_chained && self.cached_process_ex_units.lock().await.is_none() {
-                match self
-                    .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size, None)
-                    .await
-                {
-                    Ok((real_fee, ex_units_map)) => {
-                        let rebuilt = self
-                            .build_complete_process_tx(
-                                &components,
-                                payer,
-                                Some((real_fee, &ex_units_map)),
-                                chained_payer.as_ref(),
-                            )
-                            .await?;
-                        signed_tx = self.sign_transaction(rebuilt, payer)?;
-                        actual_fee = real_fee;
-                        info!("Batch TX {i}: evaluated fee {real_fee} lovelace");
-                    }
-                    Err(e) => {
-                        warn!("Batch TX {i}: evaluation failed, using cached/static ExUnits: {e}");
-                    }
+            // For chained TXs, provide predecessor UTxOs via evaluate/utxos so
+            // the evaluator can resolve unconfirmed inputs (Ogmios v5 format).
+            let additional_utxos: Option<Vec<Utxo>> = chained_state.as_ref().map(|cs| {
+                vec![
+                    cs.mailbox_utxo.clone(),
+                    cs.ism_utxo.clone(),
+                    cs.payer_utxo.clone(),
+                ]
+            });
+            match self
+                .evaluate_and_compute_fee(
+                    &signed_tx,
+                    components.total_ref_script_size,
+                    additional_utxos.as_deref(),
+                )
+                .await
+            {
+                Ok((real_fee, ex_units_map)) => {
+                    let rebuilt = self
+                        .build_complete_process_tx(
+                            &components,
+                            payer,
+                            Some((real_fee, &ex_units_map)),
+                            chained_payer.as_ref(),
+                        )
+                        .await?;
+                    signed_tx = self.sign_transaction(rebuilt, payer)?;
+                    actual_fee = real_fee;
+                    info!("Batch TX {i}: evaluated fee {real_fee} lovelace");
+                }
+                Err(e) => {
+                    warn!("Batch TX {i}: evaluation failed, using cached/static ExUnits: {e}");
                 }
             }
 
-            // When evaluate was skipped or failed, compute real fee from cached ExUnits.
+            // When evaluate failed, compute real fee from cached ExUnits.
             // The initial build uses ESTIMATED_FEE_LOVELACE; rebuild if it's still set.
             if actual_fee == ESTIMATED_FEE_LOVELACE {
                 let cached_opt = self.cached_process_ex_units.lock().await.clone();
@@ -3723,19 +3724,31 @@ impl HyperlaneTxBuilder {
     /// Evaluate a signed TX via Blockfrost and compute the real fee.
     /// Returns (fee, per_redeemer_ex_units_map).
     ///
-    /// Only used for unchained TXs (all inputs confirmed on-chain).
-    /// Chained TXs skip this and use cached ExUnits because Blockfrost's
-    /// evaluate/utxos does not support UTxOs with native assets (mailbox
-    /// and ISM inputs always carry NFTs).
+    /// When `additional_utxos` is provided (non-empty), uses
+    /// `/utils/txs/evaluate/utxos` so the evaluation can reference
+    /// unconfirmed predecessor outputs (chained TX inputs). The value
+    /// format uses policy IDs as top-level keys per the Ogmios v5 spec.
     async fn evaluate_and_compute_fee(
         &self,
         signed_tx: &[u8],
         ref_script_size: u64,
-        _unused: Option<&[Utxo]>,
+        additional_utxos: Option<&[Utxo]>,
     ) -> Result<(u64, EvaluatedExUnits), TxBuilderError> {
-        let eval_result = match self.provider.evaluate_tx(signed_tx).await {
-            Ok(result) => result,
-            Err(e) => return Err(e.into()),
+        let eval_result = match additional_utxos {
+            Some(utxos) if !utxos.is_empty() => {
+                match self
+                    .provider
+                    .evaluate_tx_with_additional_utxos(signed_tx, utxos)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            _ => match self.provider.evaluate_tx(signed_tx).await {
+                Ok(result) => result,
+                Err(e) => return Err(e.into()),
+            },
         };
 
         let per_redeemer_units = parse_per_redeemer_ex_units(&eval_result)?;

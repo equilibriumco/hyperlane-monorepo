@@ -593,24 +593,25 @@ impl BlockfrostProvider {
                 // Add native assets if present
                 let assets: Vec<&UtxoValue> =
                     u.value.iter().filter(|v| v.unit != "lovelace").collect();
-                if !assets.is_empty() {
-                    let mut asset_map = serde_json::Map::new();
-                    for a in assets {
-                        if a.unit.len() >= 56 {
-                            let policy = &a.unit[..56];
-                            let name = &a.unit[56..];
-                            let policy_entry = asset_map
-                                .entry(policy.to_string())
-                                .or_insert_with(|| serde_json::json!({}));
-                            if let Some(obj) = policy_entry.as_object_mut() {
-                                obj.insert(
-                                    name.to_string(),
-                                    serde_json::json!(a.quantity.parse::<u64>().unwrap_or(0)),
-                                );
-                            }
+                // In Ogmios v5, native assets are top-level keys in the value
+                // object (not nested under "assets"). The key is the policy ID
+                // (56 hex chars) and the nested map uses asset names as keys.
+                for a in assets {
+                    if a.unit.len() >= 56 {
+                        let policy = &a.unit[..56];
+                        let name = &a.unit[56..];
+                        let policy_entry = value
+                            .as_object_mut()
+                            .unwrap()
+                            .entry(policy.to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(obj) = policy_entry.as_object_mut() {
+                            obj.insert(
+                                name.to_string(),
+                                serde_json::json!(a.quantity.parse::<u64>().unwrap_or(0)),
+                            );
                         }
                     }
-                    value["assets"] = serde_json::Value::Object(asset_map);
                 }
 
                 let mut output = serde_json::json!({
