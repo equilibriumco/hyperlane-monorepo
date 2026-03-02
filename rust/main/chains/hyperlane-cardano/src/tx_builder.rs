@@ -199,6 +199,72 @@ pub struct HyperlaneTxBuilder {
 }
 
 impl HyperlaneTxBuilder {
+    async fn select_payer_utxos_for_process(
+        &self,
+        payer_address: &str,
+        total_payer_extra: u64,
+        min_lovelace: u64,
+        processed_marker_min_lovelace_for_selection: u64,
+        payer_extra: u64,
+        chained_payer: Option<&ChainedPayer>,
+    ) -> Result<(Vec<Utxo>, Vec<Utxo>, u64), TxBuilderError> {
+        if let Some(cp) = chained_payer {
+            let needed = ESTIMATED_FEE_LOVELACE + min_lovelace + total_payer_extra;
+            if cp.total_input >= needed {
+                debug!(
+                    "Using chained payer: {} UTXOs, {} lovelace",
+                    cp.utxos.len(),
+                    cp.total_input
+                );
+                return Ok((cp.utxos.clone(), cp.utxos.clone(), cp.total_input));
+            }
+
+            // Chained payer insufficient — supplement with fresh wallet UTXOs.
+            // This happens when the tracked change from a previous batch is too
+            // small for the current batch's total cost.
+            warn!(
+                "Chained payer {} lovelace < {} needed, supplementing from wallet",
+                cp.total_input, needed
+            );
+            let fresh_utxos = self.provider.get_utxos_at_address(payer_address).await?;
+            // Blockfrost has a 25-40s indexing lag, so fresh_utxos may still contain
+            // UTXOs that are already in cp.utxos (the tracked change output). Filter
+            // them out to prevent duplicate inputs in the transaction.
+            let cp_utxo_set: std::collections::HashSet<_> = cp
+                .utxos
+                .iter()
+                .map(|u| (u.tx_hash.clone(), u.output_index))
+                .collect();
+            let fresh_utxos = self.filter_recently_spent(fresh_utxos).await;
+            let fresh_utxos: Vec<_> = fresh_utxos
+                .into_iter()
+                .filter(|u| !cp_utxo_set.contains(&(u.tx_hash.clone(), u.output_index)))
+                .collect();
+            let shortfall = needed - cp.total_input;
+            let (extra, extra_total) =
+                self.select_utxos_for_fee_with_extra(&fresh_utxos, shortfall, 0)?;
+            let mut selected = cp.utxos.clone();
+            selected.extend(extra);
+            let total = cp.total_input + extra_total;
+            let mut all = cp.utxos.clone();
+            all.extend(fresh_utxos);
+            return Ok((all, selected, total));
+        }
+
+        let utxos = self.provider.get_utxos_at_address(payer_address).await?;
+        let utxos = self.filter_recently_spent(utxos).await;
+        let (selected, total) =
+            self.select_utxos_for_fee_with_extra(&utxos, total_payer_extra, min_lovelace)?;
+        debug!(
+            "Selected {} UTXOs with {} lovelace for fees (processed_marker={}, payer_extra={})",
+            selected.len(),
+            total,
+            processed_marker_min_lovelace_for_selection,
+            payer_extra
+        );
+        Ok((utxos, selected, total))
+    }
+
     /// Create a new transaction builder
     pub fn new(conf: &ConnectionConf, provider: Arc<BlockfrostProvider>) -> Self {
         let resolver = RecipientResolver::new(
@@ -2101,63 +2167,18 @@ impl HyperlaneTxBuilder {
             + processed_marker_min_lovelace_for_selection
             + verified_message_min_lovelace;
 
-        // Find payer UTXOs for fee payment (coin selection)
-        // When chaining, use the change UTXO(s) from the previous TX
-        let (payer_utxos, selected_utxos, total_input) = if let Some(cp) = chained_payer {
-            let needed = ESTIMATED_FEE_LOVELACE + min_lovelace + total_payer_extra;
-            if cp.total_input >= needed {
-                debug!(
-                    "Using chained payer: {} UTXOs, {} lovelace",
-                    cp.utxos.len(),
-                    cp.total_input
-                );
-                (cp.utxos.clone(), cp.utxos.clone(), cp.total_input)
-            } else {
-                // Chained payer insufficient — supplement with fresh wallet UTXOs.
-                // This happens when the tracked change from a previous batch is too
-                // small for the current batch's total cost.
-                warn!(
-                    "Chained payer {} lovelace < {} needed, supplementing from wallet",
-                    cp.total_input, needed
-                );
-                let fresh_utxos = self.provider.get_utxos_at_address(&payer_address).await?;
-                // Blockfrost has a 25-40s indexing lag, so fresh_utxos may still contain
-                // UTXOs that are already in cp.utxos (the tracked change output). Filter
-                // them out to prevent duplicate inputs in the transaction.
-                let cp_utxo_set: std::collections::HashSet<_> = cp
-                    .utxos
-                    .iter()
-                    .map(|u| (u.tx_hash.clone(), u.output_index))
-                    .collect();
-                let fresh_utxos = self.filter_recently_spent(fresh_utxos).await;
-                let fresh_utxos: Vec<_> = fresh_utxos
-                    .into_iter()
-                    .filter(|u| !cp_utxo_set.contains(&(u.tx_hash.clone(), u.output_index)))
-                    .collect();
-                let shortfall = needed - cp.total_input;
-                let (extra, extra_total) =
-                    self.select_utxos_for_fee_with_extra(&fresh_utxos, shortfall, 0)?;
-                let mut selected = cp.utxos.clone();
-                selected.extend(extra);
-                let total = cp.total_input + extra_total;
-                let mut all = cp.utxos.clone();
-                all.extend(fresh_utxos);
-                (all, selected, total)
-            }
-        } else {
-            let utxos = self.provider.get_utxos_at_address(&payer_address).await?;
-            let utxos = self.filter_recently_spent(utxos).await;
-            let (selected, total) =
-                self.select_utxos_for_fee_with_extra(&utxos, total_payer_extra, min_lovelace)?;
-            debug!(
-                "Selected {} UTXOs with {} lovelace for fees (processed_marker={}, payer_extra={})",
-                selected.len(),
-                total,
+        // Find payer UTXOs for fee payment (coin selection).
+        // When chaining, use the change UTXO(s) from the previous TX.
+        let (payer_utxos, selected_utxos, total_input) = self
+            .select_payer_utxos_for_process(
+                &payer_address,
+                total_payer_extra,
+                min_lovelace,
                 processed_marker_min_lovelace_for_selection,
-                payer_extra
-            );
-            (utxos, selected, total)
-        };
+                payer_extra,
+                chained_payer,
+            )
+            .await?;
 
         // Start building the transaction
         let mut tx = StagingTransaction::new();
