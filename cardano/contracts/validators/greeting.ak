@@ -48,7 +48,9 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
         )
 
       Reclaim ->
-        assets.is_zero(assets.without_lovelace(own_input.output.value))
+        list.has(tx.extra_signatories, owner) && assets.is_zero(
+          assets.without_lovelace(own_input.output.value),
+        )
 
       HandleMessage { message, message_id } -> {
         // Determine UTXO type by checking which NFT the input holds:

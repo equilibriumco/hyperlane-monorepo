@@ -19,6 +19,12 @@ use types.{
 }
 use utils.{find_input, hyperlane_address_to_script_hash, is_signed_by, policy_id_to_hyperlane_address, validate_migrate, value_preserved}
 
+/// Fixed policy ID of canonical_config_nft.ak (non-parameterized validator).
+/// Any config UTXO at a generic recipient's address MUST hold a token from
+/// this policy to be accepted as an ISM override by find_generic_recipient_ism.
+const canonical_config_nft_policy: PolicyId =
+  #"1ae447f5a98155243852ba2264e150c03ace89cf3e17fd1da670ae36"
+
 /// Mailbox Validator
 /// Core Hyperlane contract that dispatches and processes messages
 ///
@@ -399,8 +405,8 @@ fn find_generic_recipient_ism(
           list.any(
             assets.flatten(input.output.value),
             fn(item) {
-              let (_p, name, qty) = item
-              name == script_hash && qty > 0
+              let (p, name, qty) = item
+              p == canonical_config_nft_policy && name == script_hash && qty > 0
             },
           )
         is_script_addr && has_config_token
@@ -584,9 +590,8 @@ fn make_tx(inputs: List<Input>, reference_inputs: List<Input>) -> Transaction {
 const test_generic_script_hash =
   #"1234567890abcdef1234567890abcdef1234567890abcdef12345678"
 
-// Fake canonical config NFT policy used in tests
-const test_canonical_policy =
-  #"aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+// Use the real policy so tests exercise the actual check
+const test_canonical_policy = canonical_config_nft_policy
 
 fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
   // Datum is Option<ScriptHash> (the new canonical config format)

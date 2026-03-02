@@ -1,20 +1,20 @@
 {
   "network": "preview",
   "mailbox": {
-    "hashBeforeParametrization": "f54283bf16d86503336e0fdca1f617c244c9a57053bb981d68788526",
-    "hash": "f81818c739b109d06782ae082791857616b5355cd917f7bf813c4dbc",
-    "address": "addr_test1wrupsxx88xcsn5r8s2hqsfu3s4mpddf4tnv30aalsy7ym0qv43wss",
+    "hashBeforeParametrization": "a6f750013b7c5ef77a4a611aacdb674a1e8d5c504746a91be211317a",
+    "hash": "c9d97685d6700a10a3f941d272c128c55d75f25db8bbed92b8fc0297",
+    "address": "addr_test1wryaja596ecq5y9rl9qayukp9rz46a0jtkuthmvjhr7q99c382npy",
     "appliedParameters": [
       {
         "name": "processed_messages_nft_policy",
         "paramType": "PolicyId",
-        "value": "b9c33797ba40496458fd5be39d5249fd730d5fae14f85845c7e984c0",
+        "value": "1108021d00323a9baecac4444a65e44de41d68cf15c38304bd4f88db",
         "description": "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
       },
       {
         "name": "verified_message_nft_policy",
         "paramType": "PolicyId",
-        "value": "28f8941d7c03cba81f440cdefffaecf7a94440eb8c4f843e59d9f4fa",
+        "value": "e525f7845b85f38019728a82f7545fab454a923a6d4512fcd2014247",
         "description": "Policy ID for verified message NFTs (parameterized by mailbox_policy_id)"
       },
       {
@@ -25,21 +25,21 @@
       }
     ],
     "stateNft": {
-      "policyId": "36e0eed061f20e03139a1673317385b13f67e3698f87eb43f5bfd1d8",
+      "policyId": "ab2161300e8f69d2fe0a4106857c1c9c26dbe056e8e780764ac949b9",
       "assetNameHex": "4d61696c626f78205374617465",
       "assetName": "Mailbox State",
-      "seedUtxo": "bc326779941df74e10558f27573948acd805d24c2af0bd72d069964d5e2c717c#0"
+      "seedUtxo": "2a676075f9a822932dba128b065d8b6a13b5e1d2978e345acbd973443cd1db34#2"
     },
-    "stateUtxo": "67a1b6f8a3ed64c13546064a8825c36918859bf3f360e3211c7ae41fc242243e#0",
+    "stateUtxo": "be71e9efa2c85833192f3ad0bfd682f86425c0cdfb0bc2fe499c7f410be0bbad#0",
     "referenceScriptUtxo": {
-      "txHash": "ec8f2700727a74d636c58f00a13cfaf5dfbd334aaa2fcaeb687da6aaf1a10502",
+      "txHash": "41f2d56202c2bc0aa5116e3a2322ba4b0a7e4977a23566184d7b1843db59980d",
       "outputIndex": 0,
-      "lovelace": 26000000
+      "lovelace": 30000000
     },
-    "initTxHash": "67a1b6f8a3ed64c13546064a8825c36918859bf3f360e3211c7ae41fc242243e",
+    "initTxHash": "e5b3c11f743d2ebfc339763c21f434b67ae36d2014e723b523703d96d0d363f8",
     "initialized": true,
-    "utxo": "67a1b6f8a3ed64c13546064a8825c36918859bf3f360e3211c7ae41fc242243e#0",
-    "stateNftPolicy": "36e0eed061f20e03139a1673317385b13f67e3698f87eb43f5bfd1d8"
+    "utxo": "e5b3c11f743d2ebfc339763c21f434b67ae36d2014e723b523703d96d0d363f8#0",
+    "stateNftPolicy": "ab2161300e8f69d2fe0a4106857c1c9c26dbe056e8e780764ac949b9"
   },
   "ism": {
     "hash": "48b62ff9474899cd6ffa7abcadd9e07634a6feb1e7f03b3a0253d14c",
@@ -52,7 +52,7 @@
     },
     "stateUtxo": "762efdca320e5b3a6dac0ecf4d1b1c8f3bd5cdefd52441a11440e14480b32844#0",
     "referenceScriptUtxo": {
-      "txHash": "7f4dced2b40f98782107156aeed64067b096f2c7af06c6ae1f9000ceae04cfcc",
+      "txHash": "63f702f22a71911c9ce3208525ddbb719b919403edd38654286b78d250426d53",
       "outputIndex": 0,
       "lovelace": 15000000
     },
@@ -182,13 +182,13 @@
   "recipients": [
     {
       "recipient_type": "greeting",
-      "script_hash": "c9dc65505c8ce242d4f01b319da6c3062e789c9b857ce43e0fa03cf5",
-      "address": "addr_test1wryace2stjxwysk57qdnr8dxcvrzu7yunwzheep7p7sreagc2828k",
-      "nft_policy": "22bec5ea757362f5d95720f9bcd45195e627cadb1f2ff97b7f449433",
-      "init_tx_hash": "adc294f3d55ff4c39bb5713071a2b7a2bf1f7d8faf477fff8596cd4be0438f7d",
+      "script_hash": "1fa24a94d3f9f11c4c450e7984230a151f688028b63c09cf238e286c",
+      "address": "addr_test1wq06yj5560ulz8zvg588npprpg2376yq9zmrczw0yw8zsmqv6q266",
+      "nft_policy": "7110193e782c8ce01677d91d810db268383478125c105c2e40b3c2d5",
+      "init_tx_hash": "7ef3e3011ab90b14180401430d39abf5760c7e5825e190709175ccc510a30190",
       "reference_script_utxo": {
-        "txHash": "adc294f3d55ff4c39bb5713071a2b7a2bf1f7d8faf477fff8596cd4be0438f7d",
-        "outputIndex": 1,
+        "txHash": "7ef3e3011ab90b14180401430d39abf5760c7e5825e190709175ccc510a30190",
+        "outputIndex": 2,
         "lovelace": 20000000
       }
     }
