@@ -1112,7 +1112,9 @@ fn script_hash_to_address(
     let delegation_part = ShelleyDelegationPart::Null;
     let address = ShelleyAddress::new(network, payment_part, delegation_part);
 
-    Ok(Address::Shelley(address).to_bech32().unwrap_or_default())
+    Address::Shelley(address).to_bech32().map_err(|e| {
+        BlockfrostProviderError::Deserialization(format!("Invalid bech32 address: {e}"))
+    })
 }
 
 #[cfg(test)]

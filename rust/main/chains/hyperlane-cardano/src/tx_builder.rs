@@ -1696,8 +1696,7 @@ impl HyperlaneTxBuilder {
                             break;
                         }
                         Err(e) => {
-                            let err_str = e.to_string();
-                            if err_str.contains("BadInputsUTxO") && attempt < SUBMIT_MAX_RETRIES {
+                            if is_retryable_bad_inputs_error(&e) && attempt < SUBMIT_MAX_RETRIES {
                                 warn!(
                                     "Chained TX {}/{} got BadInputsUTxO (attempt {}/{}): predecessor not yet in mempool, retrying in {}s",
                                     i + 1, batch_size, attempt + 1, SUBMIT_MAX_RETRIES, SUBMIT_RETRY_DELAY.as_secs()
@@ -1788,13 +1787,12 @@ impl HyperlaneTxBuilder {
                          Aborting {} remaining TX(s).",
                         i + 1, batch_size, actual_hash, batch_size - i - 1
                     );
-                    for j in (i + 1)..batch_size {
+                    for _ in (i + 1)..batch_size {
                         results.push(Err(TxBuilderError::SubmissionFailed(format!(
                             "Skipped: chained state lost after TX {} ({})",
                             i + 1,
                             actual_hash
                         ))));
-                        let _ = j;
                     }
                     break 'batch;
                 }
@@ -3971,6 +3969,12 @@ fn parse_fee_too_small_expected(err: &str) -> Option<u64> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after.len());
     after[..end].parse().ok()
+}
+
+fn is_retryable_bad_inputs_error(err: &TxBuilderError) -> bool {
+    // Cardano node signals predecessor-mempool race as "BadInputsUTxO".
+    // Keep matching centralized here so future parser upgrades are localized.
+    err.to_string().contains("BadInputsUTxO")
 }
 
 /// Components needed to build a Process transaction
