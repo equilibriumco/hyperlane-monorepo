@@ -784,19 +784,31 @@ impl HyperlaneTxBuilder {
             );
             ci.ism_utxo.clone()
         } else {
-            let (ism_policy_id, ism_asset_name) = match &resolved.ism {
-                Some(ism) => (hex::encode(ism), String::new()),
-                None => (
-                    self.conf.ism_policy_id.clone(),
-                    self.conf.ism_asset_name_hex.clone(),
-                ),
-            };
-            let utxo = self
-                .provider
-                .find_utxo_by_nft(&ism_policy_id, &ism_asset_name)
-                .await?;
-            debug!("Found ISM UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
-            utxo
+            match &resolved.ism {
+                Some(override_ism_hash) => {
+                    // Per-recipient ISM override: find the state UTXO by script address.
+                    // The WarpRouteDatum.ism field holds the override ISM's script hash.
+                    let hash_hex = hex::encode(override_ism_hash);
+                    info!("Using override ISM: script_hash={}", hash_hex);
+                    let utxos = self.provider.get_script_utxos(&hash_hex).await?;
+                    utxos
+                        .into_iter()
+                        .find(|u| u.inline_datum.is_some())
+                        .ok_or_else(|| {
+                            TxBuilderError::ScriptNotFound(format!(
+                                "Override ISM state UTXO not found at script {hash_hex}"
+                            ))
+                        })?
+                }
+                None => {
+                    let utxo = self
+                        .provider
+                        .find_utxo_by_nft(&self.conf.ism_policy_id, &self.conf.ism_asset_name_hex)
+                        .await?;
+                    debug!("Found ISM UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
+                    utxo
+                }
+            }
         };
 
         // 5. No additional inputs in new architecture (derived from datum)
@@ -1090,6 +1102,7 @@ impl HyperlaneTxBuilder {
             recipient_script_hash,
             total_ref_script_size,
             mailbox_continuation_datum_cbor: Some(mailbox_continuation_datum_cbor),
+            ism_config_utxo: resolved.ism_config_utxo,
         })
     }
 
@@ -2239,6 +2252,17 @@ impl HyperlaneTxBuilder {
             debug!(
                 "Added recipient reference script UTXO: {}#{}",
                 ref_utxo.tx_hash, ref_utxo.output_index
+            );
+        }
+
+        // Add ISM config UTXO as reference input for generic recipients with an ISM override.
+        // The mailbox reads the HyperlaneRecipientDatum.ism field from this UTXO on-chain.
+        if let Some(ref ism_config) = components.ism_config_utxo {
+            let ism_config_input = utxo_to_input(ism_config)?;
+            tx = tx.reference_input(ism_config_input);
+            debug!(
+                "Added ISM config reference input: {}#{}",
+                ism_config.tx_hash, ism_config.output_index
             );
         }
 
@@ -4025,6 +4049,9 @@ pub struct ProcessTxComponents {
     /// When Some, the mailbox continuation output uses this datum instead of
     /// copying the original UTXO's datum.
     pub mailbox_continuation_datum_cbor: Option<Vec<u8>>,
+    /// GenericRecipient: UTXO holding HyperlaneRecipientDatum at the recipient's script
+    /// address. Added as a reference input so the mailbox can read the ism field on-chain.
+    pub ism_config_utxo: Option<Utxo>,
 }
 
 /// Overrides for on-chain UTXO lookups when building chained transactions.

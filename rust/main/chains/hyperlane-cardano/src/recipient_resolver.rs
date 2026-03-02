@@ -40,6 +40,11 @@ pub struct ResolvedRecipient {
     pub ism: Option<ScriptHash>,
     /// Recipient's NFT policy ID (28 bytes)
     pub recipient_policy: [u8; 28],
+    /// For generic recipients with an ISM override: the UTXO holding the
+    /// HyperlaneRecipientDatum at the recipient's script address.
+    /// The relayer adds this as a reference input so the mailbox can read
+    /// the ism field on-chain without spending the recipient's state.
+    pub ism_config_utxo: Option<Utxo>,
 }
 
 /// Resolves recipient info by querying the state NFT directly.
@@ -67,16 +72,22 @@ impl RecipientResolver {
         if let Some(script_hash) = hyperlane_address_to_script_hash(recipient) {
             // Only treat as script-hash if prefix is actually 0x02
             if recipient[0] == 0x02 {
-                info!(
-                    "Resolving script-hash recipient: {}",
-                    hex::encode(script_hash)
-                );
+                let hash_hex = hex::encode(script_hash);
+                info!("Resolving script-hash recipient: {}", hash_hex);
+
+                // Check for a HyperlaneRecipientDatum at the recipient's script address.
+                // If found, use the ism field as an override and include the UTXO as a
+                // reference input so the mailbox can verify the override on-chain.
+                let (ism, ism_config_utxo) =
+                    find_generic_recipient_ism(&self.provider, &hash_hex).await;
+
                 return Ok(ResolvedRecipient {
                     state_utxo: None,
                     script_hash,
                     recipient_kind: RecipientKind::GenericRecipient,
-                    ism: None,
+                    ism,
                     recipient_policy: [0u8; 28], // not used for generic recipients
+                    ism_config_utxo,
                 });
             }
         }
@@ -131,6 +142,7 @@ impl RecipientResolver {
             recipient_kind,
             ism,
             recipient_policy: policy_id,
+            ism_config_utxo: None, // warp routes embed ISM in their own datum (tx.inputs)
         })
     }
 }
@@ -270,6 +282,63 @@ fn detect_from_json(
     let ism = parse_optional_script_hash_json(&fields[3]);
 
     Ok((RecipientKind::WarpRoute, ism))
+}
+
+/// Query the recipient's script address for a HyperlaneRecipientDatum and extract the ISM override.
+///
+/// HyperlaneRecipientDatum = Constr 0 [ism: Option<ScriptHash>, last_processed_nonce: Option<Int>, inner: Data]
+/// Returns (ism_override, utxo_to_use_as_reference_input).
+async fn find_generic_recipient_ism(
+    provider: &BlockfrostProvider,
+    script_hash_hex: &str,
+) -> (Option<ScriptHash>, Option<Utxo>) {
+    let utxos = match provider.get_script_utxos(script_hash_hex).await {
+        Ok(u) => u,
+        Err(e) => {
+            debug!("Could not fetch UTXOs for script {script_hash_hex}: {e}");
+            return (None, None);
+        }
+    };
+
+    for utxo in utxos {
+        let inline_datum = match &utxo.inline_datum {
+            Some(d) => d.clone(),
+            None => continue,
+        };
+
+        if let Some(ism) = parse_hyperlane_recipient_datum_ism(&inline_datum) {
+            return (Some(ism), Some(utxo));
+        }
+        // Datum present but no ISM override — still return the UTXO as the config ref
+        // so the mailbox can verify None on-chain.
+        return (None, Some(utxo));
+    }
+
+    (None, None)
+}
+
+/// Parse a HyperlaneRecipientDatum inline datum and extract the optional ISM hash.
+///
+/// Constr 0 (tag 121) with ≥3 fields; field 0 = Option<ScriptHash>.
+fn parse_hyperlane_recipient_datum_ism(inline_datum: &str) -> Option<ScriptHash> {
+    let hex_str = inline_datum.trim_matches('"');
+    if let Ok(cbor_bytes) = hex::decode(hex_str) {
+        if let Ok(data) = minicbor::decode::<PlutusData>(&cbor_bytes) {
+            if let PlutusData::Constr(c) = &data {
+                if c.tag == 121 && c.fields.len() >= 3 {
+                    return parse_optional_script_hash_cbor(c.fields.first()?);
+                }
+            }
+        }
+    }
+    // JSON fallback
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(inline_datum) {
+        let fields = json.get("fields").and_then(|f| f.as_array())?;
+        if fields.len() >= 3 {
+            return parse_optional_script_hash_json(&fields[0]);
+        }
+    }
+    None
 }
 
 fn parse_optional_script_hash_json(json: &serde_json::Value) -> Option<ScriptHash> {
