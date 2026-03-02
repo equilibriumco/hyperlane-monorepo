@@ -750,10 +750,19 @@ impl HyperlaneTxBuilder {
                     "Message already in SMT (duplicate message_id)".to_string(),
                 ));
             }
-            let proof = tree.prove_non_membership(&key);
+            let proof = tree.prove_non_membership(&key).map_err(|e| {
+                TxBuilderError::UndeliverableMessage(format!(
+                    "Failed to generate SMT non-membership proof: {e}"
+                ))
+            })?;
             let old_root = tree.root();
             let new_root =
-                crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof);
+                crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof)
+                    .map_err(|e| {
+                        TxBuilderError::UndeliverableMessage(format!(
+                            "Failed to verify SMT non-membership proof: {e}"
+                        ))
+                    })?;
             debug!(
                 "Generated SMT non-membership proof ({} siblings)",
                 proof.len()
@@ -1049,10 +1058,19 @@ impl HyperlaneTxBuilder {
                         "Message already in SMT (duplicate message_id)".to_string(),
                     ));
                 }
-                let proof = tree.prove_non_membership(&key);
+                let proof = tree.prove_non_membership(&key).map_err(|e| {
+                    TxBuilderError::UndeliverableMessage(format!(
+                        "Failed to generate SMT non-membership proof: {e}"
+                    ))
+                })?;
                 let old_root = tree.root();
                 let new_root =
-                    crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof);
+                    crate::smt::SparseMerkleTree::verify_and_insert_static(&old_root, &key, &proof)
+                        .map_err(|e| {
+                            TxBuilderError::UndeliverableMessage(format!(
+                                "Failed to verify SMT non-membership proof: {e}"
+                            ))
+                        })?;
                 (proof, new_root)
             };
             let chained = ChainedInputs {
@@ -1460,11 +1478,20 @@ impl HyperlaneTxBuilder {
                     hex::encode(message_id)
                 )));
             }
-            let smt_proof = smt_clone.prove_non_membership(&smt_key);
+            let smt_proof = smt_clone.prove_non_membership(&smt_key).map_err(|e| {
+                TxBuilderError::UndeliverableMessage(format!(
+                    "Failed to generate SMT non-membership proof: {e}"
+                ))
+            })?;
             let old_root = smt_clone.root();
             let new_root = crate::smt::SparseMerkleTree::verify_and_insert_static(
                 &old_root, &smt_key, &smt_proof,
-            );
+            )
+            .map_err(|e| {
+                TxBuilderError::UndeliverableMessage(format!(
+                    "Failed to verify SMT non-membership proof: {e}"
+                ))
+            })?;
             smt_clone.insert(smt_key);
 
             // Build process TX components with chained overrides

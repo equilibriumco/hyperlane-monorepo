@@ -1,7 +1,16 @@
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
+use thiserror::Error;
 
 const DEPTH: usize = 128;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SmtError {
+    #[error("Cannot prove non-membership for existing key")]
+    KeyAlreadyPresent,
+    #[error("SMT non-membership proof failed: computed root doesn't match expected root")]
+    InvalidProof,
+}
 
 fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
@@ -101,7 +110,11 @@ fn collect_proof_path(
 }
 
 /// Verify a non-membership proof against root and return the new root after inserting key.
-fn verify_and_insert_key(root: &[u8; 32], key: &[u8; 16], proof: &[[u8; 32]]) -> [u8; 32] {
+fn verify_and_insert_key(
+    root: &[u8; 32],
+    key: &[u8; 16],
+    proof: &[[u8; 32]],
+) -> Result<[u8; 32], SmtError> {
     let mut old_hash = EMPTY_LEAF;
     let mut new_hash = PRESENT_LEAF;
     for (idx, sibling) in proof.iter().enumerate() {
@@ -113,11 +126,10 @@ fn verify_and_insert_key(root: &[u8; 32], key: &[u8; 16], proof: &[[u8; 32]]) ->
             new_hash = hash_pair(sibling, &new_hash);
         }
     }
-    assert_eq!(
-        &old_hash, root,
-        "SMT non-membership proof failed: computed root doesn't match"
-    );
-    new_hash
+    if &old_hash != root {
+        return Err(SmtError::InvalidProof);
+    }
+    Ok(new_hash)
 }
 
 /// 128-bit key Sparse Merkle Tree for replay protection.
@@ -160,7 +172,7 @@ impl SparseMerkleTree {
         root: &[u8; 32],
         key: &[u8; 16],
         proof: &[[u8; 32]],
-    ) -> [u8; 32] {
+    ) -> Result<[u8; 32], SmtError> {
         verify_and_insert_key(root, key, proof)
     }
 
@@ -169,17 +181,15 @@ impl SparseMerkleTree {
     }
 
     /// Generate a non-membership proof (128 sibling hashes, leaf→root order).
-    /// Panics if the key is already in the tree.
-    pub fn prove_non_membership(&self, key: &[u8; 16]) -> Vec<[u8; 32]> {
-        assert!(
-            !self.contains(key),
-            "Cannot prove non-membership for existing key"
-        );
+    pub fn prove_non_membership(&self, key: &[u8; 16]) -> Result<Vec<[u8; 32]>, SmtError> {
+        if self.contains(key) {
+            return Err(SmtError::KeyAlreadyPresent);
+        }
         let sorted = self.sorted_keys_tree_order();
         let mut siblings = Vec::with_capacity(DEPTH);
         collect_proof_path(&sorted, key, DEPTH, &self.zero_hashes, &mut siblings);
         siblings.reverse();
-        siblings
+        Ok(siblings)
     }
 
     /// Reconstruct SMT from a set of message IDs (first 16 bytes of each).
@@ -234,10 +244,13 @@ mod tests {
     fn test_non_membership_proof_empty_tree() {
         let tree = SparseMerkleTree::new();
         let key = [0x42u8; 16];
-        let proof = tree.prove_non_membership(&key);
+        let proof = tree
+            .prove_non_membership(&key)
+            .expect("proof should be generated");
         assert_eq!(proof.len(), DEPTH);
 
-        let new_root = SparseMerkleTree::verify_and_insert_static(&EMPTY_ROOT, &key, &proof);
+        let new_root = SparseMerkleTree::verify_and_insert_static(&EMPTY_ROOT, &key, &proof)
+            .expect("proof should verify");
         assert_ne!(new_root, EMPTY_ROOT);
     }
 
@@ -247,24 +260,32 @@ mod tests {
         let key1 = [0x01u8; 16];
         let key2 = [0x02u8; 16];
 
-        let proof1 = tree.prove_non_membership(&key1);
-        let root_after_1 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key1, &proof1);
+        let proof1 = tree
+            .prove_non_membership(&key1)
+            .expect("proof should be generated");
+        let root_after_1 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key1, &proof1)
+            .expect("proof should verify");
         tree.insert(key1);
         assert_eq!(tree.root(), root_after_1);
 
-        let proof2 = tree.prove_non_membership(&key2);
-        let root_after_2 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key2, &proof2);
+        let proof2 = tree
+            .prove_non_membership(&key2)
+            .expect("proof should be generated");
+        let root_after_2 = SparseMerkleTree::verify_and_insert_static(&tree.root(), &key2, &proof2)
+            .expect("proof should verify");
         tree.insert(key2);
         assert_eq!(tree.root(), root_after_2);
     }
 
     #[test]
-    #[should_panic(expected = "Cannot prove non-membership")]
     fn test_cannot_prove_existing_key() {
         let mut tree = SparseMerkleTree::new();
         let key = [0xAB; 16];
         tree.insert(key);
-        tree.prove_non_membership(&key);
+        let err = tree
+            .prove_non_membership(&key)
+            .expect_err("existing key must fail");
+        assert_eq!(err, SmtError::KeyAlreadyPresent);
     }
 
     #[test]
@@ -317,11 +338,14 @@ mod tests {
         }
 
         let absent_key = [0xFFu8; 16];
-        let proof = tree.prove_non_membership(&absent_key);
+        let proof = tree
+            .prove_non_membership(&absent_key)
+            .expect("proof should be generated");
         assert_eq!(proof.len(), DEPTH);
 
         let new_root =
-            SparseMerkleTree::verify_and_insert_static(&tree.root(), &absent_key, &proof);
+            SparseMerkleTree::verify_and_insert_static(&tree.root(), &absent_key, &proof)
+                .expect("proof should verify");
         tree.insert(absent_key);
         assert_eq!(tree.root(), new_root);
     }
