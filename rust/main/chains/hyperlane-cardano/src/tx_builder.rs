@@ -5872,7 +5872,7 @@ mod tests {
 
     #[test]
     fn test_full_tx_build_with_redeemer() {
-        use pallas_addresses::{Address, Network};
+        use pallas_addresses::Address;
         use pallas_crypto::hash::Hash;
         use pallas_primitives::conway::Tx;
         use pallas_primitives::Fragment;
@@ -6071,11 +6071,7 @@ mod tests {
 
 #[cfg(test)]
 mod signature_verification_tests {
-    use super::*;
-    use k256::ecdsa::{
-        signature::hazmat::PrehashVerifier, signature::Verifier, RecoveryId, Signature,
-        VerifyingKey,
-    };
+    use k256::ecdsa::{signature::hazmat::PrehashVerifier, RecoveryId, Signature, VerifyingKey};
     use sha3::{Digest, Keccak256};
 
     /// Test signature verification with recovery to identify the actual signer
