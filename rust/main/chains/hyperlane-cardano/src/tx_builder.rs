@@ -165,6 +165,14 @@ enum OutputType {
 
 /// Estimated fee for a complex script transaction (~2-3 ADA)
 const ESTIMATED_FEE_LOVELACE: u64 = 3_000_000;
+const EX_UNITS_MARGIN_FACTOR: f64 = 1.2;
+const FEE_MARGIN_FACTOR: f64 = 1.05;
+const CHAINED_BATCH_BUFFER_LOVELACE: u64 = 1_500_000;
+const FALLBACK_MIN_FEE_A: u64 = 44;
+const FALLBACK_MIN_FEE_B: u64 = 155_381;
+const FALLBACK_PRICE_MEM: f64 = 0.0577;
+const FALLBACK_PRICE_STEP: f64 = 0.000_072_1;
+const FALLBACK_MIN_FEE_REF_SCRIPT_COST_PER_BYTE: u64 = 15;
 
 impl From<TxBuilderError> for ChainCommunicationError {
     fn from(e: TxBuilderError) -> Self {
@@ -1466,7 +1474,8 @@ impl HyperlaneTxBuilder {
         // supplementary wallet UTXOs for TX 0 so the change cascades.
         // ~7 ADA/TX is conservative (fee 3M + processed 1.5M + verified 4M).
         const ESTIMATED_COST_PER_CHAINED_TX: u64 = 7_000_000;
-        let batch_needed = batch_size as u64 * ESTIMATED_COST_PER_CHAINED_TX + 1_500_000;
+        let batch_needed =
+            batch_size as u64 * ESTIMATED_COST_PER_CHAINED_TX + CHAINED_BATCH_BUFFER_LOVELACE;
         let supplementary_utxos: Vec<Utxo> = if let Some(ref cs) = chained_state {
             if cs.payer_total_input < batch_needed {
                 info!(
@@ -3807,8 +3816,8 @@ impl HyperlaneTxBuilder {
         let mut total_mem = 0u64;
         let mut total_steps = 0u64;
         for (key, (mem, steps)) in per_redeemer_units {
-            let margined_mem = (mem as f64 * 1.2).ceil() as u64;
-            let margined_steps = (steps as f64 * 1.2).ceil() as u64;
+            let margined_mem = (mem as f64 * EX_UNITS_MARGIN_FACTOR).ceil() as u64;
+            let margined_steps = (steps as f64 * EX_UNITS_MARGIN_FACTOR).ceil() as u64;
             margined_units.insert(key, (margined_mem, margined_steps));
             total_mem += margined_mem;
             total_steps += margined_steps;
@@ -3837,23 +3846,23 @@ impl HyperlaneTxBuilder {
         let min_fee_a = params
             .get("min_fee_a")
             .and_then(|v| v.as_u64())
-            .unwrap_or(44);
+            .unwrap_or(FALLBACK_MIN_FEE_A);
         let min_fee_b = params
             .get("min_fee_b")
             .and_then(|v| v.as_u64())
-            .unwrap_or(155381);
+            .unwrap_or(FALLBACK_MIN_FEE_B);
         let price_mem: f64 = params
             .get("price_mem")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0577);
+            .unwrap_or(FALLBACK_PRICE_MEM);
         let price_step: f64 = params
             .get("price_step")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0000721);
+            .unwrap_or(FALLBACK_PRICE_STEP);
         let min_fee_ref_script: u64 = params
             .get("min_fee_ref_script_cost_per_byte")
             .and_then(|v| v.as_u64())
-            .unwrap_or(15);
+            .unwrap_or(FALLBACK_MIN_FEE_REF_SCRIPT_COST_PER_BYTE);
 
         let size_fee = min_fee_b + (tx_size * min_fee_a);
         let script_fee =
@@ -3861,7 +3870,7 @@ impl HyperlaneTxBuilder {
         let ref_script_fee = min_fee_ref_script * ref_script_size;
 
         let base_fee = size_fee + script_fee + ref_script_fee;
-        let fee_with_margin = (base_fee as f64 * 1.05).ceil() as u64;
+        let fee_with_margin = (base_fee as f64 * FEE_MARGIN_FACTOR).ceil() as u64;
 
         info!(
             "Computed fee: size_fee={}, script_fee={}, ref_script_fee={} ({}*{}), base_fee={}, with_margin={}",
