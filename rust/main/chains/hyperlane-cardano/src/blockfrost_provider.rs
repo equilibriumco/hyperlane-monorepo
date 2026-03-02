@@ -586,7 +586,7 @@ impl BlockfrostProvider {
 
         let utxo_set: Vec<serde_json::Value> = additional_utxos
             .iter()
-            .map(|u| {
+            .map(|u| -> Result<serde_json::Value, BlockfrostProviderError> {
                 let mut value = serde_json::json!({
                     "coins": u.lovelace(),
                 });
@@ -606,10 +606,13 @@ impl BlockfrostProvider {
                             .entry(policy.to_string())
                             .or_insert_with(|| serde_json::json!({}));
                         if let Some(obj) = policy_entry.as_object_mut() {
-                            obj.insert(
-                                name.to_string(),
-                                serde_json::json!(a.quantity.parse::<u64>().unwrap_or(0)),
-                            );
+                            let quantity = a.quantity.parse::<u64>().map_err(|e| {
+                                BlockfrostProviderError::Deserialization(format!(
+                                    "Invalid asset quantity '{}' for unit '{}': {e}",
+                                    a.quantity, a.unit
+                                ))
+                            })?;
+                            obj.insert(name.to_string(), serde_json::json!(quantity));
                         }
                     }
                 }
@@ -622,18 +625,23 @@ impl BlockfrostProvider {
                     output["datum"] = serde_json::json!(datum);
                 }
 
-                serde_json::json!([
+                Ok(serde_json::json!([
                     { "txId": u.tx_hash, "index": u.output_index },
                     output
-                ])
+                ]))
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let cbor_hex = hex::encode(tx_cbor);
         let body = serde_json::json!({
             "cbor": cbor_hex,
             "additionalUtxoSet": utxo_set,
         });
+        let body = serde_json::to_string(&body).map_err(|e| {
+            BlockfrostProviderError::Deserialization(format!(
+                "Failed to serialize evaluate/utxos request body: {e}"
+            ))
+        })?;
 
         let response = tokio::time::timeout(
             BLOCKFROST_REQUEST_TIMEOUT,
@@ -641,7 +649,7 @@ impl BlockfrostProvider {
                 .post(&url)
                 .header("project_id", &self.api_key)
                 .header("Content-Type", "application/json")
-                .body(serde_json::to_string(&body).unwrap_or_default())
+                .body(body)
                 .send(),
         )
         .await
