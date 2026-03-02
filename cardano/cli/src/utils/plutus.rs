@@ -537,6 +537,26 @@ pub fn encode_script_hash_param(script_hash_hex: &str) -> Result<Vec<u8>> {
     Ok(cbor)
 }
 
+/// Encode an unsigned integer as CBOR for validator parameters
+pub fn encode_int_param(n: u64) -> Vec<u8> {
+    match n {
+        0..=23 => vec![n as u8],
+        24..=0xFF => vec![0x18, n as u8],
+        0x100..=0xFFFF => {
+            let b = (n as u16).to_be_bytes();
+            vec![0x19, b[0], b[1]]
+        }
+        0x10000..=0xFFFF_FFFF => {
+            let b = (n as u32).to_be_bytes();
+            vec![0x1a, b[0], b[1], b[2], b[3]]
+        }
+        _ => {
+            let b = n.to_be_bytes();
+            vec![0x1b, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]
+        }
+    }
+}
+
 /// Encode an output reference as CBOR for state_nft parameter
 pub fn encode_output_reference(tx_hash: &str, output_index: u32) -> Result<Vec<u8>> {
     let tx_hash_bytes = hex::decode(tx_hash).with_context(|| "Invalid tx hash hex")?;

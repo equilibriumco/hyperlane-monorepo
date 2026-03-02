@@ -12,7 +12,7 @@ use cardano/transaction.{
 use merkle
 use smt
 use types.{
-  Checkpoint, Domain, HyperlaneAddress, HyperlaneRecipientDatum, MailboxDatum,
+  Checkpoint, Domain, HyperlaneAddress, MailboxDatum,
   MailboxRedeemer, Message, MerkleTreeState, MultisigIsmRedeemer, Native, PolicyId,
   ScriptHash, VerifiedMessageDatum, Verify, WarpRouteConfig, WarpRouteDatum,
   encode_message, Dispatch, Process, SetDefaultIsm, TransferOwnership, MigrateMailbox,
@@ -376,9 +376,12 @@ fn find_warp_route_ism(
   }
 }
 
-/// Look for a reference input at the recipient's script address whose datum
-/// conforms to HyperlaneRecipientDatum and has a non-None ism override.
-/// The relayer is responsible for including only well-formed datums here.
+/// Look for a reference input at the recipient's script address that carries a
+/// "hyperlane-config" token and parse its datum as Option<ScriptHash>.
+///
+/// The "hyperlane-config" token requirement prevents an attacker from planting a
+/// plain datum at the recipient's address: minting requires the recipient script
+/// to run with a constructor-0 (Init) redeemer, which only the owner can produce.
 fn find_generic_recipient_ism(
   script_hash: ScriptHash,
   reference_inputs: List<Input>,
@@ -387,10 +390,20 @@ fn find_generic_recipient_ism(
     list.find(
       reference_inputs,
       fn(input) {
-        when input.output.address.payment_credential is {
-          Script(h) -> h == script_hash
-          _ -> False
-        }
+        let is_script_addr =
+          when input.output.address.payment_credential is {
+            Script(h) -> h == script_hash
+            _ -> False
+          }
+        let has_config_token =
+          list.any(
+            assets.flatten(input.output.value),
+            fn(item) {
+              let (_p, name, qty) = item
+              name == script_hash && qty > 0
+            },
+          )
+        is_script_addr && has_config_token
       },
     )
   when maybe_input is {
@@ -398,8 +411,8 @@ fn find_generic_recipient_ism(
     Some(input) ->
       when input.output.datum is {
         InlineDatum(datum_data) -> {
-          expect config: HyperlaneRecipientDatum<Data> = datum_data
-          config.ism
+          expect ism_override: Option<ScriptHash> = datum_data
+          ism_override
         }
         _ -> None
       }
@@ -571,13 +584,13 @@ fn make_tx(inputs: List<Input>, reference_inputs: List<Input>) -> Transaction {
 const test_generic_script_hash =
   #"1234567890abcdef1234567890abcdef1234567890abcdef12345678"
 
+// Fake canonical config NFT policy used in tests
+const test_canonical_policy =
+  #"aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+
 fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
-  let datum =
-    HyperlaneRecipientDatum {
-      ism: ism_override,
-      last_processed_nonce: None,
-      inner: #"",
-    }
+  // Datum is Option<ScriptHash> (the new canonical config format)
+  let datum: Option<ScriptHash> = ism_override
 
   Input {
     output_reference: OutputReference {
@@ -589,7 +602,7 @@ fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
         payment_credential: Script(test_generic_script_hash),
         stake_credential: None,
       },
-      value: assets.from_lovelace(2_000_000),
+      value: assets.from_asset(test_canonical_policy, test_generic_script_hash, 1),
       datum: InlineDatum(datum),
       reference_script: None,
     },

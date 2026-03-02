@@ -76,6 +76,10 @@ enum TxCommands {
         #[arg(long)]
         amount: u64,
 
+        /// Inline datum as raw CBOR hex
+        #[arg(long)]
+        datum_cbor: Option<String>,
+
         /// Output file
         #[arg(short, long)]
         output: Option<String>,
@@ -93,9 +97,12 @@ pub async fn execute(ctx: &CliContext, args: TxArgs) -> Result<()> {
         TxCommands::Wait { tx_hash, timeout } => wait_for_tx(ctx, &tx_hash, timeout).await,
         TxCommands::Sign { tx_file, output } => sign(ctx, &tx_file, output).await,
         TxCommands::Decode { input } => decode(&input).await,
-        TxCommands::BuildPayment { to, amount, output } => {
-            build_payment(ctx, &to, amount, output).await
-        }
+        TxCommands::BuildPayment {
+            to,
+            amount,
+            datum_cbor,
+            output,
+        } => build_payment(ctx, &to, amount, datum_cbor.as_deref(), output).await,
     }
 }
 
@@ -300,6 +307,7 @@ async fn build_payment(
     ctx: &CliContext,
     to: &str,
     amount: u64,
+    datum_cbor: Option<&str>,
     _output: Option<String>,
 ) -> Result<()> {
     println!("{}", "Building payment transaction...".cyan());
@@ -357,12 +365,20 @@ async fn build_payment(
         1
     };
 
+    let mut recipient_output = Output::new(to_addr, amount);
+    if let Some(datum_hex) = datum_cbor {
+        let datum_bytes =
+            hex::decode(datum_hex).map_err(|e| anyhow!("Invalid datum CBOR hex: {}", e))?;
+        recipient_output = recipient_output.set_inline_datum(datum_bytes);
+        println!("  Datum: {} ({} bytes)", datum_hex, datum_hex.len() / 2);
+    }
+
     let mut staging = StagingTransaction::new()
         .input(Input::new(
             Hash::new(input_tx_hash),
             suitable.output_index as u64,
         ))
-        .output(Output::new(to_addr, amount))
+        .output(recipient_output)
         .fee(fee_estimate)
         .network_id(network_id);
 

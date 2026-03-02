@@ -89,6 +89,15 @@ impl CliContext {
         }
     }
 
+    /// Hyperlane domain ID for this network.
+    pub fn domain(&self) -> u32 {
+        match self.network {
+            CardanoNetwork::Mainnet => 2001,
+            CardanoNetwork::Preprod => 2002,
+            CardanoNetwork::Preview => 2003,
+        }
+    }
+
     /// Require an API key (error if not set)
     pub fn require_api_key(&self) -> Result<&str> {
         self.api_key.as_deref().ok_or_else(|| {

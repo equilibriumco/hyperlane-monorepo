@@ -389,6 +389,26 @@ pub fn build_igp_datum(
     Ok(builder.build())
 }
 
+/// Build an ISM config datum for the canonical config NFT UTXO.
+///
+/// Encodes `Option<ScriptHash>` as Plutus data:
+/// - `None`       → `Constr 1 []` = `d87980`
+/// - `Some(hash)` → `Constr 0 [ByteArray(hash)]` = `d8799f581c{hash}ff`
+pub fn build_ism_config_datum(ism: Option<&[u8; 28]>) -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+    match ism {
+        None => {
+            builder.start_constr(1).end_constr();
+        }
+        Some(hash) => {
+            builder.start_constr(0);
+            builder.bytes_raw(hash);
+            builder.end_constr();
+        }
+    }
+    builder.build()
+}
+
 // =============================================================================
 // CBOR Decoder for Plutus Data
 // =============================================================================

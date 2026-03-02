@@ -52,6 +52,7 @@ impl CardanoMailbox {
         let resolver = RecipientResolver::new(
             BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay),
             conf.warp_route_reference_script_utxo.clone(),
+            conf.network,
         );
 
         Ok(CardanoMailbox {

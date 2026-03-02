@@ -763,4 +763,208 @@ impl<'a> HyperlaneTxBuilder<'a> {
 
         Ok(tx)
     }
+
+    /// Build a simple ADA-transfer transaction (no scripts, no tokens).
+    ///
+    /// Used for TX1 of the canonical recipient init flow: funds the init-signal
+    /// UTXO at the recipient's script address.
+    pub async fn build_send_ada_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        destination_address: &str,
+        amount_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+        let dest_addr = pallas_addresses::Address::from_bech32(destination_address)
+            .map_err(|e| anyhow!("Invalid destination address: {}", e))?;
+
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+
+        let fee_estimate = 200_000u64;
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(amount_lovelace)
+            .saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .output(Output::new(dest_addr, amount_lovelace))
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build send-ADA transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build TX2 of the canonical recipient init flow.
+    ///
+    /// Spends the init-signal UTXO at the script address (with `Init` redeemer),
+    /// mints the canonical config NFT ("hyperlane-config") and the state NFT ("" + "ref"),
+    /// and creates three outputs:
+    /// - Output #0: config UTXO at script address — canonical NFT + ISM config datum
+    /// - Output #1: state UTXO at script address — state NFT ("") + initial state datum
+    /// - Output #2: ref script UTXO at payer address — state NFT ("ref") + recipient script
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_init_canonical_nft_tx(
+        &self,
+        payer: &Keypair,
+        init_signal_utxo: &Utxo, // ADA-only UTXO at script address (from TX1)
+        fee_utxo: &Utxo,         // wallet UTXO for fees + supplemental ADA
+        collateral_utxo: &Utxo,
+        canonical_nft_script_cbor: &[u8], // canonical_config_nft script (fixed policy)
+        state_nft_script_cbor: &[u8],     // state_nft applied script (one-shot)
+        recipient_script_cbor: &[u8],     // recipient validator (e.g. greeting) for ref UTXO
+        script_address: &str,
+        config_asset_name: &[u8],  // recipient's script hash bytes (28 bytes) — asset name
+        config_datum_cbor: &[u8],  // Option<ScriptHash> datum for config UTXO
+        state_datum_cbor: &[u8],   // initial state datum (e.g. GreetingDatum)
+        owner_pkh: &[u8; 28],      // required signer (passes greeting's Init check)
+        state_output_lovelace: u64,
+        ref_output_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        let canonical_policy = super::crypto::script_hash(canonical_nft_script_cbor);
+        let state_policy = super::crypto::script_hash(state_nft_script_cbor);
+
+        let init_signal_tx_hash: [u8; 32] = hex::decode(&init_signal_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid init-signal tx hash"))?;
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee UTXO tx hash"))?;
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+        let script_addr = pallas_addresses::Address::from_bech32(script_address)
+            .map_err(|e| anyhow!("Invalid script address: {}", e))?;
+
+        // Init redeemer = Constr 0 [] = d87980
+        let init_redeemer: Vec<u8> = vec![0xd8, 0x79, 0x80];
+
+        let config_asset_name: Vec<u8> = config_asset_name.to_vec();
+        let state_asset_name: Vec<u8> = vec![];
+        let ref_asset_name: Vec<u8> = b"ref".to_vec();
+
+        // Output #0: config UTXO
+        let min_config_lovelace = 2_000_000u64;
+        let config_output = Output::new(script_addr.clone(), min_config_lovelace)
+            .set_inline_datum(config_datum_cbor.to_vec())
+            .add_asset(Hash::new(canonical_policy), config_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add canonical NFT: {:?}", e))?;
+
+        // Output #1: state UTXO
+        let state_output = Output::new(script_addr, state_output_lovelace)
+            .set_inline_datum(state_datum_cbor.to_vec())
+            .add_asset(Hash::new(state_policy), state_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+        // Output #2: ref script UTXO
+        let ref_output = Output::new(payer_addr.clone(), ref_output_lovelace)
+            .add_asset(Hash::new(state_policy), ref_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT: {:?}", e))?
+            .set_inline_script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec());
+
+        let fee_estimate = 3_500_000u64;
+        let total_outputs = min_config_lovelace + state_output_lovelace + ref_output_lovelace;
+        let available = init_signal_utxo.lovelace + fee_utxo.lovelace;
+        let change = available.saturating_sub(total_outputs).saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            // init-signal UTXO (at script address, spent with Init redeemer)
+            .input(Input::new(
+                Hash::new(init_signal_tx_hash),
+                init_signal_utxo.output_index as u64,
+            ))
+            // wallet UTXO for fees
+            .input(Input::new(
+                Hash::new(fee_tx_hash),
+                fee_utxo.output_index as u64,
+            ))
+            .collateral_input(Input::new(
+                Hash::new(collateral_tx_hash),
+                collateral_utxo.output_index as u64,
+            ))
+            .output(config_output)
+            .output(state_output)
+            .output(ref_output)
+            // Canonical config NFT (one token: "hyperlane-config")
+            .mint_asset(Hash::new(canonical_policy), config_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add canonical NFT mint: {:?}", e))?
+            // State NFT (two tokens: "" + "ref")
+            .mint_asset(Hash::new(state_policy), state_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add state NFT mint: {:?}", e))?
+            .mint_asset(Hash::new(state_policy), ref_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT mint: {:?}", e))?
+            // Scripts in witness set
+            .script(ScriptKind::PlutusV3, canonical_nft_script_cbor.to_vec())
+            .script(ScriptKind::PlutusV3, state_nft_script_cbor.to_vec())
+            .script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec())
+            // Mint redeemers (canonical_config_nft + state_nft)
+            .add_mint_redeemer(
+                Hash::new(canonical_policy),
+                build_mint_redeemer(),
+                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            )
+            .add_mint_redeemer(
+                Hash::new(state_policy),
+                build_mint_redeemer(),
+                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            )
+            // Spend redeemer for init-signal UTXO (Init = Constr 0 [])
+            .add_spend_redeemer(
+                Input::new(
+                    Hash::new(init_signal_tx_hash),
+                    init_signal_utxo.output_index as u64,
+                ),
+                init_redeemer,
+                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr, change));
+        }
+
+        // Required signer: the owner key (so the Init handler passes)
+        staging = staging.disclosed_signer(Hash::new(*owner_pkh));
+
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build canonical-nft init transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
 }
