@@ -528,7 +528,7 @@ fn parse_greeting_datum(json_str: &str) -> Result<(String, u64)> {
 }
 
 /// Build GreetingRedeemer: HandleMessage { message, message_id }
-/// = Constr 0 [Message, Bytes(message_id)]
+/// = Constr 1 [Message, Bytes(message_id)]  (Init is Constr 0, Reclaim is Constr 2)
 /// where Message = Constr 0 [version, nonce, origin, sender, destination, recipient, body]
 fn build_greeting_redeemer(
     version: u32,
@@ -541,8 +541,8 @@ fn build_greeting_redeemer(
     message_id_hex: &str,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
-    // HandleMessage = Constr 0 [Message, Bytes(message_id)]
-    builder.start_constr(0);
+    // HandleMessage = Constr 1 [Message, Bytes(message_id)]
+    builder.start_constr(1);
     // Message = Constr 0 [version, nonce, origin, sender, destination, recipient, body]
     builder.start_constr(0);
     builder.uint(version as u64);

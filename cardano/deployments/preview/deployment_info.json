@@ -182,12 +182,12 @@
   "recipients": [
     {
       "recipient_type": "greeting",
-      "script_hash": "1fa24a94d3f9f11c4c450e7984230a151f688028b63c09cf238e286c",
-      "address": "addr_test1wq06yj5560ulz8zvg588npprpg2376yq9zmrczw0yw8zsmqv6q266",
-      "nft_policy": "7110193e782c8ce01677d91d810db268383478125c105c2e40b3c2d5",
-      "init_tx_hash": "7ef3e3011ab90b14180401430d39abf5760c7e5825e190709175ccc510a30190",
+      "script_hash": "9f7fa6b8f65f7d6bd9d8b5468be2176e1eecab2093534f2a36b2d212",
+      "address": "addr_test1wz0hlf4c7e0h667emz65dzlzzahpam9tyzf4xne2x6edyysda7039",
+      "nft_policy": "c82b9c4d4b00ea8c211671439d23e3f69c48471e04970eeac8eedd3c",
+      "init_tx_hash": "dcd57c33f193edec3546e2e12b0707c753e3b55a418a8f9df277171463bde518",
       "reference_script_utxo": {
-        "txHash": "7ef3e3011ab90b14180401430d39abf5760c7e5825e190709175ccc510a30190",
+        "txHash": "dcd57c33f193edec3546e2e12b0707c753e3b55a418a8f9df277171463bde518",
         "outputIndex": 2,
         "lovelace": 20000000
       }
