@@ -764,9 +764,8 @@ impl HyperlaneTxBuilder {
     /// 1. Spends the mailbox UTXO with Process redeemer
     /// 2. Includes ISM UTXO as reference input for signature verification
     /// 3. Spends recipient UTXO with HandleMessage redeemer
-    /// 4. Creates processed message marker output
-    /// 5. Creates continuation outputs for mailbox and recipient
-    /// 6. For warp routes: Creates direct delivery output to recipient wallet
+    /// 4. Creates continuation outputs for mailbox and recipient
+    /// 5. For warp routes: Creates direct delivery output to recipient wallet
     #[instrument(skip(self, metadata, _payer, chained))]
     pub async fn build_process_tx(
         &self,
@@ -1550,7 +1549,7 @@ impl HyperlaneTxBuilder {
 
         // Pre-check: if tracked payer can't fund the full batch, fetch
         // supplementary wallet UTXOs for TX 0 so the change cascades.
-        // ~7 ADA/TX is conservative (fee 3M + processed 1.5M + verified 4M).
+        // ~7 ADA/TX is conservative (fee 3M + verified 4M).
         const ESTIMATED_COST_PER_CHAINED_TX: u64 = 7_000_000;
         let batch_needed =
             batch_size as u64 * ESTIMATED_COST_PER_CHAINED_TX + CHAINED_BATCH_BUFFER_LOVELACE;
