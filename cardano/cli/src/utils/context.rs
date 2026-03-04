@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use super::crypto::Keypair;
 use super::plutus::PlutusBlueprint;
 use super::types::{CardanoNetwork, DeploymentInfo};
+use super::wallet_lock::WalletLock;
 
 /// CLI execution context
 #[derive(Clone)]
@@ -98,6 +99,11 @@ impl CliContext {
         }
     }
 
+    /// Return true when a signing key path has been configured.
+    pub fn has_signing_key(&self) -> bool {
+        self.signing_key_path.is_some()
+    }
+
     /// Require an API key (error if not set)
     pub fn require_api_key(&self) -> Result<&str> {
         self.api_key.as_deref().ok_or_else(|| {
@@ -188,6 +194,17 @@ impl CliContext {
                 format!("https://preview.cardanoscan.io/transaction/{}", tx_hash)
             }
         }
+    }
+
+    /// Acquire an exclusive process-level lock for the wallet associated with
+    /// `signing_key`. Blocks until no other CLI process holds the lock.
+    ///
+    /// The returned `WalletLock` must be kept alive for the duration of UTXO
+    /// selection and transaction submission; drop it afterwards.
+    pub fn acquire_wallet_lock(&self) -> Result<WalletLock> {
+        let keypair = self.load_signing_key()?;
+        let addr = keypair.address_bech32(self.pallas_network());
+        WalletLock::acquire(&addr)
     }
 
     /// Get network as string

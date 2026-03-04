@@ -7,3 +7,4 @@ pub mod crypto;
 pub mod plutus;
 pub mod tx_builder;
 pub mod types;
+pub mod wallet_lock;

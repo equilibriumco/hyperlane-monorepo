@@ -843,6 +843,7 @@ dependencies = [
  "hex",
  "indicatif",
  "k256",
+ "libc",
  "pallas-addresses",
  "pallas-codec",
  "pallas-crypto",

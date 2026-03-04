@@ -150,6 +150,15 @@ async fn main() -> anyhow::Result<()> {
         cli.no_wait,
     )?;
 
+    // Acquire a process-level wallet lock when a signing key is provided so
+    // that parallel CLI invocations with the same wallet cannot select
+    // overlapping UTXOs as collateral or inputs.
+    let _wallet_lock = if ctx.has_signing_key() {
+        Some(ctx.acquire_wallet_lock()?)
+    } else {
+        None
+    };
+
     // Execute command
     match cli.command {
         Commands::Deploy(args) => deploy::execute(&ctx, args).await,
