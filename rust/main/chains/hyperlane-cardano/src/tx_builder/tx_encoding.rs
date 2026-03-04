@@ -9,7 +9,7 @@ use pallas_primitives::conway::{BigInt, Constr, PlutusData};
 use crate::redeemers::{
     plutus_constr_tag, MailboxRedeemerTag, MultisigIsmRedeemerTag, WarpRouteRedeemerTag,
 };
-use crate::types::{MailboxRedeemer, Message, ProcessedMessageDatum};
+use crate::types::{MailboxRedeemer, Message};
 
 use super::TxBuilderError;
 
@@ -240,21 +240,6 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(new_owner.to_vec().into())]),
         }),
     };
-
-    encode_plutus_data(&plutus_data)
-}
-
-/// Encode a ProcessedMessageDatum as Plutus Data CBOR.
-pub fn encode_processed_message_datum(
-    datum: &ProcessedMessageDatum,
-) -> Result<Vec<u8>, TxBuilderError> {
-    let plutus_data = PlutusData::Constr(Constr {
-        tag: plutus_constr_tag(0),
-        any_constructor: None,
-        fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
-            datum.message_id.to_vec().into(),
-        )]),
-    });
 
     encode_plutus_data(&plutus_data)
 }

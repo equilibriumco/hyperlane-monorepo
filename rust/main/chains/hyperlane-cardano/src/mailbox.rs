@@ -436,25 +436,10 @@ impl Mailbox for CardanoMailbox {
 
     async fn delivered(&self, id: H256) -> ChainResult<bool> {
         let message_id_bytes: [u8; 32] = id.0;
-
-        // Prefer NFT lookup (O(1)) if processedMessagesNftPolicyId is configured
-        if let Some(ref nft_policy_id) = self.conf.processed_messages_nft_policy_id {
-            let result = self
-                .provider
-                .is_message_delivered_by_nft(nft_policy_id, &message_id_bytes)
-                .await
-                .map_err(ChainCommunicationError::from_other)?;
-            return Ok(result);
-        }
-
-        // Fallback: Scan UTXOs at processed_messages_script address (O(n))
-        // This is used when NFT minting is not configured
-        let result = self
-            .provider
-            .is_message_delivered(&self.conf.processed_messages_script_hash, &message_id_bytes)
+        self.tx_builder
+            .is_delivered(&message_id_bytes)
             .await
-            .map_err(ChainCommunicationError::from_other)?;
-        Ok(result)
+            .map_err(ChainCommunicationError::from_other)
     }
 
     async fn default_ism(&self) -> ChainResult<H256> {
@@ -638,10 +623,10 @@ impl Mailbox for CardanoMailbox {
         // Fallback: static estimate based on recipient type
         let recipient_bytes = message.recipient.as_bytes();
         let estimated_fee_lovelace = if recipient_bytes.first() == Some(&0x01) {
-            // Warp routes: fee + processed_marker (no verified_message UTXO)
+            // Warp routes: fee only (no verified_message UTXO)
             3_000_000u64
         } else {
-            // Script recipients: fee + processed_marker + verified_message UTXO.
+            // Script recipients: fee + verified_message UTXO.
             // The verified_message UTXO stores the full body in its inline datum
             // and grows at ~4400 lovelace/byte (coins_per_utxo_byte + CBOR overhead).
             let body_len = message.body.len() as u64;

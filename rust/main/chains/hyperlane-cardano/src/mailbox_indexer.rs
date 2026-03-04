@@ -304,21 +304,6 @@ impl CardanoMailboxIndexer {
         None
     }
 
-    /// Parse ProcessedMessageDatum from inline datum
-    fn parse_processed_message_datum(&self, json: &JsonValue) -> Option<H256> {
-        // ProcessedMessageDatum format:
-        // { "constructor": 0, "fields": [message_id] }
-        let fields = json.get("fields")?.as_array()?;
-        let message_id_hex = fields.first()?.get("bytes")?.as_str()?;
-        let message_id_bytes = hex::decode(message_id_hex).ok()?;
-        if message_id_bytes.len() != 32 {
-            return None;
-        }
-        let mut message_id = [0u8; 32];
-        message_id.copy_from_slice(&message_id_bytes);
-        Some(H256::from(message_id))
-    }
-
     async fn fetch_block_hashes(&self, transactions: &[AddressTransaction]) -> HashMap<u64, H256> {
         let unique_heights: Vec<u64> = transactions
             .iter()
@@ -527,8 +512,7 @@ impl SequenceAwareIndexer<HyperlaneMessage> for CardanoMailboxIndexer {
     }
 }
 
-// H256 indexer is used by the scraper agent to index delivered message IDs
-// Queries processed message marker UTXOs from the mailbox script address
+// H256 indexer: indexes delivered message IDs by scanning mailbox Process redeemers
 #[async_trait]
 impl Indexer<H256> for CardanoMailboxIndexer {
     async fn fetch_logs_in_range(
@@ -543,25 +527,11 @@ impl Indexer<H256> for CardanoMailboxIndexer {
             from, to
         );
 
-        // For delivered messages, we look for processed message marker UTXOs
-        // These are created when a Process transaction is executed
-        // The marker contains the message_id in its datum
+        let mailbox_address = self.get_mailbox_address()?;
 
-        // Get the processed messages script address
-        // This is typically a script that holds marker NFTs
-        let processed_script_address = self
-            .provider
-            .script_hash_to_address(&self.conf.processed_messages_script_hash)
-            .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
-
-        // Get transactions that created processed message markers
         let transactions = self
             .provider
-            .get_address_transactions(
-                &processed_script_address,
-                Some(from as u64),
-                Some(to as u64),
-            )
+            .get_address_transactions(&mailbox_address, Some(from as u64), Some(to as u64))
             .await
             .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
 
@@ -569,54 +539,46 @@ impl Indexer<H256> for CardanoMailboxIndexer {
 
         let mut results = Vec::new();
 
-        for tx_info in transactions {
-            // Get transaction UTXOs to find outputs with processed message datums
-            let tx_utxos = match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
-                Ok(u) => u,
-                Err(e) => {
-                    debug!("Could not get UTXOs for tx {}: {}", tx_info.tx_hash, e);
-                    continue;
-                }
-            };
+        for tx_info in &transactions {
+            let message_ids = crate::process_redeemer_extractor::extract_process_message_ids(
+                &self.provider,
+                &tx_info.tx_hash,
+                &self.conf.mailbox_script_hash,
+            )
+            .await
+            .unwrap_or_default();
 
             let block_hash = block_hashes
                 .get(&tx_info.block_height)
                 .copied()
                 .unwrap_or_else(H256::zero);
 
-            // Check each output for processed message markers
-            for output in tx_utxos.outputs {
-                if let Some(inline_datum) = &output.inline_datum {
-                    // Try to parse the datum as JSON
-                    if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum) {
-                        if let Some(message_id) = self.parse_processed_message_datum(&datum_json) {
-                            let indexed = Indexed::new(message_id);
+            for (idx, id) in message_ids.iter().enumerate() {
+                let message_id = H256::from(*id);
+                let indexed = Indexed::new(message_id);
 
-                            let log_meta = LogMeta {
-                                address: H256::zero(),
-                                block_number: tx_info.block_height,
-                                block_hash,
-                                transaction_id: H512::from_slice(&{
-                                    let mut bytes = [0u8; 64];
-                                    let tx_bytes = hex::decode(&tx_info.tx_hash)
-                                        .unwrap_or_else(|_| vec![0u8; 32]);
-                                    bytes[..tx_bytes.len().min(64)]
-                                        .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                                    bytes
-                                }),
-                                transaction_index: tx_info.tx_index as u64,
-                                log_index: U256::from(output.output_index),
-                            };
+                let log_meta = LogMeta {
+                    address: H256::zero(),
+                    block_number: tx_info.block_height,
+                    block_hash,
+                    transaction_id: H512::from_slice(&{
+                        let mut bytes = [0u8; 64];
+                        let tx_bytes =
+                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
+                        bytes[..tx_bytes.len().min(64)]
+                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
+                        bytes
+                    }),
+                    transaction_index: tx_info.tx_index as u64,
+                    log_index: U256::from(idx),
+                };
 
-                            info!(
-                                "Found delivered message in tx {}, message_id: {}",
-                                tx_info.tx_hash,
-                                hex::encode(message_id.as_bytes())
-                            );
-                            results.push((indexed, log_meta));
-                        }
-                    }
-                }
+                info!(
+                    "Found delivered message in tx {}, message_id: {}",
+                    tx_info.tx_hash,
+                    hex::encode(message_id.as_bytes())
+                );
+                results.push((indexed, log_meta));
             }
         }
 

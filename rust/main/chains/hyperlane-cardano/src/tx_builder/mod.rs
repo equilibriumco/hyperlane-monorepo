@@ -9,8 +9,7 @@ mod tx_helpers;
 
 // Re-export public API from sub-modules
 pub use tx_encoding::{
-    encode_mailbox_redeemer, encode_processed_message_datum, encode_verified_message_datum,
-    encode_warp_route_redeemer,
+    encode_mailbox_redeemer, encode_verified_message_datum, encode_warp_route_redeemer,
 };
 pub use tx_helpers::parse_per_redeemer_ex_units;
 
@@ -33,8 +32,7 @@ use crate::consts::{ECDSA_SIG_LEN, MULTISIG_ISM_METADATA_MIN_LEN};
 use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
 use crate::redeemers::plutus_constr_tag;
 use crate::types::{
-    extract_cardano_credential_from_bytes32, script_hash_bytes_to_address, MailboxRedeemer,
-    Message, ProcessedMessageDatum,
+    extract_cardano_credential_from_bytes32, script_hash_bytes_to_address, MailboxRedeemer, Message,
 };
 use crate::ConnectionConf;
 use hyperlane_core::{
@@ -66,7 +64,6 @@ type EvaluatedExUnits = HashMap<String, (u64, u64)>;
 struct CachedProcessExUnits {
     mailbox_spend: (u64, u64),
     ism_spend: (u64, u64),
-    processed_nft_mint: Option<(u64, u64)>,
     verified_nft_mint: Option<(u64, u64)>,
     recipient_spend: Option<(u64, u64)>,
     synthetic_mint: Option<(u64, u64)>,
@@ -82,7 +79,6 @@ impl CachedProcessExUnits {
         Self {
             mailbox_spend: m(self.mailbox_spend),
             ism_spend: m(self.ism_spend),
-            processed_nft_mint: mo(self.processed_nft_mint),
             verified_nft_mint: mo(self.verified_nft_mint),
             recipient_spend: mo(self.recipient_spend),
             synthetic_mint: mo(self.synthetic_mint),
@@ -91,9 +87,6 @@ impl CachedProcessExUnits {
 
     fn total_mem(&self) -> u64 {
         let mut total = self.mailbox_spend.0 + self.ism_spend.0;
-        if let Some((m, _)) = self.processed_nft_mint {
-            total += m;
-        }
         if let Some((m, _)) = self.verified_nft_mint {
             total += m;
         }
@@ -108,9 +101,6 @@ impl CachedProcessExUnits {
 
     fn total_steps(&self) -> u64 {
         let mut total = self.mailbox_spend.1 + self.ism_spend.1;
-        if let Some((_, s)) = self.processed_nft_mint {
-            total += s;
-        }
         if let Some((_, s)) = self.verified_nft_mint {
             total += s;
         }
@@ -156,9 +146,9 @@ pub enum TxBuilderError {
 /// Protocol limits (Conway): mem = 16,500,000, steps = 10,000,000,000 per transaction
 /// We use smaller values per redeemer to stay within limits when multiple scripts execute
 // Execution units per script - total must fit within network max (16.5M mem, 10B steps)
-// For deferred recipients, we have 5 scripts: mailbox, recipient, ISM, message_nft_mint, processed_nft_mint
-// 2.5M + 2.5M + 4M + 2.5M + 2.5M = 14M mem (fits within 16.5M with headroom)
-// 1.5B + 1.5B + 2.5B + 1.5B + 1.5B = 8.5B steps (fits within 10B)
+// For deferred recipients, we have 4 scripts: mailbox, recipient, ISM, message_nft_mint
+// 2.5M + 2.5M + 4M + 2.5M = 11.5M mem (fits within 16.5M with headroom)
+// 1.5B + 1.5B + 2.5B + 1.5B = 7B steps (fits within 10B)
 const DEFAULT_MEM_UNITS: u64 = 2_500_000;
 const DEFAULT_STEP_UNITS: u64 = 1_500_000_000;
 const ISM_MEM_UNITS: u64 = 4_000_000;
@@ -217,7 +207,7 @@ pub struct HyperlaneTxBuilder {
     /// Script sizes are immutable once deployed, so this never needs invalidation.
     script_size_cache: RwLock<HashMap<String, u64>>,
     /// Sparse Merkle Tree for replay protection. Initialized lazily on first use
-    /// by scanning on-chain processed_message_nft tokens.
+    /// by scanning mailbox Process redeemers via Blockfrost.
     smt: Mutex<Option<crate::smt::SparseMerkleTree>>,
     /// Predicted UTXO state (mailbox, ISM, payer, datum) from the last
     /// successfully-submitted TX. Avoids querying Blockfrost between rapid
@@ -238,7 +228,6 @@ impl HyperlaneTxBuilder {
         payer_address: &str,
         total_payer_extra: u64,
         min_lovelace: u64,
-        processed_marker_min_lovelace_for_selection: u64,
         payer_extra: u64,
         chained_payer: Option<&ChainedPayer>,
     ) -> Result<(Vec<Utxo>, Vec<Utxo>, u64), TxBuilderError> {
@@ -290,10 +279,9 @@ impl HyperlaneTxBuilder {
         let (selected, total) =
             self.select_utxos_for_fee_with_extra(&utxos, total_payer_extra, min_lovelace)?;
         debug!(
-            "Selected {} UTXOs with {} lovelace for fees (processed_marker={}, payer_extra={})",
+            "Selected {} UTXOs with {} lovelace for fees (payer_extra={})",
             selected.len(),
             total,
-            processed_marker_min_lovelace_for_selection,
             payer_extra
         );
         Ok((utxos, selected, total))
@@ -318,6 +306,17 @@ impl HyperlaneTxBuilder {
             cached_process_ex_units: Mutex::new(None),
             recently_spent: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Check if a message has been delivered by looking up its ID in the SMT.
+    /// Initializes the SMT on first call by scanning mailbox Process redeemers.
+    pub async fn is_delivered(&self, message_id: &[u8; 32]) -> Result<bool, TxBuilderError> {
+        self.get_or_init_smt().await?;
+        let guard = self.smt.lock().await;
+        let tree = guard.as_ref().expect("SMT initialized above");
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&message_id[..16]);
+        Ok(tree.contains(&key))
     }
 
     async fn set_last_tx_state(&self, state: ChainedUtxoState) {
@@ -453,8 +452,8 @@ impl HyperlaneTxBuilder {
         Ok(size)
     }
 
-    /// Get or initialize the Sparse Merkle Tree by scanning on-chain
-    /// processed_message_nft tokens, validated against the mailbox datum's root.
+    /// Get or initialize the Sparse Merkle Tree by scanning mailbox
+    /// Process redeemers, validated against the mailbox datum's root.
     async fn get_or_init_smt(&self) -> Result<(), TxBuilderError> {
         // Hold the lock for the entire initialization to prevent concurrent inits.
         // Concurrent callers block here; after the first one completes they see
@@ -464,17 +463,6 @@ impl HyperlaneTxBuilder {
             return Ok(());
         }
 
-        let policy_id = self
-            .conf
-            .processed_messages_nft_policy_id
-            .clone()
-            .ok_or_else(|| {
-                TxBuilderError::MissingInput(
-                    "processed_messages_nft_policy_id is required for SMT replay protection"
-                        .to_string(),
-                )
-            })?;
-
         let mailbox_utxo = self.find_mailbox_utxo().await.map_err(|e| {
             TxBuilderError::UtxoNotFound(format!(
                 "Could not fetch mailbox UTXO for SMT root validation: {e}"
@@ -482,9 +470,18 @@ impl HyperlaneTxBuilder {
         })?;
         let expected_root = read_processed_tree_root_from_utxo(&mailbox_utxo)?;
 
+        let mailbox_address = self
+            .provider
+            .script_hash_to_address(&self.conf.mailbox_script_hash)
+            .map_err(|e| {
+                TxBuilderError::InvalidAddress(format!(
+                    "Failed to derive mailbox address for SMT init: {e}"
+                ))
+            })?;
+
         info!(
-            "Initializing SMT from on-chain processed_message_nft tokens (policy={}, expected_root={})",
-            policy_id,
+            "Initializing SMT by scanning mailbox Process redeemers (address={}, expected_root={})",
+            mailbox_address,
             hex::encode(expected_root)
         );
 
@@ -492,22 +489,27 @@ impl HyperlaneTxBuilder {
         const RETRY_DELAY: Duration = Duration::from_secs(5);
 
         for attempt in 0..=MAX_RETRIES {
-            let asset_ids = self
+            let transactions = self
                 .provider
-                .get_policy_asset_ids(&policy_id)
+                .get_address_transactions(&mailbox_address, None, None)
                 .await
                 .unwrap_or_default();
 
             let mut message_ids: Vec<[u8; 32]> = Vec::new();
-            for asset_id in &asset_ids {
-                if asset_id.len() == 56 + 64 {
-                    let asset_name_hex = &asset_id[56..];
-                    if let Ok(bytes) = hex::decode(asset_name_hex) {
-                        if bytes.len() == 32 {
-                            let mut id = [0u8; 32];
-                            id.copy_from_slice(&bytes);
-                            message_ids.push(id);
-                        }
+            for tx in &transactions {
+                match crate::process_redeemer_extractor::extract_process_message_ids(
+                    &self.provider,
+                    &tx.tx_hash,
+                    &self.conf.mailbox_script_hash,
+                )
+                .await
+                {
+                    Ok(ids) => message_ids.extend(ids),
+                    Err(e) => {
+                        warn!(
+                            tx_hash = tx.tx_hash,
+                            "Failed to extract Process message_ids: {e}"
+                        );
                     }
                 }
             }
@@ -536,7 +538,7 @@ impl HyperlaneTxBuilder {
 
         Err(TxBuilderError::Encoding(format!(
             "SMT root mismatch after {MAX_RETRIES} retries: Blockfrost has not indexed \
-             all processed_message_nft tokens yet. Will retry on next message."
+             all mailbox transactions yet. Will retry on next message."
         )))
     }
 
@@ -981,11 +983,7 @@ impl HyperlaneTxBuilder {
             RecipientKind::GenericRecipient => None,
         };
 
-        // 8. Encode processed message marker datum
-        let processed_datum = ProcessedMessageDatum { message_id };
-        let processed_datum_cbor = encode_processed_message_datum(&processed_datum)?;
-
-        // 9. Convert HyperlaneMessage to our Message type for ISM verification
+        // 8. Convert HyperlaneMessage to our Message type for ISM verification
         let msg_for_ism = crate::types::Message {
             version: message.version,
             nonce: message.nonce,
@@ -1149,7 +1147,6 @@ impl HyperlaneTxBuilder {
             recipient_continuation_datum_cbor,
             ism_utxo,
             additional_utxos,
-            processed_datum_cbor,
             message_id,
             metadata: metadata.to_vec(),
             message: msg_for_ism,
@@ -2214,26 +2211,6 @@ impl HyperlaneTxBuilder {
             _ => 0,
         };
 
-        // Calculate processed marker minUTxO - needed for UTXO selection
-        // This output is always created and needs higher minUTxO if NFT minting is enabled
-        let processed_marker_min_lovelace_for_selection =
-            if self.conf.processed_messages_nft_policy_id.is_some() {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithTokenAndDatum {
-                        asset_name_len: 32,
-                        datum_size: components.processed_datum_cbor.len(),
-                    },
-                )
-            } else {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithInlineDatum {
-                        datum_size: components.processed_datum_cbor.len(),
-                    },
-                )
-            };
-
         // Calculate verified message UTXO cost if applicable
         let verified_message_min_lovelace =
             if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
@@ -2250,11 +2227,8 @@ impl HyperlaneTxBuilder {
 
         // Total extra the payer needs to cover:
         // - payer_extra: shortfall from warp route for recipient output
-        // - processed_marker: the processed marker NFT output
         // - verified_message: the verified message UTXO (GenericRecipient only)
-        let total_payer_extra = payer_extra
-            + processed_marker_min_lovelace_for_selection
-            + verified_message_min_lovelace;
+        let total_payer_extra = payer_extra + verified_message_min_lovelace;
 
         // Find payer UTXOs for fee payment (coin selection).
         // When chaining, use the change UTXO(s) from the previous TX.
@@ -2263,7 +2237,6 @@ impl HyperlaneTxBuilder {
                 &payer_address,
                 total_payer_extra,
                 min_lovelace,
-                processed_marker_min_lovelace_for_selection,
                 payer_extra,
                 chained_payer,
             )
@@ -2495,17 +2468,7 @@ impl HyperlaneTxBuilder {
             mint_policies.push(policy_bytes);
         }
 
-        // 2. Processed message NFT policy (if present)
-        if let Some(ref policy_id) = self.conf.processed_messages_nft_policy_id {
-            let policy_bytes = hex::decode(policy_id).map_err(|e| {
-                TxBuilderError::Encoding(format!(
-                    "Invalid processed_messages_nft_policy_id hex: {e}"
-                ))
-            })?;
-            mint_policies.push(policy_bytes);
-        }
-
-        // 3. Verified message NFT policy (if present and needed)
+        // 2. Verified message NFT policy (if present and needed)
         if components.verified_message_datum_cbor.is_some() {
             if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
                 let policy_bytes = hex::decode(policy_id).map_err(|e| {
@@ -2531,16 +2494,6 @@ impl HyperlaneTxBuilder {
         } else {
             None
         };
-
-        let processed_nft_mint_idx =
-            if let Some(ref policy_id) = self.conf.processed_messages_nft_policy_id {
-                let policy_bytes = hex::decode(policy_id).map_err(|e| {
-                    TxBuilderError::Encoding(format!("Invalid processed_messages_nft hex: {e}"))
-                })?;
-                mint_policies.iter().position(|p| *p == policy_bytes)
-            } else {
-                None
-            };
 
         let verified_nft_mint_idx = if components.verified_message_datum_cbor.is_some() {
             if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
@@ -2869,118 +2822,10 @@ impl HyperlaneTxBuilder {
         tx = tx.output(ism_output);
         debug!("Added ISM continuation output");
 
-        // 4. Processed message marker output
-        // This output goes to the processed_messages_script address with inline datum
-        // If NFT minting is configured, the NFT will be included in this output
-        // The verified_message_nft goes to the recipient script output (GenericRecipient only)
+        // 4. Verified message NFT minting (required by mailbox validator)
         let has_verified_message = components.verified_message_datum_cbor.is_some();
-        let has_processed_nft = self.conf.processed_messages_nft_policy_id.is_some();
-        let processed_marker_min_lovelace = if has_processed_nft {
-            self.calculate_min_lovelace(OutputType::WithTokenAndDatum {
-                asset_name_len: 32,
-                datum_size: components.processed_datum_cbor.len(),
-            })
-            .await
-        } else {
-            self.calculate_min_lovelace(OutputType::WithInlineDatum {
-                datum_size: components.processed_datum_cbor.len(),
-            })
-            .await
-        };
 
-        let mut processed_marker_output = self.create_processed_marker_output(
-            &components.message_id,
-            &components.processed_datum_cbor,
-            processed_marker_min_lovelace,
-        )?;
-
-        // 4b. Optional: Mint processed message NFT for efficient O(1) lookups
-        // If processed_messages_nft_policy_id is configured, mint an NFT with message_id as asset name
-        if let (Some(ref policy_id), Some(ref script_cbor)) = (
-            &self.conf.processed_messages_nft_policy_id,
-            &self.conf.processed_messages_nft_script_cbor,
-        ) {
-            debug!("Minting processed message NFT with policy: {}", policy_id);
-
-            // Parse policy ID as bytes
-            let policy_bytes: Hash<28> = Hash::new(
-                hex::decode(policy_id)
-                    .map_err(|e| {
-                        TxBuilderError::Encoding(format!("Invalid NFT policy ID hex: {e}"))
-                    })?
-                    .try_into()
-                    .map_err(|_| {
-                        TxBuilderError::Encoding("NFT policy ID must be 28 bytes".to_string())
-                    })?,
-            );
-
-            // Asset name is the 32-byte message_id
-            let asset_name: Vec<u8> = components.message_id.to_vec();
-
-            // Add mint asset (policy_id, asset_name, amount=1)
-            tx = tx
-                .mint_asset(policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| TxBuilderError::TxBuild(format!("Failed to add mint asset: {e:?}")))?;
-
-            // Add the minted NFT to the processed marker output
-            // This is where the minted NFT will live
-            processed_marker_output = processed_marker_output
-                .add_asset(policy_bytes, asset_name.clone(), 1)
-                .map_err(|e| {
-                    TxBuilderError::TxBuild(format!(
-                        "Failed to add NFT to processed marker output: {e:?}"
-                    ))
-                })?;
-
-            // Add mint redeemer (empty data since minting policy just checks mailbox is spent)
-            let mint_redeemer_data = vec![0xd8, 0x79, 0x9f, 0xff]; // Constr 0 []
-            let ex_units_mint = if let (Some((_, ex_units_map)), Some(sorted_idx)) =
-                (eval_overrides, processed_nft_mint_idx)
-            {
-                let key = format!("mint:{sorted_idx}");
-                if let Some(&(mem, steps)) = ex_units_map.get(&key) {
-                    ExUnits { mem, steps }
-                } else if let Some(ref c) = cached_ex {
-                    c.processed_nft_mint
-                        .map(|(m, s)| ExUnits { mem: m, steps: s })
-                        .unwrap_or(ExUnits {
-                            mem: DEFAULT_MEM_UNITS,
-                            steps: DEFAULT_STEP_UNITS,
-                        })
-                } else {
-                    ExUnits {
-                        mem: DEFAULT_MEM_UNITS,
-                        steps: DEFAULT_STEP_UNITS,
-                    }
-                }
-            } else if let Some(ref c) = cached_ex {
-                c.processed_nft_mint
-                    .map(|(m, s)| ExUnits { mem: m, steps: s })
-                    .unwrap_or(ExUnits {
-                        mem: DEFAULT_MEM_UNITS,
-                        steps: DEFAULT_STEP_UNITS,
-                    })
-            } else {
-                ExUnits {
-                    mem: DEFAULT_MEM_UNITS,
-                    steps: DEFAULT_STEP_UNITS,
-                }
-            };
-            tx = tx.add_mint_redeemer(policy_bytes, mint_redeemer_data, Some(ex_units_mint));
-
-            // Add minting policy script to witness set
-            let script_bytes = hex::decode(script_cbor).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid NFT script CBOR hex: {e}"))
-            })?;
-            tx = tx.script(ScriptKind::PlutusV3, script_bytes);
-
-            debug!(
-                "Added NFT minting for message_id: {}",
-                hex::encode(components.message_id)
-            );
-        }
-
-        // 4b-bis: Always mint verified message NFT (required by mailbox validator)
+        // 4a: Always mint verified message NFT (required by mailbox validator)
         // The mailbox always checks verified_nft_minted during Process.
         // For GenericRecipient, the NFT goes to the recipient script output.
         // For WarpRoute recipients, no verified NFT is minted (not needed).
@@ -3073,13 +2918,7 @@ impl HyperlaneTxBuilder {
             None
         };
 
-        tx = tx.output(processed_marker_output);
-        debug!(
-            "Added processed message marker output for message_id: {}",
-            hex::encode(components.message_id)
-        );
-
-        // 4c. Verified message output (GenericRecipient only)
+        // 4b. Verified message output (GenericRecipient only)
         // Delivers the verified message datum directly to the recipient script address
         if let (Some(ref verified_datum_cbor), Some(recipient_hash)) = (
             &components.verified_message_datum_cbor,
@@ -3135,8 +2974,6 @@ impl HyperlaneTxBuilder {
                     ism_spend: *ex_units_map
                         .get(&format!("spend:{ism_sorted_idx}"))
                         .unwrap_or(&(ISM_MEM_UNITS, ISM_STEP_UNITS)),
-                    processed_nft_mint: processed_nft_mint_idx
-                        .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
                     verified_nft_mint: verified_nft_mint_idx
                         .and_then(|idx| ex_units_map.get(&format!("mint:{idx}")).copied()),
                     recipient_spend: recipient_sorted_idx
@@ -3152,8 +2989,6 @@ impl HyperlaneTxBuilder {
                 *self.cached_process_ex_units.lock().await = Some(to_cache);
             }
         }
-
-        let processed_marker_cost = processed_marker_min_lovelace;
 
         // Calculate recipient shortfall - when warp route UTXO doesn't have enough lovelace
         // to fund both the continuation output AND the recipient output, payer covers the difference.
@@ -3219,16 +3054,15 @@ impl HyperlaneTxBuilder {
         };
 
         debug!(
-            "Change calculation: total_input={}, fee={}, processed_marker={}, recipient_shortfall={}, verified_message={}",
-            total_input, fee, processed_marker_cost, recipient_shortfall, verified_message_min_lovelace
+            "Change calculation: total_input={}, fee={}, recipient_shortfall={}, verified_message={}",
+            total_input, fee, recipient_shortfall, verified_message_min_lovelace
         );
-        let change_amount = total_input.saturating_sub(
-            fee + processed_marker_cost + recipient_shortfall + verified_message_min_lovelace,
-        );
+        let change_amount =
+            total_input.saturating_sub(fee + recipient_shortfall + verified_message_min_lovelace);
         if chained_payer.is_some() && change_amount < min_lovelace {
             return Err(TxBuilderError::TxBuild(format!(
                 "Chained payer change {change_amount} < min_lovelace {min_lovelace} \
-                 (total_input={total_input}, fee={fee}, processed={processed_marker_cost}, \
+                 (total_input={total_input}, fee={fee}, \
                  shortfall={recipient_shortfall}, verified={verified_message_min_lovelace})",
             )));
         }
@@ -3533,28 +3367,6 @@ impl HyperlaneTxBuilder {
         }
     }
 
-    /// Create the processed message marker output
-    /// This output is sent to the processed_messages_script address
-    /// with an inline datum containing the message_id. No NFT is needed.
-    fn create_processed_marker_output(
-        &self,
-        _message_id: &[u8; 32],
-        datum_cbor: &[u8],
-        min_lovelace: u64,
-    ) -> Result<Output, TxBuilderError> {
-        // The processed messages are stored at the processed_messages_script address
-        // This must match the parameter applied to the mailbox validator
-        let script_address = self
-            .provider
-            .script_hash_to_address(&self.conf.processed_messages_script_hash)?;
-
-        // Just create a simple output with inline datum, no NFT needed
-        let output = Output::new(parse_address(&script_address)?, min_lovelace)
-            .set_inline_datum(datum_cbor.to_vec());
-
-        Ok(output)
-    }
-
     /// Update ISM validators for a specific domain
     ///
     /// This builds and submits a transaction that updates the validator set
@@ -3831,22 +3643,6 @@ impl HyperlaneTxBuilder {
 
         // Add minUTxO costs for outputs the relayer creates (mirrors build_complete_process_tx)
         let coins_per_byte = self.get_coins_per_utxo_byte().await;
-        let processed_marker_min = if self.conf.processed_messages_nft_policy_id.is_some() {
-            Self::calculate_min_lovelace_sync(
-                coins_per_byte,
-                OutputType::WithTokenAndDatum {
-                    asset_name_len: 32,
-                    datum_size: components.processed_datum_cbor.len(),
-                },
-            )
-        } else {
-            Self::calculate_min_lovelace_sync(
-                coins_per_byte,
-                OutputType::WithInlineDatum {
-                    datum_size: components.processed_datum_cbor.len(),
-                },
-            )
-        };
 
         let verified_message_min =
             if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
@@ -3861,12 +3657,11 @@ impl HyperlaneTxBuilder {
                 0
             };
 
-        let output_costs = processed_marker_min + verified_message_min;
-        let total = fee + output_costs;
+        let total = fee + verified_message_min;
 
         info!(
-            "Estimated cost: fee={}, processed_marker={}, verified_msg={}, total={}",
-            fee, processed_marker_min, verified_message_min, total
+            "Estimated cost: fee={}, verified_msg={}, total={}",
+            fee, verified_message_min, total
         );
 
         Ok(total)
@@ -3994,8 +3789,6 @@ pub struct ProcessTxComponents {
     pub ism_utxo: Utxo,
     /// Additional inputs (UTXO, must_be_spent)
     pub additional_utxos: Vec<(Utxo, bool)>,
-    /// Encoded processed message datum (CBOR)
-    pub processed_datum_cbor: Vec<u8>,
     /// Message ID (32 bytes)
     pub message_id: [u8; 32],
     /// Original metadata
@@ -4980,16 +4773,6 @@ fn get_plutus_v3_cost_model() -> Vec<i64> {
 mod tests {
     use super::*;
     use crate::tx_builder::tx_encoding::encode_message_as_plutus_data;
-
-    #[test]
-    fn test_encode_processed_message_datum() {
-        let datum = ProcessedMessageDatum {
-            message_id: [0x42; 32],
-        };
-
-        let encoded = encode_processed_message_datum(&datum).unwrap();
-        assert!(!encoded.is_empty());
-    }
 
     #[test]
     fn test_encode_message() {

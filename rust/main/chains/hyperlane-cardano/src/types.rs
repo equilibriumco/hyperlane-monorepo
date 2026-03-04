@@ -154,12 +154,6 @@ pub enum MailboxRedeemer {
     },
 }
 
-/// Processed message marker datum (matches Aiken ProcessedMessageDatum)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessedMessageDatum {
-    pub message_id: [u8; 32],
-}
-
 /// Multisig ISM datum (matches Aiken MultisigIsmDatum)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultisigIsmDatum {

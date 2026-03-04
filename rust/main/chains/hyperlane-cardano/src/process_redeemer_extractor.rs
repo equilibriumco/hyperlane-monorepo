@@ -1,5 +1,4 @@
-use crate::blockfrost_provider::BlockfrostProvider;
-use eyre::Result;
+use crate::blockfrost_provider::{BlockfrostProvider, BlockfrostProviderError};
 use tracing::warn;
 
 /// Extract message_ids from Process redeemers in a transaction.
@@ -11,7 +10,7 @@ pub async fn extract_process_message_ids(
     provider: &BlockfrostProvider,
     tx_hash: &str,
     mailbox_script_hash: &str,
-) -> Result<Vec<[u8; 32]>> {
+) -> Result<Vec<[u8; 32]>, BlockfrostProviderError> {
     let redeemers = provider.get_transaction_redeemers(tx_hash).await?;
 
     let mut message_ids = Vec::new();
