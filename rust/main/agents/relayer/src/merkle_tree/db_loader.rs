@@ -31,6 +31,8 @@ pub struct MerkleTreeDbLoader {
     prover_sync: Arc<RwLock<MerkleTreeBuilder>>,
     #[new(default)]
     leaf_index: u32,
+    #[new(default)]
+    warned_leaf_zero: bool,
 }
 
 impl Debug for MerkleTreeDbLoader {
@@ -76,13 +78,14 @@ impl DbLoaderExt for MerkleTreeDbLoader {
             // Increase the leaf index to move on to the next leaf
             self.leaf_index += 1;
         } else {
-            if self.leaf_index == 0 {
+            if self.leaf_index == 0 && !self.warned_leaf_zero {
                 warn!(
                     domain = %self.domain(),
                     "No merkle tree insertion found at leaf_index=0. \
                      Verify that the chain's index.from config is set to a block at or before \
                      the mailbox deployment block. The relayer will be stuck until leaf 0 is indexed."
                 );
+                self.warned_leaf_zero = true;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }

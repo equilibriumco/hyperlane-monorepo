@@ -483,8 +483,10 @@ To test the full IGP flow end-to-end, always dispatch from the official mailbox 
 
 ```bash
 # Dispatch with custom hook so IGP payment is recorded
-cast send $MAILBOX "dispatch(uint32,bytes32,bytes)" \
-  $DEST_DOMAIN $RECIPIENT $BODY \
+# Uses the 5-arg overload: dispatch(domain, recipient, body, metadata, hook)
+cast send $MAILBOX \
+  "dispatch(uint32,bytes32,bytes,bytes,address)" \
+  $DEST_DOMAIN $RECIPIENT $BODY 0x $AGGREGATION_HOOK \
   --value 1 \
   --rpc-url $RPC_URL \
   --private-key $KEY
