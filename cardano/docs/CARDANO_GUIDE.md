@@ -650,7 +650,7 @@ The `message_id` is what the ISM validated. Recipients **must** verify `keccak25
 
 ### Greeting Example
 
-The reference implementation is `greeting.ak`. Generic recipients are parameterized by `verified_message_nft_policy` and handle two types of UTXOs at their script address: **state UTXOs** (with the contract's datum) and **message UTXOs** (with a `verified_message_nft`, no typed datum).
+The reference implementation is `greeting.ak`. Generic recipients are parameterized by `verified_message_nft_policy` and `owner`, and handle two types of UTXOs at their script address: **state UTXOs** (with the contract's datum) and **message UTXOs** (with a `verified_message_nft`, no typed datum).
 
 ```aiken
 use types.{Message, PolicyId, encode_message}
@@ -661,41 +661,39 @@ type GreetingDatum {
 }
 
 type GreetingRedeemer {
+  Init
   HandleMessage { message: Message, message_id: ByteArray }
+  Reclaim
 }
 
-validator greeting(verified_message_nft_policy: PolicyId) {
+validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKeyHash) {
   spend(
-    datum: Option<GreetingDatum>,
+    datum: Option<Data>,
     redeemer: GreetingRedeemer,
     own_ref: OutputReference,
     tx: Transaction,
   ) {
     expect Some(own_input) = find_input(tx, own_ref)
-    let HandleMessage { message, message_id } = redeemer
 
-    when datum is {
-      Some(old_datum) -> {
-        // State UTXO: update the greeting
-        let greeting = bytearray.concat("Hello, ", message.body)
-        let own_addr = own_input.output.address
+    when redeemer is {
+      Init -> list.has(tx.extra_signatories, owner) && is_ada_only(own_input)
+      Reclaim -> list.has(tx.extra_signatories, owner) && is_ada_only(own_input)
+      HandleMessage { message, message_id } -> {
+        // Message UTXO (holds verified_message_nft): just check burn
+        // State UTXO (holds greeting state NFT): full message processing
+        let is_message_utxo = quantity_of(own_input, verified_message_nft_policy, message_id) == 1
 
-        expect Some(continuation) =
-          list.find(tx.outputs, fn(output) { output.address == own_addr })
-        expect InlineDatum(raw_datum) = continuation.datum
-        expect new_datum: GreetingDatum = raw_datum
-
-        // Verify message authenticity
-        expect keccak_256(encode_message(message)) == message_id
-        expect verified_nft_burned(tx, verified_message_nft_policy, message_id)
-        expect message_utxo_spent(tx, own_addr, verified_message_nft_policy, message_id, own_ref)
-
-        new_datum.last_greeting == greeting
-          && new_datum.greeting_count == old_datum.greeting_count + 1
+        if is_message_utxo {
+          verified_nft_burned(tx, verified_message_nft_policy, message_id)
+        } else {
+          expect Some(raw_datum) = datum
+          expect old_datum: GreetingDatum = raw_datum
+          let greeting = bytearray.concat("Hello, ", message.body)
+          // ... verify continuation datum, NFT burn, message UTXO spent
+          new_datum.last_greeting == greeting
+            && new_datum.greeting_count == old_datum.greeting_count + 1
+        }
       }
-      None ->
-        // Message UTXO (no typed datum): allow spending if the NFT is burned
-        verified_nft_burned(tx, verified_message_nft_policy, message_id)
     }
   }
 
@@ -707,6 +705,7 @@ Key points:
 - `HandleMessage` carries the full `Message` and `message_id`
 - Verifies `keccak256(encode_message(message)) == message_id`
 - The `verified_message_nft` burn proves the mailbox created the message
+- `Init` and `Reclaim` redeemers require owner signature and ADA-only input
 - The `None` datum branch handles the message UTXO (no contract-specific datum)
 
 ### State UTXO Pattern

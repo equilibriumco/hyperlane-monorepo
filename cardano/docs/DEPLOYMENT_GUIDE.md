@@ -1415,12 +1415,13 @@ After deployment, your `deployment_info.json` will contain addresses like:
 
 | Command         | Description              |
 | --------------- | ------------------------ |
-| `query mailbox` | Query mailbox state      |
-| `query ism`     | Query ISM configuration  |
-| `query utxos`   | List UTXOs at an address |
-| `query utxo`    | Query specific UTXO      |
-| `query params`  | Get protocol parameters  |
-| `query tip`     | Get latest slot          |
+| `query mailbox` | Query mailbox state                          |
+| `query ism`     | Query ISM configuration                      |
+| `query message` | Check if a message has been delivered (by ID) |
+| `query utxos`   | List UTXOs at an address                     |
+| `query utxo`    | Query specific UTXO                          |
+| `query params`  | Get protocol parameters                      |
+| `query tip`     | Get latest slot                              |
 
 ---
 
