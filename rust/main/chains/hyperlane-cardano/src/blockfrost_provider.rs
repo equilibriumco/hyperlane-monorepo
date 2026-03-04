@@ -187,6 +187,14 @@ impl BlockfrostProvider {
         Ok(tip.saturating_sub(self.confirmation_block_delay as u64))
     }
 
+    /// Get the latest finalized block info (hash, height, time), lagging
+    /// behind the real tip by `confirmation_block_delay` blocks.
+    #[instrument(skip(self))]
+    pub async fn get_latest_block_info(&self) -> Result<BlockInfo, BlockfrostProviderError> {
+        let finalized_height = self.get_latest_block().await?;
+        self.get_block_by_height(finalized_height).await
+    }
+
     /// Get the latest slot number
     #[instrument(skip(self))]
     pub async fn get_latest_slot(&self) -> Result<u64, BlockfrostProviderError> {
