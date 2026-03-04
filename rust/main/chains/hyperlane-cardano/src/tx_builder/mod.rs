@@ -170,8 +170,6 @@ enum OutputType {
     SimpleAda,
     /// Output with a native token (policy ID + asset name)
     WithNativeToken { asset_name_len: usize },
-    /// Output with an inline datum
-    WithInlineDatum { datum_size: usize },
     /// Output with both native token and inline datum
     WithTokenAndDatum {
         asset_name_len: usize,
@@ -613,10 +611,6 @@ impl HyperlaneTxBuilder {
                 // Address + value + policy_id (28) + asset_name + multiasset overhead
                 60 + 28 + asset_name_len as u64 + 20
             }
-            OutputType::WithInlineDatum { datum_size } => {
-                // Simple output + datum
-                60 + datum_size as u64
-            }
             OutputType::WithTokenAndDatum {
                 asset_name_len,
                 datum_size,
@@ -645,7 +639,6 @@ impl HyperlaneTxBuilder {
         let output_size: u64 = match output_type {
             OutputType::SimpleAda => 60,
             OutputType::WithNativeToken { asset_name_len } => 60 + 28 + asset_name_len as u64 + 20,
-            OutputType::WithInlineDatum { datum_size } => 60 + datum_size as u64,
             OutputType::WithTokenAndDatum {
                 asset_name_len,
                 datum_size,

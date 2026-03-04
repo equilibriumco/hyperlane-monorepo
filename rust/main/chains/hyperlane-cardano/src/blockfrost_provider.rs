@@ -4,7 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 #[derive(Error, Debug)]
 pub enum BlockfrostProviderError {

@@ -32,8 +32,6 @@ const DEFAULT_FEE_ESTIMATE: u64 = 3_000_000;
 
 /// Cardano lander adapter for submitting Process transactions.
 pub struct CardanoAdapter {
-    /// Connection configuration for Cardano
-    pub connection_conf: ConnectionConf,
     /// Blockfrost provider for querying chain state
     pub provider: Arc<BlockfrostProvider>,
     /// Transaction builder for constructing Process transactions
@@ -65,7 +63,6 @@ impl CardanoAdapter {
         let tx_builder = HyperlaneTxBuilder::new(connection_conf, provider.clone());
 
         Ok(Self {
-            connection_conf: connection_conf.clone(),
             provider,
             tx_builder,
             signer,
