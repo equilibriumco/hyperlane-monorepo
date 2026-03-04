@@ -66,7 +66,7 @@ pub struct ConnectionConf {
     /// Number of blocks to lag behind the tip when reporting latest block.
     /// Prevents the indexer from advancing past blocks that Blockfrost hasn't
     /// finished indexing for address-transaction queries (25-40s lag).
-    /// Defaults to 2 (~40s at ~20s/block on preview).
+    /// Defaults to 5 (~100s at ~20s/block on preview).
     pub confirmation_block_delay: u32,
     /// Unused — Cardano does not support message batching.
     /// Sequential TX chaining is used instead. Setting this > 1 emits a warning.

@@ -14,6 +14,11 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Number of blocks to re-scan behind the cursor on each indexer tick.
+/// Catches TXs whose Blockfrost address-transaction index was not yet
+/// populated when the block was first scanned (25-40s indexing lag).
+const BACKFILL_WINDOW: u32 = 5;
+
 #[derive(Debug)]
 pub struct CardanoMailboxIndexer {
     provider: Arc<BlockfrostProvider>,
@@ -420,18 +425,23 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
         let from = *range.start();
         let to = *range.end();
 
+        // Extend the scan window back by BACKFILL_WINDOW blocks so that TXs
+        // whose Blockfrost address-transaction index was not yet populated on a
+        // prior tick (due to 25-40s indexing lag) are still caught.
+        let scan_from = from.saturating_sub(BACKFILL_WINDOW);
+
         // Get mailbox script address
         let mailbox_address = self.get_mailbox_address()?;
 
         info!(
-            "Fetching Cardano HyperlaneMessage logs from block {} to {} at address {}",
-            from, to, mailbox_address
+            "Fetching Cardano HyperlaneMessage logs from block {} (scan_from={}) to {} at address {}",
+            from, scan_from, to, mailbox_address
         );
 
         // Get transactions at mailbox address in the block range
         let transactions = self
             .provider
-            .get_address_transactions(&mailbox_address, Some(from as u64), Some(to as u64))
+            .get_address_transactions(&mailbox_address, Some(scan_from as u64), Some(to as u64))
             .await
             .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
 
