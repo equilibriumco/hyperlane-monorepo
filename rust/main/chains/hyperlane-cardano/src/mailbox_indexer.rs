@@ -1,5 +1,5 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider};
-use crate::{CardanoMailbox, CardanoNetwork, ConnectionConf};
+use crate::{CardanoMailbox, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
 use ciborium::Value as CborValue;
@@ -45,13 +45,8 @@ impl CardanoMailboxIndexer {
             .map_err(hyperlane_core::ChainCommunicationError::from_other)
     }
 
-    /// Get the local domain ID from configuration
     fn get_local_domain(&self) -> u32 {
-        match self.conf.network {
-            CardanoNetwork::Mainnet => 2001,
-            CardanoNetwork::Preprod => 2002,
-            CardanoNetwork::Preview => 2003,
-        }
+        self.conf.network.domain_id()
     }
 
     /// Parse a Dispatch redeemer from Blockfrost's JSON format to extract message data.
