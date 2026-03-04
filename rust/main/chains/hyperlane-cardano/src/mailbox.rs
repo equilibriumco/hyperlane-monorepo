@@ -611,7 +611,11 @@ impl Mailbox for CardanoMailbox {
                     return Ok(TxCostEstimate {
                         gas_limit: U256::from(gas_units),
                         gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT))
-                            .unwrap_or_else(|_| FixedPointNumber::zero()),
+                            .map_err(|e| {
+                                ChainCommunicationError::from_other_str(&format!(
+                                    "Failed to convert gas price: {e}"
+                                ))
+                            })?,
                         l2_gas_limit: None,
                     });
                 }
@@ -647,8 +651,13 @@ impl Mailbox for CardanoMailbox {
         let gas_units = estimated_fee_lovelace / LOVELACE_PER_GAS_UNIT + 1;
         Ok(TxCostEstimate {
             gas_limit: U256::from(gas_units),
-            gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT))
-                .unwrap_or_else(|_| FixedPointNumber::zero()),
+            gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT)).map_err(
+                |e| {
+                    ChainCommunicationError::from_other_str(&format!(
+                        "Failed to convert gas price: {e}"
+                    ))
+                },
+            )?,
             l2_gas_limit: None,
         })
     }

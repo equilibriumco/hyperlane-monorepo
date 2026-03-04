@@ -610,7 +610,11 @@ impl BlockfrostProvider {
                         let name = &a.unit[56..];
                         let policy_entry = value
                             .as_object_mut()
-                            .unwrap()
+                            .ok_or_else(|| {
+                                BlockfrostProviderError::Deserialization(
+                                    "Value is not a JSON object".to_string(),
+                                )
+                            })?
                             .entry(policy.to_string())
                             .or_insert_with(|| serde_json::json!({}));
                         if let Some(obj) = policy_entry.as_object_mut() {

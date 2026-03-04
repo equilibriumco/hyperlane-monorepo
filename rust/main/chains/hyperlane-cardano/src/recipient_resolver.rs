@@ -323,14 +323,16 @@ async fn find_generic_recipient_ism(
 
     // When multiple config UTXOs exist (e.g., after re-init), prefer an explicit ISM
     // override (Some) over the default (None). If none have an override, use the first.
-    let (utxo, ism) = config_utxos
+    let Some((utxo, ism)) = config_utxos
         .into_iter()
         .map(|u| {
             let ism = u.inline_datum.as_deref().and_then(parse_ism_config_datum);
             (u, ism)
         })
         .max_by_key(|(_, ism)| ism.is_some())
-        .unwrap();
+    else {
+        return (None, None);
+    };
 
     (ism, Some(utxo))
 }
