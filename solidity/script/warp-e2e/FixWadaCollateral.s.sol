@@ -10,22 +10,25 @@ import "./TestERC20.sol";
 
 /**
  * @title FixWadaCollateral
- * @notice Redeploys Fuji WADA Collateral warp route with correct scale
+ * @notice Redeploys WADA Collateral warp route with correct scale
  * @dev The original deployment used scale=1e12, but for bidirectional transfers
- *      between Fuji (18 decimals) and Cardano (6 decimals), the 18-decimal side
- *      should use scale=1 while the 6-decimal side uses scale=1e12.
+ *      between an 18-decimal EVM chain and Cardano (6 decimals), the 18-decimal
+ *      side should use scale=1 while the 6-decimal side uses scale=1e12.
  *
- *      With scale=1 on Fuji:
- *      - Fuji -> Cardano: wire = local * 1 = 10 * 1e18; Cardano divides by 1e12 = 10 * 1e6 lovelace = 10 ADA
- *      - Cardano -> Fuji: wire = local * 1e12 = 10 * 1e6 * 1e12 = 10 * 1e18; Fuji divides by 1 = 10 * 1e18 = 10 WADA
+ *      With scale=1 on the EVM side:
+ *      - EVM -> Cardano: wire = local * 1 = 10 * 1e18; Cardano divides by 1e12 = 10 * 1e6 lovelace = 10 ADA
+ *      - Cardano -> EVM: wire = local * 1e12 = 10 * 1e6 * 1e12 = 10 * 1e18; EVM divides by 1 = 10 * 1e18 = 10 WADA
+ *
+ *      Required env vars:
+ *        EVM_MAILBOX     - Mailbox contract address on the EVM chain
+ *        EVM_ISM         - ISM contract address on the EVM chain
+ *        EVM_SIGNER_KEY  - Deployer private key
+ *        EVM_WADA        - WADA ERC20 token address
+ *        CARDANO_DOMAIN  - (optional) Cardano domain ID, defaults to 2003 (preview)
  */
 contract FixWadaCollateral is Script {
-    // Fuji Hyperlane infrastructure
-    address constant FUJI_MAILBOX = 0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0;
-    address constant FUJI_ISM = 0xD44036F1917bb13cB36a4ab1ad0F87324aacF1EB;
-
-    // Cardano domain ID
-    uint32 constant CARDANO_DOMAIN = 2003;
+    // Default Cardano domain ID (preview testnet)
+    uint32 constant DEFAULT_CARDANO_DOMAIN = 2003;
 
     // Cardano Native ADA #2 warp route (paired with WADA collateral)
     // Script hash: db711f4dc8a751e3615864e8a6d9b7aa1da24cb71ca0ba254cfdc4ba
@@ -39,12 +42,18 @@ contract FixWadaCollateral is Script {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
         address wadaToken = vm.envAddress("EVM_WADA");
+        address mailbox = vm.envAddress("EVM_MAILBOX");
+        address ism = vm.envAddress("EVM_ISM");
+        uint32 cardanoDomain = uint32(
+            vm.envOr("CARDANO_DOMAIN", uint256(DEFAULT_CARDANO_DOMAIN))
+        );
 
         console.log("=== Fixing WADA Collateral with Correct Scale ===");
         console.log("Deployer:", deployer);
         console.log("WADA Token:", wadaToken);
-        console.log("Mailbox:", FUJI_MAILBOX);
-        console.log("ISM:", FUJI_ISM);
+        console.log("Mailbox:", mailbox);
+        console.log("ISM:", ism);
+        console.log("Cardano Domain:", uint256(cardanoDomain));
         console.log("Scale:", CORRECT_SCALE, "(was 1e12)");
 
         vm.startBroadcast(deployerPrivateKey);
@@ -53,20 +62,20 @@ contract FixWadaCollateral is Script {
         HypERC20Collateral newCollateral = new HypERC20Collateral(
             wadaToken,
             CORRECT_SCALE,
-            FUJI_MAILBOX
+            mailbox
         );
         console.log("New WADA Collateral deployed:", address(newCollateral));
 
         // 2. Initialize the collateral
         newCollateral.initialize(
             address(0), // no hook
-            FUJI_ISM, // ISM
+            ism,
             deployer
         );
         console.log("Collateral initialized");
 
         // 3. Enroll Cardano Native ADA #2 as remote router
-        newCollateral.enrollRemoteRouter(CARDANO_DOMAIN, CARDANO_NATIVE_ADA2);
+        newCollateral.enrollRemoteRouter(cardanoDomain, CARDANO_NATIVE_ADA2);
         console.log("Enrolled Cardano Native ADA #2 as router");
         console.log("  -> Cardano address:", vm.toString(CARDANO_NATIVE_ADA2));
 
