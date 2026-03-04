@@ -447,7 +447,7 @@ async fn query_message(
         "Scanning mailbox transactions for Process redeemers...".cyan()
     );
 
-    let txs = client.get_address_transactions(&address, 100).await?;
+    let txs = client.get_all_address_transactions(&address).await?;
     println!("  Found {} transactions to scan", txs.len());
 
     for tx in &txs {
@@ -508,7 +508,7 @@ async fn query_message(
 
     println!("\n{}", "NOT DELIVERED".yellow().bold());
     println!(
-        "  Message {} was not found in the last {} mailbox transactions.",
+        "  Message {} was not found in {} mailbox transactions.",
         msg_id_normalized,
         txs.len()
     );

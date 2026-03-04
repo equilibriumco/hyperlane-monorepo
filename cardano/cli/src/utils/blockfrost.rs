@@ -658,7 +658,7 @@ impl BlockfrostClient {
         self.get(&format!("/txs/{}", tx_hash)).await
     }
 
-    /// Get transactions for an address (paginated, returns tx hashes in order)
+    /// Get transactions for an address (single page, returns tx hashes in order)
     pub async fn get_address_transactions(
         &self,
         address: &str,
@@ -677,6 +677,37 @@ impl BlockfrostClient {
                 Err(e)
             }
         }
+    }
+
+    /// Get ALL transactions for an address (paginated, ascending order).
+    pub async fn get_all_address_transactions(
+        &self,
+        address: &str,
+    ) -> Result<Vec<AddressTx>> {
+        let mut all_txs = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let endpoint = format!(
+                "/addresses/{}/transactions?count=100&page={}&order=asc",
+                address, page
+            );
+            let batch: Vec<AddressTx> = match self.get(&endpoint).await {
+                Ok(txs) => txs,
+                Err(e) => {
+                    if e.to_string().contains("404") {
+                        break;
+                    }
+                    return Err(e);
+                }
+            };
+            let done = batch.len() < 100;
+            all_txs.extend(batch);
+            if done {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all_txs)
     }
 
     /// Get transaction UTXOs (inputs and outputs)
