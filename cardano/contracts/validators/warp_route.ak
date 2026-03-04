@@ -23,7 +23,6 @@ use utils.{assoc_find, find_input, is_signed_by, validate_migrate}
 /// 3. minUTxO ADA is covered by source chain fees (relayer tops up if needed)
 validator warp_route(
   mailbox_policy_id: PolicyId,
-  processed_messages_nft_policy: PolicyId,
 ) {
   spend(
     datum: Option<WarpRouteDatum>,
@@ -55,7 +54,6 @@ validator warp_route(
           tx,
           own_ref,
           mailbox_policy_id,
-          processed_messages_nft_policy,
           message_id,
         )
       }
@@ -136,7 +134,6 @@ fn validate_receive_transfer(
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
-  processed_messages_nft_policy: PolicyId,
   message_id: ByteArray,
 ) -> Bool {
   // 1. Verify sender is an enrolled remote route
@@ -146,14 +143,11 @@ fn validate_receive_transfer(
   // 2. Verify mailbox is calling us
   expect mailbox_is_caller(mailbox_policy_id, tx)
 
-  // 3. Verify the mailbox validated THIS exact message_id
-  expect processed_nft_minted(processed_messages_nft_policy, message_id, tx)
-
-  // 4. Decode the EVM TokenMessage body
+  // 3. Decode the EVM TokenMessage body
   expect Some(wire_transfer) = decode_evm_token_message(body)
   expect wire_transfer.amount > 0
 
-  // 5. Convert wire amount to local amount
+  // 4. Convert wire amount to local amount
   let local_amount = convert_decimals(
     wire_transfer.amount,
     datum.config.remote_decimals,
@@ -161,15 +155,15 @@ fn validate_receive_transfer(
   )
   expect local_amount > 0
 
-  // 6. Find own input
+  // 5. Find own input
   expect Some(own_input) = find_input(tx, own_ref)
   let own_address = own_input.output.address
 
-  // 7. Find continuation output
+  // 6. Find continuation output
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
-  // 8. Validate tokens sent directly to recipient
+  // 7. Validate tokens sent directly to recipient
   let transfer_valid =
     when datum.config.token_type is {
       Collateral { policy_id, asset_name } ->
@@ -202,7 +196,7 @@ fn validate_receive_transfer(
     }
   expect transfer_valid
 
-  // 9. Verify datum updated (decrement total_bridged by LOCAL amount)
+  // 8. Verify datum updated (decrement total_bridged by LOCAL amount)
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: WarpRouteDatum = cont_datum_data
   expect cont_datum.config == datum.config
@@ -385,18 +379,6 @@ fn recipient_receives_ada(
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-fn processed_nft_minted(
-  processed_messages_nft_policy: PolicyId,
-  message_id: ByteArray,
-  tx: Transaction,
-) -> Bool {
-  let policy_mints = assets.tokens(tx.mint, processed_messages_nft_policy)
-  when dict.get(policy_mints, message_id) is {
-    Some(quantity) -> quantity == 1
-    None -> False
-  }
-}
 
 fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
   list.any(

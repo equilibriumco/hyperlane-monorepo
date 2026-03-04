@@ -30,11 +30,9 @@ const canonical_config_nft_policy: PolicyId =
 ///
 /// During Process, the mailbox:
 /// 1. Verifies the message via ISM
-/// 2. Mints a processed_message_nft (replay protection)
-/// 3. Mints a verified_message_nft and delivers it to the recipient's script address
+/// 2. Mints a verified_message_nft and delivers it to the recipient's script address
 ///    inside a UTXO with VerifiedMessageDatum
 validator mailbox(
-  processed_messages_nft_policy: PolicyId,
   verified_message_nft_policy: PolicyId,
   ism_nft_policy: PolicyId,
 ) {
@@ -68,7 +66,6 @@ validator mailbox(
           smt_proof,
           tx,
           own_ref,
-          processed_messages_nft_policy,
           verified_message_nft_policy,
           ism_nft_policy,
         )
@@ -148,7 +145,6 @@ fn validate_process(
   smt_proof: List<ByteArray>,
   tx: Transaction,
   own_ref: OutputReference,
-  processed_messages_nft_policy: PolicyId,
   verified_message_nft_policy: PolicyId,
   ism_nft_policy: PolicyId,
 ) -> Bool {
@@ -173,10 +169,7 @@ fn validate_process(
   let ism_hash = get_recipient_ism(message.recipient, datum.default_ism, tx)
   expect verify_ism_for_message(ism_hash, datum.default_ism, ism_nft_policy, message_id, tx, metadata)
 
-  // 5. Verify processed message NFT is being minted (for queryability)
-  expect processed_nft_minted(message_id, tx, processed_messages_nft_policy)
-
-  // 6. For script-hash recipients (0x02 prefix), verify verified message delivery.
+  // 5. For script-hash recipients (0x02 prefix), verify verified message delivery.
   //    NFT-policy recipients (0x01 prefix, e.g. warp routes) handle their own
   //    validation as spent inputs in the same TX.
   let is_script_recipient = bytearray.at(message.recipient, 0) == 2
@@ -192,7 +185,7 @@ fn validate_process(
       True
     }
 
-  // 7. Validate mailbox continuation with updated processed_tree_root
+  // 6. Validate mailbox continuation with updated processed_tree_root
   let new_datum = MailboxDatum { ..datum, processed_tree_root: new_tree_root }
   validate_continuation(datum, new_datum, tx, own_ref)
 }
@@ -490,18 +483,6 @@ fn verified_nft_minted(
   verified_message_nft_policy: PolicyId,
 ) -> Bool {
   let policy_mints = assets.tokens(tx.mint, verified_message_nft_policy)
-  when dict.get(policy_mints, message_id) is {
-    Some(quantity) -> quantity == 1
-    None -> False
-  }
-}
-
-fn processed_nft_minted(
-  message_id: ByteArray,
-  tx: Transaction,
-  processed_messages_nft_policy: PolicyId,
-) -> Bool {
-  let policy_mints = assets.tokens(tx.mint, processed_messages_nft_policy)
   when dict.get(policy_mints, message_id) is {
     Some(quantity) -> quantity == 1
     None -> False
