@@ -495,7 +495,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
         // This is typically a script that holds marker NFTs
         let processed_script_address = self
             .provider
-            .script_hash_to_address(&self.conf.mailbox_policy_id)
+            .script_hash_to_address(&self.conf.processed_messages_script_hash)
             .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
 
         // Get transactions that created processed message markers

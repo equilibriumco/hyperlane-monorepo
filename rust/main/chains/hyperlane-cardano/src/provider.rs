@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use hyperlane_core::{
-    BlockInfo, ChainInfo, ChainResult, HyperlaneChain, HyperlaneDomain, HyperlaneProvider, TxnInfo,
-    H256, H512, U256,
+    BlockInfo, ChainCommunicationError, ChainInfo, ChainResult, HyperlaneChain, HyperlaneDomain,
+    HyperlaneProvider, TxnInfo, H256, H512, U256,
 };
 use std::sync::Arc;
 
@@ -39,34 +39,50 @@ impl HyperlaneChain for CardanoProvider {
     }
 }
 
+fn to_chain_err(e: impl std::fmt::Display) -> ChainCommunicationError {
+    ChainCommunicationError::from_other_str(&e.to_string())
+}
+
+fn block_hash_to_h256(hash_hex: &str) -> ChainResult<H256> {
+    let bytes = hex::decode(hash_hex).map_err(|e| {
+        ChainCommunicationError::from_other_str(&format!(
+            "Invalid block hash hex '{hash_hex}': {e}"
+        ))
+    })?;
+    Ok(H256::from_slice(&bytes))
+}
+
 #[async_trait]
 impl HyperlaneProvider for CardanoProvider {
     async fn get_block_by_height(&self, height: u64) -> ChainResult<BlockInfo> {
-        // Get the current finalized block to check if height is valid
-        let finalized =
-            self.provider.get_latest_block().await.map_err(|e| {
-                hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string())
-            })?;
+        let finalized = self
+            .provider
+            .get_latest_block()
+            .await
+            .map_err(to_chain_err)?;
 
         if height > finalized {
-            return Err(hyperlane_core::ChainCommunicationError::from_other_str(
-                &format!("Block {height} not yet finalized (current: {finalized})"),
-            ));
+            return Err(ChainCommunicationError::from_other_str(&format!(
+                "Block {height} not yet finalized (current: {finalized})"
+            )));
         }
 
+        let block = self
+            .provider
+            .get_block_by_height(height)
+            .await
+            .map_err(to_chain_err)?;
+
         Ok(BlockInfo {
-            hash: H256::zero(), // Would need to query Blockfrost for actual block hash
-            timestamp: 0,       // Would need to query Blockfrost for actual timestamp
-            number: height,
+            hash: block_hash_to_h256(&block.hash)?,
+            timestamp: block.time,
+            number: block.height,
         })
     }
 
     async fn get_txn_by_hash(&self, hash: &H512) -> ChainResult<TxnInfo> {
-        // For Cardano, transaction hashes are 32 bytes (H256), but the trait requires H512
-        // We'll use the first 32 bytes of the H512 as the Cardano tx hash
         let cardano_tx_hash = H256::from_slice(&hash.as_bytes()[0..32]);
 
-        // Note: This would require extending the Blockfrost provider to support transaction queries
         Ok(TxnInfo {
             hash: cardano_tx_hash.into(),
             gas_limit: U256::zero(),
@@ -82,44 +98,33 @@ impl HyperlaneProvider for CardanoProvider {
     }
 
     async fn is_contract(&self, _address: &H256) -> ChainResult<bool> {
-        // In Cardano, we can check if an address is a script address
-        // by examining the address type. For now, we'll assume all addresses
-        // could potentially be scripts (validators or minting policies)
         Ok(true)
     }
 
     async fn get_balance(&self, address: String) -> ChainResult<U256> {
-        // Query UTXOs at the address and sum the ADA balance
-        match self.provider.get_utxos_at_address(&address).await {
-            Ok(utxos) => {
-                let total_lovelace: u64 = utxos.iter().map(|u| u.lovelace()).sum();
-                Ok(U256::from(total_lovelace))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to get balance for Cardano address {}: {}",
-                    address,
-                    e
-                );
-                Ok(U256::zero())
-            }
-        }
+        let utxos = self
+            .provider
+            .get_utxos_at_address(&address)
+            .await
+            .map_err(to_chain_err)?;
+        let total_lovelace: u64 = utxos.iter().map(|u| u.lovelace()).sum();
+        Ok(U256::from(total_lovelace))
     }
 
     async fn get_chain_metrics(&self) -> ChainResult<Option<ChainInfo>> {
-        // Get the current finalized block number as a basic health metric
-        let latest_block_number =
-            self.provider.get_latest_block().await.map_err(|e| {
-                hyperlane_core::ChainCommunicationError::from_other_str(&e.to_string())
-            })?;
+        let block = self
+            .provider
+            .get_latest_block_info()
+            .await
+            .map_err(to_chain_err)?;
 
         Ok(Some(ChainInfo {
             latest_block: BlockInfo {
-                hash: H256::zero(), // Would need to query Blockfrost for actual block hash
-                timestamp: 0,       // Would need to query Blockfrost for actual timestamp
-                number: latest_block_number,
+                hash: block_hash_to_h256(&block.hash)?,
+                timestamp: block.time,
+                number: block.height,
             },
-            min_gas_price: None, // Cardano doesn't have a dynamic gas price mechanism like EIP-1559
+            min_gas_price: None,
         }))
     }
 }
