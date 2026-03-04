@@ -459,7 +459,14 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
             .collect();
         let results: Vec<Vec<_>> = futs.collect().await;
 
-        Ok(results.into_iter().flatten().collect())
+        // Filter out logs from the backfill window that fall before the
+        // requested range.  The sequence-aware cursor expects only events
+        // within `from..=to`; stale events would trigger gap-rewind.
+        Ok(results
+            .into_iter()
+            .flatten()
+            .filter(|(_, meta)| meta.block_number >= from as u64)
+            .collect())
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
