@@ -9,7 +9,7 @@ use derive_new::new;
 use eyre::Result;
 use prometheus::{IntCounter, IntGauge};
 use tokio::sync::RwLock;
-use tracing::trace;
+use tracing::{trace, warn};
 
 use hyperlane_base::{
     db::{HyperlaneDb, HyperlaneRocksDB},
@@ -76,6 +76,14 @@ impl DbLoaderExt for MerkleTreeDbLoader {
             // Increase the leaf index to move on to the next leaf
             self.leaf_index += 1;
         } else {
+            if self.leaf_index == 0 {
+                warn!(
+                    domain = %self.domain(),
+                    "No merkle tree insertion found at leaf_index=0. \
+                     Verify that the chain's index.from config is set to a block at or before \
+                     the mailbox deployment block. The relayer will be stuck until leaf 0 is indexed."
+                );
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Ok(())
