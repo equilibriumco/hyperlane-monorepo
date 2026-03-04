@@ -399,56 +399,18 @@ flowchart TB
 | Vault | Identifies token vault UTXOs |
 | Recipients | Each registered recipient has a state NFT |
 
-### 2. Replay Protection (Processed Message NFTs)
+### 2. Replay Protection (Sparse Merkle Tree in Mailbox Datum)
 
 **Problem**: Prevent the same message from being processed twice.
 
-**Solution**: Mint a unique NFT for each processed message, using the message ID as the asset name.
-
-```mermaid
-flowchart TB
-    subgraph Process["Message Processing"]
-        MSG["Incoming Message<br/>message_id: 0x123..."]
-        CHECK["Check: Does NFT exist<br/>with name = message_id?"]
-        MINT["Mint Processed Message NFT<br/>name: 0x123..."]
-        STORE["Store in UTXO at<br/>any address"]
-    end
-
-    subgraph Replay["Replay Attempt"]
-        MSG2["Same Message<br/>message_id: 0x123..."]
-        CHECK2["Check: Does NFT exist<br/>in reference inputs?"]
-        FOUND["NFT EXISTS!"]
-        REJECT["Reject: Already processed"]
-    end
-
-    MSG --> CHECK
-    CHECK -->|"Not found"| MINT
-    MINT --> STORE
-
-    MSG2 --> CHECK2
-    CHECK2 --> FOUND
-    FOUND --> REJECT
-
-    STORE -.->|"NFT now exists"| FOUND
-```
+**Solution**: The mailbox datum contains a sparse Merkle tree (SMT) root that tracks which message nonces have been delivered. On each `Process` transaction, the redeemer includes an SMT proof showing the nonce was not yet in the tree, along with the updated root after insertion. The on-chain validator verifies the proof and updates the stored root.
 
 **Benefits:**
 
-- O(1) lookup via Blockfrost asset query
-- Immutable proof of processing
-- No state bloat in mailbox datum
-- **Upgrade-safe**: Policy ID remains stable across mailbox upgrades (see below)
-
-**Why parameterized by `mailbox_policy_id` (not `mailbox_script_hash`)?**
-
-The `processed_message_nft` minting policy is parameterized by `mailbox_policy_id` (the one-shot NFT policy that identifies the mailbox state UTXO) rather than `mailbox_script_hash`. This is critical for upgrade safety:
-
-| Parameter             | Stability                      | Effect on Replay Protection                          |
-| --------------------- | ------------------------------ | ---------------------------------------------------- |
-| `mailbox_script_hash` | Changes with every code update | ❌ Old NFTs under different policy, replay possible  |
-| `mailbox_policy_id`   | Fixed at initialization        | ✅ Same policy forever, replay protection maintained |
-
-The `mailbox_policy_id` is determined once during mailbox initialization and never changes. This ensures that all processed message NFTs, regardless of when they were minted, are under the same policy and can be found during replay checks.
+- No separate minting policy or UTXOs needed for replay tracking
+- Compact: only a 32-byte root stored in the mailbox datum
+- Proofs are provided in the redeemer, keeping on-chain logic simple
+- The relayer maintains the SMT state off-chain and constructs proofs
 
 ### 3. Message Authentication (Verified Message NFTs)
 

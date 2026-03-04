@@ -45,11 +45,6 @@ This flow is mature and has been tested end-to-end with messages from Fuji (Aval
   - Per-origin domain validator sets and thresholds
   - Checkpoint signing format matching Hyperlane spec
 
-- **Processed Message NFT** (`contracts/validators/processed_message_nft.ak`): Replay protection
-
-  - Mints unique NFT per processed message
-  - Enables O(1) delivery status lookups
-
 - **Verified Message NFT** (`contracts/validators/verified_message_nft.ak`): Message authentication
   - Minted during Process for generic recipients
   - Delivered to recipient's script address with VerifiedMessageDatum
@@ -370,7 +365,6 @@ cat cardano/deployments/preview/deployment_info.json
 | `validators/vault.ak`                      | 286   | Token vault for collateral                   |
 | `validators/validator_announce.ak`         | 181   | Validator announcements                      |
 | `validators/verified_message_nft.ak`       | 109   | NFT for verified messages                    |
-| `validators/processed_message_nft.ak`      | 58    | NFT for processed messages                   |
 | `validators/state_nft.ak`                  | 39    | One-shot state NFT policy                    |
 | `validators/synthetic_token.ak`            | 32    | Synthetic token minting                      |
 

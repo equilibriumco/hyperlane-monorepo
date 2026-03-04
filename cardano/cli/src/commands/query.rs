@@ -428,38 +428,40 @@ async fn query_message(
         }
     };
 
-    // Look for processed message marker UTXO
-    // The message ID would be stored in a datum at the mailbox address
+    // Message delivery is tracked in the mailbox datum's sparse Merkle tree.
+    // Query the mailbox state UTXO to check the current message count.
     let utxos = client.get_utxos(&address).await?;
 
-    println!("\n{}", "Searching for processed message...".cyan());
+    println!("\n{}", "Checking mailbox state...".cyan());
+
+    let msg_id_normalized = message_id
+        .to_lowercase()
+        .strip_prefix("0x")
+        .unwrap_or(message_id)
+        .to_string();
 
     for utxo in &utxos {
         if let Some(datum) = &utxo.inline_datum {
-            // Check if this is a ProcessedMessageDatum with matching message_id
             if let Some(fields) = datum.get("fields").and_then(|f| f.as_array()) {
-                if let Some(id) = fields
-                    .get(0)
-                    .and_then(|i| i.get("bytes"))
-                    .and_then(|b| b.as_str())
-                {
-                    if id.to_lowercase()
-                        == message_id
-                            .to_lowercase()
-                            .strip_prefix("0x")
-                            .unwrap_or(message_id)
-                    {
-                        println!("\n{}", "Message PROCESSED:".green().bold());
-                        println!("  UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
-                        return Ok(());
-                    }
+                // Mailbox datum has message_count as an integer field
+                if let Some(count) = fields.get(1).and_then(|f| f.get("int")) {
+                    println!("\n{}", "Mailbox state found:".green().bold());
+                    println!("  UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
+                    println!("  Messages processed: {}", count);
+                    println!(
+                        "\n  Note: Individual message delivery status for {} is tracked",
+                        msg_id_normalized
+                    );
+                    println!("  in the mailbox datum's sparse Merkle tree and can be");
+                    println!("  verified by examining process transaction redeemers.");
+                    return Ok(());
                 }
             }
         }
     }
 
-    println!("\n{}", "Message NOT YET PROCESSED".yellow());
-    println!("The message may be pending or not yet relayed to Cardano.");
+    println!("\n{}", "Mailbox state UTXO not found".yellow());
+    println!("Check the mailbox address or deployment status.");
 
     Ok(())
 }

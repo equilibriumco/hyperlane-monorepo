@@ -71,10 +71,13 @@ Both conditions must hold: signer in validator set AND not already counted.
 
 ### S2 — Replay protection (depth-in-defense gap)
 
+**Status:** Superseded. The `processed_message_nft` policy has been removed entirely.
+Replay protection is now solely via the SMT non-membership proof in the mailbox validator.
+
 **Severity:** Medium (mitigated by SMT; low practical exploitability)
 
-**Where:** `cardano/contracts/validators/mailbox.ak:164-170`,
-`cardano/contracts/validators/processed_message_nft.ak:35-71`
+**Where:** `cardano/contracts/validators/mailbox.ak:164-170`
+(previously also `processed_message_nft.ak`, now removed)
 
 **Finding:** The original report said "`is_message_processed` only checks `tx.reference_inputs`" — that
 description is of an older architecture. The current code uses an **SMT non-membership proof**:
@@ -94,29 +97,9 @@ let new_tree_root =
 Replay is cryptographically blocked: generating a valid non-membership proof for a key already in
 the SMT is infeasible. Old proofs fail because the root has changed.
 
-**Remaining gap:** `processed_message_nft` policy does not verify the minted asset name equals
-`message_id`, and does not enforce asset-name uniqueness across TXs. The NFT is
-informational/queryability only — not the actual replay guard. Two independent submissions could
-each mint a processed NFT with the same asset name (though the SMT proof would reject the second TX
-anyway).
-
-**Plan (defense-in-depth, not blocking):**
-Add an on-chain uniqueness check in the minting policy so the NFT independently proves
-non-reprocessing:
-
-```aiken
-// processed_message_nft.ak — add inside mint validator:
-// Require that the minted asset_name matches the message_id in the mailbox redeemer
-// (currently no such check exists).
-let mint_pairs = dict.to_pairs(own_mints)
-expect [Pair(asset_name, 1)] = mint_pairs  // exactly one, quantity=1
-// Add: verify asset_name == message_id extracted from the Mailbox Process redeemer
-```
-
-Full implementation requires reading the mailbox redeemer from `tx.redeemers` inside the NFT
-policy, which is straightforward in Aiken.
-
-**Priority:** Implement post-preprod if security posture requires it. Not blocking.
+**Resolution:** The `processed_message_nft` policy has been removed. The SMT in the mailbox
+datum is the sole replay protection mechanism, which is cryptographically sound.
+No additional defense-in-depth is needed since there is no separate NFT minting policy.
 
 ---
 
@@ -124,29 +107,9 @@ policy, which is straightforward in Aiken.
 
 ### B1 — Delivered-message indexer uses wrong address `mailbox_policy_id` ⚠️ HIGH
 
-**Where:** `rust/main/chains/hyperlane-cardano/src/mailbox_indexer.rs:498`
-
-**Code (buggy):**
-```rust
-let processed_script_address = self
-    .provider
-    .script_hash_to_address(&self.conf.mailbox_policy_id)  // ← wrong field
-    .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
-```
-
-`mailbox_policy_id` is the mailbox state-NFT minting policy hash. The address for querying
-processed-message markers is derived from `processed_messages_script_hash`.
-
-**Impact:** Scraper queries the wrong on-chain address → zero delivered messages indexed → metrics
-and analytics broken.
-
-**Fix (1 line):**
-```rust
-let processed_script_address = self
-    .provider
-    .script_hash_to_address(&self.conf.processed_messages_script_hash)  // ← correct
-    .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
-```
+**Status:** Superseded. The `processed_message_nft` mechanism has been removed entirely.
+Delivery status is now determined by extracting process redeemers from transactions,
+not by querying processed message marker UTXOs.
 
 ---
 
@@ -562,7 +525,7 @@ relayer config example.
 
 1. **C2** — Remove testnet private keys from git; rotate exposed keys; add to `.gitignore`.
 2. **B8** — Redeploy `WADA` collateral with `scale=1` (`FixWadaCollateral.s.sol`).
-3. **B1** — 1-line fix: `mailbox_indexer.rs:498` → use `processed_messages_script_hash`.
+3. **B1** — Superseded: `processed_message_nft` removed; delivery tracked via process redeemers.
 4. **B2** — Operational: set correct `CARDANO_INDEX_FROM`; add startup warning in `MerkleTreeDbLoader`.
 5. **C1** — Implement real address derivation in `ChainSigner for Keypair`.
 6. **B4** — Add bounds check in `convert_wire_to_local_amount`.
@@ -580,6 +543,6 @@ relayer config example.
 
 13. **B7** — Implement real chain metrics (block hash, timestamp).
 14. **Q3** — Replace `unwrap`/`expect` in production paths.
-15. **S2** — Add defense-in-depth uniqueness check to `processed_message_nft` policy.
+15. **S2** — Superseded: `processed_message_nft` removed; SMT is the sole replay guard.
 16. **Q4–Q6** — Code quality cleanup (consolidate helpers, split modules, unify domain IDs).
 17. **O2–O4** — UX improvements.

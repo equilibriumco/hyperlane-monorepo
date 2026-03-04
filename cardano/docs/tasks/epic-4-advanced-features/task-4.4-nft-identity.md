@@ -30,7 +30,7 @@ When the mailbox code changes:
 
 The existing **state NFT** already serves as a stable identity token. Its policy ID is derived from a one-shot minting policy (seed UTXO), so it never changes across upgrades. Other contracts are parameterized by this state NFT policy, not the validator script hash.
 
-The `Migrate` redeemer moves the state UTXO (with datum + state NFT) from the old script address to a new one. Since the state NFT policy stays constant, all dependent contracts (processed_message_nft, verified_message_nft, warp routes) continue working without redeployment.
+The `Migrate` redeemer moves the state UTXO (with datum + state NFT) from the old script address to a new one. Since the state NFT policy stays constant, all dependent contracts (verified_message_nft, warp routes) continue working without redeployment.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

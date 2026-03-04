@@ -6,12 +6,6 @@
     "address": "addr_test1wrx7eegv5fzel8qyetutdtsdge2dmfya889w09tqcweza7spc2yxk",
     "appliedParameters": [
       {
-        "name": "processed_messages_nft_policy",
-        "paramType": "PolicyId",
-        "value": "a571dc713a4ac21e6be5e7b1c0f5cb4bab9d42cd0fc8beed381f3ae3",
-        "description": "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
-      },
-      {
         "name": "verified_message_nft_policy",
         "paramType": "PolicyId",
         "value": "3e0ad9a9d677a8158c935dd02985b8300dcc777ad8d91ea0afa7fb4b",

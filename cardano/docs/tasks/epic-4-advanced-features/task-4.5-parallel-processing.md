@@ -2,7 +2,9 @@
 
 # Task 4.5: Parallel Inbound Processing
 
-**Status:** ⬜ Not Started
+**Status:** Superseded - the `processed_message_nft` mechanism described here was replaced with
+sparse Merkle tree (SMT) replay protection in the mailbox datum. Parallel processing is achieved
+through reference inputs for mailbox and ISM, with the SMT root updated in the mailbox datum.
 **Complexity:** High
 **Depends On:** Task 4.4 (NFT-Based Contract Identity)
 

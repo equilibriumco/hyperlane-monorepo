@@ -65,7 +65,7 @@ ls cardano/deployments/   # should show no preview/ subdirectory (or error if em
 cli deploy extract
 ```
 
-**Verify:** `deployment_info.json` populated with unparameterized hashes for `mailbox`, `multisig_ism`, `igp`, `validator_announce`, `warp_route`, `processed_message_nft`, `verified_message_nft`, `canonical_config_nft`.
+**Verify:** `deployment_info.json` populated with unparameterized hashes for `mailbox`, `multisig_ism`, `igp`, `validator_announce`, `warp_route`, `verified_message_nft`, `canonical_config_nft`.
 
 **Record in runbook:** mailbox hash, ISM hash, IGP hash.
 
@@ -685,9 +685,9 @@ While executing the above, note friction points for the FIXME.md:
 
 **Cardano delivery cost per message:**
 ```
-fee = tx_fee + lovelace_locked_in_processed_marker(1.5 ADA) + lovelace_locked_in_verified_msg_nft
+fee = tx_fee + lovelace_locked_in_verified_msg_nft
 verified_msg_utxo ≈ 3.9 ADA (5B body) to 23.9 ADA (5000B body)
-total_delivery_cost ≈ fee + 1.5 ADA + verified_msg_utxo
+total_delivery_cost ≈ fee + verified_msg_utxo
 ```
 
 **Relayer profitability (Sepolia→Cardano):**

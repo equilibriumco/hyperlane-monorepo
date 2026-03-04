@@ -132,7 +132,6 @@
           rectangle "Multisig ISM Validator" <<onchain_validator>> as ism_validator
           rectangle "Mailbox Validator" <<onchain_validator>> as mailbox_validator
           rectangle "Recipient Validator" <<onchain_validator>> as recipient_validator
-          rectangle "Processed Messages Marker" <<onchain_validator>> as processed_marker
       }
   }
 
@@ -181,9 +180,6 @@
   ' Security validation chain - the key relationships
   ism_validator -right-> mailbox_validator #green;line.bold : "verifies ISM NFT in inputs"
   mailbox_validator -right-> recipient_validator #green;line.bold : "verifies Mailbox NFT in inputs"
-
-  ' Flow arrows - Marker creation
-  mailbox_validator -down-> processed_marker : "create marker"
 
   ' ISM verification note
   note bottom of ism_validator #fff5f5

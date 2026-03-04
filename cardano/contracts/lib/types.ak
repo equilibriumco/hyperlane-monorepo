@@ -193,11 +193,6 @@ pub type MailboxRedeemer {
   MigrateMailbox { new_address: Address }
 }
 
-/// Processed message marker (separate UTXOs to avoid state bloat)
-pub type ProcessedMessageDatum {
-  message_id: ByteArray,
-}
-
 // ============================================================================
 // ISM Types (Multisig ISM)
 // ============================================================================

@@ -40,12 +40,9 @@ One review finding (Codex) required a correction to B3's cache logic.
 
 ### B1 — Delivered-message indexer uses wrong address (HIGH)
 
-**File:** `rust/main/chains/hyperlane-cardano/src/mailbox_indexer.rs:498`
-
-**Change:** `self.conf.mailbox_policy_id` → `self.conf.processed_messages_script_hash`
-
-**Why:** The indexer queried the mailbox script address instead of the processed-message
-NFT script address, so delivered messages were never found.
+**Note:** This fix has been superseded. The `processed_message_nft` mechanism was removed
+entirely in favor of sparse Merkle tree (SMT) replay protection in the mailbox datum.
+Delivery status is now determined by extracting process redeemers from transactions.
 
 ---
 

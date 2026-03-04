@@ -36,7 +36,7 @@ contract DeploySepoliaIGP is Script {
     // tokenExchangeRate = 5.278e14 * 1e10 / (86000 * 44) = 1.395e18
     uint128 constant DEFAULT_TOKEN_EXCHANGE_RATE = 1_395_000_000_000_000_000;
 
-    // Base cost in Cardano gas units (fee + processed_marker + verified_msg overhead)
+    // Base cost in Cardano gas units (fee + verified_msg overhead)
     uint96 constant DEFAULT_GAS_OVERHEAD = 86_000;
 
     function run() external {
