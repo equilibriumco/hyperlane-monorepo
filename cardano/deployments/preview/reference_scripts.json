@@ -1,72 +1,16 @@
 [
   {
     "script_name": "mailbox",
-    "script_hash": "b666224149ee55988a143c7630d32bca69240f9d6e4074275aa95313",
-    "tx_hash": "c0fc301ffc7716429345915554bd20888030a638f8fd3c38262ba3fb7dc8bcdb",
+    "script_hash": "cdece50ca2459f9c04caf8b6ae0d4654dda49d39cae79560c3b22efa",
+    "tx_hash": "45b22ebc428c0a354b9f0c1ac47c113a6f267fba006562a2c7bc7a71f46cbad9",
     "output_index": 0,
-    "lovelace": 23000000
-  },
-  {
-    "script_name": "multisig_ism",
-    "script_hash": "4032f381de830d13c6d150376b58d59f0a7f1c61b79da4d1ac55faef",
-    "tx_hash": "f29e74afa885ed441227cb99cf94cb2f33ae3e933a9cca68095f7ffc89cd45eb",
-    "output_index": 0,
-    "lovelace": 15000000
-  },
-  {
-    "script_name": "igp",
-    "script_hash": "54ae86f5f086dde832cc26bfa7016e9b7f653770b0d34bc969a4051c",
-    "tx_hash": "252e41415ece3b757a912e7f7903789c96457f97ce01e1fe7265d5dc7cff702c",
-    "output_index": 0,
-    "lovelace": 14000000
-  },
-  {
-    "script_name": "verified_message_nft_applied",
-    "script_hash": "4d7c04b6fc0b433beadfb40e98fde60f01e58573e1d03e3bd52046dc",
-    "tx_hash": "ba17efa7dd125cea7cf4c0f35d43c98144700f35a7526b7f7964cae198d6c9ca",
-    "output_index": 0,
-    "lovelace": 5000000
-  },
-  {
-    "script_name": "processed_message_nft_applied",
-    "script_hash": "5cd49aefec78205beb4bd522694188cfb1a1310c5c38411ce262b18b",
-    "tx_hash": "4e6feefac083ee5f03af7f3695ec06cb1fa73037016dca63ac4250d65c5f1cfb",
-    "output_index": 0,
-    "lovelace": 4000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "f81818c739b109d06782ae082791857616b5355cd917f7bf813c4dbc",
-    "tx_hash": "ec8f2700727a74d636c58f00a13cfaf5dfbd334aaa2fcaeb687da6aaf1a10502",
-    "output_index": 0,
-    "lovelace": 26000000
+    "lovelace": 30000000
   },
   {
     "script_name": "multisig_ism",
     "script_hash": "48b62ff9474899cd6ffa7abcadd9e07634a6feb1e7f03b3a0253d14c",
-    "tx_hash": "63f702f22a71911c9ce3208525ddbb719b919403edd38654286b78d250426d53",
+    "tx_hash": "75a5893bd12ac086f5bcc193bb974318c2abbdaa7fc11f7b8bf30ec316a0a1f4",
     "output_index": 0,
     "lovelace": 15000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "6b295aebe72c9c2f2a7249b8dea3b9350892fcb78fa8b81433c87617",
-    "tx_hash": "ee176eeb020fbda15d0ca5e27b9d2f6c067590971863ebfd9628e7db02cee534",
-    "output_index": 0,
-    "lovelace": 30000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "4765e0adb88a4f82fba26d27e250abad7dfdc7c94f41a3a5d7de5564",
-    "tx_hash": "ce16a57aba2c1dcb621f3cf9f0d1672b6da5b10ca24cbf66650d4bc3b22ad92a",
-    "output_index": 0,
-    "lovelace": 30000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "c9d97685d6700a10a3f941d272c128c55d75f25db8bbed92b8fc0297",
-    "tx_hash": "41f2d56202c2bc0aa5116e3a2322ba4b0a7e4977a23566184d7b1843db59980d",
-    "output_index": 0,
-    "lovelace": 30000000
   }
 ]

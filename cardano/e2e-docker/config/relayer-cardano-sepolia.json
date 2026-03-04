@@ -86,7 +86,8 @@
   "destinationChainNames": "cardanopreview,sepolia",
   "gasPaymentEnforcement": [
     {
-      "type": "none"
+      "type": "onChainFeeQuoting",
+      "gasFraction": "1/1"
     }
   ],
   "metrics": {
@@ -94,5 +95,5 @@
   },
   "originChainNames": "cardanopreview,sepolia",
   "relayChains": "cardanopreview,sepolia",
-  "blacklist": "[]"
+  "blacklist": "[{\"messageid\": \"0x32d01904b5e1b2cfd5a953d4a32f628d38a16e73a8c46ac0f130f81ce40a9d2b\"}, {\"messageid\": \"0x6e2440e5525aa0c25aec7750c093e6e09318ece46a3cac337ac153accf1f8d4f\"}, {\"messageid\": \"0xd8feb1026e60a5b59cac079b07e15ba42e90b1ee743cbe08b06e6617c39c3bdd\"}, {\"messageid\": \"0x44c371c600462cebb394d2c203c07e64455d17b0bc1775c19500dba794a7bbdf\"}]"
 }
