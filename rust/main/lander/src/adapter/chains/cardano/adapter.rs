@@ -303,43 +303,12 @@ impl AdaptsChain for CardanoAdapter {
 
     async fn reverted_payloads(
         &self,
-        tx: &Transaction,
+        _tx: &Transaction,
     ) -> Result<Vec<PayloadDetails>, LanderError> {
-        // Check if the message was actually delivered by querying the mailbox
-        let precursor = tx.precursor();
-
-        let message = match decode_hyperlane_message(&precursor.message_bytes) {
-            Ok(m) => m,
-            Err(_) => return Ok(tx.payload_details.clone()),
-        };
-
-        // Check if message was delivered
-        let message_id = message.id();
-
-        // Prefer NFT lookup (O(1)) if processedMessagesNftPolicyId is configured
-        let delivered = if let Some(ref nft_policy_id) =
-            self.connection_conf.processed_messages_nft_policy_id
-        {
-            self.provider
-                .is_message_delivered_by_nft(nft_policy_id, &message_id.0)
-                .await
-                .unwrap_or(false)
-        } else {
-            // Fallback: Scan UTXOs at processed_messages_script address (O(n))
-            self.provider
-                .is_message_delivered(
-                    &self.connection_conf.processed_messages_script_hash,
-                    &message_id.0,
-                )
-                .await
-                .unwrap_or(false)
-        };
-
-        if delivered {
-            Ok(Vec::new())
-        } else {
-            Ok(tx.payload_details.clone())
-        }
+        // On Cardano, transactions are atomic: if a TX was included on-chain,
+        // ALL its effects are committed (no partial reverts). The finality
+        // stage already handles TXs that never made it on-chain.
+        Ok(Vec::new())
     }
 
     fn estimated_block_time(&self) -> &Duration {
