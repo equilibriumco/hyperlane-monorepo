@@ -1,9 +1,10 @@
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/collection/pairs
 use aiken/primitive/bytearray
 use cardano/assets
-use cardano/transaction.{Transaction}
-use types.{PolicyId}
+use cardano/transaction.{Spend, Transaction}
+use types.{MailboxRedeemer, PolicyId, Process}
 
 /// Processed Message NFT minting policy
 /// Allows minting one NFT per processed message for efficient off-chain tracking
@@ -15,6 +16,8 @@ use types.{PolicyId}
 /// Minting is allowed when:
 /// - The mailbox NFT (from mailbox_policy_id) is in transaction inputs
 /// - Exactly one NFT is minted with a 32-byte asset name (the message_id)
+/// - The minted asset name matches the message_id from the mailbox Process redeemer
+///   (defense-in-depth: the SMT in the mailbox is the primary replay guard)
 ///
 /// This allows the relayer to efficiently query processed messages using
 /// Blockfrost's asset API instead of scanning all UTXOs at an address.
@@ -34,11 +37,9 @@ use types.{PolicyId}
 /// so requiring it in inputs guarantees the real mailbox validator runs.
 validator processed_message_nft(mailbox_policy_id: PolicyId) {
   mint(_redeemer: Data, own_policy: ByteArray, tx: Transaction) {
-    // 1. Verify mailbox NFT is in transaction inputs
-    // The mailbox NFT can only exist at the real mailbox UTXO (one-shot minting),
-    // so its presence guarantees the mailbox validator is running
-    let mailbox_involved =
-      list.any(
+    // 1. Find the mailbox input (holds the one-shot mailbox NFT)
+    expect Some(mailbox_input) =
+      list.find(
         tx.inputs,
         fn(input) {
           let policy_tokens = assets.tokens(input.output.value, mailbox_policy_id)
@@ -46,23 +47,22 @@ validator processed_message_nft(mailbox_policy_id: PolicyId) {
         },
       )
 
-    // 2. Verify exactly one NFT is minted with this policy
-    // and the asset name is 32 bytes (message_id length)
+    // 2. Extract message_id from the mailbox's Process redeemer.
+    //    Defense-in-depth: the SMT in the mailbox is the primary replay guard,
+    //    but this check independently binds the NFT asset name to the processed
+    //    message_id so the token alone proves which message was handled.
+    expect Some(mailbox_redeemer_data) =
+      pairs.get_first(tx.redeemers, Spend(mailbox_input.output_reference))
+    expect mailbox_redeemer: MailboxRedeemer = mailbox_redeemer_data
+    expect Process { message_id, .. } = mailbox_redeemer
+
+    // 3. Verify exactly one NFT is minted whose 32-byte asset name equals
+    //    the message_id from the mailbox redeemer
     let own_mints = assets.tokens(tx.mint, own_policy)
-    let mint_count = list.length(dict.to_pairs(own_mints))
+    expect [Pair(minted_asset_name, 1)] = dict.to_pairs(own_mints)
+    expect bytearray.length(minted_asset_name) == 32
 
-    // Check that we're minting exactly 1 token with 32-byte asset name
-    let valid_mint =
-      list.any(
-        dict.to_pairs(own_mints),
-        fn(pair) {
-          let Pair(asset_name, quantity) = pair
-          // Asset name should be 32 bytes (message_id) and quantity should be 1
-          bytearray.length(asset_name) == 32 && quantity == 1
-        },
-      )
-
-    mailbox_involved && mint_count == 1 && valid_mint
+    minted_asset_name == message_id
   }
 
   else(_) {
