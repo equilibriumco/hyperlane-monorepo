@@ -12,6 +12,7 @@ use crate::utils::cbor::{
     build_migrate_redeemer,
 };
 use crate::utils::context::CliContext;
+use crate::utils::types::ScriptInfo;
 
 #[derive(Args)]
 pub struct MailboxArgs {
@@ -403,14 +404,7 @@ async fn dispatch(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
-        if mailbox_info.applied_parameters.len() < 2 {
-            return Err(anyhow!(
-                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
-                mailbox_info.applied_parameters.len()
-            ));
-        }
-        let vm_policy = &mailbox_info.applied_parameters[0].value;
-        let ism_nft = &mailbox_info.applied_parameters[1].value;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
@@ -901,14 +895,7 @@ async fn set_default_ism(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
-        if mailbox_info.applied_parameters.len() < 2 {
-            return Err(anyhow!(
-                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
-                mailbox_info.applied_parameters.len()
-            ));
-        }
-        let vm_policy = &mailbox_info.applied_parameters[0].value;
-        let ism_nft = &mailbox_info.applied_parameters[1].value;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
@@ -1075,14 +1062,7 @@ async fn migrate(
                 .mailbox
                 .as_ref()
                 .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-            if mailbox_info.applied_parameters.len() < 2 {
-                return Err(anyhow!(
-                    "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
-                    mailbox_info.applied_parameters.len()
-                ));
-            }
-            let vm_policy = &mailbox_info.applied_parameters[0].value;
-            let ism_nft = &mailbox_info.applied_parameters[1].value;
+            let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
             let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
             let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
             let applied = crate::utils::plutus::apply_validator_params(
@@ -1269,14 +1249,7 @@ async fn migrate(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-        if mailbox_info.applied_parameters.len() < 2 {
-            return Err(anyhow!(
-                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
-                mailbox_info.applied_parameters.len()
-            ));
-        }
-        let vm_policy = &mailbox_info.applied_parameters[0].value;
-        let ism_nft = &mailbox_info.applied_parameters[1].value;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
@@ -1711,4 +1684,22 @@ fn extract_bytes_hex(data: &PlutusData) -> Result<String> {
         }
         _ => Err(anyhow!("Expected bytes")),
     }
+}
+
+fn find_mailbox_params(mailbox_info: &ScriptInfo) -> Result<(&str, &str)> {
+    let vm_policy = mailbox_info
+        .applied_parameters
+        .iter()
+        .find(|p| p.name == "verified_message_nft_policy")
+        .map(|p| p.value.as_str())
+        .ok_or_else(|| {
+            anyhow!("verified_message_nft_policy not found in mailbox.appliedParameters")
+        })?;
+    let ism_nft = mailbox_info
+        .applied_parameters
+        .iter()
+        .find(|p| p.name == "ism_nft_policy")
+        .map(|p| p.value.as_str())
+        .ok_or_else(|| anyhow!("ism_nft_policy not found in mailbox.appliedParameters"))?;
+    Ok((vm_policy, ism_nft))
 }
