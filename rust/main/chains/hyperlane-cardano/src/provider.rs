@@ -49,6 +49,12 @@ fn block_hash_to_h256(hash_hex: &str) -> ChainResult<H256> {
             "Invalid block hash hex '{hash_hex}': {e}"
         ))
     })?;
+    if bytes.len() != 32 {
+        return Err(ChainCommunicationError::from_other_str(&format!(
+            "Block hash has unexpected length {} (expected 32): '{hash_hex}'",
+            bytes.len()
+        )));
+    }
     Ok(H256::from_slice(&bytes))
 }
 

@@ -330,12 +330,13 @@ impl HyperlaneTxBuilder {
         }
     }
 
-    /// Evict all inputs of a failed TX from the recently-spent cache.
+    /// Mark all inputs of a failed TX as recently-spent.
     ///
-    /// When `BadInputsUTxO` signals that cached inputs are already spent on-chain,
-    /// immediate eviction lets the next attempt query Blockfrost for fresh UTxOs
-    /// rather than waiting for the TTL to expire.
-    async fn evict_spent_utxos(&self, signed_tx: &[u8]) {
+    /// When `BadInputsUTxO` signals that some inputs are already spent on-chain,
+    /// Blockfrost may still report them as available (25-40s index lag).
+    /// Adding them to `recently_spent` prevents the next rebuild from
+    /// re-selecting the same stale UTxOs.
+    async fn mark_bad_inputs_as_spent(&self, signed_tx: &[u8]) {
         use pallas_primitives::conway::Tx;
         use pallas_primitives::Fragment;
         let inputs: Vec<(String, u32)> = Tx::decode_fragment(signed_tx)
@@ -352,12 +353,13 @@ impl HyperlaneTxBuilder {
             return;
         }
         let mut spent = self.recently_spent.lock().await;
-        for key in &inputs {
-            spent.remove(key);
+        let now = Instant::now();
+        for (hash, idx) in &inputs {
+            spent.insert((hash.clone(), *idx), now);
         }
         warn!(
-            evicted = inputs.len(),
-            "Evicted stale UTxOs from recently_spent cache after BadInputsUTxO"
+            marked = inputs.len(),
+            "Marked BadInputsUTxO inputs as recently-spent to prevent reselection"
         );
     }
 
@@ -1410,7 +1412,7 @@ impl HyperlaneTxBuilder {
                     self.submit_transaction(&signed_tx).await?
                 } else {
                     if is_retryable_bad_inputs_error(&submit_err) {
-                        self.evict_spent_utxos(&signed_tx).await;
+                        self.mark_bad_inputs_as_spent(&signed_tx).await;
                     }
                     return Err(submit_err);
                 }
