@@ -1328,6 +1328,11 @@ impl HyperlaneTxBuilder {
                 }
                 Err(e) => {
                     warn!("Fee evaluation failed: {e}");
+                    // Evaluation can fail when inputs are already spent on-chain
+                    // but Blockfrost still reports them (25-40s index lag).
+                    // Mark them as spent to prevent the next rebuild from
+                    // re-selecting the same stale UTxOs.
+                    self.mark_bad_inputs_as_spent(&signed_tx).await;
                     // Use cached ExUnits to compute a proper fee and rebuild.
                     // The first build already used cached ExUnits for correct script
                     // budgets but still has a 3M placeholder fee.
@@ -1716,6 +1721,7 @@ impl HyperlaneTxBuilder {
                 }
                 Err(e) => {
                     warn!("Batch TX {i}: evaluation failed, using cached/static ExUnits: {e}");
+                    self.mark_bad_inputs_as_spent(&signed_tx).await;
                 }
             }
 
