@@ -353,13 +353,11 @@ impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
 
 impl ChainSigner for hyperlane_cardano::Keypair {
     fn address_string(&self) -> String {
-        // TODO: Implement proper Cardano address derivation
-        "cardano_address_placeholder".to_string()
+        self.address_bech32_testnet()
     }
 
     fn address_h256(&self) -> H256 {
-        // TODO: Implement proper Cardano address to H256 conversion
-        H256::zero()
+        self.address_h256()
     }
 }
 

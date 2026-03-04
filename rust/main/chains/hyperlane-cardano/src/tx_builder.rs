@@ -302,8 +302,8 @@ impl HyperlaneTxBuilder {
         self.last_tx_state.lock().await.clone()
     }
 
-    /// TTL for recently-spent UTxO cache entries (2× Blockfrost lag)
-    const SPENT_UTXO_CACHE_TTL_SECS: u64 = 120;
+    /// TTL for recently-spent UTxO cache entries (1× Blockfrost lag)
+    const SPENT_UTXO_CACHE_TTL_SECS: u64 = 60;
 
     /// Record all inputs of a just-submitted TX as recently-spent.
     /// Prevents Blockfrost's 25-40s UTXO index lag from causing
@@ -328,6 +328,37 @@ impl HyperlaneTxBuilder {
         for (hash, idx) in inputs {
             spent.insert((hash, idx), now);
         }
+    }
+
+    /// Evict all inputs of a failed TX from the recently-spent cache.
+    ///
+    /// When `BadInputsUTxO` signals that cached inputs are already spent on-chain,
+    /// immediate eviction lets the next attempt query Blockfrost for fresh UTxOs
+    /// rather than waiting for the TTL to expire.
+    async fn evict_spent_utxos(&self, signed_tx: &[u8]) {
+        use pallas_primitives::conway::Tx;
+        use pallas_primitives::Fragment;
+        let inputs: Vec<(String, u32)> = Tx::decode_fragment(signed_tx)
+            .map(|tx| {
+                tx.transaction_body
+                    .inputs
+                    .iter()
+                    .map(|i| (hex::encode(i.transaction_id.as_ref()), i.index as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if inputs.is_empty() {
+            return;
+        }
+        let mut spent = self.recently_spent.lock().await;
+        for key in &inputs {
+            spent.remove(key);
+        }
+        warn!(
+            evicted = inputs.len(),
+            "Evicted stale UTxOs from recently_spent cache after BadInputsUTxO"
+        );
     }
 
     /// Filter UTxOs that appear in the recently-spent cache.
@@ -905,7 +936,7 @@ impl HyperlaneTxBuilder {
                     token_msg.amount,
                     decimals.remote_decimals,
                     decimals.local_decimals,
-                );
+                )?;
                 info!(
                     "Decimal conversion: {} (wire {} dec) -> {} (local {} dec)",
                     token_msg.amount,
@@ -1001,7 +1032,7 @@ impl HyperlaneTxBuilder {
                 token_msg.amount,
                 decimals.remote_decimals,
                 decimals.local_decimals,
-            );
+            )?;
 
             info!(
                 "TokenMessage recipient (32 bytes): {}",
@@ -1378,6 +1409,9 @@ impl HyperlaneTxBuilder {
                     actual_fee = exact_fee;
                     self.submit_transaction(&signed_tx).await?
                 } else {
+                    if is_retryable_bad_inputs_error(&submit_err) {
+                        self.evict_spent_utxos(&signed_tx).await;
+                    }
                     return Err(submit_err);
                 }
             }
@@ -5517,21 +5551,27 @@ pub fn encode_warp_route_redeemer(
 ///
 /// This function takes U256 to handle large wire amounts (e.g., 35 * 10^18)
 /// and returns u64 after decimal conversion (which brings it into u64 range).
-fn convert_wire_to_local_amount(wire_amount: U256, remote_decimals: u8, local_decimals: u8) -> u64 {
-    if local_decimals >= remote_decimals {
-        // Upsample: multiply by 10^(local_decimals - remote_decimals)
+fn convert_wire_to_local_amount(
+    wire_amount: U256,
+    remote_decimals: u8,
+    local_decimals: u8,
+) -> Result<u64, TxBuilderError> {
+    let result = if local_decimals >= remote_decimals {
         let multiplier = U256::from(10u64).pow(U256::from(local_decimals - remote_decimals));
-        let result = wire_amount.saturating_mul(multiplier);
-        // After upsampling, result should fit in u64 for reasonable amounts
-        result.as_u64()
+        wire_amount.saturating_mul(multiplier)
     } else {
-        // Downsample: divide by 10^(remote_decimals - local_decimals)
-        // This is the common case (18 decimals -> 6 decimals)
-        // Division brings large U256 values into u64 range
         let divisor = U256::from(10u64).pow(U256::from(remote_decimals - local_decimals));
-        let result = wire_amount / divisor;
-        result.as_u64()
+        wire_amount / divisor
+    };
+
+    if result > U256::from(u64::MAX) {
+        return Err(TxBuilderError::Encoding(format!(
+            "Amount overflow: converted value {} exceeds u64::MAX (wire={}, remote_dec={}, local_dec={})",
+            result, wire_amount, remote_decimals, local_decimals
+        )));
     }
+
+    Ok(result.as_u64())
 }
 
 /// Build a warp transfer body with the given recipient and amount
@@ -5986,17 +6026,17 @@ mod tests {
         // EVM (18 dec) -> Cardano ADA (6 dec): scale = 10^12
         // 1 unit in wire format (1e18) = 1_000_000 local units
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 6),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 6).unwrap(),
             1_000_000
         );
         // 1e12 wire = 1 local unit
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000u64), 18, 6),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000u64), 18, 6).unwrap(),
             1
         );
         // 5e18 wire = 5_000_000 local units
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 6),
+            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 6).unwrap(),
             5_000_000
         );
     }
@@ -6006,12 +6046,12 @@ mod tests {
         // 18 dec -> 8 decimal token: scale = 10^10
         // 1 unit in wire format (1e18) = 1e8 local units
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 8),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 8).unwrap(),
             100_000_000
         );
         // 1e10 wire = 1 local unit
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(10_000_000_000u64), 18, 8),
+            convert_wire_to_local_amount(U256::from(10_000_000_000u64), 18, 8).unwrap(),
             1
         );
     }
@@ -6020,14 +6060,18 @@ mod tests {
     fn test_convert_wire_to_local_same_decimals() {
         // Same decimals: no conversion needed
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 18),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 18)
+                .unwrap(),
             1_000_000_000_000_000_000
         );
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(12345u64), 6, 6),
+            convert_wire_to_local_amount(U256::from(12345u64), 6, 6).unwrap(),
             12345
         );
-        assert_eq!(convert_wire_to_local_amount(U256::from(100u64), 8, 8), 100);
+        assert_eq!(
+            convert_wire_to_local_amount(U256::from(100u64), 8, 8).unwrap(),
+            100
+        );
     }
 
     #[test]
@@ -6035,12 +6079,12 @@ mod tests {
         // 18 dec -> 0 decimal token: scale = 10^18
         // 1e18 wire = 1 local unit
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 0),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 0).unwrap(),
             1
         );
         // 5e18 wire = 5 local units
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 0),
+            convert_wire_to_local_amount(U256::from(5_000_000_000_000_000_000u64), 18, 0).unwrap(),
             5
         );
     }
@@ -6049,11 +6093,11 @@ mod tests {
     fn test_convert_wire_to_local_upsample() {
         // 6 dec remote -> 18 dec local: multiply by 10^12
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000u64), 6, 18),
+            convert_wire_to_local_amount(U256::from(1_000_000u64), 6, 18).unwrap(),
             1_000_000_000_000_000_000
         );
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1u64), 6, 18),
+            convert_wire_to_local_amount(U256::from(1u64), 6, 18).unwrap(),
             1_000_000_000_000
         );
     }
@@ -6065,14 +6109,14 @@ mod tests {
         let wire = 500_000_000_000_000_000u64;
         assert_eq!(
             wire / old_factor,
-            convert_wire_to_local_amount(U256::from(wire), 18, 6)
+            convert_wire_to_local_amount(U256::from(wire), 18, 6).unwrap()
         );
 
         // More test cases
         let wire2 = 1_234_567_890_123_456_789u64;
         assert_eq!(
             wire2 / old_factor,
-            convert_wire_to_local_amount(U256::from(wire2), 18, 6)
+            convert_wire_to_local_amount(U256::from(wire2), 18, 6).unwrap()
         );
     }
 
@@ -6083,17 +6127,28 @@ mod tests {
         // because the wire amount (35 * 10^18) exceeds u64::MAX (~18.4 * 10^18)
         let large_amount = U256::from(35u64) * U256::from(10u64).pow(U256::from(18u64));
         assert_eq!(
-            convert_wire_to_local_amount(large_amount, 18, 6),
+            convert_wire_to_local_amount(large_amount, 18, 6).unwrap(),
             35_000_000
         );
 
         // 50 tokens in wire format (50 * 10^18)
         let fifty = U256::from(50u64) * U256::from(10u64).pow(U256::from(18u64));
-        assert_eq!(convert_wire_to_local_amount(fifty, 18, 6), 50_000_000);
+        assert_eq!(convert_wire_to_local_amount(fifty, 18, 6).unwrap(), 50_000_000);
 
         // 100 tokens in wire format (100 * 10^18)
         let hundred = U256::from(100u64) * U256::from(10u64).pow(U256::from(18u64));
-        assert_eq!(convert_wire_to_local_amount(hundred, 18, 6), 100_000_000);
+        assert_eq!(convert_wire_to_local_amount(hundred, 18, 6).unwrap(), 100_000_000);
+    }
+
+    #[test]
+    fn test_convert_wire_overflow_returns_error() {
+        // Upsample path: large value * multiplier overflows u64
+        let large = U256::from(u64::MAX);
+        assert!(convert_wire_to_local_amount(large, 6, 18).is_err());
+
+        // Exact u64::MAX + 1 with same decimals overflows
+        let overflow = U256::from(u64::MAX) + U256::from(1u64);
+        assert!(convert_wire_to_local_amount(overflow, 6, 6).is_err());
     }
 }
 
