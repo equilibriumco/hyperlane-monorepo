@@ -22,7 +22,7 @@ Sources: `FIXME.md`, `review-findings-2026-02-20.md`, multi-agent code analysis 
 | Q2  | ~~Magic numbers across Rust crate~~               | ~~Medium~~ | Quality  | ✅ `1924449a4` |
 | Q3  | ~~`unwrap`/`expect` in production paths~~         | ~~Medium~~ | Quality  | ✅ `e890001f3` |
 | Q4  | ~~Address/script conversion duplication~~         | ~~Low~~  | Quality   | ✅ `0723e8d9a` |
-| Q5  | `tx_builder.rs` monolith (multiple concerns)     | Low      | Quality   | 🔧 In progress |
+| Q5  | ~~`tx_builder.rs` monolith (multiple concerns)~~  | ~~Low~~  | Quality   | ✅ `de18465de` |
 | Q6  | ~~Duplicate domain ID mapping~~                   | ~~Low~~  | Quality   | ✅ `8a7217d3c` |
 | O1  | ~~Parallel CLI collateral UTXO conflict~~         | ~~Medium~~ | Ops      | ✅ `c3c6527f5` |
 | O2  | ~~`init all` silently skips IGP~~                 | ~~Low~~  | UX        | ✅ `0ceb58343` |
