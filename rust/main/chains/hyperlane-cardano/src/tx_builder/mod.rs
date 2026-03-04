@@ -16,9 +16,8 @@ pub use tx_helpers::parse_per_redeemer_ex_units;
 
 // Internal re-exports used by this module
 use tx_encoding::{
-    build_ism_datum, encode_constructor_0_redeemer, encode_ism_redeemer,
-    encode_message_as_plutus_data, encode_plutus_data, extract_bytes, extract_int,
-    extract_ism_owner, json_datum_to_cbor, json_to_plutus_data,
+    build_ism_datum, encode_constructor_0_redeemer, encode_ism_redeemer, encode_plutus_data,
+    extract_bytes, extract_int, extract_ism_owner, json_datum_to_cbor, json_to_plutus_data,
 };
 use tx_helpers::{
     compute_output_indices, convert_wire_to_local_amount, credential_to_address,
@@ -4974,6 +4973,7 @@ fn get_plutus_v3_cost_model() -> Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tx_builder::tx_encoding::encode_message_as_plutus_data;
 
     #[test]
     fn test_encode_processed_message_datum() {
