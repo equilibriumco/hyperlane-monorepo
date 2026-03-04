@@ -1,4 +1,5 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider};
+use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
 use crate::{CardanoMailbox, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
@@ -192,7 +193,7 @@ impl CardanoMailboxIndexer {
 
                                 if let Some(policy_hex) = nft_policy {
                                     // State NFT found: use 0x01000000 || policy_id
-                                    sender_bytes[0] = 0x01;
+                                    sender_bytes[0] = POLICY_ID_ADDR_PREFIX;
                                     if let Ok(policy_bytes) = hex::decode(policy_hex) {
                                         if policy_bytes.len() == 28 {
                                             sender_bytes[4..32].copy_from_slice(&policy_bytes);
@@ -200,7 +201,7 @@ impl CardanoMailboxIndexer {
                                     }
                                 } else {
                                     // Pure script, no state NFT: 0x02000000 || script_hash
-                                    sender_bytes[0] = 0x02;
+                                    sender_bytes[0] = SCRIPT_HASH_ADDR_PREFIX;
                                     sender_bytes[4..32].copy_from_slice(credential);
                                 }
                             } else {

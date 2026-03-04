@@ -1,7 +1,11 @@
 use crate::blockfrost_provider::{
     BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo,
 };
-use crate::types::{hyperlane_address_to_policy_id, hyperlane_address_to_script_hash, ScriptHash};
+use crate::consts::SCRIPT_HASH_ADDR_PREFIX;
+use crate::types::{
+    extract_script_hash_from_address, hyperlane_address_to_policy_id,
+    hyperlane_address_to_script_hash, ScriptHash,
+};
 use pallas_codec::minicbor;
 use pallas_primitives::conway::PlutusData;
 use thiserror::Error;
@@ -79,7 +83,7 @@ impl RecipientResolver {
         // 0x02 prefix = script-hash addressing (generic recipients)
         if let Some(script_hash) = hyperlane_address_to_script_hash(recipient) {
             // Only treat as script-hash if prefix is actually 0x02
-            if recipient[0] == 0x02 {
+            if recipient[0] == SCRIPT_HASH_ADDR_PREFIX {
                 let hash_hex = hex::encode(script_hash);
                 info!("Resolving script-hash recipient: {}", hash_hex);
 
@@ -130,7 +134,8 @@ impl RecipientResolver {
             state_utxo.tx_hash, state_utxo.output_index, state_utxo.address
         );
 
-        let script_hash = extract_script_hash_from_address(&state_utxo.address)?;
+        let script_hash = extract_script_hash_from_address(&state_utxo.address)
+            .map_err(ResolverError::InvalidDatum)?;
 
         let (recipient_kind, ism) = detect_recipient_kind_and_ism(&state_utxo)?;
 
@@ -155,27 +160,6 @@ impl RecipientResolver {
     }
 }
 
-/// Extract script hash from a bech32 Cardano address.
-/// Script addresses have a script hash as the payment credential.
-fn extract_script_hash_from_address(address: &str) -> Result<ScriptHash, ResolverError> {
-    use pallas_addresses::Address;
-
-    let addr = Address::from_bech32(address).map_err(|e| {
-        ResolverError::InvalidDatum(format!("Invalid bech32 address {address}: {e}"))
-    })?;
-
-    match addr {
-        Address::Shelley(shelley) => {
-            let hash_bytes = shelley.payment().as_hash().as_ref();
-            let mut hash = [0u8; 28];
-            hash.copy_from_slice(hash_bytes);
-            Ok(hash)
-        }
-        _ => Err(ResolverError::InvalidDatum(format!(
-            "Expected Shelley address, got: {address}"
-        ))),
-    }
-}
 
 /// Detect recipient kind and extract ISM from datum.
 ///

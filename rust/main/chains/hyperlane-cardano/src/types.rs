@@ -1,4 +1,8 @@
+use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
 use hyperlane_core::{HyperlaneMessage, H256};
+use pallas_addresses::{
+    Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
@@ -309,7 +313,7 @@ pub enum HyperlaneRecipientRedeemer<T> {
 pub fn script_hash_to_hyperlane_address(hash: &ScriptHash) -> HyperlaneAddress {
     let mut addr = [0u8; 32];
     // Script credential prefix: 0x02000000
-    addr[0] = 0x02;
+    addr[0] = SCRIPT_HASH_ADDR_PREFIX;
     addr[1] = 0x00;
     addr[2] = 0x00;
     addr[3] = 0x00;
@@ -321,14 +325,14 @@ pub fn script_hash_to_hyperlane_address(hash: &ScriptHash) -> HyperlaneAddress {
 /// Convert a minting policy ID to Hyperlane address (0x01 prefix)
 pub fn policy_id_to_hyperlane_address(id: &[u8; 28]) -> HyperlaneAddress {
     let mut addr = [0u8; 32];
-    addr[0] = 0x01;
+    addr[0] = POLICY_ID_ADDR_PREFIX;
     addr[4..32].copy_from_slice(id);
     addr
 }
 
 /// Extract policy ID from Hyperlane address (if 0x01 prefix)
 pub fn hyperlane_address_to_policy_id(addr: &HyperlaneAddress) -> Option<[u8; 28]> {
-    if addr[0] == 0x01 && addr[1] == 0x00 && addr[2] == 0x00 && addr[3] == 0x00 {
+    if addr[0] == POLICY_ID_ADDR_PREFIX && addr[1] == 0x00 && addr[2] == 0x00 && addr[3] == 0x00 {
         let mut id = [0u8; 28];
         id.copy_from_slice(&addr[4..32]);
         Some(id)
@@ -340,14 +344,14 @@ pub fn hyperlane_address_to_policy_id(addr: &HyperlaneAddress) -> Option<[u8; 28
 /// Convert policy ID to H256 (with 0x01 prefix)
 pub fn policy_id_to_h256(id: &[u8; 28]) -> H256 {
     let mut h = [0u8; 32];
-    h[0] = 0x01;
+    h[0] = POLICY_ID_ADDR_PREFIX;
     h[4..32].copy_from_slice(id);
     H256(h)
 }
 
 /// Extract policy ID from H256 (if 0x01 prefix)
 pub fn h256_to_policy_id(h: &H256) -> Option<[u8; 28]> {
-    if h.0[0] == 0x01 && h.0[1] == 0x00 && h.0[2] == 0x00 && h.0[3] == 0x00 {
+    if h.0[0] == POLICY_ID_ADDR_PREFIX && h.0[1] == 0x00 && h.0[2] == 0x00 && h.0[3] == 0x00 {
         let mut id = [0u8; 28];
         id.copy_from_slice(&h.0[4..32]);
         Some(id)
@@ -360,7 +364,7 @@ pub fn h256_to_policy_id(h: &H256) -> Option<[u8; 28]> {
 pub fn hyperlane_address_to_script_hash(addr: &HyperlaneAddress) -> Option<ScriptHash> {
     // Check if this is a script credential
     // Accept both 0x02000000 (canonical script prefix) and 0x00000000 (legacy/compat)
-    let is_script_prefix = (addr[0] == 0x02 || addr[0] == 0x00)
+    let is_script_prefix = (addr[0] == SCRIPT_HASH_ADDR_PREFIX || addr[0] == 0x00)
         && addr[1] == 0x00
         && addr[2] == 0x00
         && addr[3] == 0x00;
@@ -384,7 +388,7 @@ pub fn h256_to_script_hash(h: &H256) -> ScriptHash {
 /// Convert script hash to H256 (with script prefix)
 pub fn script_hash_to_h256(hash: &ScriptHash) -> H256 {
     let mut h = [0u8; 32];
-    h[0] = 0x02;
+    h[0] = SCRIPT_HASH_ADDR_PREFIX;
     h[4..32].copy_from_slice(hash);
     H256(h)
 }
@@ -494,6 +498,44 @@ pub struct VerifiedMessageDatum {
     pub nonce: u32,
 }
 
+/// Convert a 28-byte script hash to a bech32 Cardano script address.
+///
+/// Returns an error string if the bech32 encoding fails.
+pub fn script_hash_bytes_to_address(hash: &[u8; 28], network: Network) -> Result<String, String> {
+    let payment_part = ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(*hash));
+    let delegation_part = ShelleyDelegationPart::Null;
+    let address = ShelleyAddress::new(network, payment_part, delegation_part);
+    Address::Shelley(address)
+        .to_bech32()
+        .map_err(|e| format!("Invalid bech32 address: {e}"))
+}
+
+/// Extract the 28-byte script hash from a bech32 Cardano address.
+pub fn extract_script_hash_from_address(address: &str) -> Result<ScriptHash, String> {
+    let addr = Address::from_bech32(address)
+        .map_err(|e| format!("Invalid bech32 address {address}: {e}"))?;
+
+    match addr {
+        Address::Shelley(shelley) => {
+            let hash_bytes = shelley.payment().as_hash().as_ref();
+            let mut hash = [0u8; 28];
+            hash.copy_from_slice(hash_bytes);
+            Ok(hash)
+        }
+        _ => Err(format!("Expected Shelley address, got: {address}")),
+    }
+}
+
+/// Extract the 28-byte Cardano credential from a Hyperlane bytes32 recipient.
+///
+/// Hyperlane bytes32 pads 28-byte Cardano hashes with 4 leading bytes:
+/// `[prefix_byte, 0x00, 0x00, 0x00, <28 bytes credential hash>]`
+pub fn extract_cardano_credential_from_bytes32(recipient: &[u8; 32]) -> [u8; 28] {
+    let mut credential = [0u8; 28];
+    credential.copy_from_slice(&recipient[4..32]);
+    credential
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,12 +577,12 @@ mod tests {
     fn test_hyperlane_address_to_script_hash_invalid() {
         // 0x01 prefix is now a valid policy ID prefix, not a script hash
         let mut addr: HyperlaneAddress = [0x00; 32];
-        addr[0] = 0x01;
+        addr[0] = POLICY_ID_ADDR_PREFIX;
         assert!(hyperlane_address_to_script_hash(&addr).is_none());
 
         // Non-zero bytes in positions 1-3 also invalid
         let mut addr2: HyperlaneAddress = [0x00; 32];
-        addr2[0] = 0x02;
+        addr2[0] = SCRIPT_HASH_ADDR_PREFIX;
         addr2[1] = 0x01; // Invalid: must be 0x02000000
         assert!(hyperlane_address_to_script_hash(&addr2).is_none());
     }
@@ -550,7 +592,7 @@ mod tests {
         let id: [u8; 28] = [0xab; 28];
         let addr = policy_id_to_hyperlane_address(&id);
 
-        assert_eq!(addr[0..4], [0x01, 0x00, 0x00, 0x00]);
+        assert_eq!(addr[0..4], [POLICY_ID_ADDR_PREFIX, 0x00, 0x00, 0x00]);
 
         let recovered = hyperlane_address_to_policy_id(&addr).unwrap();
         assert_eq!(recovered, id);
@@ -561,7 +603,7 @@ mod tests {
         let id: [u8; 28] = [0xcd; 28];
         let h = policy_id_to_h256(&id);
 
-        assert_eq!(h.0[0], 0x01);
+        assert_eq!(h.0[0], POLICY_ID_ADDR_PREFIX);
         assert_eq!(&h.0[4..32], &id);
 
         let recovered = h256_to_policy_id(&h).unwrap();

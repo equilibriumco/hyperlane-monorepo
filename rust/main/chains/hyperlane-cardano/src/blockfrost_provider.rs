@@ -1095,14 +1095,11 @@ pub struct BlockInfo {
     pub tx_count: u32,
 }
 
-/// Convert a script hash to a bech32 script address
 fn script_hash_to_address(
     script_hash: &str,
     network: CardanoNetwork,
 ) -> Result<String, BlockfrostProviderError> {
-    use pallas_addresses::{
-        Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
-    };
+    use pallas_addresses::Network;
 
     let hash_bytes = hex::decode(script_hash)
         .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))?;
@@ -1111,18 +1108,13 @@ fn script_hash_to_address(
         BlockfrostProviderError::Deserialization("Invalid script hash length".to_string())
     })?;
 
-    let network = match network {
+    let pallas_network = match network {
         CardanoNetwork::Mainnet => Network::Mainnet,
         CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
     };
 
-    let payment_part = ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(hash));
-    let delegation_part = ShelleyDelegationPart::Null;
-    let address = ShelleyAddress::new(network, payment_part, delegation_part);
-
-    Address::Shelley(address).to_bech32().map_err(|e| {
-        BlockfrostProviderError::Deserialization(format!("Invalid bech32 address: {e}"))
-    })
+    crate::types::script_hash_bytes_to_address(&hash, pallas_network)
+        .map_err(BlockfrostProviderError::Deserialization)
 }
 
 #[cfg(test)]

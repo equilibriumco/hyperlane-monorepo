@@ -8,8 +8,15 @@ use crate::blockfrost_provider::{
     BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo, UtxoValue,
 };
 use crate::cardano::Keypair;
+use crate::consts::{ECDSA_SIG_LEN, MULTISIG_ISM_METADATA_MIN_LEN};
 use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
-use crate::types::{MailboxRedeemer, Message, ProcessedMessageDatum};
+use crate::redeemers::{
+    plutus_constr_tag, MailboxRedeemerTag, MultisigIsmRedeemerTag, WarpRouteRedeemerTag,
+};
+use crate::types::{
+    extract_cardano_credential_from_bytes32, script_hash_bytes_to_address, MailboxRedeemer,
+    Message, ProcessedMessageDatum,
+};
 use crate::ConnectionConf;
 use hyperlane_core::{
     ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256,
@@ -3058,7 +3065,10 @@ impl HyperlaneTxBuilder {
                 CardanoNetwork::Preprod | CardanoNetwork::Preview => Network::Testnet,
             };
 
-            let recipient_script_address = script_hash_to_address(recipient_hash, pallas_network)?;
+            let recipient_script_address =
+                script_hash_bytes_to_address(recipient_hash, pallas_network)
+                    .map_err(TxBuilderError::InvalidAddress)
+                    .and_then(|s| parse_address(&s))?;
 
             let mut verified_message_output =
                 Output::new(recipient_script_address, verified_message_min_lovelace)
@@ -4255,36 +4265,10 @@ fn credential_to_address(
     })
 }
 
-/// Convert a 28-byte script hash to a Cardano script address (Type 7)
-/// The script hash is used as the payment credential with no staking credential
-fn script_hash_to_address(
-    script_hash: &[u8; 28],
-    network: Network,
-) -> Result<Address, TxBuilderError> {
-    // Cardano addresses format: [header_byte] [28-byte payment credential] [optional 28-byte staking credential]
-    // Header byte for Type 7 (enterprise script address): 0111_XXXX where XXXX = network tag
-    // Network 0 = testnet (0111_0000 = 0x70), Network 1 = mainnet (0111_0001 = 0x71)
-    let header_byte = match network {
-        Network::Testnet => 0x70, // Type 7, testnet
-        Network::Mainnet => 0x71, // Type 7, mainnet
-        _ => 0x70,                // Default to testnet
-    };
-
-    let mut address_bytes = Vec::with_capacity(29);
-    address_bytes.push(header_byte);
-    address_bytes.extend_from_slice(script_hash);
-
-    Address::from_bytes(&address_bytes).map_err(|e| {
-        TxBuilderError::InvalidAddress(format!("Failed to create script address from hash: {e:?}"))
-    })
-}
-
 /// Encode a Constr 0 [] redeemer (used for MintMessage/Mint in minting policies)
 fn encode_constructor_0_redeemer() -> Vec<u8> {
-    // Constr 0 [] is encoded as CBOR tag 121 (0xd87980)
-    // Tag 121 = constructor 0 with empty array
     let redeemer = PlutusData::Constr(Constr {
-        tag: 121, // Constructor 0
+        tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![]),
     });
@@ -4966,7 +4950,7 @@ fn build_warp_route_continuation_datum(
 
     // Build the new warp route datum with same config, owner, updated total_bridged, and preserved ism
     let plutus_data = PlutusData::Constr(Constr {
-        tag: 121, // WarpRouteDatum = constructor 0
+        tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![
             config_field, // Preserve config as-is
@@ -5171,10 +5155,8 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             sender_ref,
             hook_metadata,
         } => {
-            // Constructor 0: Dispatch
-            // sender_ref encoded as OutputReference: Constr 0 [ByteArray(tx_hash), Int(output_index)]
             let sender_ref_data = PlutusData::Constr(Constr {
-                tag: 121,
+                tag: plutus_constr_tag(0),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BoundedBytes(sender_ref.0.to_vec().into()),
@@ -5182,7 +5164,7 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
                 ]),
             });
             PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0 alternative encoding
+                tag: MailboxRedeemerTag::Dispatch.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((*destination as i64).into())),
@@ -5199,13 +5181,12 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
             message_id,
             smt_proof,
         } => {
-            // Constructor 1: Process
             let proof_list: Vec<PlutusData> = smt_proof
                 .iter()
                 .map(|hash| PlutusData::BoundedBytes(hash.to_vec().into()))
                 .collect();
             PlutusData::Constr(Constr {
-                tag: 122, // Constructor 1 alternative encoding
+                tag: MailboxRedeemerTag::Process.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     encode_message_as_plutus_data(message),
@@ -5215,26 +5196,16 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
                 ]),
             })
         }
-        MailboxRedeemer::SetDefaultIsm { new_ism } => {
-            // Constructor 2: SetDefaultIsm
-            PlutusData::Constr(Constr {
-                tag: 123, // Constructor 2 alternative encoding
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
-                    new_ism.to_vec().into(),
-                )]),
-            })
-        }
-        MailboxRedeemer::TransferOwnership { new_owner } => {
-            // Constructor 3: TransferOwnership
-            PlutusData::Constr(Constr {
-                tag: 124, // Constructor 3 alternative encoding
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
-                    new_owner.to_vec().into(),
-                )]),
-            })
-        }
+        MailboxRedeemer::SetDefaultIsm { new_ism } => PlutusData::Constr(Constr {
+            tag: MailboxRedeemerTag::SetDefaultIsm.plutus_tag(),
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(new_ism.to_vec().into())]),
+        }),
+        MailboxRedeemer::TransferOwnership { new_owner } => PlutusData::Constr(Constr {
+            tag: MailboxRedeemerTag::TransferOwnership.plutus_tag(),
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(new_owner.to_vec().into())]),
+        }),
     };
 
     encode_plutus_data(&plutus_data)
@@ -5244,10 +5215,8 @@ pub fn encode_mailbox_redeemer(redeemer: &MailboxRedeemer) -> Result<Vec<u8>, Tx
 pub fn encode_processed_message_datum(
     datum: &ProcessedMessageDatum,
 ) -> Result<Vec<u8>, TxBuilderError> {
-    // ProcessedMessageDatum { message_id: ByteArray }
-    // Encoded as: Constr 0 [ByteArray]
     let plutus_data = PlutusData::Constr(Constr {
-        tag: 121, // Constructor 0
+        tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![PlutusData::BoundedBytes(
             datum.message_id.to_vec().into(),
@@ -5267,7 +5236,7 @@ pub fn encode_verified_message_datum(
     datum: &crate::types::VerifiedMessageDatum,
 ) -> Result<Vec<u8>, TxBuilderError> {
     let plutus_data = PlutusData::Constr(Constr {
-        tag: 121,
+        tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![
             PlutusData::BigInt(BigInt::Int((datum.origin as i64).into())),
@@ -5283,9 +5252,8 @@ pub fn encode_verified_message_datum(
 
 /// Encode a Message as Plutus Data
 fn encode_message_as_plutus_data(msg: &Message) -> PlutusData {
-    // Message { version, nonce, origin, sender, destination, recipient, body }
     PlutusData::Constr(Constr {
-        tag: 121, // Constructor 0
+        tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![
             PlutusData::BigInt(BigInt::Int((msg.version as i64).into())),
@@ -5405,11 +5373,8 @@ fn encode_ism_redeemer(
             checkpoint,
             validator_signatures,
         } => {
-            // Constr(0, [checkpoint, [validator_signature, ...]])
-            // checkpoint: Constr(0, [origin, merkle_root, origin_merkle_tree_hook, merkle_index, message_id])
-            // validator_signature: Constr(0, [recovered_pubkey, signature])
             let checkpoint_data = PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0
+                tag: plutus_constr_tag(0),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((checkpoint.origin as i64).into())),
@@ -5426,7 +5391,7 @@ fn encode_ism_redeemer(
                 .iter()
                 .map(|val_sig| {
                     PlutusData::Constr(Constr {
-                        tag: 121, // Constructor 0
+                        tag: plutus_constr_tag(0),
                         any_constructor: None,
                         fields: MaybeIndefArray::Def(vec![
                             PlutusData::BoundedBytes(val_sig.compressed_pubkey.to_vec().into()),
@@ -5438,7 +5403,7 @@ fn encode_ism_redeemer(
                 .collect();
 
             PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0 = Verify
+                tag: MultisigIsmRedeemerTag::Verify.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     checkpoint_data,
@@ -5454,7 +5419,7 @@ fn encode_ism_redeemer(
                 .collect();
 
             PlutusData::Constr(Constr {
-                tag: 122, // Constructor 1 = SetValidators
+                tag: MultisigIsmRedeemerTag::SetValidators.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
@@ -5463,9 +5428,8 @@ fn encode_ism_redeemer(
             })
         }
         crate::types::MultisigIsmRedeemer::SetThreshold { domain, threshold } => {
-            // Constr(2, [domain, threshold])
             PlutusData::Constr(Constr {
-                tag: 123, // Constructor 2 = SetThreshold
+                tag: MultisigIsmRedeemerTag::SetThreshold.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
@@ -5491,26 +5455,21 @@ pub fn encode_warp_route_redeemer(
             destination,
             recipient,
             amount,
-        } => {
-            PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![
-                    PlutusData::BigInt(BigInt::Int((*destination as i64).into())),
-                    PlutusData::BoundedBytes(recipient.to_vec().into()),
-                    PlutusData::BigInt(BigInt::Int((*amount as i64).into())),
-                ]),
-            })
-        }
+        } => PlutusData::Constr(Constr {
+            tag: WarpRouteRedeemerTag::TransferRemote.plutus_tag(),
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![
+                PlutusData::BigInt(BigInt::Int((*destination as i64).into())),
+                PlutusData::BoundedBytes(recipient.to_vec().into()),
+                PlutusData::BigInt(BigInt::Int((*amount as i64).into())),
+            ]),
+        }),
         crate::types::WarpRouteRedeemer::ReceiveTransfer {
             message,
             message_id,
         } => {
-            // Message is Constructor 0 with fields:
-            // [version: Int, nonce: Int, origin: Int, sender: ByteArray,
-            //  destination: Int, recipient: ByteArray, body: ByteArray]
             let message_data = PlutusData::Constr(Constr {
-                tag: 121, // Constructor 0
+                tag: plutus_constr_tag(0),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((message.version as i64).into())),
@@ -5524,7 +5483,7 @@ pub fn encode_warp_route_redeemer(
             });
 
             PlutusData::Constr(Constr {
-                tag: 122, // Constructor 1
+                tag: WarpRouteRedeemerTag::ReceiveTransfer.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     message_data,
@@ -5534,7 +5493,7 @@ pub fn encode_warp_route_redeemer(
         }
         crate::types::WarpRouteRedeemer::EnrollRemoteRoute { domain, route } => {
             PlutusData::Constr(Constr {
-                tag: 123, // Constructor 2
+                tag: WarpRouteRedeemerTag::EnrollRemoteRoute.plutus_tag(),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
                     PlutusData::BigInt(BigInt::Int((*domain as i64).into())),
@@ -5630,15 +5589,6 @@ fn parse_token_message(body: &[u8]) -> Result<TokenMessage, TxBuilderError> {
     Ok(TokenMessage { recipient, amount })
 }
 
-/// Extract Cardano credential hash from a bytes32 recipient
-/// Hyperlane bytes32 pads 28-byte Cardano hashes with 4 leading zeros:
-/// [0x00, 0x00, 0x00, 0x00, <28 bytes credential hash>]
-fn extract_cardano_credential_from_bytes32(recipient: &[u8; 32]) -> [u8; 28] {
-    let mut credential = [0u8; 28];
-    credential.copy_from_slice(&recipient[4..32]);
-    credential
-}
-
 /// Parse Hyperlane metadata and recover public keys from signatures
 ///
 /// Hyperlane metadata format for multisig ISM:
@@ -5665,7 +5615,7 @@ pub fn parse_multisig_metadata(
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
     use sha3::{Digest, Keccak256};
 
-    if metadata.len() < 68 {
+    if metadata.len() < MULTISIG_ISM_METADATA_MIN_LEN {
         return Err(TxBuilderError::Encoding(
             "Metadata too short for multisig ISM".to_string(),
         ));
@@ -5687,10 +5637,13 @@ pub fn parse_multisig_metadata(
     merkle_root.copy_from_slice(&metadata[32..64]);
 
     // Bytes 64-67: Checkpoint index
-    let root_index =
-        u32::from_be_bytes(metadata[64..68].try_into().map_err(|e| {
-            TxBuilderError::Encoding(format!("Invalid checkpoint index bytes: {e}"))
-        })?);
+    let root_index = u32::from_be_bytes(
+        metadata[64..MULTISIG_ISM_METADATA_MIN_LEN]
+            .try_into()
+            .map_err(|e| {
+                TxBuilderError::Encoding(format!("Invalid checkpoint index bytes: {e}"))
+            })?,
+    );
 
     // Compute the checkpoint hash that validators signed
     // Step 1: domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
@@ -5722,12 +5675,12 @@ pub fn parse_multisig_metadata(
     // Parse signatures and recover public keys
     // Each signature is 65 bytes: r (32) || s (32) || v (1)
     // We extract both the signature (r||s, 64 bytes) and recover the public key
-    let signatures_data = &metadata[68..];
+    let signatures_data = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
     let mut validator_signatures = Vec::new();
     let mut offset = 0;
 
-    while offset + 65 <= signatures_data.len() {
-        let sig_bytes = &signatures_data[offset..offset + 65];
+    while offset + ECDSA_SIG_LEN <= signatures_data.len() {
+        let sig_bytes = &signatures_data[offset..offset + ECDSA_SIG_LEN];
         let v = sig_bytes[64];
         let recovery_id = if v >= 27 { v - 27 } else { v };
 
@@ -5794,7 +5747,7 @@ pub fn parse_multisig_metadata(
             }
         }
 
-        offset += 65;
+        offset += ECDSA_SIG_LEN;
     }
 
     debug!(
@@ -5887,9 +5840,9 @@ mod tests {
     fn test_parse_multisig_metadata() {
         // Create minimal metadata with fake signature data
         // Note: This won't recover any valid public keys since the signature data is fake
-        let mut metadata = vec![0u8; 68];
+        let mut metadata = vec![0u8; MULTISIG_ISM_METADATA_MIN_LEN];
         // Add one fake signature (65 bytes: r=32, s=32, v=1)
-        metadata.extend_from_slice(&[0xAB; 65]);
+        metadata.extend_from_slice(&[0xAB; ECDSA_SIG_LEN]);
 
         let origin = 43113u32;
         let message_id = [0x42u8; 32];
@@ -5913,7 +5866,7 @@ mod tests {
             tag: RedeemerTag::Spend,
             index: 0,
             data: PlutusData::Constr(Constr {
-                tag: 121,
+                tag: plutus_constr_tag(0),
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![]),
             }),
@@ -5961,9 +5914,8 @@ mod tests {
         let output = Output::new(test_addr, 2_000_000);
         tx = tx.output(output);
 
-        // Create redeemer data as CBOR bytes (just empty constr for testing)
         let redeemer_data = PlutusData::Constr(Constr {
-            tag: 121,
+            tag: plutus_constr_tag(0),
             any_constructor: None,
             fields: MaybeIndefArray::Def(vec![]),
         });
@@ -6161,6 +6113,7 @@ mod tests {
 
 #[cfg(test)]
 mod signature_verification_tests {
+    use crate::consts::{ECDSA_SIG_LEN, MULTISIG_ISM_METADATA_MIN_LEN};
     use k256::ecdsa::{signature::hazmat::PrehashVerifier, RecoveryId, Signature, VerifyingKey};
     use sha3::{Digest, Keccak256};
 
@@ -6457,8 +6410,8 @@ mod signature_verification_tests {
         // Parse metadata
         let origin_merkle_tree_hook = &metadata[0..32];
         let root_index = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
-        let merkle_root = &metadata[36..68];
-        let signatures_data = &metadata[68..];
+        let merkle_root = &metadata[36..MULTISIG_ISM_METADATA_MIN_LEN];
+        let signatures_data = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         println!("=== Parsed Metadata ===");
         println!(
@@ -6471,7 +6424,7 @@ mod signature_verification_tests {
         println!(
             "signatures_data length: {} (expecting {} signatures)",
             signatures_data.len(),
-            signatures_data.len() / 65
+            signatures_data.len() / ECDSA_SIG_LEN
         );
 
         // Step 1: domain_hash = keccak256(origin || merkle_tree_hook || "HYPERLANE")
@@ -6506,8 +6459,8 @@ mod signature_verification_tests {
         let mut sig_num = 0;
         let mut recovered_addresses = Vec::new();
 
-        while offset + 65 <= signatures_data.len() {
-            let sig_bytes = &signatures_data[offset..offset + 65];
+        while offset + ECDSA_SIG_LEN <= signatures_data.len() {
+            let sig_bytes = &signatures_data[offset..offset + ECDSA_SIG_LEN];
             let v = sig_bytes[64];
             let recovery_id = if v >= 27 { v - 27 } else { v };
 
@@ -6556,7 +6509,7 @@ mod signature_verification_tests {
                 }
             }
 
-            offset += 65;
+            offset += ECDSA_SIG_LEN;
             sig_num += 1;
         }
 
@@ -6620,8 +6573,8 @@ mod signature_verification_tests {
         // Parse metadata
         let origin_merkle_tree_hook = &metadata[0..32];
         let root_index = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
-        let merkle_root = &metadata[36..68];
-        let signatures_data = &metadata[68..];
+        let merkle_root = &metadata[36..MULTISIG_ISM_METADATA_MIN_LEN];
+        let signatures_data = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         // Compute eth_signed_message
         let mut domain_hasher = Keccak256::new();
@@ -6644,7 +6597,7 @@ mod signature_verification_tests {
 
         println!("=== Testing Normalization Effect on Recovery ===\n");
 
-        let sig_bytes = &signatures_data[0..65];
+        let sig_bytes = &signatures_data[0..ECDSA_SIG_LEN];
         let v = sig_bytes[64];
         let recovery_id = if v >= 27 { v - 27 } else { v };
 
@@ -6780,11 +6733,11 @@ mod signature_verification_tests {
             245, 194, 230, 156, 45, 67, 119, 56, 96, 92, 178, 71, 97, 219, 127, 185, 115, 143, 22,
             251, 193, 73, 86, 27,
         ];
-        let signatures_data = &metadata[68..];
+        let signatures_data = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         // Check both signatures
         for i in 0..2 {
-            let sig_bytes = &signatures_data[i * 65..(i + 1) * 65];
+            let sig_bytes = &signatures_data[i * ECDSA_SIG_LEN..(i + 1) * ECDSA_SIG_LEN];
             let s = &sig_bytes[32..64];
 
             println!("\nSignature {}:", i);
@@ -6802,7 +6755,7 @@ mod signature_verification_tests {
         // Test recovery with normalize_s
         println!("\n=== Testing normalize_s behavior ===");
 
-        let sig_bytes = &signatures_data[0..65];
+        let sig_bytes = &signatures_data[0..ECDSA_SIG_LEN];
         let v = sig_bytes[64];
         let recovery_id = if v >= 27 { v - 27 } else { v };
 
@@ -6816,7 +6769,7 @@ mod signature_verification_tests {
         let origin: u32 = 43113;
         let origin_merkle_tree_hook = &metadata[0..32];
         let root_index = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
-        let merkle_root = &metadata[36..68];
+        let merkle_root = &metadata[36..MULTISIG_ISM_METADATA_MIN_LEN];
 
         let mut domain_hasher = Keccak256::new();
         domain_hasher.update(&origin.to_be_bytes());
@@ -7037,8 +6990,8 @@ mod signature_verification_tests {
         // Parse metadata
         let origin_merkle_tree_hook = &metadata[0..32];
         let root_index = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
-        let merkle_root = &metadata[36..68];
-        let signatures_data = &metadata[68..];
+        let merkle_root = &metadata[36..MULTISIG_ISM_METADATA_MIN_LEN];
+        let signatures_data = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         // Compute eth_signed_message
         let mut domain_hasher = Keccak256::new();
@@ -7069,8 +7022,8 @@ mod signature_verification_tests {
         let mut offset = 0;
         let mut sig_num = 0;
 
-        while offset + 65 <= signatures_data.len() {
-            let sig_bytes = &signatures_data[offset..offset + 65];
+        while offset + ECDSA_SIG_LEN <= signatures_data.len() {
+            let sig_bytes = &signatures_data[offset..offset + ECDSA_SIG_LEN];
             let v_original = sig_bytes[64];
 
             println!("\n--- Signature {} (v={}) ---", sig_num, v_original);
@@ -7101,7 +7054,7 @@ mod signature_verification_tests {
                 }
             }
 
-            offset += 65;
+            offset += ECDSA_SIG_LEN;
             sig_num += 1;
         }
     }
@@ -7142,8 +7095,12 @@ mod signature_verification_tests {
         // Format 1: MerkleTreeHook (32) + MerkleRoot (32) + Index (4) + Signatures
         let merkle_tree_hook_1 = &metadata[0..32];
         let merkle_root_1 = &metadata[32..64];
-        let merkle_index_1 = u32::from_be_bytes(metadata[64..68].try_into().unwrap());
-        let signatures_1 = &metadata[68..];
+        let merkle_index_1 = u32::from_be_bytes(
+            metadata[64..MULTISIG_ISM_METADATA_MIN_LEN]
+                .try_into()
+                .unwrap(),
+        );
+        let signatures_1 = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         println!("merkle_tree_hook: {}", hex::encode(merkle_tree_hook_1));
         println!("merkle_root:      {}", hex::encode(merkle_root_1));
@@ -7173,7 +7130,7 @@ mod signature_verification_tests {
         // Try recovering addresses with Format 1 hash
         println!("\nRecovered addresses with Format 1 hash:");
         for i in 0..2 {
-            let sig_bytes = &signatures_1[i * 65..(i + 1) * 65];
+            let sig_bytes = &signatures_1[i * ECDSA_SIG_LEN..(i + 1) * ECDSA_SIG_LEN];
             let v = sig_bytes[64];
             let recovery_id = if v >= 27 { v - 27 } else { v };
             let sig = Signature::from_slice(&sig_bytes[..64]).unwrap();
@@ -7198,8 +7155,8 @@ mod signature_verification_tests {
         // Format 2: MerkleTreeHook (32) + Index (4) + MerkleRoot (32) + Signatures
         let merkle_tree_hook_2 = &metadata[0..32];
         let merkle_index_2 = u32::from_be_bytes(metadata[32..36].try_into().unwrap());
-        let merkle_root_2 = &metadata[36..68];
-        let signatures_2 = &metadata[68..];
+        let merkle_root_2 = &metadata[36..MULTISIG_ISM_METADATA_MIN_LEN];
+        let signatures_2 = &metadata[MULTISIG_ISM_METADATA_MIN_LEN..];
 
         println!("merkle_tree_hook: {}", hex::encode(merkle_tree_hook_2));
         println!("merkle_index:     {}", merkle_index_2);
@@ -7229,7 +7186,7 @@ mod signature_verification_tests {
         // Try recovering addresses with Format 2 hash
         println!("\nRecovered addresses with Format 2 hash:");
         for i in 0..2 {
-            let sig_bytes = &signatures_2[i * 65..(i + 1) * 65];
+            let sig_bytes = &signatures_2[i * ECDSA_SIG_LEN..(i + 1) * ECDSA_SIG_LEN];
             let v = sig_bytes[64];
             let recovery_id = if v >= 27 { v - 27 } else { v };
             let sig = Signature::from_slice(&sig_bytes[..64]).unwrap();
