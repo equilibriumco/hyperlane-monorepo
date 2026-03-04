@@ -32,11 +32,6 @@ enum InitCommands {
         #[arg(long)]
         ism_hash: String,
 
-        /// Processed messages script hash (28 bytes hex)
-        /// This is the address where processed message markers are stored.
-        #[arg(long)]
-        processed_messages_hash: Option<String>,
-
         /// UTXO to use for minting state NFT (tx_hash#index)
         #[arg(long)]
         utxo: Option<String>,
@@ -206,20 +201,9 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         InitCommands::Mailbox {
             domain,
             ism_hash,
-            processed_messages_hash,
             utxo,
             dry_run,
-        } => {
-            init_mailbox(
-                ctx,
-                domain,
-                &ism_hash,
-                processed_messages_hash,
-                utxo,
-                dry_run,
-            )
-            .await
-        }
+        } => init_mailbox(ctx, domain, &ism_hash, utxo, dry_run).await,
         InitCommands::Ism {
             domains,
             validators,
@@ -297,11 +281,9 @@ async fn init_mailbox(
     ctx: &CliContext,
     domain: u32,
     ism_hash: &str,
-    _processed_messages_hash: Option<String>,
     utxo: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    // Note: processed_messages_hash is now ignored - we derive it from processed_message_nft
     init_mailbox_internal(ctx, domain, ism_hash, utxo, dry_run, &[]).await?;
     Ok(())
 }
@@ -310,11 +292,10 @@ async fn init_mailbox(
 ///
 /// The mailbox initialization follows a specific parameterization chain:
 /// 1. Create state_nft policy (one-shot) -> mailbox_policy_id
-/// 2. Apply mailbox_policy_id to processed_message_nft -> processed_messages_nft_policy
-/// 3. Apply mailbox_policy_id to verified_message_nft -> verified_message_nft_policy
-/// 4. Apply [processed_messages_nft_policy, verified_message_nft_policy, ism_nft_policy] to mailbox -> final mailbox script
+/// 2. Apply mailbox_policy_id to verified_message_nft -> verified_message_nft_policy
+/// 3. Apply [verified_message_nft_policy, ism_nft_policy] to mailbox -> final mailbox script
 ///
-/// This ensures replay protection and message storage are stable across mailbox upgrades.
+/// This ensures message verification and storage are stable across mailbox upgrades.
 async fn init_mailbox_internal(
     ctx: &CliContext,
     domain: u32,
@@ -420,29 +401,12 @@ async fn init_mailbox_internal(
     let mailbox_policy_id = applied_nft.policy_id.clone();
     println!("  Mailbox Policy ID: {}", mailbox_policy_id.green());
 
-    // Step 2: Apply mailbox_policy_id to processed_message_nft to get the NFT policy
-    println!(
-        "\n{}",
-        "Step 2: Creating processed_message_nft policy...".cyan()
-    );
+    // Step 2: Apply mailbox_policy_id to verified_message_nft to get the NFT policy
     let mailbox_policy_cbor = encode_script_hash_param(&mailbox_policy_id)?;
     let mailbox_policy_hex = hex::encode(&mailbox_policy_cbor);
-    let applied_processed_nft = apply_validator_param(
-        &ctx.contracts_dir,
-        "processed_message_nft",
-        "processed_message_nft",
-        &mailbox_policy_hex,
-    )?;
-    let processed_messages_nft_policy = applied_processed_nft.policy_id.clone();
-    println!(
-        "  Processed Messages NFT Policy: {}",
-        processed_messages_nft_policy.green()
-    );
-
-    // Step 3: Apply mailbox_policy_id to verified_message_nft to get the NFT policy
     println!(
         "\n{}",
-        "Step 3: Creating verified_message_nft policy...".cyan()
+        "Step 2: Creating verified_message_nft policy...".cyan()
     );
     let applied_verified_nft = apply_validator_param(
         &ctx.contracts_dir,
@@ -456,10 +420,8 @@ async fn init_mailbox_internal(
         verified_message_nft_policy.green()
     );
 
-    // Step 4: Apply processed_messages_nft_policy, verified_message_nft_policy, and ism_nft_policy to mailbox
-    println!("\n{}", "Step 4: Creating mailbox validator...".cyan());
-    let pm_policy_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
-    let pm_policy_hex = hex::encode(&pm_policy_cbor);
+    // Step 3: Apply verified_message_nft_policy and ism_nft_policy to mailbox
+    println!("\n{}", "Step 3: Creating mailbox validator...".cyan());
     let vm_policy_cbor = encode_script_hash_param(&verified_message_nft_policy)?;
     let vm_policy_hex = hex::encode(&vm_policy_cbor);
 
@@ -479,7 +441,7 @@ async fn init_mailbox_internal(
         &ctx.contracts_dir,
         "mailbox",
         "mailbox",
-        &[&pm_policy_hex, &vm_policy_hex, &ism_nft_hex],
+        &[&vm_policy_hex, &ism_nft_hex],
     )?;
     let mailbox_addr = script_hash_to_address(&applied_mailbox.policy_id, ctx.pallas_network())?;
     println!(
@@ -522,14 +484,10 @@ async fn init_mailbox_internal(
         println!("\n{}", "Parameterization chain:".green());
         println!("  1. mailbox_policy_id (state NFT): {}", mailbox_policy_id);
         println!(
-            "  2. processed_messages_nft_policy: {}",
-            processed_messages_nft_policy
-        );
-        println!(
-            "  3. verified_message_nft_policy: {}",
+            "  2. verified_message_nft_policy: {}",
             verified_message_nft_policy
         );
-        println!("  4. Resulting mailbox hash: {}", applied_mailbox.policy_id);
+        println!("  3. Resulting mailbox hash: {}", applied_mailbox.policy_id);
         return Ok(None);
     }
 
@@ -575,15 +533,6 @@ async fn init_mailbox_internal(
     let mut deployment = deployment;
     if let Some(ref mut mailbox) = deployment.mailbox {
         mailbox.applied_parameters = vec![
-            AppliedParameter {
-                name: "processed_messages_nft_policy".to_string(),
-                param_type: "PolicyId".to_string(),
-                value: processed_messages_nft_policy.clone(),
-                description: Some(
-                    "Policy ID for processed message NFTs (parameterized by mailbox_policy_id)"
-                        .to_string(),
-                ),
-            },
             AppliedParameter {
                 name: "verified_message_nft_policy".to_string(),
                 param_type: "PolicyId".to_string(),
@@ -632,18 +581,6 @@ async fn init_mailbox_internal(
     let mailbox_script_path = ctx.network_deployments_dir().join("mailbox_applied.plutus");
     applied_mailbox.save_plutus_file(&mailbox_script_path, "Applied mailbox validator")?;
     println!("  Mailbox script saved to: {:?}", mailbox_script_path);
-
-    let processed_nft_path = ctx
-        .network_deployments_dir()
-        .join("processed_message_nft_applied.plutus");
-    applied_processed_nft.save_plutus_file(
-        &processed_nft_path,
-        "Applied processed_message_nft minting policy",
-    )?;
-    println!(
-        "  Processed message NFT script saved to: {:?}",
-        processed_nft_path
-    );
 
     let verified_nft_path = ctx
         .network_deployments_dir()

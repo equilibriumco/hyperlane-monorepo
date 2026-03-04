@@ -403,23 +403,21 @@ async fn dispatch(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
-        if mailbox_info.applied_parameters.len() < 3 {
+        if mailbox_info.applied_parameters.len() < 2 {
             return Err(anyhow!(
-                "Mailbox needs 3 applied parameters, found {}. Run `init mailbox` first.",
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
                 mailbox_info.applied_parameters.len()
             ));
         }
-        let pm_policy = &mailbox_info.applied_parameters[0].value;
-        let vm_policy = &mailbox_info.applied_parameters[1].value;
-        let ism_nft = &mailbox_info.applied_parameters[2].value;
-        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_policy = &mailbox_info.applied_parameters[0].value;
+        let ism_nft = &mailbox_info.applied_parameters[1].value;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
             &ctx.contracts_dir,
             "mailbox",
             "mailbox",
-            &[&pm_cbor, &vm_cbor, &ism_cbor],
+            &[&vm_cbor, &ism_cbor],
         )?;
         println!("  Applied script hash: {}", applied.policy_id);
         Some(hex::decode(&applied.compiled_code)?)
@@ -903,23 +901,21 @@ async fn set_default_ism(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
-        if mailbox_info.applied_parameters.len() < 3 {
+        if mailbox_info.applied_parameters.len() < 2 {
             return Err(anyhow!(
-                "Mailbox needs 3 applied parameters, found {}. Run `init mailbox` first.",
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
                 mailbox_info.applied_parameters.len()
             ));
         }
-        let pm_policy = &mailbox_info.applied_parameters[0].value;
-        let vm_policy = &mailbox_info.applied_parameters[1].value;
-        let ism_nft = &mailbox_info.applied_parameters[2].value;
-        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_policy = &mailbox_info.applied_parameters[0].value;
+        let ism_nft = &mailbox_info.applied_parameters[1].value;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
             &ctx.contracts_dir,
             "mailbox",
             "mailbox",
-            &[&pm_cbor, &vm_cbor, &ism_cbor],
+            &[&vm_cbor, &ism_cbor],
         )?;
         println!("  Applied script hash: {}", applied.policy_id);
         Some(hex::decode(&applied.compiled_code)?)
@@ -1079,23 +1075,21 @@ async fn migrate(
                 .mailbox
                 .as_ref()
                 .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-            if mailbox_info.applied_parameters.len() < 3 {
+            if mailbox_info.applied_parameters.len() < 2 {
                 return Err(anyhow!(
-                    "Mailbox needs 3 applied parameters, found {}. Run `init mailbox` first.",
+                    "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
                     mailbox_info.applied_parameters.len()
                 ));
             }
-            let pm_policy = &mailbox_info.applied_parameters[0].value;
-            let vm_policy = &mailbox_info.applied_parameters[1].value;
-            let ism_nft = &mailbox_info.applied_parameters[2].value;
-            let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+            let vm_policy = &mailbox_info.applied_parameters[0].value;
+            let ism_nft = &mailbox_info.applied_parameters[1].value;
             let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
             let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
             let applied = crate::utils::plutus::apply_validator_params(
                 &ctx.contracts_dir,
                 "mailbox",
                 "mailbox",
-                &[&pm_cbor, &vm_cbor, &ism_cbor],
+                &[&vm_cbor, &ism_cbor],
             )?;
             applied.policy_id
         }
@@ -1275,23 +1269,21 @@ async fn migrate(
             .mailbox
             .as_ref()
             .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
-        if mailbox_info.applied_parameters.len() < 3 {
+        if mailbox_info.applied_parameters.len() < 2 {
             return Err(anyhow!(
-                "Mailbox needs 3 applied parameters, found {}. Run `init mailbox` first.",
+                "Mailbox needs 2 applied parameters, found {}. Run `init mailbox` first.",
                 mailbox_info.applied_parameters.len()
             ));
         }
-        let pm_policy = &mailbox_info.applied_parameters[0].value;
-        let vm_policy = &mailbox_info.applied_parameters[1].value;
-        let ism_nft = &mailbox_info.applied_parameters[2].value;
-        let pm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(pm_policy)?);
+        let vm_policy = &mailbox_info.applied_parameters[0].value;
+        let ism_nft = &mailbox_info.applied_parameters[1].value;
         let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
         let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
         let applied = crate::utils::plutus::apply_validator_params(
             &ctx.contracts_dir,
             "mailbox",
             "mailbox",
-            &[&pm_cbor, &vm_cbor, &ism_cbor],
+            &[&vm_cbor, &ism_cbor],
         )?;
         let applied_hash = &applied.policy_id;
         if applied_hash != &current_hash_hex {

@@ -335,80 +335,6 @@ async fn update_relayer(
         ));
     }
 
-    // Generate processed_message_nft policy (parameterized with mailbox_policy_id)
-    // This is used for efficient O(1) processed message lookups
-    // IMPORTANT: We use mailbox_policy_id (state NFT policy, stable) NOT mailbox.hash (script hash, changes with code)
-    if let Some(ref mailbox) = deployment.mailbox {
-        println!("\n{}", "Generating processed_message_nft policy...".cyan());
-
-        // Get the mailbox_policy_id (state NFT policy) - this is stable across upgrades
-        let mailbox_policy_id = mailbox
-            .state_nft
-            .as_ref()
-            .map(|nft| nft.policy_id.clone())
-            .or_else(|| mailbox.state_nft_policy.clone())
-            .ok_or_else(|| {
-                anyhow!("Mailbox state NFT policy not found. Ensure mailbox is initialized.")
-            })?;
-
-        // Apply mailbox_policy_id parameter to processed_message_nft validator
-        let mailbox_policy_param = encode_script_hash_param(&mailbox_policy_id)
-            .with_context(|| "Failed to encode mailbox_policy_id as CBOR")?;
-        let mailbox_policy_param_hex = hex::encode(&mailbox_policy_param);
-
-        match apply_validator_param_with_purpose(
-            &ctx.contracts_dir,
-            "processed_message_nft",
-            "processed_message_nft",
-            Some("mint"),
-            &mailbox_policy_param_hex,
-        ) {
-            Ok(applied) => {
-                println!(
-                    "  Applied mailbox_policy_id parameter: {}",
-                    mailbox_policy_id
-                );
-                println!("  Resulting policy ID: {}", applied.policy_id.green());
-
-                let old_policy = get_old_value(connection, "processedMessagesNftPolicyId");
-                connection_updates.push((
-                    "processedMessagesNftPolicyId".to_string(),
-                    json!(applied.policy_id.clone()),
-                    old_policy,
-                    applied.policy_id.clone(),
-                ));
-
-                let old_cbor = get_old_value(connection, "processedMessagesNftScriptCbor");
-                let cbor_display = if applied.compiled_code.len() > 40 {
-                    format!("{}...", &applied.compiled_code[..40])
-                } else {
-                    applied.compiled_code.clone()
-                };
-                connection_updates.push((
-                    "processedMessagesNftScriptCbor".to_string(),
-                    json!(applied.compiled_code.clone()),
-                    if old_cbor.len() > 40 {
-                        format!("{}...", &old_cbor[..40])
-                    } else {
-                        old_cbor
-                    },
-                    cbor_display,
-                ));
-            }
-            Err(e) => {
-                println!(
-                    "  {} Failed to apply processed_message_nft parameter: {}",
-                    "[WARN]".yellow(),
-                    e
-                );
-                println!(
-                    "  {} NFT-based message lookup will not be available",
-                    "[WARN]".yellow()
-                );
-            }
-        }
-    }
-
     // Update IGP info (use script hash for address derivation)
     if let Some(ref igp) = deployment.igp {
         let old = get_old_value(connection, "igpScriptHash");
@@ -681,34 +607,6 @@ async fn update_validator(
     if let Some(ref ref_utxo) = ism.reference_script_utxo {
         connection["ismReferenceScriptUtxo"] =
             json!(format!("{}#{}", ref_utxo.tx_hash, ref_utxo.output_index));
-    }
-
-    // Add processed messages NFT policy (for O(1) lookups)
-    if let Some(ref mailbox_nft) = mailbox.state_nft {
-        let mailbox_policy_id = &mailbox_nft.policy_id;
-        let mailbox_policy_param = encode_script_hash_param(mailbox_policy_id)
-            .with_context(|| "Failed to encode mailbox_policy_id as CBOR")?;
-        let mailbox_policy_param_hex = hex::encode(&mailbox_policy_param);
-
-        match apply_validator_param_with_purpose(
-            &ctx.contracts_dir,
-            "processed_message_nft",
-            "processed_message_nft",
-            Some("mint"),
-            &mailbox_policy_param_hex,
-        ) {
-            Ok(applied) => {
-                connection["processedMessagesNftPolicyId"] = json!(applied.policy_id);
-                connection["processedMessagesNftScriptCbor"] = json!(applied.compiled_code);
-            }
-            Err(e) => {
-                println!(
-                    "  {} Failed to generate processed_message_nft policy: {}",
-                    "[WARN]".yellow(),
-                    e
-                );
-            }
-        }
     }
 
     // Add IGP info (use script hash for address derivation)
@@ -998,22 +896,6 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
         if let Some(ref pid) = mailbox_policy_id {
             let param = encode_script_hash_param(pid)?;
             let param_hex = hex::encode(&param);
-
-            // Processed messages NFT
-            if let Ok(applied) = apply_validator_param_with_purpose(
-                &ctx.contracts_dir,
-                "processed_message_nft",
-                "processed_message_nft",
-                Some("mint"),
-                &param_hex,
-            ) {
-                lines.push("# Processed Messages NFT".to_string());
-                lines.push(format!(
-                    "CARDANO_PROCESSED_MSG_POLICY_ID={}",
-                    applied.policy_id
-                ));
-                lines.push(String::new());
-            }
 
             // Verified message NFT
             if let Ok(verified_applied) = apply_validator_param_with_purpose(

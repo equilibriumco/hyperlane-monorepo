@@ -390,24 +390,13 @@ async fn prepare_warp_deployment(ctx: &CliContext) -> Result<WarpDeploymentConte
     println!("  State NFT Policy: {}", warp_nft_applied.policy_id.green());
 
     // Compute warp_route script hash
-    // The warp_route validator takes 2 params: mailbox_policy_id, processed_messages_nft_policy
-    let processed_messages_nft_policy = deployment
-        .mailbox
-        .as_ref()
-        .and_then(|m| m.applied_parameters.first())
-        .map(|p| p.value.clone())
-        .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
-
+    // The warp_route validator takes 1 param: mailbox_policy_id
     let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-    let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
     let warp_route_applied = apply_validator_params(
         &ctx.contracts_dir,
         "warp_route",
         "warp_route",
-        &[
-            &hex::encode(&mailbox_param_cbor),
-            &hex::encode(&pm_nft_param_cbor),
-        ],
+        &[&hex::encode(&mailbox_param_cbor)],
     )?;
     println!(
         "  Warp Route Script Hash: {}",
@@ -1930,24 +1919,14 @@ async fn transfer(
         .and_then(|w| w.reference_script_utxo.as_ref());
 
     // Load warp script only if no reference UTXO available
-    // The warp_route validator takes 2 params: mailbox_policy_id, processed_messages_nft_policy
+    // The warp_route validator takes 1 param: mailbox_policy_id
     let warp_script = if warp_ref_utxo.is_none() {
-        let processed_messages_nft_policy = deployment
-            .mailbox
-            .as_ref()
-            .and_then(|m| m.applied_parameters.first())
-            .map(|p| p.value.clone())
-            .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
         let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-        let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
         let warp_route_applied = apply_validator_params(
             &ctx.contracts_dir,
             "warp_route",
             "warp_route",
-            &[
-                &hex::encode(&mailbox_param_cbor),
-                &hex::encode(&pm_nft_param_cbor),
-            ],
+            &[&hex::encode(&mailbox_param_cbor)],
         )?;
         Some(hex::decode(&warp_route_applied.compiled_code)?)
     } else {
@@ -3252,18 +3231,12 @@ async fn migrate(
                 .state_nft_policy
                 .as_ref()
                 .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?;
-            let pm_policy = &mailbox_info
-                .applied_parameters
-                .first()
-                .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?
-                .value;
             let mb_cbor = hex::encode(encode_script_hash_param(mailbox_policy_id)?);
-            let pm_cbor = hex::encode(encode_script_hash_param(pm_policy)?);
             let applied = apply_validator_params(
                 &ctx.contracts_dir,
                 "warp_route",
                 "warp_route",
-                &[&mb_cbor, &pm_cbor],
+                &[&mb_cbor],
             )?;
             applied.policy_id
         }
@@ -3423,27 +3396,17 @@ async fn migrate(
         });
 
     let warp_script = if warp_ref_script.is_none() {
-        let processed_messages_nft_policy = deployment
-            .mailbox
-            .as_ref()
-            .and_then(|m| m.applied_parameters.first())
-            .map(|p| p.value.clone())
-            .ok_or_else(|| anyhow!("Mailbox missing processed_messages_nft_policy parameter"))?;
         let mailbox_policy_id = deployment
             .mailbox
             .as_ref()
             .and_then(|m| m.state_nft_policy.as_ref())
             .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
         let mailbox_param_cbor = encode_script_hash_param(mailbox_policy_id)?;
-        let pm_nft_param_cbor = encode_script_hash_param(&processed_messages_nft_policy)?;
         let warp_route_applied = apply_validator_params(
             &ctx.contracts_dir,
             "warp_route",
             "warp_route",
-            &[
-                &hex::encode(&mailbox_param_cbor),
-                &hex::encode(&pm_nft_param_cbor),
-            ],
+            &[&hex::encode(&mailbox_param_cbor)],
         )?;
         Some(hex::decode(&warp_route_applied.compiled_code)?)
     } else {
