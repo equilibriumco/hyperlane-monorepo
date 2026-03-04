@@ -4,13 +4,13 @@ use crate::{CardanoMailbox, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
 use ciborium::Value as CborValue;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneMessage, Indexed, Indexer, LogMeta,
     SequenceAwareIndexer, H256, H512, U256,
 };
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -236,7 +236,8 @@ impl CardanoMailboxIndexer {
         }
 
         // outbound_nonce is at index 3
-        let nonce = fields.get(3)?.get("int")?.as_u64()? as u32;
+        let nonce_u64 = fields.get(3)?.get("int")?.as_u64()?;
+        let nonce = u32::try_from(nonce_u64).ok()?;
         Some(nonce)
     }
 
@@ -263,7 +264,7 @@ impl CardanoMailboxIndexer {
         match &fields[3] {
             CborValue::Integer(n) => {
                 let nonce: i128 = (*n).into();
-                Some(nonce as u32)
+                u32::try_from(nonce).ok()
             }
             _ => None,
         }
@@ -273,10 +274,16 @@ impl CardanoMailboxIndexer {
     fn extract_nonce_from_outputs(
         &self,
         tx_utxos: &crate::blockfrost_provider::TransactionUtxos,
-    ) -> u32 {
+    ) -> Option<u32> {
+        let mailbox_address = self.get_mailbox_address().ok()?;
+
         // Look for the mailbox output and extract the nonce from its datum
         // The nonce in the output is already incremented, so subtract 1 to get the message nonce
         for output in &tx_utxos.outputs {
+            if output.address != mailbox_address {
+                continue;
+            }
+
             if let Some(inline_datum) = &output.inline_datum {
                 // Try JSON format first, then CBOR
                 let nonce = if let Ok(datum_json) = serde_json::from_str::<JsonValue>(inline_datum)
@@ -288,14 +295,13 @@ impl CardanoMailboxIndexer {
 
                 if let Some(n) = nonce {
                     // The output nonce is incremented, so the message nonce is one less
-                    return n.saturating_sub(1);
+                    return Some(n.saturating_sub(1));
                 }
             }
         }
 
-        // If we can't find the nonce, log a warning and return 0
         warn!("Could not extract nonce from mailbox output datum");
-        0
+        None
     }
 
     /// Parse ProcessedMessageDatum from inline datum
@@ -313,9 +319,36 @@ impl CardanoMailboxIndexer {
         Some(H256::from(message_id))
     }
 
+    async fn fetch_block_hashes(&self, transactions: &[AddressTransaction]) -> HashMap<u64, H256> {
+        let unique_heights: Vec<u64> = transactions
+            .iter()
+            .map(|tx| tx.block_height)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        stream::iter(unique_heights)
+            .map(|height| async move {
+                let hash = match self.provider.get_block_by_height(height).await {
+                    Ok(block_info) => H256::from_slice(
+                        &hex::decode(&block_info.hash).unwrap_or_else(|_| vec![0u8; 32]),
+                    ),
+                    Err(e) => {
+                        debug!("Could not fetch block info for height {}: {}", height, e);
+                        H256::zero()
+                    }
+                };
+                (height, hash)
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await
+    }
+
     async fn process_dispatch_transaction(
         &self,
         tx_info: &AddressTransaction,
+        block_hashes: &HashMap<u64, H256>,
     ) -> Vec<(Indexed<HyperlaneMessage>, LogMeta)> {
         let mut results = Vec::new();
 
@@ -374,7 +407,13 @@ impl CardanoMailboxIndexer {
                 }
             };
 
-            let nonce = self.extract_nonce_from_outputs(&tx_utxos);
+            let nonce = match self.extract_nonce_from_outputs(&tx_utxos) {
+                Some(n) => n,
+                None => {
+                    warn!("Skipping tx {}: could not extract nonce", tx_info.tx_hash);
+                    continue;
+                }
+            };
             info!("Extracted nonce: {}", nonce);
 
             if let Some(message) = self.parse_dispatch_redeemer(&redeemer_datum, &tx_utxos, nonce) {
@@ -385,13 +424,15 @@ impl CardanoMailboxIndexer {
                     nonce, indexed.sequence
                 );
 
+                let block_hash = block_hashes
+                    .get(&tx_info.block_height)
+                    .copied()
+                    .unwrap_or_else(H256::zero);
+
                 let log_meta = LogMeta {
                     address: H256::zero(),
                     block_number: tx_info.block_height,
-                    block_hash: H256::from_slice(
-                        &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
-                            .unwrap_or_else(|_| vec![0u8; 32]),
-                    ),
+                    block_hash,
                     transaction_id: H512::from_slice(&{
                         let mut bytes = [0u8; 64];
                         let tx_bytes =
@@ -453,9 +494,11 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
             to
         );
 
+        let block_hashes = self.fetch_block_hashes(&transactions).await;
+
         let futs: FuturesUnordered<_> = transactions
             .iter()
-            .map(|tx_info| self.process_dispatch_transaction(tx_info))
+            .map(|tx_info| self.process_dispatch_transaction(tx_info, &block_hashes))
             .collect();
         let results: Vec<Vec<_>> = futs.collect().await;
 
@@ -522,6 +565,8 @@ impl Indexer<H256> for CardanoMailboxIndexer {
             .await
             .map_err(hyperlane_core::ChainCommunicationError::from_other)?;
 
+        let block_hashes = self.fetch_block_hashes(&transactions).await;
+
         let mut results = Vec::new();
 
         for tx_info in transactions {
@@ -534,6 +579,11 @@ impl Indexer<H256> for CardanoMailboxIndexer {
                 }
             };
 
+            let block_hash = block_hashes
+                .get(&tx_info.block_height)
+                .copied()
+                .unwrap_or_else(H256::zero);
+
             // Check each output for processed message markers
             for output in tx_utxos.outputs {
                 if let Some(inline_datum) = &output.inline_datum {
@@ -545,10 +595,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
                             let log_meta = LogMeta {
                                 address: H256::zero(),
                                 block_number: tx_info.block_height,
-                                block_hash: H256::from_slice(
-                                    &hex::decode(tx_info.tx_hash.get(0..64).unwrap_or(""))
-                                        .unwrap_or_else(|_| vec![0u8; 32]),
-                                ),
+                                block_hash,
                                 transaction_id: H512::from_slice(&{
                                     let mut bytes = [0u8; 64];
                                     let tx_bytes = hex::decode(&tx_info.tx_hash)

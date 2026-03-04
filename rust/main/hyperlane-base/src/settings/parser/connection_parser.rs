@@ -912,7 +912,13 @@ pub fn build_cardano_connection_conf(
                 .parse_string()
                 .end()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("mailboxPolicyId"),
+                eyre!("Missing mailboxPolicyId (and no fallback mailbox address); using empty default"),
+            );
+            Default::default()
+        });
 
     // Mailbox asset name hex for NFT lookup (defaults to empty for backwards compat)
     let mailbox_asset_name_hex = conn
@@ -974,7 +980,13 @@ pub fn build_cardano_connection_conf(
                 .parse_string()
                 .end()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("ismPolicyId"),
+                eyre!("Missing ismPolicyId (and no fallback interchainSecurityModule); using empty default"),
+            );
+            Default::default()
+        });
 
     // ISM asset name hex for NFT lookup (defaults to empty for backwards compat)
     let ism_asset_name_hex = conn
@@ -997,14 +1009,26 @@ pub fn build_cardano_connection_conf(
         .get_opt_key("igpScriptHash")
         .parse_string()
         .end()
-        .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("igpScriptHash"),
+                eyre!("Missing igpScriptHash; defaulting to zeros (IGP features will not work)"),
+            );
+            "00000000000000000000000000000000000000000000000000000000"
+        });
 
     let validator_announce_policy_id = conn
         .chain(&mut local_err)
         .get_opt_key("validatorAnnouncePolicyId")
         .parse_string()
         .end()
-        .unwrap_or("00000000000000000000000000000000000000000000000000000000"); // Default to zeros
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("validatorAnnouncePolicyId"),
+                eyre!("Missing validatorAnnouncePolicyId; defaulting to zeros (VA features will not work)"),
+            );
+            "00000000000000000000000000000000000000000000000000000000"
+        });
 
     // Optional: Script CBOR hex for witness set (deprecated - use reference scripts)
     let mailbox_script_cbor = conn

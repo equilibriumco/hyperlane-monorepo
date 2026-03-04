@@ -1701,8 +1701,9 @@ fn extract_u32(data: &PlutusData) -> Result<u32> {
         PlutusData::BigInt(BigInt::Int(i)) => {
             let inner = &i.0;
             match i64::try_from(*inner) {
-                Ok(val) => Ok(val as u32),
-                Err(_) => Err(anyhow!("Integer too large for u32")),
+                Ok(val) => u32::try_from(val)
+                    .map_err(|_| anyhow!("Integer out of u32 range: {}", val)),
+                Err(_) => Err(anyhow!("Integer too large for i64")),
             }
         }
         _ => Err(anyhow!("Expected integer")),

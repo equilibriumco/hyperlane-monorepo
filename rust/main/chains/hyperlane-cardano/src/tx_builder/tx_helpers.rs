@@ -231,8 +231,7 @@ pub(crate) fn convert_wire_to_local_amount(
 
     if result > U256::from(u64::MAX) {
         return Err(TxBuilderError::Encoding(format!(
-            "Amount overflow: converted value {} exceeds u64::MAX (wire={}, remote_dec={}, local_dec={})",
-            result, wire_amount, remote_decimals, local_decimals
+            "Amount overflow: converted value {result} exceeds u64::MAX (wire={wire_amount}, remote_dec={remote_decimals}, local_dec={local_decimals})"
         )));
     }
 

@@ -1506,16 +1506,39 @@ pub(crate) fn parse_igp_datum(
                 .unwrap_or_default();
 
             if items.len() >= 2 {
-                let domain = items[0].get("int").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-                let oracle_fields = items[1].get("fields").and_then(|f| f.as_array());
-                if let Some(of) = oracle_fields {
-                    if of.len() >= 3 {
-                        let gas_price = of[0].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
-                        let exchange_rate = of[1].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
-                        let gas_overhead = of[2].get("int").and_then(|i| i.as_u64()).unwrap_or(0);
-                        gas_oracles.push((domain, gas_price, exchange_rate, gas_overhead));
-                    }
+                let domain = items[0]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Gas oracle entry has invalid or missing domain"))?;
+                let domain =
+                    u32::try_from(domain).map_err(|_| anyhow!("Gas oracle domain out of u32 range: {domain}"))?;
+
+                let oracle_fields = items[1]
+                    .get("fields")
+                    .and_then(|f| f.as_array())
+                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: missing oracle fields"))?;
+
+                if oracle_fields.len() < 3 {
+                    return Err(anyhow!(
+                        "Gas oracle for domain {domain}: expected >= 3 fields, got {}",
+                        oracle_fields.len()
+                    ));
                 }
+
+                let gas_price = oracle_fields[0]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: invalid gas_price"))?;
+                let exchange_rate = oracle_fields[1]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: invalid exchange_rate"))?;
+                let gas_overhead = oracle_fields[2]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: invalid gas_overhead"))?;
+
+                gas_oracles.push((domain, gas_price, exchange_rate, gas_overhead));
             }
         }
     }
