@@ -160,7 +160,6 @@ impl RecipientResolver {
     }
 }
 
-
 /// Detect recipient kind and extract ISM from datum.
 ///
 /// Tries to parse the datum as a WarpRouteDatum (Constr 0 with 4 fields:
