@@ -26,7 +26,7 @@ mod mailbox;
 mod mailbox_indexer;
 mod merkle_tree_hook;
 mod multisig_ism;
-pub mod process_redeemer_extractor;
+mod process_redeemer_extractor;
 mod provider;
 pub mod recipient_resolver;
 pub mod redeemers;

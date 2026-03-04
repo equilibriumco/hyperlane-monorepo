@@ -540,13 +540,22 @@ impl Indexer<H256> for CardanoMailboxIndexer {
         let mut results = Vec::new();
 
         for tx_info in &transactions {
-            let message_ids = crate::process_redeemer_extractor::extract_process_message_ids(
+            let message_ids = match crate::process_redeemer_extractor::extract_process_message_ids(
                 &self.provider,
                 &tx_info.tx_hash,
                 &self.conf.mailbox_script_hash,
             )
             .await
-            .unwrap_or_default();
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(
+                        tx_hash = tx_info.tx_hash,
+                        "Failed to extract delivered message_ids, skipping TX: {e}"
+                    );
+                    continue;
+                }
+            };
 
             let block_hash = block_hashes
                 .get(&tx_info.block_height)

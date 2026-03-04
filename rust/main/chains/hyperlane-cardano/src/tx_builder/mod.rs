@@ -489,6 +489,9 @@ impl HyperlaneTxBuilder {
         const RETRY_DELAY: Duration = Duration::from_secs(5);
 
         for attempt in 0..=MAX_RETRIES {
+            // NOTE: This fetches ALL mailbox TXs (Dispatch + Process + etc), not just
+            // Process TXs. extract_process_message_ids filters to Process redeemers only.
+            // For high-volume mailboxes, consider incremental scanning with a cursor.
             let transactions = self
                 .provider
                 .get_address_transactions(&mailbox_address, None, None)
