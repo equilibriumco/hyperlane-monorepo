@@ -1601,6 +1601,11 @@ async fn init_all(
         "\n{}",
         "✓ All contracts initialized successfully!".green().bold()
     );
+    println!(
+        "{}",
+        "Note: IGP not initialized by 'init all'. Run 'init igp' separately."
+            .yellow()
+    );
 
     Ok(())
 }
