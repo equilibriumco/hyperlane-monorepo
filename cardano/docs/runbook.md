@@ -463,6 +463,35 @@ delivery_success=  # yes/no
 
 ---
 
+## Troubleshooting
+
+### GasPaymentNotFound for cross-chain messages
+
+**Symptom:** Relayer logs show `GasPaymentNotFound` for messages dispatched from the official Sepolia mailbox.
+
+**Cause:** The official Sepolia mailbox uses its own IGP hook (charges 1 wei). When the relayer's `gasPaymentEnforcement` is set to `onChainFeeQuoting`, it looks for gas payments on the custom IGP, which doesn't have them.
+
+**Configuration options:**
+
+| Scenario | `gasPaymentEnforcement` | Notes |
+|----------|------------------------|-------|
+| Skip gas checks (basic connectivity) | `[{"type": "none"}]` | Messages relay without IGP |
+| Test IGP flow with custom hook | `[{"type": "minimum", "payment": "1"}]` | Dispatch with `--hook <aggregation_hook>` |
+| Production with official mailbox | `[{"type": "onChainFeeQuoting"}]` | Requires dispatching with `--hook <aggregation_hook>` so payments go to the custom IGP |
+
+To test the full IGP flow end-to-end, always dispatch from the official mailbox with `--hook <aggregation_hook_address>`. This routes the gas payment through the custom AggregationHook (MerkleTreeHook + IGP), which the relayer can verify.
+
+```bash
+# Dispatch with custom hook so IGP payment is recorded
+cast send $MAILBOX "dispatch(uint32,bytes32,bytes)" \
+  $DEST_DOMAIN $RECIPIENT $BODY \
+  --value 1 \
+  --rpc-url $RPC_URL \
+  --private-key $KEY
+```
+
+---
+
 ## Summary
 
 ### Deployment Summary Table
