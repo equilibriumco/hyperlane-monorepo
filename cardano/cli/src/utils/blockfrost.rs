@@ -684,6 +684,25 @@ impl BlockfrostClient {
         self.get(&format!("/txs/{}/utxos", tx_hash)).await
     }
 
+    /// Get transaction redeemers
+    pub async fn get_tx_redeemers(&self, tx_hash: &str) -> Result<Vec<TxRedeemer>> {
+        let endpoint = format!("/txs/{}/redeemers", tx_hash);
+        match self.get(&endpoint).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                if e.to_string().contains("404") {
+                    return Ok(vec![]);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Get script datum by datum hash
+    pub async fn get_script_datum(&self, datum_hash: &str) -> Result<ScriptDatum> {
+        self.get(&format!("/scripts/datum/{}", datum_hash)).await
+    }
+
     /// Wait for transaction confirmation
     pub async fn wait_for_tx(&self, tx_hash: &str, timeout_secs: u64) -> Result<TxInfo> {
         let start = std::time::Instant::now();
@@ -802,4 +821,22 @@ pub struct TxUtxoEntry {
 pub struct TxUtxoAmount {
     pub unit: String,
     pub quantity: String,
+}
+
+/// Transaction redeemer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxRedeemer {
+    pub tx_index: u32,
+    pub purpose: String,
+    pub script_hash: String,
+    pub redeemer_data_hash: String,
+    pub unit_mem: String,
+    pub unit_steps: String,
+    pub fee: String,
+}
+
+/// Script datum (fetched by datum hash)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptDatum {
+    pub json_value: serde_json::Value,
 }

@@ -416,52 +416,102 @@ async fn query_message(
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    // Get mailbox address
+    let deployment = ctx.load_deployment_info()?;
+    let mailbox_info = deployment
+        .mailbox
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not found in deployment_info.json"))?;
+
     let address = match mailbox_address {
         Some(a) => a,
-        None => {
-            let deployment = ctx.load_deployment_info()?;
-            deployment
-                .mailbox
-                .map(|m| m.address)
-                .ok_or_else(|| anyhow!("Mailbox address not found"))?
-        }
+        None => mailbox_info.address.clone(),
     };
-
-    // Message delivery is tracked in the mailbox datum's sparse Merkle tree.
-    // Query the mailbox state UTXO to check the current message count.
-    let utxos = client.get_utxos(&address).await?;
-
-    println!("\n{}", "Checking mailbox state...".cyan());
+    let mailbox_script_hash = &mailbox_info.hash;
 
     let msg_id_normalized = message_id
         .to_lowercase()
         .strip_prefix("0x")
-        .unwrap_or(message_id)
-        .to_string();
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| message_id.to_lowercase());
 
-    for utxo in &utxos {
-        if let Some(datum) = &utxo.inline_datum {
-            if let Some(fields) = datum.get("fields").and_then(|f| f.as_array()) {
-                // Mailbox datum has message_count as an integer field
-                if let Some(count) = fields.get(1).and_then(|f| f.get("int")) {
-                    println!("\n{}", "Mailbox state found:".green().bold());
-                    println!("  UTXO: {}#{}", utxo.tx_hash, utxo.output_index);
-                    println!("  Messages processed: {}", count);
-                    println!(
-                        "\n  Note: Individual message delivery status for {} is tracked",
-                        msg_id_normalized
-                    );
-                    println!("  in the mailbox datum's sparse Merkle tree and can be");
-                    println!("  verified by examining process transaction redeemers.");
-                    return Ok(());
-                }
+    println!(
+        "  Mailbox address: {}...{}",
+        &address[..20],
+        &address[address.len().saturating_sub(8)..]
+    );
+    println!("  Mailbox script hash: {}", mailbox_script_hash);
+    println!("  Looking for message_id: {}", msg_id_normalized);
+
+    println!(
+        "\n{}",
+        "Scanning mailbox transactions for Process redeemers...".cyan()
+    );
+
+    let txs = client.get_address_transactions(&address, 100).await?;
+    println!("  Found {} transactions to scan", txs.len());
+
+    for tx in &txs {
+        let redeemers = match client.get_tx_redeemers(&tx.tx_hash).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        for redeemer in &redeemers {
+            if redeemer.purpose != "spend" || redeemer.script_hash != *mailbox_script_hash {
+                continue;
+            }
+
+            let datum = match client.get_script_datum(&redeemer.redeemer_data_hash).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Process redeemer: constructor == 1, fields[2].bytes == message_id
+            let constructor = datum
+                .json_value
+                .get("constructor")
+                .and_then(|c| c.as_u64());
+            if constructor != Some(1) {
+                continue;
+            }
+
+            let fields = match datum.json_value.get("fields").and_then(|f| f.as_array()) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            let redeemer_msg_id = fields
+                .get(2)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .unwrap_or("");
+
+            if redeemer_msg_id.to_lowercase() == msg_id_normalized {
+                println!("\n{}", "DELIVERED".green().bold());
+                println!("  Message ID: {}", msg_id_normalized);
+                println!("  TX Hash:    {}", tx.tx_hash);
+                println!("  Block:      {}", tx.block_height);
+
+                let datetime = chrono::DateTime::from_timestamp(tx.block_time as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| tx.block_time.to_string());
+                println!("  Time:       {}", datetime);
+
+                println!(
+                    "\n  Explorer: {}",
+                    ctx.explorer_tx_url(&tx.tx_hash)
+                );
+                return Ok(());
             }
         }
     }
 
-    println!("\n{}", "Mailbox state UTXO not found".yellow());
-    println!("Check the mailbox address or deployment status.");
+    println!("\n{}", "NOT DELIVERED".yellow().bold());
+    println!(
+        "  Message {} was not found in the last {} mailbox transactions.",
+        msg_id_normalized,
+        txs.len()
+    );
 
     Ok(())
 }
