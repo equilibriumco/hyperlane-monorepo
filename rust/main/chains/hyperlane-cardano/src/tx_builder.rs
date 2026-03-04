@@ -6060,8 +6060,7 @@ mod tests {
     fn test_convert_wire_to_local_same_decimals() {
         // Same decimals: no conversion needed
         assert_eq!(
-            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 18)
-                .unwrap(),
+            convert_wire_to_local_amount(U256::from(1_000_000_000_000_000_000u64), 18, 18).unwrap(),
             1_000_000_000_000_000_000
         );
         assert_eq!(
@@ -6133,11 +6132,17 @@ mod tests {
 
         // 50 tokens in wire format (50 * 10^18)
         let fifty = U256::from(50u64) * U256::from(10u64).pow(U256::from(18u64));
-        assert_eq!(convert_wire_to_local_amount(fifty, 18, 6).unwrap(), 50_000_000);
+        assert_eq!(
+            convert_wire_to_local_amount(fifty, 18, 6).unwrap(),
+            50_000_000
+        );
 
         // 100 tokens in wire format (100 * 10^18)
         let hundred = U256::from(100u64) * U256::from(10u64).pow(U256::from(18u64));
-        assert_eq!(convert_wire_to_local_amount(hundred, 18, 6).unwrap(), 100_000_000);
+        assert_eq!(
+            convert_wire_to_local_amount(hundred, 18, 6).unwrap(),
+            100_000_000
+        );
     }
 
     #[test]
