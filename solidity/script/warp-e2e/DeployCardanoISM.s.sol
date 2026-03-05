@@ -4,7 +4,7 @@ pragma solidity ^0.8.22;
 import "forge-std/Script.sol";
 import "forge-std/console.sol";
 
-import {StaticMerkleRootMultisigIsm, StaticMerkleRootMultisigIsmFactory} from "contracts/isms/multisig/StaticMultisigIsm.sol";
+import {StaticMessageIdMultisigIsm, StaticMessageIdMultisigIsmFactory} from "contracts/isms/multisig/StaticMultisigIsm.sol";
 import {TestRecipient} from "contracts/test/TestRecipient.sol";
 
 interface ITokenRouter {
@@ -55,9 +55,9 @@ contract DeployCardanoISM is Script {
         address[] memory validators = new address[](1);
         validators[0] = cardanoValidator;
 
-        // Deploy StaticMerkleRootMultisigIsm for Cardano domain
-        // Using the factory pattern for deterministic deployment
-        StaticMerkleRootMultisigIsmFactory factory = new StaticMerkleRootMultisigIsmFactory();
+        // Deploy StaticMessageIdMultisigIsm for Cardano domain
+        // MessageId ISM only needs message_id + signatures (no full merkle proof)
+        StaticMessageIdMultisigIsmFactory factory = new StaticMessageIdMultisigIsmFactory();
         address ism = factory.deploy(validators, threshold);
 
         console.log("\n=== Deployment Complete ===");
