@@ -46,6 +46,8 @@ pub struct ConnectionConf {
     pub igp_script_hash: String,
     /// Validator Announce policy ID (hex)
     pub validator_announce_policy_id: String,
+    /// Validator Announce reference script UTXO (format: "tx_hash#output_index")
+    pub validator_announce_reference_script_utxo: Option<String>,
     /// Verified message NFT policy ID (hex) - minting policy for verified message NFTs.
     /// Required for direct message delivery pattern.
     pub verified_message_nft_policy_id: Option<String>,
@@ -84,6 +86,7 @@ pub struct RawConnectionConf {
     ism_reference_script_utxo: Option<String>,
     igp_script_hash: Option<String>,
     validator_announce_policy_id: Option<String>,
+    validator_announce_reference_script_utxo: Option<String>,
     verified_message_nft_policy_id: Option<String>,
     verified_message_nft_script_cbor: Option<String>,
     confirmation_block_delay: Option<u32>,
@@ -198,6 +201,8 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("validator_announce"))
             .into_config_result(|| cwp.join("validator_announce_policy_id"))?;
 
+        let validator_announce_reference_script_utxo = raw.validator_announce_reference_script_utxo;
+
         // Mailbox script CBOR is optional (deprecated - use reference scripts instead)
         let mailbox_script_cbor = raw.mailbox_script_cbor;
         // Mailbox reference script UTXO (preferred method)
@@ -242,6 +247,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             ism_reference_script_utxo,
             igp_script_hash,
             validator_announce_policy_id,
+            validator_announce_reference_script_utxo,
             verified_message_nft_policy_id,
             verified_message_nft_script_cbor,
             confirmation_block_delay,

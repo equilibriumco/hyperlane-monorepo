@@ -11,7 +11,7 @@ mod tx_helpers;
 pub use tx_encoding::{
     encode_mailbox_redeemer, encode_verified_message_datum, encode_warp_route_redeemer,
 };
-pub use tx_helpers::parse_per_redeemer_ex_units;
+pub use tx_helpers::{parse_per_redeemer_ex_units, parse_utxo_ref};
 
 // Internal re-exports used by this module
 use tx_encoding::{
@@ -21,7 +21,7 @@ use tx_encoding::{
 use tx_helpers::{
     compute_output_indices, convert_wire_to_local_amount, credential_to_address,
     is_retryable_bad_inputs_error, parse_address, parse_fee_too_small_expected, parse_policy_id,
-    parse_token_message, parse_utxo_ref, utxo_to_input,
+    parse_token_message, utxo_to_input,
 };
 
 use crate::blockfrost_provider::{

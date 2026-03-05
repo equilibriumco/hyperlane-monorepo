@@ -1005,6 +1005,13 @@ pub fn build_cardano_connection_conf(
             "00000000000000000000000000000000000000000000000000000000"
         });
 
+    let validator_announce_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("validatorAnnounceReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
     // Optional: Script CBOR hex for witness set (deprecated - use reference scripts)
     let mailbox_script_cbor = conn
         .chain(&mut local_err)
@@ -1088,6 +1095,7 @@ pub fn build_cardano_connection_conf(
         ism_reference_script_utxo,
         igp_script_hash: igp_script_hash.to_string(),
         validator_announce_policy_id: validator_announce_policy_id.to_string(),
+        validator_announce_reference_script_utxo,
         verified_message_nft_policy_id,
         verified_message_nft_script_cbor,
         confirmation_block_delay,

@@ -1057,7 +1057,10 @@ impl ChainConf {
                 Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
             ChainConnectionConf::Cardano(conf) => {
-                let va = Box::new(h_cardano::CardanoValidatorAnnounce::new(conf, locator));
+                let signer = self.cardano_signer().await.context(ctx)?;
+                let va = Box::new(h_cardano::CardanoValidatorAnnounce::new(
+                    conf, locator, signer,
+                ));
                 Ok(va as Box<dyn ValidatorAnnounce>)
             }
         }

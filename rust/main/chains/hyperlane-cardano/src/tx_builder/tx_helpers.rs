@@ -163,7 +163,7 @@ pub(crate) fn parse_policy_id(policy_id: &str) -> Result<Hash<28>, TxBuilderErro
 }
 
 /// Parse a UTXO reference string in the format "tx_hash#output_index" into an Input.
-pub(crate) fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
+pub fn parse_utxo_ref(utxo_ref: &str) -> Result<Input, TxBuilderError> {
     let parts: Vec<&str> = utxo_ref.split('#').collect();
     if parts.len() != 2 {
         return Err(TxBuilderError::Encoding(format!(
