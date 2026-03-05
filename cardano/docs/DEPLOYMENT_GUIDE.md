@@ -17,6 +17,7 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 11. [Complete Deployment Script](#complete-deployment-script)
 12. [Appendix: Script Parameterization](#appendix-script-parameterization)
 13. [Appendix: Warp Route Architecture](#appendix-warp-route-architecture)
+14. [Appendix: EVM-Side Hook Configuration (AggregationHook)](#appendix-evm-side-hook-configuration-aggregationhook)
 
 ---
 
@@ -2953,4 +2954,97 @@ cast send $FUJI_WADA "transfer(address,uint256)" $FUJI_COLLATERAL_WADA "50000000
 2. Verify Cardano relayer is running and configured for Fuji (domain 43113) as origin
 3. Check relayer logs: `docker logs -f hyperlane-relayer 2>&1 | grep -E "(message|error)"`
 4. Verify Cardano ISM has the correct Fuji validators configured
+
+---
+
+## Appendix: EVM-Side Hook Configuration (AggregationHook)
+
+When dispatching messages from an EVM chain (Sepolia, Fuji, etc.) to Cardano,
+the message **must** be inserted into the MerkleTreeHook. Without this,
+validators cannot sign checkpoints covering the message and cross-chain delivery
+will fail.
+
+### Why This Matters
+
+Hyperlane validators watch the MerkleTreeHook for new message insertions. They
+sign checkpoints (merkle root + index) that the relayer uses as proof when
+delivering messages on the destination chain. If a message is dispatched through
+the Mailbox but never inserted into the MerkleTreeHook, validators will never
+see it.
+
+### When You Need an AggregationHook
+
+| Scenario | Hook Needed? | Why |
+| --- | --- | --- |
+| Warp route `transferRemote()` | Automatic | Warp routes have their own hook configured at deploy time |
+| `Mailbox.dispatch()` (3-arg) | Default hook only | Uses the Mailbox's default hook (usually MerkleTreeHook) — **cannot accept ETH for gas** |
+| `Mailbox.dispatch()` (5-arg) with custom hook | **Yes — must include MerkleTreeHook** | If your custom hook is only an IGP, messages won't be in the merkle tree |
+
+The 3-argument `dispatch(uint32,bytes32,bytes)` uses the Mailbox's default hook
+(typically MerkleTreeHook), which works but **does not accept ETH value** for gas
+payment. To pay for interchain gas, you need the 5-argument form with an
+AggregationHook that combines MerkleTreeHook + IGP.
+
+### Deploying an AggregationHook
+
+Use the provided Forge script at `solidity/script/warp-e2e/DeployAggregationHook.s.sol`:
+
+```bash
+cd solidity
+
+# Set environment variables
+export EVM_SIGNER_KEY="0x..."                                    # Your deployer key
+export EVM_MERKLE_TREE_HOOK="0x4917a9746A7B6E0A57159cCb7F5a6744247f2d0d"  # Sepolia example
+export EVM_IGP="0xb9655C900Ef6104a776E533E93dC1D32BEe8cd93"              # Your IGP address
+
+# Deploy
+forge script script/warp-e2e/DeployAggregationHook.s.sol:DeployAggregationHook \
+  --rpc-url $EVM_RPC_URL \
+  --broadcast
+
+# Save the output address
+export EVM_AGGREGATION_HOOK="0x..."  # Copy from "AggregationHook deployed:" line
+```
+
+The AggregationHook is reusable — you only need to redeploy if the IGP or
+MerkleTreeHook address changes.
+
+### Dispatching with the AggregationHook
+
+When sending messages directly through the Mailbox (not via warp routes), use
+the 5-argument `dispatch()` with the AggregationHook:
+
+```bash
+# Quote gas payment from the IGP
+GAS_QUOTE=$(cast call $EVM_IGP \
+  "quoteGasPayment(uint32)(uint256)" 2003 \
+  --rpc-url $EVM_RPC_URL)
+
+# Dispatch with AggregationHook (MerkleTreeHook + IGP)
+cast send $EVM_MAILBOX \
+  "dispatch(uint32,bytes32,bytes,bytes,address)" \
+  2003 \
+  $CARDANO_RECIPIENT \
+  $MESSAGE_BODY \
+  "0x" \
+  $EVM_AGGREGATION_HOOK \
+  --value $GAS_QUOTE \
+  --rpc-url $EVM_RPC_URL \
+  --private-key $EVM_SIGNER_KEY
+```
+
+The `--value` pays the IGP for interchain gas, and the AggregationHook ensures
+the message is also inserted into the MerkleTreeHook for validator signing.
+
+### Common Mistake: "No Value Expected" Error
+
+If you try to send ETH value with the 3-argument `dispatch()`:
+
+```
+MerkleTreeHook: no value expected
+```
+
+This happens because the default Mailbox hook is MerkleTreeHook alone, which
+does not accept ETH. Switch to the 5-argument form with the AggregationHook as
+shown above.
 

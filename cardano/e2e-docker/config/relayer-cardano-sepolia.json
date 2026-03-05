@@ -6,7 +6,7 @@
       "blocks": {
         "confirmations": 1,
         "estimateBlockTime": 20,
-        "reorgPeriod": 20
+        "reorgPeriod": 2
       },
       "chainId": 2003,
       "connection": {
@@ -92,5 +92,5 @@
   },
   "originChainNames": "cardanopreview,sepolia",
   "relayChains": "cardanopreview,sepolia",
-  "blacklist": "[{\"messageid\": \"0x32d01904b5e1b2cfd5a953d4a32f628d38a16e73a8c46ac0f130f81ce40a9d2b\"}, {\"messageid\": \"0x6e2440e5525aa0c25aec7750c093e6e09318ece46a3cac337ac153accf1f8d4f\"}, {\"messageid\": \"0xd8feb1026e60a5b59cac079b07e15ba42e90b1ee743cbe08b06e6617c39c3bdd\"}, {\"messageid\": \"0x44c371c600462cebb394d2c203c07e64455d17b0bc1775c19500dba794a7bbdf\"}]"
+  "blacklist": "[{\"messageid\": \"0xbbbeda0da0d7645de10bff5c3d4054eba01bc8686fee3debead444ffb5c79fdb\"}, {\"messageid\": \"0x5e03977759a3a3301358c77f69ef3c59a31edde5bdc4a4a6f5df4a26c3d1e826\"}]"
 }
