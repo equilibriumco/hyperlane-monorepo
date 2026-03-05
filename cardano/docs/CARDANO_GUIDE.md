@@ -766,16 +766,12 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
   --signing-key path/to/payment.skey \
   --network preview \
   init recipient \
-  --verified-message-nft-policy $(cat deployments/preview/verified_message_nft.policy)
+  --custom-contracts ./contracts \
+  --custom-module greeting \
+  --custom-validator greeting
 ```
 
-The CLI handles parameterization, NFT minting, and initial state creation. Output includes recipient script hash, state NFT policy ID, recipient script address, and TX hash.
-
-#### Manual Deployment
-
-1. Build contracts: `cd contracts && aiken build`
-2. Apply parameters: parameterize `verified_message_nft.mint` with mailbox policy, `state_nft.mint` with a UTXO, and the recipient with the verified message NFT policy
-3. Build and submit the initialization transaction
+The CLI handles parameterization, NFT minting, and initial state creation. Output includes recipient script hash, state NFT policy ID, recipient script address, and TX hash. The `verified_message_nft_policy` is auto-derived from the mailbox deployment.
 
 See the [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md) for full step-by-step instructions.
 
@@ -803,7 +799,7 @@ hyperlane-cardano message receive \
   --recipient-policy def456...
 ```
 
-Parameters: `--message-utxo`, `--recipient-policy`, `--recipient-state-asset`, `--message-nft-policy` (auto-derived), `--recipient-ref-script`, `--nft-ref-script`, `--dry-run`.
+Parameters: `--message-utxo`, `--recipient-policy`, `--recipient-state-asset`, `--message-nft-policy` (auto-derived from mailbox deployment), `--recipient-ref-script`, `--nft-ref-script`, `--dry-run`.
 
 #### Automated Processing
 
@@ -815,8 +811,7 @@ MESSAGES=$(hyperlane-cardano message list \
 echo "$MESSAGES" | jq -r '.[].utxo' | while read UTXO; do
   hyperlane-cardano message receive \
     --message-utxo "$UTXO" \
-    --recipient-state-policy $STATE_POLICY \
-    --verified-message-nft-policy $VERIFIED_MESSAGE_POLICY \
+    --recipient-policy $STATE_POLICY \
     --recipient-ref-script "$RECIPIENT_REF" \
     --nft-ref-script "$NFT_REF"
   sleep 30  # Avoid contention
@@ -877,7 +872,8 @@ hyperlane-cardano warp deploy --token-type collateral \
   --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
 
 # Synthetic
-hyperlane-cardano warp deploy --token-type synthetic --decimals 18 \
+hyperlane-cardano warp deploy --token-type synthetic --decimals 6 \
+  --remote-decimals 18 \
   --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
 ```
 
@@ -1428,12 +1424,12 @@ forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
 
 ### Step 6: Enroll Cardano Routers on Fuji
 
-Get Cardano warp route addresses from deployment (format: `0x02000000{script_hash}`):
+Get Cardano warp route addresses from deployment (format: `0x01000000{nft_policy_id}`):
 
 ```bash
-export CARDANO_NATIVE_ADA="0x02000000..."
-export CARDANO_COLLATERAL_CTEST="0x02000000..."
-export CARDANO_SYNTHETIC_FTEST="0x02000000..."
+export CARDANO_NATIVE_ADA="0x01000000..."
+export CARDANO_COLLATERAL_CTEST="0x01000000..."
+export CARDANO_SYNTHETIC_FTEST="0x01000000..."
 
 cd solidity
 forge script script/warp-e2e/EnrollCardanoRouters.s.sol:EnrollCardanoRouters \
@@ -1554,7 +1550,7 @@ The limitation becomes relevant when sustained volume exceeds ~100/hour or low-l
 | Multisig ISM                            | Complete       | ECDSA secp256k1 verified                     |
 | Validator Agent                         | Tested         | Signing checkpoints, storing in S3           |
 | Warp Routes (Native, Collateral, Synth) | Tested         | All 6 directions verified                    |
-| Interchain Gas Paymaster                | Untested       | Contract implemented, indexer stub           |
+| Interchain Gas Paymaster                | Implemented    | Contract, indexer, and relayer integration   |
 | Per-recipient ISM                       | Implemented    | Relayer reads ISM from WarpRouteDatum        |
 | NFT Policy Addressing                   | Complete       | O(1) lookups, no registry needed             |
 
@@ -1578,10 +1574,8 @@ The limitation becomes relevant when sustained volume exceeds ~100/hour or low-l
 
 ### What's Missing
 
-1. **IGP RPC Integration**: `get_gas_payments_by_block_range()` endpoint needed
-2. **Reorg Reporter**: Not implemented for Cardano (needed for production)
-3. **On-chain Custom ISM Enforcement**: Currently relayer-side only
-4. **MerkleTreeHook**: Mostly stubs, needs full implementation
+1. **Reorg Reporter**: Not implemented for Cardano (needed for production hardening)
+2. **On-chain Custom ISM Enforcement**: Currently relayer-side only
 
 ### Recommended Next Steps
 
