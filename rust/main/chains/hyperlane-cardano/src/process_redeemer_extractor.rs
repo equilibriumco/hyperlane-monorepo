@@ -4,13 +4,18 @@ use crate::blockfrost_provider::{
 use tracing::warn;
 
 /// Filter redeemers that match the mailbox script_hash with "spend" purpose.
+/// If `mailbox_script_hash` is empty, matches all spend redeemers (used after
+/// migration when old Process TXs have a different script hash).
 fn filter_mailbox_spend_redeemers<'a>(
     redeemers: &'a [TransactionRedeemer],
     mailbox_script_hash: &str,
 ) -> Vec<&'a TransactionRedeemer> {
     redeemers
         .iter()
-        .filter(|r| r.script_hash == mailbox_script_hash && r.purpose.eq_ignore_ascii_case("spend"))
+        .filter(|r| {
+            r.purpose.eq_ignore_ascii_case("spend")
+                && (mailbox_script_hash.is_empty() || r.script_hash == mailbox_script_hash)
+        })
         .collect()
 }
 

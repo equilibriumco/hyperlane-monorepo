@@ -729,6 +729,64 @@ impl BlockfrostProvider {
         Ok(result)
     }
 
+    /// Get all transactions involving a specific asset (policy_id + asset_name_hex).
+    ///
+    /// Unlike `get_address_transactions`, this returns TXs across ALL addresses
+    /// that ever held the asset — important after contract migrations where the
+    /// script address changes but the state NFT stays the same.
+    #[instrument(skip(self))]
+    pub async fn get_asset_transactions(
+        &self,
+        asset: &str,
+    ) -> Result<Vec<AddressTransaction>, BlockfrostProviderError> {
+        let mut result = Vec::new();
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
+
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+
+            let txs = match self
+                .with_timeout(self.api.assets_transactions(asset, pagination))
+                .await
+            {
+                Ok(txs) => txs,
+                Err(e) => {
+                    let error_str = format!("{e:?}");
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        return Ok(result);
+                    }
+                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
+                        tracing::warn!(
+                            "Rate limited while fetching asset transactions, continuing with {} txs",
+                            result.len()
+                        );
+                        break;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let page_len = txs.len();
+            for tx in txs {
+                result.push(AddressTransaction {
+                    tx_hash: tx.tx_hash,
+                    block_height: tx.block_height as u64,
+                    block_time: tx.block_time as u64,
+                    tx_index: tx.tx_index as u32,
+                });
+            }
+
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(result)
+    }
+
     /// Get transaction UTXO details
     #[instrument(skip(self))]
     pub async fn get_transaction_utxos(

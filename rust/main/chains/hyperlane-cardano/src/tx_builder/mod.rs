@@ -452,6 +452,11 @@ impl HyperlaneTxBuilder {
 
     /// Get or initialize the Sparse Merkle Tree by scanning mailbox
     /// Process redeemers, validated against the mailbox datum's root.
+    ///
+    /// First tries address-based TX lookup (fast path). If the root doesn't
+    /// match — e.g. after a contract migration where old Process TXs live at a
+    /// previous script address — falls back to asset-based lookup which covers
+    /// all addresses the mailbox NFT has ever been at.
     async fn get_or_init_smt(&self) -> Result<(), TxBuilderError> {
         // Hold the lock for the entire initialization to prevent concurrent inits.
         // Concurrent callers block here; after the first one completes they see
@@ -487,33 +492,13 @@ impl HyperlaneTxBuilder {
         const RETRY_DELAY: Duration = Duration::from_secs(5);
 
         for attempt in 0..=MAX_RETRIES {
-            // NOTE: This fetches ALL mailbox TXs (Dispatch + Process + etc), not just
-            // Process TXs. extract_process_message_ids filters to Process redeemers only.
-            // For high-volume mailboxes, consider incremental scanning with a cursor.
             let transactions = self
                 .provider
                 .get_address_transactions(&mailbox_address, None, None)
                 .await
                 .unwrap_or_default();
 
-            let mut message_ids: Vec<[u8; 32]> = Vec::new();
-            for tx in &transactions {
-                match crate::process_redeemer_extractor::extract_process_message_ids(
-                    &self.provider,
-                    &tx.tx_hash,
-                    &self.conf.mailbox_script_hash,
-                )
-                .await
-                {
-                    Ok(ids) => message_ids.extend(ids),
-                    Err(e) => {
-                        warn!(
-                            tx_hash = tx.tx_hash,
-                            "Failed to extract Process message_ids: {e}"
-                        );
-                    }
-                }
-            }
+            let message_ids = self.extract_all_process_ids(&transactions, false).await;
 
             let smt = crate::smt::SparseMerkleTree::from_message_ids(&message_ids);
             if smt.root() == expected_root {
@@ -523,6 +508,38 @@ impl HyperlaneTxBuilder {
                 );
                 *guard = Some(smt);
                 return Ok(());
+            }
+
+            // On first mismatch, try asset-based lookup which covers
+            // pre-migration addresses where old Process TXs may live.
+            if attempt == 0 {
+                let mailbox_asset = format!(
+                    "{}{}",
+                    self.conf.mailbox_policy_id, self.conf.mailbox_asset_name_hex
+                );
+                info!(
+                    "Address-based SMT scan found {} ids but root mismatched, \
+                     falling back to asset-based lookup (asset={})",
+                    message_ids.len(),
+                    mailbox_asset
+                );
+
+                if let Ok(asset_txs) = self.provider.get_asset_transactions(&mailbox_asset).await {
+                    let asset_ids = self.extract_all_process_ids(&asset_txs, true).await;
+                    let asset_smt = crate::smt::SparseMerkleTree::from_message_ids(&asset_ids);
+                    if asset_smt.root() == expected_root {
+                        info!(
+                            count = asset_ids.len(),
+                            "SMT initialized via asset-based lookup (post-migration recovery)"
+                        );
+                        *guard = Some(asset_smt);
+                        return Ok(());
+                    }
+                    info!(
+                        loaded = asset_ids.len(),
+                        "Asset-based lookup also mismatched, continuing retries"
+                    );
+                }
             }
 
             if attempt < MAX_RETRIES {
@@ -541,6 +558,41 @@ impl HyperlaneTxBuilder {
             "SMT root mismatch after {MAX_RETRIES} retries: Blockfrost has not indexed \
              all mailbox transactions yet. Will retry on next message."
         )))
+    }
+
+    /// Extract Process message IDs from a list of transactions.
+    ///
+    /// When `any_script_hash` is true, matches all spend redeemers regardless
+    /// of script hash (needed after migration when old TXs have old hashes).
+    async fn extract_all_process_ids(
+        &self,
+        transactions: &[crate::blockfrost_provider::AddressTransaction],
+        any_script_hash: bool,
+    ) -> Vec<[u8; 32]> {
+        let script_hash = if any_script_hash {
+            ""
+        } else {
+            &self.conf.mailbox_script_hash
+        };
+        let mut message_ids: Vec<[u8; 32]> = Vec::new();
+        for tx in transactions {
+            match crate::process_redeemer_extractor::extract_process_message_ids(
+                &self.provider,
+                &tx.tx_hash,
+                script_hash,
+            )
+            .await
+            {
+                Ok(ids) => message_ids.extend(ids),
+                Err(e) => {
+                    warn!(
+                        tx_hash = tx.tx_hash,
+                        "Failed to extract Process message_ids: {e}"
+                    );
+                }
+            }
+        }
+        message_ids
     }
 
     /// Compute total reference script size for all scripts used in a process TX.
