@@ -1,4 +1,5 @@
 use aiken/primitive/bytearray
+use cardano/assets.{from_asset, from_lovelace, merge}
 use utils
 
 /// Test hyperlane_address_to_script_hash with valid 32-byte address
@@ -183,4 +184,162 @@ test has_at_least_zero() {
 test has_at_least_empty_zero() {
   let items: List<Int> = []
   utils.has_at_least(items, 0)
+}
+
+// ============================================================================
+// value_preserved tests
+// ============================================================================
+
+const test_nft_policy = #"f1bd8bb9bbd7d3fe0a20b12e1d8f36ab717c6e9c8e796f5375400378"
+
+const test_token_policy = #"abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"
+
+test value_preserved_lovelace_and_nft() {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_extra_lovelace_ok() {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = merge(from_lovelace(10_000_000), from_asset(test_nft_policy, "", 1))
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_fails_when_nft_missing() fail {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = from_lovelace(5_000_000)
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_fails_when_lovelace_reduced() fail {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = merge(from_lovelace(1_000_000), from_asset(test_nft_policy, "", 1))
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_fails_when_nft_stolen_lovelace_ok() fail {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = from_lovelace(5_000_000)
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_multiple_tokens() {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_fails_when_one_token_missing() fail {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+  utils.value_preserved(input, output)
+}
+
+test value_preserved_lovelace_only() {
+  let input = from_lovelace(5_000_000)
+  let output = from_lovelace(5_000_000)
+  utils.value_preserved(input, output)
+}
+
+// ============================================================================
+// native_tokens_preserved tests
+// ============================================================================
+
+test native_tokens_preserved_ignores_lovelace_decrease() {
+  let input = merge(from_lovelace(10_000_000), from_asset(test_nft_policy, "", 1))
+  let output = merge(from_lovelace(3_000_000), from_asset(test_nft_policy, "", 1))
+  utils.native_tokens_preserved(input, output)
+}
+
+test native_tokens_preserved_fails_when_nft_missing() fail {
+  let input = merge(from_lovelace(5_000_000), from_asset(test_nft_policy, "", 1))
+  let output = from_lovelace(5_000_000)
+  utils.native_tokens_preserved(input, output)
+}
+
+test native_tokens_preserved_token_increase_ok() {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 50))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  utils.native_tokens_preserved(input, output)
+}
+
+test native_tokens_preserved_fails_when_token_decreased() fail {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 50))
+  utils.native_tokens_preserved(input, output)
+}
+
+// ============================================================================
+// native_tokens_preserved_except tests
+// ============================================================================
+
+test native_tokens_preserved_except_allows_excepted_token_decrease() {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 50))
+  utils.native_tokens_preserved_except(input, output, test_token_policy, "TokenA")
+}
+
+test native_tokens_preserved_except_allows_excepted_token_removal() {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+  utils.native_tokens_preserved_except(input, output, test_token_policy, "TokenA")
+}
+
+test native_tokens_preserved_except_still_protects_nft() fail {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_token_policy, "TokenA", 50))
+  utils.native_tokens_preserved_except(input, output, test_token_policy, "TokenA")
+}
+
+test native_tokens_preserved_except_wrong_name_not_excluded() fail {
+  let input =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 100))
+  let output =
+    from_lovelace(5_000_000)
+      |> merge(from_asset(test_nft_policy, "", 1))
+      |> merge(from_asset(test_token_policy, "TokenA", 50))
+  // Excluding "TokenB" should NOT exempt "TokenA"
+  utils.native_tokens_preserved_except(input, output, test_token_policy, "TokenB")
 }

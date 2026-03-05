@@ -216,6 +216,20 @@ test migrate_works_with_ism_datum() {
   validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
 }
 
+test migrate_fails_when_nft_extracted_but_lovelace_preserved() fail {
+  let datum = sample_mailbox_datum()
+  let datum_as_data: Data = datum
+  // Attacker preserves lovelace but omits the state NFT
+  let continuation = Output {
+    address: new_address(),
+    value: from_lovelace(5_000_000),
+    datum: InlineDatum(datum),
+    reference_script: None,
+  }
+  let tx = mock_tx([owner_key], [continuation])
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+}
+
 test migrate_works_with_warp_datum() {
   let warp_datum = WarpRouteDatum {
     config: WarpRouteConfig {
