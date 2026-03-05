@@ -6,7 +6,7 @@
       "blocks": {
         "confirmations": 1,
         "estimateBlockTime": 20,
-        "reorgPeriod": 2
+        "reorgPeriod": 5
       },
       "chainId": 2003,
       "connection": {
@@ -83,8 +83,7 @@
   "destinationChainNames": "cardanopreview,sepolia",
   "gasPaymentEnforcement": [
     {
-      "type": "onChainFeeQuoting",
-      "gasFraction": "1/1"
+      "type": "none"
     }
   ],
   "metrics": {
@@ -92,5 +91,5 @@
   },
   "originChainNames": "cardanopreview,sepolia",
   "relayChains": "cardanopreview,sepolia",
-  "blacklist": "[{\"messageid\": \"0xbbbeda0da0d7645de10bff5c3d4054eba01bc8686fee3debead444ffb5c79fdb\"}, {\"messageid\": \"0x5e03977759a3a3301358c77f69ef3c59a31edde5bdc4a4a6f5df4a26c3d1e826\"}]"
+  "blacklist": "[{\"messageid\": \"0xbbbeda0da0d7645de10bff5c3d4054eba01bc8686fee3debead444ffb5c79fdb\"}, {\"messageid\": \"0x5e03977759a3a3301358c77f69ef3c59a31edde5bdc4a4a6f5df4a26c3d1e826\"}, {\"messageid\": \"0x9999dfec7e93b1fae206ccc2d2b0d0960cef4c1dfc53e0128c2066cc5b50fc55\"}, {\"messageid\": \"0x9313b9b881bd3c12f4a4491b3b291895bd9e57d9e7d981b696ff279cc7f3d34d\"}]"
 }
