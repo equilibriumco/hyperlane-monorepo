@@ -329,6 +329,16 @@ fn parse_chain(
 
     cfg_unwrap_all!(&chain.cwp, err: [connection, mailbox, interchain_gas_paymaster, validator_announce, merkle_tree_hook]);
 
+    // Enrich Cardano signer with network from connection config
+    let signer = signer.map(|mut s| {
+        if let (SignerConf::CardanoKey { is_mainnet, .. }, ChainConnectionConf::Cardano(ref conf)) =
+            (&mut s, &connection)
+        {
+            *is_mainnet = matches!(conf.network, hyperlane_cardano::CardanoNetwork::Mainnet);
+        }
+        s
+    });
+
     let submitter = chain
         .chain(&mut err)
         .get_opt_key("submitter")
@@ -588,7 +598,10 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
                     .parse_private_key()
                     .unwrap_or_default()
             };
-            err.into_result(SignerConf::CardanoKey { key })
+            err.into_result(SignerConf::CardanoKey {
+                key,
+                is_mainnet: false,
+            })
         }};
     }
 

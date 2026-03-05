@@ -19,6 +19,7 @@ pub struct Keypair {
     _pallas_secret: PallasSecretKey,
     pallas_public: PallasPublicKey,
     payment_credential_hash: [u8; 28], // Blake2b_224 of public key
+    is_mainnet: bool,
 }
 
 impl Keypair {
@@ -53,6 +54,7 @@ impl Keypair {
             _pallas_secret: pallas_secret,
             pallas_public,
             payment_credential_hash,
+            is_mainnet: false,
         })
     }
 
@@ -71,6 +73,20 @@ impl Keypair {
         let hex_string = hex_string.strip_prefix("0x").unwrap_or(hex_string);
         let secret_bytes = hex::decode(hex_string).ok()?;
         Self::from_secret_key(&secret_bytes).ok()
+    }
+
+    pub fn set_mainnet(&mut self, is_mainnet: bool) {
+        self.is_mainnet = is_mainnet;
+    }
+
+    /// Get the bech32 address for the configured network
+    pub fn address_bech32_for_configured_network(&self) -> String {
+        let network = if self.is_mainnet {
+            Network::Mainnet
+        } else {
+            Network::Testnet
+        };
+        self.address_bech32(network)
     }
 
     /// Get the Cardano payment address (bech32 format) for testnet

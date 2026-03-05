@@ -351,7 +351,7 @@ fn create_signer(conf: &ChainConf) -> Result<Keypair, LanderError> {
 
             Ok(keypair)
         }
-        SignerConf::CardanoKey { key } => {
+        SignerConf::CardanoKey { key, .. } => {
             // CardanoKey also contains H256 with raw bytes
             let key_bytes = key.as_bytes();
 

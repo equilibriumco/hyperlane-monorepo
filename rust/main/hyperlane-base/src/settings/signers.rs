@@ -61,6 +61,8 @@ pub enum SignerConf {
     CardanoKey {
         /// Private key value (extracted from .skey file)
         key: H256,
+        /// Whether this is a mainnet signer (affects bech32 address prefix)
+        is_mainnet: bool,
     },
     /// Assume node will sign on RPC calls
     #[default]
@@ -332,19 +334,15 @@ impl ChainSigner for hyperlane_aleo::AleoSigner {
 impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
     async fn build(conf: &SignerConf) -> Result<Self, Report> {
         match conf {
-            SignerConf::HexKey { key } => {
-                // TODO: Implement proper Cardano key derivation from hex
-                Ok(
-                    hyperlane_cardano::Keypair::from_string(&ethers::utils::hex::encode(
-                        key.as_bytes(),
-                    ))
-                    .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?,
-                )
-            }
-            SignerConf::CardanoKey { key } => {
-                // Create Cardano keypair from CardanoKey (same as HexKey for now)
-                Ok(hyperlane_cardano::Keypair::from_secret_key(key.as_bytes())
-                    .map_err(|e| eyre::eyre!("Failed to create Cardano keypair: {}", e))?)
+            SignerConf::HexKey { key } => Ok(hyperlane_cardano::Keypair::from_string(
+                &ethers::utils::hex::encode(key.as_bytes()),
+            )
+            .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?),
+            SignerConf::CardanoKey { key, is_mainnet } => {
+                let mut keypair = hyperlane_cardano::Keypair::from_secret_key(key.as_bytes())
+                    .map_err(|e| eyre::eyre!("Failed to create Cardano keypair: {}", e))?;
+                keypair.set_mainnet(*is_mainnet);
+                Ok(keypair)
             }
             _ => bail!(format!("{conf:?} key is not supported by Cardano")),
         }
@@ -353,7 +351,7 @@ impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
 
 impl ChainSigner for hyperlane_cardano::Keypair {
     fn address_string(&self) -> String {
-        self.address_bech32_testnet()
+        self.address_bech32_for_configured_network()
     }
 
     fn address_h256(&self) -> H256 {
