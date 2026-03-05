@@ -215,10 +215,7 @@ impl LatestCheckpointReorgReporter {
                     Tron(updated_conn)
                 })
             }
-            Cardano(_conn) => {
-                // Cardano validator reorg reporting not yet implemented
-                vec![]
-            }
+            Cardano(conn) => vec![(conn.url.clone(), Cardano(conn))],
         };
 
         chain_conn_confs
