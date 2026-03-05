@@ -1486,11 +1486,12 @@ impl HyperlaneTxBuilder {
             }
         }
 
-        // Convert tx_hash string to H512
+        // Convert tx_hash string to H512 (upper half, bytes 0..31)
         let mut tx_id_bytes = [0u8; 64];
         let hash_bytes = hex::decode(&tx_hash)
             .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {e}")))?;
-        tx_id_bytes[32..64].copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
+        tx_id_bytes[..hash_bytes.len().min(32)]
+            .copy_from_slice(&hash_bytes[..hash_bytes.len().min(32)]);
 
         Ok(TxOutcome {
             transaction_id: H512::from(tx_id_bytes),
@@ -1830,7 +1831,8 @@ impl HyperlaneTxBuilder {
 
             let mut tx_id_bytes = [0u8; 64];
             if let Ok(hash_bytes) = hex::decode(&actual_hash) {
-                tx_id_bytes[32..64].copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
+                tx_id_bytes[..hash_bytes.len().min(32)]
+                    .copy_from_slice(&hash_bytes[..hash_bytes.len().min(32)]);
             }
             results.push(Ok(TxOutcome {
                 transaction_id: H512::from(tx_id_bytes),

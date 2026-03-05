@@ -203,9 +203,9 @@ impl AdaptsChain for CardanoAdapter {
 
     async fn get_tx_hash_status(&self, hash: H512) -> Result<TransactionStatus, LanderError> {
         // Extract the 32-byte tx hash from the H512
-        // Cardano tx hashes are 32 bytes, stored in the lower half of H512
+        // Cardano tx hashes are 32 bytes, stored in the upper half of H512
         let hash_bytes: [u8; 64] = hash.0;
-        let tx_hash_hex = hex::encode(&hash_bytes[32..64]);
+        let tx_hash_hex = hex::encode(&hash_bytes[..32]);
 
         // Query Blockfrost for transaction status
         match self.provider.get_transaction_utxos(&tx_hash_hex).await {
