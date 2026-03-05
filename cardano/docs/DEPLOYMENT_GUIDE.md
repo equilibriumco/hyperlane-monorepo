@@ -543,20 +543,7 @@ validator my_recipient(verified_message_nft_policy: PolicyId) {
 }
 ```
 
-**Pattern 2: Co-spending pattern** (used by warp routes):
-
-The contract is parameterized by `mailbox_policy_id` and co-spends with the mailbox directly.
-
-```aiken
-validator my_warp_recipient(mailbox_policy_id: PolicyId) {
-  spend(datum, redeemer, own_ref, tx) {
-    // Verify mailbox is co-spending by checking for mailbox NFT in inputs
-    expect mailbox_is_caller(tx, mailbox_policy_id)
-    // Your custom logic here
-    True
-  }
-}
-```
+> **Note**: Warp routes use a different co-spending pattern internally (parameterized by `mailbox_policy_id`), but this is handled by the built-in warp route contracts. Custom recipients should always use the verified message NFT pattern above.
 
 ---
 
