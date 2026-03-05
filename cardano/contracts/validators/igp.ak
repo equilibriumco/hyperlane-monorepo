@@ -4,7 +4,7 @@ use cardano/address.{Address, Credential, Script}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use types.{Domain, GasOracleConfig, IgpDatum, IgpRedeemer, PayForGas, Claim, SetGasOracle, MigrateIgp}
-use utils.{find_input, is_signed_by, validate_migrate, value_preserved}
+use utils.{find_input, is_signed_by, validate_migrate, value_preserved, native_tokens_preserved}
 
 /// Interchain Gas Paymaster (IGP) Validator
 /// Handles gas payments for cross-chain messages
@@ -80,13 +80,14 @@ fn validate_pay_for_gas(
   let expected_lovelace = assets.lovelace_of(own_value) + required_lovelace
   expect assets.lovelace_of(continuation.value) >= expected_lovelace
 
-  // 6. Verify datum is preserved
+  // 6. Verify all native tokens (including state NFT) are preserved
+  expect native_tokens_preserved(own_value, continuation.value)
+
+  // 7. Verify datum is preserved
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: IgpDatum = cont_datum_data
   expect datum_preserved(datum, cont_datum)
 
-  // 7. Verify gas payment event is recorded
-  // This is implicit in the transaction - the redeemer itself serves as the event log
   True
 }
 
@@ -114,7 +115,10 @@ fn validate_claim(
   let output_lovelace = assets.lovelace_of(continuation.value)
   expect input_lovelace - output_lovelace == amount
 
-  // 5. Verify datum is preserved
+  // 5. Verify all native tokens (including state NFT) are preserved
+  expect native_tokens_preserved(own_value, continuation.value)
+
+  // 6. Verify datum is preserved
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: IgpDatum = cont_datum_data
   expect datum_preserved(datum, cont_datum)

@@ -2,14 +2,13 @@ use aiken/builtin.{verify_ecdsa_secp256k1_signature}
 use aiken/collection/list
 use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
-use cardano/assets.{lovelace_of}
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use types.{
   Checkpoint, Domain, MultisigIsmDatum, MultisigIsmRedeemer, ValidatorSignature,
   encode_checkpoint, encode_domain_hash, Verify, SetValidators, SetThreshold,
   MigrateIsm,
 }
-use utils.{assoc_find, find_input, is_signed_by, validate_migrate}
+use utils.{assoc_find, find_input, is_signed_by, validate_migrate, value_preserved}
 
 /// Multisig ISM (Interchain Security Module) Validator
 /// Verifies message authenticity using N-of-M validator signatures
@@ -263,6 +262,6 @@ fn validate_ism_continuation(
   expect cont_datum: MultisigIsmDatum = cont_datum_data
   expect cont_datum == new_datum
 
-  // Value must be preserved
-  lovelace_of(continuation.value) >= lovelace_of(own_value)
+  // Value must be preserved (lovelace + all native tokens including state NFT)
+  value_preserved(own_value, continuation.value)
 }

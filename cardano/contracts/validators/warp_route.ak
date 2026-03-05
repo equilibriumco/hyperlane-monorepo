@@ -12,7 +12,7 @@ use types.{
   Collateral, Synthetic, Native,
   encode_message,
 }
-use utils.{assoc_find, find_input, is_signed_by, validate_migrate}
+use utils.{assoc_find, find_input, is_signed_by, validate_migrate, value_preserved, native_tokens_preserved, native_tokens_preserved_except}
 
 /// Warp Route Validator
 /// Enables token bridging between Cardano and other Hyperlane-connected chains
@@ -121,6 +121,11 @@ fn validate_transfer_remote(
   expect cont_datum.total_bridged == datum.total_bridged + amount
   expect cont_datum.ism == datum.ism
 
+  // All native tokens (including state NFT) must be preserved.
+  // For Native/Collateral lock, token quantities only increase so this always holds.
+  // For Synthetic burn, the UTXO's native tokens don't change.
+  expect native_tokens_preserved(own_input.output.value, continuation.value)
+
   True
 }
 
@@ -204,6 +209,24 @@ fn validate_receive_transfer(
   expect cont_datum.total_bridged == datum.total_bridged - local_amount
   expect cont_datum.ism == datum.ism
 
+  // 9. Ensure state NFT is preserved in continuation.
+  //    For collateral release, the collateral token quantity decreases — exclude it.
+  //    For native release, only lovelace changes — native tokens check passes.
+  //    For synthetic mint, no UTXO value change — native tokens check passes.
+  let nft_ok =
+    when datum.config.token_type is {
+      Collateral { policy_id, asset_name } ->
+        native_tokens_preserved_except(
+          own_input.output.value,
+          continuation.value,
+          policy_id,
+          asset_name,
+        )
+      _ ->
+        native_tokens_preserved(own_input.output.value, continuation.value)
+    }
+  expect nft_ok
+
   True
 }
 
@@ -225,7 +248,7 @@ fn validate_enroll_remote_route(
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
-  expect lovelace_of(continuation.value) >= lovelace_of(own_value)
+  expect value_preserved(own_value, continuation.value)
 
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: WarpRouteDatum = cont_datum_data

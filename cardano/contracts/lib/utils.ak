@@ -4,7 +4,7 @@ use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
 use cardano/transaction.{InlineDatum, Input, Output, OutputReference, Transaction}
-use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero}
+use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero, flatten}
 
 /// Utility functions for Hyperlane Cardano contracts
 /// Script hash type alias
@@ -69,9 +69,54 @@ pub fn get_script_input_value(tx: Transaction, script_hash: ScriptHash) -> Value
   )
 }
 
-/// Check that value is preserved (output >= input for all tokens)
+/// Check that value is preserved (output >= input for lovelace AND all native tokens).
 pub fn value_preserved(input_value: Value, output_value: Value) -> Bool {
-  lovelace_of(output_value) >= lovelace_of(input_value)
+  lovelace_of(output_value) >= lovelace_of(input_value) && native_tokens_preserved(
+    input_value,
+    output_value,
+  )
+}
+
+/// Check that all native tokens (non-lovelace) in the input are present
+/// in the output with equal or greater quantity.
+pub fn native_tokens_preserved(
+  input_value: Value,
+  output_value: Value,
+) -> Bool {
+  list.all(
+    flatten(input_value),
+    fn(item) {
+      let (policy, name, qty) = item
+      if policy == #"" {
+        True
+      } else {
+        quantity_of(output_value, policy, name) >= qty
+      }
+    },
+  )
+}
+
+/// Like native_tokens_preserved, but excludes one specific token from the check.
+/// Used when a token is intentionally released from a UTXO (e.g. collateral release).
+pub fn native_tokens_preserved_except(
+  input_value: Value,
+  output_value: Value,
+  except_policy: ByteArray,
+  except_name: ByteArray,
+) -> Bool {
+  list.all(
+    flatten(input_value),
+    fn(item) {
+      let (policy, name, qty) = item
+      if policy == #"" {
+        True
+      } else if policy == except_policy && name == except_name {
+        True
+      } else {
+        quantity_of(output_value, policy, name) >= qty
+      }
+    },
+  )
 }
 
 /// Convert a Hyperlane address (32 bytes) to a Cardano script hash (28 bytes)
