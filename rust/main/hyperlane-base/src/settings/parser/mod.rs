@@ -31,7 +31,7 @@ use crate::settings::{
     chains::IndexSettings,
     parser::connection_parser::{build_connection_conf, is_protocol_supported},
     trace::TracingConfig,
-    ChainConf, CoreContractAddresses, Settings, SignerConf,
+    ChainConf, ChainConnectionConf, CoreContractAddresses, Settings, SignerConf,
 };
 
 pub use super::envs::*;
