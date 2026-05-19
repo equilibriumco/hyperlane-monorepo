@@ -9,9 +9,13 @@ use url::Url;
 pub struct ConnectionConf {
     /// GraphQL URL for the Midnight indexer (primary data source for reads).
     pub indexer_graphql_url: Url,
-    /// Filesystem path to the `midnight-node-toolkit` binary used by the
-    /// Classic `Mailbox::process` implementation (issue #20). Optional at
-    /// scaffolding time (#13).
+    /// Filesystem path to the Midnight handle submitter binary used by the
+    /// Classic `Mailbox::process` implementation. The submitter reads a
+    /// JSON payload on stdin and writes a JSON envelope on stdout (see
+    /// `toolkit.rs` for the protocol). In the devnet workflow this points
+    /// at the `relayer/dist/submit-handle.js` entrypoint in
+    /// `equilibriumco/hyperlane-midnight`. Optional — `process` returns
+    /// `HyperlaneMidnightError::MissingSubmitterPath` if absent.
     pub toolkit_path: Option<String>,
 }
 

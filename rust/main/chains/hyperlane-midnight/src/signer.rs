@@ -2,10 +2,12 @@ use hyperlane_core::H256;
 
 /// Placeholder signer for Midnight.
 ///
-/// Real signing is performed by the `midnight-node-toolkit` subprocess
-/// (issue #20). This struct exists at scaffolding time only to satisfy the
-/// `ChainSigner` + `BuildableWithSignerConf` trait surface in
-/// `hyperlane-base`.
+/// Real signing is performed by the Midnight handle-submitter subprocess
+/// (see `ConnectionConf::toolkit_path` and the `relayer/` workspace in
+/// `equilibriumco/hyperlane-midnight`). This struct exists only to satisfy
+/// the `ChainSigner` + `BuildableWithSignerConf` trait surface in
+/// `hyperlane-base`. The submitter reads the relayer wallet seed from the
+/// `MIDNIGHT_RELAYER_SEED` env var.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightSigner {
     address: String,
@@ -13,18 +15,18 @@ pub struct MidnightSigner {
 }
 
 impl MidnightSigner {
-    /// Construct a placeholder signer. At #13 the address is empty / zero;
-    /// #20 will populate these from the toolkit.
+    /// Construct a placeholder signer. The real signer lives inside the
+    /// submitter subprocess; the agent-side struct stays empty.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the configured address (empty at #13).
+    /// Returns the configured address (always empty for the placeholder).
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Returns the configured address as `H256` (zero at #13).
+    /// Returns the configured address as `H256` (always zero for the placeholder).
     pub fn address_h256(&self) -> H256 {
         self.address_h256
     }
@@ -41,7 +43,7 @@ mod tests {
     fn config_constructs() {
         let conf = ConnectionConf::new(
             Url::parse("http://localhost:8080/graphql").unwrap(),
-            Some("/usr/local/bin/midnight-node-toolkit".to_string()),
+            Some("/srv/hyperlane/relayer/dist/submit-handle.js".to_string()),
         );
         assert_eq!(
             conf.indexer_graphql_url.as_str(),

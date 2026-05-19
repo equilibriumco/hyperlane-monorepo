@@ -10,6 +10,11 @@ version.workspace = true
 [dependencies]
 hyperlane-core = { path = "../../hyperlane-core", features = ["async"] }
 
+async-trait = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 # `macros` is required for feature unification: hyperlane-core's
 # `rpc_clients::fallback::test` module (unconditionally `pub`) uses
@@ -17,5 +22,7 @@ thiserror = { workspace = true }
 # workspace is built, other crates pull `macros` in transitively;
 # when running `cargo test -p hyperlane-midnight` standalone the
 # graph is too thin and `hyperlane-core` fails to compile without this.
-tokio = { workspace = true, features = ["macros"] }
+# `io-util` + `process` are needed by the toolkit subprocess wrapper.
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread"] }
+tracing = { workspace = true }
 url = { workspace = true }

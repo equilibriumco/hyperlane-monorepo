@@ -445,9 +445,11 @@ impl ChainConf {
                 let mailbox = h_aleo::AleoMailbox::new(provider, &locator, conf);
                 Ok(Box::new(mailbox) as Box<dyn Mailbox>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: Mailbox is not yet implemented (see issue #20)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                let mailbox =
+                    h_midnight::MidnightMailbox::new(&locator, conf).context(ctx)?;
+                Ok(Box::new(mailbox) as Box<dyn Mailbox>)
+            }
         }
         .context(ctx)
     }
