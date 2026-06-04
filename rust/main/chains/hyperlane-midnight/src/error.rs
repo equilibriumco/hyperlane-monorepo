@@ -30,6 +30,14 @@ pub enum HyperlaneMidnightError {
         stderr: String,
     },
 
+    /// Submitter did not exit within the configured wall-clock budget.
+    /// The child is SIGKILLed via `kill_on_drop` before this is raised.
+    #[error("submitter exceeded {elapsed_secs}s timeout (SIGKILLed)")]
+    SubmitterTimeout {
+        /// Wall-clock budget in seconds, for surfacing in logs/metrics.
+        elapsed_secs: u64,
+    },
+
     /// Submitter produced output that could not be parsed.
     #[error("submitter returned malformed JSON: {message} (raw: {raw})")]
     SubmitterMalformed {

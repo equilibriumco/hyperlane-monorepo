@@ -50,10 +50,19 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn is_contract(&self, _address: &H256) -> ChainResult<bool> {
-        // Until the indexer client exposes contract metadata (issue #14), all
-        // recipients are treated as user addresses for routing. The Mailbox's
-        // `isContractRecipient` flag is supplied separately at process time.
-        Ok(false)
+        // The relayer's `pending_message` state machine drops inbound messages
+        // when this returns `false` (see `agents/relayer/src/msg/pending_message.rs`
+        // — `is_recipient_contract` gate). For the monolithic WarpRoute design
+        // every Hyperlane-routable recipient on Midnight IS the WarpRoute
+        // contract itself, so the safe answer here is `true`. The on-circuit
+        // `isContractRecipient` flag — whether `sendUnshielded` ultimately
+        // pays out to a `ContractAddress` vs `UserAddress` — is a separate
+        // decision threaded through `Mailbox::process` at submission time.
+        //
+        // If/when the design grows non-WarpRoute recipients on Midnight, this
+        // must query the indexer for actual contract-vs-EOA classification
+        // (work scoped to issue #14).
+        Ok(true)
     }
 
     async fn get_balance(&self, _address: String) -> ChainResult<U256> {

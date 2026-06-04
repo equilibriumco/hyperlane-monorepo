@@ -8,14 +8,24 @@
 //! captured into the error variants so operators see what failed.
 
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 use hyperlane_core::{ChainResult, HyperlaneMessage, H256, H512};
 
 use crate::HyperlaneMidnightError;
+
+/// Wall-clock cap on a single `submit` invocation. Generous so a busy ZK
+/// proof server has headroom; tight enough that a wedged child does not
+/// block the relayer worker future forever.
+const SUBMIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wall-clock cap on a single `isDelivered` query. No proof work — just
+/// indexer fetch + ledger decode — so much tighter than `SUBMIT_TIMEOUT`.
+const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// JSON payload written to the submitter's stdin.
 ///
@@ -159,59 +169,7 @@ pub async fn submit_handle(
     ctx: &ToolkitContext,
     request: &SubmitRequest<'_>,
 ) -> ChainResult<ToolkitOutcome> {
-    if ctx.binary_path.is_empty() {
-        return Err(HyperlaneMidnightError::MissingSubmitterPath.into());
-    }
-
-    let payload = serde_json::to_vec(request).map_err(HyperlaneMidnightError::from)?;
-
-    let mut child = Command::new(&ctx.binary_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
-            path: ctx.binary_path.clone(),
-            source,
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
-                path: ctx.binary_path.clone(),
-                source,
-            })?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
-                path: ctx.binary_path.clone(),
-                source,
-            })?;
-    }
-
-    let output =
-        child
-            .wait_with_output()
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
-                path: ctx.binary_path.clone(),
-                source,
-            })?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        return Err(HyperlaneMidnightError::SubmitterFailed {
-            status: output.status.code().unwrap_or(-1),
-            stderr,
-        }
-        .into());
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw = run_submitter(ctx, request, SUBMIT_TIMEOUT).await?;
     let response: SubmitResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),
@@ -312,10 +270,6 @@ pub async fn query_delivered(
     contract_address: H256,
     message_id: H256,
 ) -> ChainResult<bool> {
-    if ctx.binary_path.is_empty() {
-        return Err(HyperlaneMidnightError::MissingSubmitterPath.into());
-    }
-
     let request = IsDeliveredRequest {
         op: "isDelivered",
         contract_address: format!("0x{contract_address:x}"),
@@ -324,12 +278,56 @@ pub async fn query_delivered(
         network_id: ctx.network_id.clone(),
         message_id: format!("0x{message_id:x}"),
     };
-    let payload = serde_json::to_vec(&request).map_err(HyperlaneMidnightError::from)?;
 
-    let mut child = Command::new(&ctx.binary_path)
+    let raw = run_submitter(ctx, &request, DELIVERED_TIMEOUT).await?;
+    let response: IsDeliveredResponse =
+        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
+            message: err.to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    if let Some(error) = response.error {
+        return Err(HyperlaneMidnightError::SubmitterReported {
+            kind: error.kind,
+            message: error.message,
+        }
+        .into());
+    }
+
+    response
+        .delivered
+        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
+            message: "missing `delivered` boolean in response".to_string(),
+            raw: truncate(&raw, 1024),
+        })
+        .map_err(Into::into)
+}
+
+/// Spawn the submitter binary, write `request` as JSON to stdin, wait up
+/// to `timeout` for the child to exit, and return its stdout as a string.
+///
+/// The child is spawned with `kill_on_drop(true)` so that if the calling
+/// future is cancelled (relayer shutdown, timeout, parent task drop) the
+/// Node process is reaped instead of leaked. On a timeout elapse the
+/// `Child` handle goes out of scope mid-await and SIGKILL is delivered;
+/// the error surfaces as `SubmitterTimeout` so callers can map it onto a
+/// dedicated retry classification.
+async fn run_submitter<R: Serialize>(
+    ctx: &ToolkitContext,
+    request: &R,
+    timeout: Duration,
+) -> ChainResult<String> {
+    if ctx.binary_path.is_empty() {
+        return Err(HyperlaneMidnightError::MissingSubmitterPath.into());
+    }
+
+    let payload = serde_json::to_vec(request).map_err(HyperlaneMidnightError::from)?;
+
+    let mut child: Child = Command::new(&ctx.binary_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
             path: ctx.binary_path.clone(),
@@ -353,14 +351,24 @@ pub async fn query_delivered(
             })?;
     }
 
-    let output =
-        child
-            .wait_with_output()
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(source)) => {
+            return Err(HyperlaneMidnightError::SubmitterSpawn {
                 path: ctx.binary_path.clone(),
                 source,
-            })?;
+            }
+            .into());
+        }
+        Err(_elapsed) => {
+            // `child` dropped here → kill_on_drop(true) SIGKILLs the Node
+            // process before we return.
+            return Err(HyperlaneMidnightError::SubmitterTimeout {
+                elapsed_secs: timeout.as_secs(),
+            }
+            .into());
+        }
+    };
 
     if !output.status.success() {
         return Err(HyperlaneMidnightError::SubmitterFailed {
@@ -370,28 +378,7 @@ pub async fn query_delivered(
         .into());
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let response: IsDeliveredResponse =
-        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
-            message: err.to_string(),
-            raw: truncate(&raw, 1024),
-        })?;
-
-    if let Some(error) = response.error {
-        return Err(HyperlaneMidnightError::SubmitterReported {
-            kind: error.kind,
-            message: error.message,
-        }
-        .into());
-    }
-
-    response
-        .delivered
-        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
-            message: "missing `delivered` boolean in response".to_string(),
-            raw: truncate(&raw, 1024),
-        })
-        .map_err(Into::into)
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Helper: take the relayer-supplied `(message, metadata, contract_address)`
@@ -497,6 +484,50 @@ mod tests {
         assert!(
             msg.contains("malformed") || msg.contains("eof") || msg.contains("expected"),
             "actual error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_elapses_and_kills_child() {
+        // Write a tiny shell stub that hangs forever. Use it as the
+        // submitter binary so `run_submitter` has to enforce its own
+        // timeout. Validates both H1 deliverables (timeout surfaces as
+        // `SubmitterTimeout`; `kill_on_drop` reaps the child promptly).
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "midnight-toolkit-timeout-{}.sh",
+            std::process::id()
+        ));
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(b"#!/bin/sh\nsleep 5\n").unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut ctx = ctx();
+        ctx.binary_path = tmp.to_string_lossy().into_owned();
+        let payload = serde_json::json!({"op": "submit"});
+
+        let started = std::time::Instant::now();
+        let err = run_submitter(&ctx, &payload, Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        let _ = std::fs::remove_file(&tmp);
+
+        // If `kill_on_drop` were off, the future would block until the
+        // child's `sleep 5` returned — well past 2 seconds.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout future hung for {elapsed:?} — kill_on_drop likely missing"
+        );
+        let display = format!("{err}");
+        assert!(
+            display.contains("timeout") || display.contains("SIGKILL"),
+            "actual error: {display}"
         );
     }
 }
