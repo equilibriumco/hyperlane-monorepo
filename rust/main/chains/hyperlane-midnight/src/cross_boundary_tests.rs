@@ -19,9 +19,10 @@
 //! 1. **Provider/Mailbox contract drift** — methods like
 //!    `MidnightProvider::is_contract` and `Mailbox::delivered` return
 //!    types `pending_message` in the relayer agent gates its behavior
-//!    on. The previous review caught one: `is_contract` returned
-//!    `Ok(false)` and silently dropped every inbound message
-//!    (regression test `c2_is_contract_returns_true`).
+//!    on. If `is_contract` returns `Ok(false)`, the relayer silently
+//!    drops every inbound message at the `is_recipient_contract` gate
+//!    before `Mailbox::process` is ever called
+//!    (`is_contract_returns_true_for_monolithic_warp_route`).
 //!
 //! 2. **Wire-format drift** — the JSON shape Rust sends has to keep
 //!    matching the TS submitter's parser. The format-snapshot tests
@@ -35,8 +36,8 @@
 //!    each one (`process_maps_<kind>_response_to_submitter_reported`).
 //!
 //! Higher-fidelity validation against `pending_message` itself is
-//! tracked separately; the contract-shape tests here would have
-//! caught the criticals (C1, C2) from the PR review.
+//! tracked separately; these contract-shape tests intentionally stop at
+//! the Mailbox/Provider boundary.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -157,14 +158,15 @@ fn sample_metadata() -> Metadata {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: C1 — `delivered` must actually work
+// `delivered` must actually round-trip both boolean responses
 // ---------------------------------------------------------------------------
 //
-// C1 from the PR review: the original `handleIsDelivered` called a
-// non-existent symbol and every invocation threw `TypeError`. Anything
-// downstream then looped forever. These tests pin that `delivered`
-// resolves both boolean responses cleanly via the same wire contract
-// the TS submitter implements today.
+// `delivered` is called from `pending_message` both before submission
+// (to skip already-delivered messages) and during the confirm loop. If
+// it throws on every invocation — easy to do by reaching for the wrong
+// SDK symbol — the relayer either retries forever or fails to recognise
+// successful deliveries. These tests pin that the wire contract the TS
+// submitter implements today produces correct booleans.
 
 #[tokio::test]
 async fn delivered_resolves_true_response_to_true() {
@@ -208,13 +210,13 @@ async fn delivered_propagates_submitter_error_as_structured_kind() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: C2 — provider's `is_contract` MUST return true for the
-// monolithic WarpRoute. Returning false makes `pending_message` drop
-// every inbound message before `Mailbox::process` is even called.
+// `is_contract` MUST return true for the monolithic WarpRoute.
+// Returning false makes `pending_message` drop every inbound message
+// before `Mailbox::process` is even called.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn c2_is_contract_returns_true() {
+async fn is_contract_returns_true_for_monolithic_warp_route() {
     // No submitter is invoked here — `is_contract` is a Provider method
     // that returns synthetically for the monolithic-WarpRoute design.
     // Stub just needs to exist to satisfy the constructor.
