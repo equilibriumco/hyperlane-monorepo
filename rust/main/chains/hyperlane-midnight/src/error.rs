@@ -7,7 +7,7 @@ pub enum HyperlaneMidnightError {
     #[error("Midnight: {0} not implemented yet")]
     NotImplemented(&'static str),
 
-    /// The configured submitter binary path is empty.
+    /// Submitter path is unset.
     #[error("Midnight submitter path is not configured (set `toolkitPath` in the chain config)")]
     MissingSubmitterPath,
 
@@ -24,39 +24,38 @@ pub enum HyperlaneMidnightError {
     /// Submitter exited with a non-zero status code.
     #[error("submitter exited with status {status}; stderr: {stderr}")]
     SubmitterFailed {
-        /// Process exit status (numeric for cross-platform).
+        /// Process exit status.
         status: i32,
-        /// Captured stderr from the subprocess.
+        /// Captured stderr.
         stderr: String,
     },
 
-    /// Submitter did not exit within the configured wall-clock budget.
-    /// The child is SIGKILLed via `kill_on_drop` before this is raised.
+    /// Submitter did not exit within the wall-clock budget.
     #[error("submitter exceeded {elapsed_secs}s timeout (SIGKILLed)")]
     SubmitterTimeout {
-        /// Wall-clock budget in seconds, for surfacing in logs/metrics.
+        /// Wall-clock budget in seconds.
         elapsed_secs: u64,
     },
 
-    /// Submitter produced output that could not be parsed.
+    /// Submitter stdout could not be parsed as JSON.
     #[error("submitter returned malformed JSON: {message} (raw: {raw})")]
     SubmitterMalformed {
-        /// Parser error message.
+        /// Parser error.
         message: String,
-        /// Raw stdout the parser failed on (truncated upstream if very long).
+        /// Raw stdout.
         raw: String,
     },
 
-    /// Submitter reported a structured error in its JSON response.
+    /// Submitter reported a structured error.
     #[error("submitter reported error: {kind}: {message}")]
     SubmitterReported {
-        /// Short kind tag from the submitter (e.g. `proofTimeout`, `insufficientDust`).
+        /// Short kind tag.
         kind: String,
-        /// Human-readable message from the submitter.
+        /// Human-readable message.
         message: String,
     },
 
-    /// The indexer GraphQL endpoint returned an error.
+    /// Indexer GraphQL error.
     #[error("indexer GraphQL error: {0}")]
     IndexerGraphql(String),
 
@@ -68,7 +67,7 @@ pub enum HyperlaneMidnightError {
     #[error("indexer JSON error: {0}")]
     IndexerJson(#[from] serde_json::Error),
 
-    /// Generic catch-all for anything else.
+    /// Catch-all.
     #[error("{0}")]
     Other(String),
 }

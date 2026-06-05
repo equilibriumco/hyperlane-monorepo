@@ -1,13 +1,8 @@
 use hyperlane_core::H256;
 
-/// Placeholder signer for Midnight.
-///
-/// Real signing is performed by the Midnight handle-submitter subprocess
-/// (see `ConnectionConf::toolkit_path` and the `relayer/` workspace in
-/// `equilibriumco/hyperlane-midnight`). This struct exists only to satisfy
-/// the `ChainSigner` + `BuildableWithSignerConf` trait surface in
-/// `hyperlane-base`. The submitter reads the relayer wallet seed from the
-/// `MIDNIGHT_RELAYER_SEED` env var.
+/// Placeholder signer. Real signing happens inside the submitter
+/// subprocess; this exists only to satisfy `ChainSigner` +
+/// `BuildableWithSignerConf` in `hyperlane-base`.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightSigner {
     address: String,
@@ -15,18 +10,17 @@ pub struct MidnightSigner {
 }
 
 impl MidnightSigner {
-    /// Construct a placeholder signer. The real signer lives inside the
-    /// submitter subprocess; the agent-side struct stays empty.
+    /// Construct a placeholder signer.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the configured address (always empty for the placeholder).
+    /// Returns the configured address.
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Returns the configured address as `H256` (always zero for the placeholder).
+    /// Returns the configured address as `H256`.
     pub fn address_h256(&self) -> H256 {
         self.address_h256
     }

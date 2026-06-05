@@ -1,10 +1,3 @@
-//! Minimal `HyperlaneProvider` implementation for Midnight.
-//!
-//! The destination-side Mailbox uses this only to satisfy `HyperlaneChain`'s
-//! `provider()` accessor. Block- and txn-level queries return
-//! `NotImplemented` until the full Midnight provider lands with issue #14 /
-//! #16.
-
 use async_trait::async_trait;
 
 use hyperlane_core::{
@@ -14,8 +7,7 @@ use hyperlane_core::{
 
 use crate::{HyperlaneMidnightError, MidnightIndexerClient};
 
-/// Skeleton provider. Carries enough to serve `HyperlaneChain` and a single
-/// indexer ping; anything else returns `NotImplemented` until #14 / #16.
+/// Skeleton provider.
 #[derive(Debug, Clone)]
 pub struct MidnightProvider {
     domain: HyperlaneDomain,
@@ -23,7 +15,7 @@ pub struct MidnightProvider {
 }
 
 impl MidnightProvider {
-    /// Build a new provider with the given chain domain and indexer client.
+    /// Build a new provider.
     pub fn new(domain: HyperlaneDomain, indexer: MidnightIndexerClient) -> Self {
         Self { domain, indexer }
     }
@@ -50,18 +42,10 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn is_contract(&self, _address: &H256) -> ChainResult<bool> {
-        // The relayer's `pending_message` state machine drops inbound messages
-        // when this returns `false` (see `agents/relayer/src/msg/pending_message.rs`
-        // — `is_recipient_contract` gate). For the monolithic WarpRoute design
-        // every Hyperlane-routable recipient on Midnight IS the WarpRoute
-        // contract itself, so the safe answer here is `true`. The on-circuit
-        // `isContractRecipient` flag — whether `sendUnshielded` ultimately
-        // pays out to a `ContractAddress` vs `UserAddress` — is a separate
-        // decision threaded through `Mailbox::process` at submission time.
-        //
-        // If/when the design grows non-WarpRoute recipients on Midnight, this
-        // must query the indexer for actual contract-vs-EOA classification
-        // (work scoped to issue #14).
+        // Returning false makes `pending_message` drop every inbound message
+        // at the `is_recipient_contract` gate. Every routable recipient on
+        // Midnight is the monolithic WarpRoute contract, so `true` is correct
+        // until non-WarpRoute recipients exist.
         Ok(true)
     }
 
@@ -70,13 +54,7 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn get_chain_metrics(&self) -> ChainResult<Option<ChainInfo>> {
-        // Best-effort liveness: report the latest known indexer height as
-        // chain progress when available, otherwise `None`.
-        match self.indexer.latest_block_height().await {
-            Ok(Some(_height)) => Ok(None),
-            Ok(None) => Ok(None),
-            // Indexer ping is non-fatal here; treat as "no metrics yet".
-            Err(_) => Ok(None),
-        }
+        let _ = self.indexer.latest_block_height().await;
+        Ok(None)
     }
 }

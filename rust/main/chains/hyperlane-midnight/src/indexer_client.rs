@@ -1,14 +1,9 @@
-//! Thin GraphQL client for the Midnight indexer.
-//!
-//! Only the queries needed by the destination-side Mailbox path live here.
-//! The full indexer-driven message + delivery indexer arrives with issue #16.
-
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::HyperlaneMidnightError;
 
-/// HTTP client wrapper around the indexer's GraphQL endpoint.
+/// HTTP client for the Midnight indexer's GraphQL endpoint.
 #[derive(Debug, Clone)]
 pub struct MidnightIndexerClient {
     endpoint: Url,
@@ -24,13 +19,7 @@ impl MidnightIndexerClient {
         }
     }
 
-    /// Latest known block height (used as a heartbeat / liveness check).
-    /// Returns `None` if the indexer hasn't observed any blocks yet.
-    ///
-    /// The destination-side Mailbox doesn't actually read this — it's
-    /// included so [`HyperlaneProvider`] can implement `get_block_by_height`
-    /// without re-wiring a second client later. Bigger surface lands in
-    /// issue #14.
+    /// Latest known block height, or `None` if the indexer has not observed any yet.
     pub async fn latest_block_height(&self) -> Result<Option<u64>, HyperlaneMidnightError> {
         let query = r#"query { block { height } }"#;
         let body = GraphqlRequest {
