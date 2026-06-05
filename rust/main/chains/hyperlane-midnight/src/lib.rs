@@ -11,6 +11,9 @@ mod provider;
 mod signer;
 mod toolkit;
 
+#[cfg(test)]
+mod cross_boundary_tests;
+
 pub use config::ConnectionConf;
 pub use error::HyperlaneMidnightError;
 pub use indexer_client::MidnightIndexerClient;
