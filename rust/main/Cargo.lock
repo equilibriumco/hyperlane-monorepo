@@ -6127,6 +6127,7 @@ name = "hyperlane-midnight"
 version = "2.2.0"
 dependencies = [
  "async-trait",
+ "ethers",
  "hex 0.4.3",
  "hyperlane-core",
  "reqwest 0.11.27",
