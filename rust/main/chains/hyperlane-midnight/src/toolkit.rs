@@ -225,7 +225,11 @@ pub async fn query_delivered(
 ) -> ChainResult<bool> {
     let request = IsDeliveredRequest {
         op: "isDelivered",
-        contract_address: format!("0x{contract_address:x}"),
+        // Midnight contract addresses are bare hex — `@midnight-ntwrk/midnight-js-utils`
+        // throws TypeError on any leading `0x`. Hyperlane addresses elsewhere
+        // (EVM, Substrate, our own config parser) are `0x`-prefixed, so we
+        // strip only at the Midnight-SDK seam.
+        contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
         network_id: ctx.network_id.clone(),
@@ -333,7 +337,8 @@ pub fn build_request<'a>(
 ) -> SubmitRequest<'a> {
     SubmitRequest {
         op: "submit",
-        contract_address: format!("0x{contract_address:x}"),
+        // See `query_delivered` — Midnight rejects `0x` on contract addresses.
+        contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
         node_rpc_url: ctx.node_rpc_url.clone(),

@@ -136,7 +136,7 @@ async fn process_request_json_pins_wire_shape() {
 
     let req = stub.captured_request();
     assert_eq!(req["op"], "submit");
-    assert_eq!(req["contractAddress"], format!("0x{TEST_CONTRACT_ADDRESS:x}"));
+    assert_eq!(req["contractAddress"], format!("{TEST_CONTRACT_ADDRESS:x}"));
     assert_eq!(req["isContractRecipient"], false);
 
     let msg = &req["message"];
@@ -176,7 +176,7 @@ async fn delivered_request_json_pins_wire_shape() {
 
     let req = stub.captured_request();
     assert_eq!(req["op"], "isDelivered");
-    assert_eq!(req["contractAddress"], format!("0x{TEST_CONTRACT_ADDRESS:x}"));
+    assert_eq!(req["contractAddress"], format!("{TEST_CONTRACT_ADDRESS:x}"));
     assert_eq!(req["messageId"], format!("0x{msg_id:x}"));
     assert!(req["indexerGraphqlUrl"].as_str().unwrap().contains("graphql"));
 }
