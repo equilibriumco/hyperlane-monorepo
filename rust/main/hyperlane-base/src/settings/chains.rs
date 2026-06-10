@@ -302,9 +302,10 @@ impl ChainConf {
                 h_aleo::application::AleoApplicationOperationVerifier::new(),
             )
                 as Box<dyn ApplicationOperationVerifier>),
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: application operation verifier is not yet implemented (see issues #14-#20)"
-            )),
+            ChainConnectionConf::Midnight(_) => Ok(Box::new(
+                h_midnight::application::MidnightApplicationOperationVerifier::new(),
+            )
+                as Box<dyn ApplicationOperationVerifier>),
         };
 
         result.context(ctx)
@@ -610,9 +611,12 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: message dispatch indexer is not yet implemented (see issue #16)"
-            )),
+            ChainConnectionConf::Midnight(_) => {
+                // TODO(#16): real dispatch indexer reading from the WarpRoute
+                // contract state via the Midnight indexer client (#14).
+                Ok(Box::new(h_midnight::stubs::MidnightMessageIndexerStub::new())
+                    as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
+            }
         }
         .context(ctx)
     }
@@ -861,9 +865,12 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: interchain gas payment indexer is not yet implemented (see issue #19)"
-            )),
+            ChainConnectionConf::Midnight(_) => {
+                // TODO(#19): real IGP indexer reading payments from the IGP
+                // contract state via the Midnight indexer client (#14).
+                Ok(Box::new(h_midnight::stubs::MidnightIgpIndexerStub::new())
+                    as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
+            }
         }
         .context(ctx)
     }
@@ -952,9 +959,13 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: merkle tree hook indexer is not yet implemented (see issue #15)"
-            )),
+            ChainConnectionConf::Midnight(_) => {
+                // TODO(#15): real merkle-tree-hook indexer reading leaf
+                // insertions from the WarpRoute contract state via the
+                // Midnight indexer client (#14).
+                Ok(Box::new(h_midnight::stubs::MidnightMerkleTreeIndexerStub::new())
+                    as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
+            }
         }
         .context(ctx)
     }
@@ -1043,9 +1054,23 @@ impl ChainConf {
                     h_aleo::AleoValidatorAnnounce::new(provider, &locator, conf);
                 Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: ValidatorAnnounce is not yet implemented (see issue #33)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // TODO(#33): real ValidatorAnnounce backed by the on-chain
+                // ValidatorAnnounce contract via the Midnight indexer
+                // client (#14).
+                let indexer = h_midnight::MidnightIndexerClient::new(
+                    conf.indexer_graphql_url.clone(),
+                );
+                let provider = h_midnight::MidnightProvider::new(
+                    locator.domain.clone(),
+                    indexer,
+                );
+                Ok(Box::new(h_midnight::stubs::MidnightValidatorAnnounceStub::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                )) as Box<dyn ValidatorAnnounce>)
+            }
         }
         .context("Building ValidatorAnnounce")
     }
@@ -1120,9 +1145,25 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: InterchainSecurityModule is not yet implemented (see issue #14)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // TODO(#14): read module type from chain state once the
+                // state reader lands — Midnight only has MessageIdMultisig
+                // today, but the contract design allows other ISM variants
+                // to be wired in later.
+                let indexer = h_midnight::MidnightIndexerClient::new(
+                    conf.indexer_graphql_url.clone(),
+                );
+                let provider = h_midnight::MidnightProvider::new(
+                    locator.domain.clone(),
+                    indexer,
+                );
+                let ism = h_midnight::ism::MidnightInterchainSecurityModule::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
+            }
         }
         .context(ctx)
     }
@@ -1188,9 +1229,26 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn MultisigIsm>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: MultisigIsm is not yet implemented (see issue #14)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // TODO(#14): read validators + threshold from chain state.
+                // The pair must migrate together — set/threshold drift would
+                // either soft-brick delivery (wrong validators) or
+                // invalidate on-chain ISM verification.
+                let indexer = h_midnight::MidnightIndexerClient::new(
+                    conf.indexer_graphql_url.clone(),
+                );
+                let provider = h_midnight::MidnightProvider::new(
+                    locator.domain.clone(),
+                    indexer,
+                );
+                let ism = h_midnight::ism::MidnightMultisigIsm::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                    conf,
+                );
+                Ok(Box::new(ism) as Box<dyn MultisigIsm>)
+            }
         }
         .context(ctx)
     }

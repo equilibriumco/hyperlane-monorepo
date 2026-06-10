@@ -815,13 +815,34 @@ pub fn build_midnight_connection_conf(
         })
         .unwrap_or_default();
 
+    // Optional multisig threshold; defaults to 0 if unset, which is fine
+    // because the relayer's MultisigIsm only matters when midnight is a
+    // destination and the agent operator should supply the same threshold
+    // that's configured on-chain. TODO(#14): read from chain state.
+    let threshold: u8 = match chain
+        .chain(&mut local_err)
+        .get_opt_key("threshold")
+        .parse_u64()
+        .end()
+    {
+        Some(v) => u8::try_from(v).unwrap_or_else(|_| {
+            local_err.push(
+                (&chain.cwp).add("threshold"),
+                eyre!("Midnight threshold {} exceeds u8 max (255)", v),
+            );
+            0
+        }),
+        None => 0,
+    };
+
     if !local_err.is_ok() {
         err.merge(local_err);
         None
     } else {
         Some(ChainConnectionConf::Midnight(
             hyperlane_midnight::ConnectionConf::new(indexer_graphql_url?, toolkit_path)
-                .with_validators(validators),
+                .with_validators(validators)
+                .with_threshold(threshold),
         ))
     }
 }
