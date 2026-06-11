@@ -1,11 +1,8 @@
 use hyperlane_core::H256;
 
-/// Placeholder signer for Midnight.
-///
-/// Real signing is performed by the `midnight-node-toolkit` subprocess
-/// (issue #20). This struct exists at scaffolding time only to satisfy the
-/// `ChainSigner` + `BuildableWithSignerConf` trait surface in
-/// `hyperlane-base`.
+/// Placeholder signer. Real signing happens inside the submitter
+/// subprocess; this exists only to satisfy `ChainSigner` +
+/// `BuildableWithSignerConf` in `hyperlane-base`.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightSigner {
     address: String,
@@ -13,18 +10,17 @@ pub struct MidnightSigner {
 }
 
 impl MidnightSigner {
-    /// Construct a placeholder signer. At #13 the address is empty / zero;
-    /// #20 will populate these from the toolkit.
+    /// Construct a placeholder signer.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the configured address (empty at #13).
+    /// Returns the configured address.
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Returns the configured address as `H256` (zero at #13).
+    /// Returns the configured address as `H256`.
     pub fn address_h256(&self) -> H256 {
         self.address_h256
     }
@@ -41,7 +37,7 @@ mod tests {
     fn config_constructs() {
         let conf = ConnectionConf::new(
             Url::parse("http://localhost:8080/graphql").unwrap(),
-            Some("/usr/local/bin/midnight-node-toolkit".to_string()),
+            Some("/srv/hyperlane/relayer/dist/submit-handle.js".to_string()),
         );
         assert_eq!(
             conf.indexer_graphql_url.as_str(),

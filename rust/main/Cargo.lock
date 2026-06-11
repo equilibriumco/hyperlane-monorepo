@@ -6126,9 +6126,20 @@ dependencies = [
 name = "hyperlane-midnight"
 version = "2.2.0"
 dependencies = [
+ "async-trait",
+ "derive-new",
+ "ethers",
+ "hex 0.4.3",
  "hyperlane-core",
+ "hyperlane-operation-verifier",
+ "hyperlane-warp-route",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.63",
  "tokio",
+ "tracing",
  "url",
 ]
 

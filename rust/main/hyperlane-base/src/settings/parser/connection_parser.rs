@@ -11,7 +11,7 @@ use url::Url;
 use h_eth::TransactionOverrides;
 
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
-use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
+use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken, H160};
 
 use hyperlane_starknet as h_starknet;
 
@@ -798,12 +798,51 @@ pub fn build_midnight_connection_conf(
         .end()
         .map(|s| s.to_string());
 
+    // Validator addresses registered on the destination Midnight contract,
+    // in the order the on-chain `validators` vector was set at construction.
+    // The Midnight Mailbox uses this to sort signatures by validator-set
+    // index before handing the metadata to the submitter, so the on-chain
+    // two-pointer multisig walk accepts them.
+    let validators: Vec<H160> = chain
+        .chain(&mut local_err)
+        .get_opt_key("validators")
+        .into_array_iter()
+        .map(|values| {
+            values
+                .map(|v| v.parse_from_str::<H160>("Invalid Midnight validator address"))
+                .collect::<Result<Vec<H160>, _>>()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    // Optional multisig threshold; defaults to 0 if unset, which is fine
+    // because the relayer's MultisigIsm only matters when midnight is a
+    // destination and the agent operator should supply the same threshold
+    // that's configured on-chain. TODO(#14): read from chain state.
+    let threshold: u8 = match chain
+        .chain(&mut local_err)
+        .get_opt_key("threshold")
+        .parse_u64()
+        .end()
+    {
+        Some(v) => u8::try_from(v).unwrap_or_else(|_| {
+            local_err.push(
+                (&chain.cwp).add("threshold"),
+                eyre!("Midnight threshold {} exceeds u8 max (255)", v),
+            );
+            0
+        }),
+        None => 0,
+    };
+
     if !local_err.is_ok() {
         err.merge(local_err);
         None
     } else {
         Some(ChainConnectionConf::Midnight(
-            hyperlane_midnight::ConnectionConf::new(indexer_graphql_url?, toolkit_path),
+            hyperlane_midnight::ConnectionConf::new(indexer_graphql_url?, toolkit_path)
+                .with_validators(validators)
+                .with_threshold(threshold),
         ))
     }
 }
