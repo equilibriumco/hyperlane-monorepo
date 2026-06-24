@@ -1146,10 +1146,8 @@ impl ChainConf {
                 Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
             }
             ChainConnectionConf::Midnight(conf) => {
-                // TODO(#14): read module type from chain state once the
-                // state reader lands — Midnight only has MessageIdMultisig
-                // today, but the contract design allows other ISM variants
-                // to be wired in later.
+                // The ISM reads its module type from chain state (via the
+                // indexer) on each `module_type` call, not from config.
                 let indexer = h_midnight::MidnightIndexerClient::new(
                     conf.indexer_graphql_url.clone(),
                 );
@@ -1230,10 +1228,8 @@ impl ChainConf {
                 Ok(Box::new(ism) as Box<dyn MultisigIsm>)
             }
             ChainConnectionConf::Midnight(conf) => {
-                // TODO(#14): read validators + threshold from chain state.
-                // The pair must migrate together — set/threshold drift would
-                // either soft-brick delivery (wrong validators) or
-                // invalidate on-chain ISM verification.
+                // Validators + threshold are read from chain state by the ISM
+                // itself (via the indexer), not sourced from config.
                 let indexer = h_midnight::MidnightIndexerClient::new(
                     conf.indexer_graphql_url.clone(),
                 );
@@ -1245,7 +1241,6 @@ impl ChainConf {
                     locator.address,
                     locator.domain.clone(),
                     provider,
-                    conf,
                 );
                 Ok(Box::new(ism) as Box<dyn MultisigIsm>)
             }

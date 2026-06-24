@@ -25,11 +25,11 @@ pub struct MidnightMailbox {
     domain: HyperlaneDomain,
     provider: MidnightProvider,
     toolkit_ctx: ToolkitContext,
-    /// Validators registered on the destination contract, in the order the
-    /// on-chain `validators` vector was set at construction. Used to sort
-    /// signatures by validator-set index before handing metadata to the
-    /// submitter so the on-chain two-pointer multisig walk accepts them.
-    validators: Vec<H160>,
+    /// Test-only override for the on-chain validator order. Production reads
+    /// the set from chain state in [`Self::validator_order`]; tests set this
+    /// (to an empty vec) so `process` can run offline without an indexer.
+    #[cfg(test)]
+    validator_override: Option<Vec<H160>>,
 }
 
 impl MidnightMailbox {
@@ -61,8 +61,36 @@ impl MidnightMailbox {
             domain: locator.domain.clone(),
             provider,
             toolkit_ctx,
-            validators: conf.validators.clone(),
+            #[cfg(test)]
+            validator_override: None,
         })
+    }
+
+    /// Read the on-chain validator set (in slot order) from the deployed
+    /// contract, used to sort signatures by validator index before submitting.
+    async fn validator_order(&self) -> ChainResult<Vec<H160>> {
+        #[cfg(test)]
+        if let Some(validators) = &self.validator_override {
+            return Ok(validators.clone());
+        }
+        let address = format!("{:x}", self.address);
+        let validators = self
+            .provider
+            .indexer()
+            .read_ism_state(&address)
+            .await?
+            .validators
+            .into_iter()
+            .map(H160::from)
+            .collect();
+        Ok(validators)
+    }
+
+    /// Test-only: pin the validator order so `process` skips the chain read.
+    #[cfg(test)]
+    pub(crate) fn with_validator_override(mut self, validators: Vec<H160>) -> Self {
+        self.validator_override = Some(validators);
+        self
     }
 }
 
@@ -123,14 +151,16 @@ impl Mailbox for MidnightMailbox {
         let mut parsed = parse_metadata(metadata.as_ref())?;
 
         // The on-chain MessageIdMultisigIsm requires signatures in
-        // validator-set-index order (two-pointer match). The relayer's
-        // metadata builder concatenates signatures in fetch-completion
-        // order, not validator-index order (only Aleo gets a special-case
-        // sort in `hyperlane-base/src/types/multisig.rs`). Sort here so the
-        // Midnight contract accepts the metadata. Skips when no validator
-        // list is configured (preserves cross-boundary test behaviour).
-        if !self.validators.is_empty() {
-            sort_signatures_by_validator_index(message, &mut parsed, &self.validators)?;
+        // validator-set-index order (a two-pointer match). The relayer's
+        // metadata builder emits them in checkpoint-syncer fetch order, which
+        // only incidentally matches validator-index order within a single
+        // batch and is not guaranteed (only the Aleo destination gets an
+        // explicit ordering pass in `hyperlane-base/src/types/multisig.rs`).
+        // So read the on-chain validator set and sort here. An empty set means
+        // nothing to sort against (also the offline cross-boundary test path).
+        let validators = self.validator_order().await?;
+        if !validators.is_empty() {
+            sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
         }
 
         let request =
