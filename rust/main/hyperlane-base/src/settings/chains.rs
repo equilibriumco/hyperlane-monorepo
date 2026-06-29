@@ -518,9 +518,18 @@ impl ChainConf {
 
                 Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: MerkleTreeHook is not yet implemented (see issue #15)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // The monolithic WarpRoute embeds the merkle tree; read its
+                // count / current_root from chain state via the indexer (#14).
+                let indexer = h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
+            }
         }
         .context(ctx)
     }
@@ -967,14 +976,18 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
-            ChainConnectionConf::Midnight(_) => {
-                // TODO(#15): real merkle-tree-hook indexer reading leaf
-                // insertions from the WarpRoute contract state via the
-                // Midnight indexer client (#14).
-                Ok(
-                    Box::new(h_midnight::stubs::MidnightMerkleTreeIndexerStub::new())
-                        as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>,
-                )
+            ChainConnectionConf::Midnight(conf) => {
+                // Reads leaf insertions from the WarpRoute contract's
+                // append-only dispatched-messages map via the Midnight indexer
+                // client (#14). Same struct as build_merkle_tree_hook above.
+                let indexer = h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
         }
         .context(ctx)
@@ -1065,19 +1078,9 @@ impl ChainConf {
                 Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
             ChainConnectionConf::Midnight(conf) => {
-                // TODO(#33): real ValidatorAnnounce backed by the on-chain
-                // ValidatorAnnounce contract via the Midnight indexer
-                // client (#14).
-                let indexer =
-                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
-                Ok(
-                    Box::new(h_midnight::stubs::MidnightValidatorAnnounceStub::new(
-                        locator.address,
-                        locator.domain.clone(),
-                        provider,
-                    )) as Box<dyn ValidatorAnnounce>,
-                )
+                let validator_announce =
+                    h_midnight::MidnightValidatorAnnounce::new(&locator, conf)?;
+                Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
         }
         .context("Building ValidatorAnnounce")

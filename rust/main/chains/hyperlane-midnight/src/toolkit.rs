@@ -5,12 +5,19 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
-use hyperlane_core::{ChainResult, HyperlaneMessage, H256, H512};
+use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512};
 
 use crate::HyperlaneMidnightError;
 
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(120);
+const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Maximum byte length of a storage location, matching the on-chain
+/// `Bytes<480>` buffer and the `MAX_STORAGE_LOCATION_LEN` circuit. A location
+/// longer than this is rejected before spawning the submitter.
+pub const MAX_STORAGE_LOCATION_LEN: usize = 480;
 
 /// JSON payload for the `submit` op.
 #[derive(Debug, Serialize)]
@@ -146,12 +153,12 @@ pub async fn submit_handle(
         .into());
     }
 
-    let tx_hash = response.tx_hash.ok_or_else(|| {
-        HyperlaneMidnightError::SubmitterMalformed {
+    let tx_hash = response
+        .tx_hash
+        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
             message: "missing `txHash` in response".to_string(),
             raw: truncate(&raw, 1024),
-        }
-    })?;
+        })?;
 
     Ok(ToolkitOutcome {
         transaction_id: parse_tx_hash(&tx_hash, &raw)?,
@@ -260,6 +267,186 @@ pub async fn query_delivered(
         .map_err(Into::into)
 }
 
+/// JSON payload for the `announce` op (write tx).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnounceRequest {
+    /// Operation discriminator.
+    pub op: &'static str,
+    /// Deployed ValidatorAnnounce contract address.
+    pub contract_address: String,
+    /// Indexer GraphQL endpoint (HTTP).
+    pub indexer_graphql_url: String,
+    /// Indexer GraphQL endpoint (WebSocket).
+    pub indexer_ws_url: String,
+    /// Midnight node RPC endpoint.
+    pub node_rpc_url: String,
+    /// Proof server endpoint.
+    pub proof_server_url: String,
+    /// Midnight network id.
+    pub network_id: String,
+    /// `0x`-prefixed 20-byte validator address.
+    pub validator: String,
+    /// `0x`-prefixed hex of the storage location bytes (unpadded; the
+    /// submitter zero-pads to the on-chain `Bytes<480>` buffer).
+    pub storage_location: String,
+    /// Real byte length of the storage location.
+    pub location_len: u16,
+    /// `0x`-prefixed 65-byte ECDSA signature.
+    pub signature: String,
+}
+
+/// Submit an `announce` write tx via the submitter. Rejects an empty or
+/// over-long (> `MAX_STORAGE_LOCATION_LEN`) storage location before spawning
+/// the subprocess so the on-chain asserts never fire on input we can catch.
+pub async fn announce_tx(
+    ctx: &ToolkitContext,
+    contract_address: H256,
+    validator: H160,
+    storage_location: &str,
+    signature: &[u8],
+) -> ChainResult<ToolkitOutcome> {
+    let bytes = storage_location.as_bytes();
+    if bytes.is_empty() {
+        return Err(
+            HyperlaneMidnightError::Other("announce: empty storage location".to_string()).into(),
+        );
+    }
+    if bytes.len() > MAX_STORAGE_LOCATION_LEN {
+        return Err(HyperlaneMidnightError::Other(format!(
+            "announce: storage location is {} bytes, exceeds on-chain bound of {MAX_STORAGE_LOCATION_LEN}",
+            bytes.len()
+        ))
+        .into());
+    }
+
+    let request = AnnounceRequest {
+        op: "announce",
+        // See `query_delivered` — Midnight rejects `0x` on contract addresses.
+        contract_address: format!("{contract_address:x}"),
+        indexer_graphql_url: ctx.indexer_graphql_url.clone(),
+        indexer_ws_url: ctx.indexer_ws_url.clone(),
+        node_rpc_url: ctx.node_rpc_url.clone(),
+        proof_server_url: ctx.proof_server_url.clone(),
+        network_id: ctx.network_id.clone(),
+        validator: format!("0x{validator:x}"),
+        storage_location: format!("0x{}", hex::encode(bytes)),
+        location_len: bytes.len() as u16,
+        signature: format!("0x{}", hex::encode(signature)),
+    };
+
+    let raw = run_submitter(ctx, &request, ANNOUNCE_TIMEOUT).await?;
+    let response: SubmitResponse =
+        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
+            message: err.to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    if let Some(error) = response.error {
+        return Err(HyperlaneMidnightError::SubmitterReported {
+            kind: error.kind,
+            message: error.message,
+        }
+        .into());
+    }
+
+    let tx_hash = response
+        .tx_hash
+        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
+            message: "missing `txHash` in response".to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    Ok(ToolkitOutcome {
+        transaction_id: parse_tx_hash(&tx_hash, &raw)?,
+        executed: true,
+    })
+}
+
+/// JSON payload for the `getStorageLocations` op (read).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageLocationsRequest {
+    /// Operation discriminator.
+    pub op: &'static str,
+    /// Deployed ValidatorAnnounce contract address.
+    pub contract_address: String,
+    /// Indexer GraphQL endpoint (HTTP).
+    pub indexer_graphql_url: String,
+    /// Indexer GraphQL endpoint (WebSocket).
+    pub indexer_ws_url: String,
+    /// Midnight network id.
+    pub network_id: String,
+    /// `0x`-prefixed 20-byte validator addresses to query.
+    pub validators: Vec<String>,
+}
+
+/// JSON envelope returned by the `getStorageLocations` op.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageLocationsResponse {
+    /// One list of locations per requested validator, in request order.
+    #[serde(default)]
+    pub locations: Option<Vec<Vec<String>>>,
+    /// Structured error on failure.
+    #[serde(default)]
+    pub error: Option<SubmitError>,
+}
+
+/// Read announced storage locations for `validators` via the submitter.
+pub async fn query_storage_locations(
+    ctx: &ToolkitContext,
+    contract_address: H256,
+    validators: &[H160],
+) -> ChainResult<Vec<Vec<String>>> {
+    let request = StorageLocationsRequest {
+        op: "getStorageLocations",
+        // See `query_delivered` — Midnight rejects `0x` on contract addresses.
+        contract_address: format!("{contract_address:x}"),
+        indexer_graphql_url: ctx.indexer_graphql_url.clone(),
+        indexer_ws_url: ctx.indexer_ws_url.clone(),
+        network_id: ctx.network_id.clone(),
+        validators: validators.iter().map(|v| format!("0x{v:x}")).collect(),
+    };
+
+    let raw = run_submitter(ctx, &request, STORAGE_LOCATIONS_TIMEOUT).await?;
+    let response: StorageLocationsResponse =
+        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
+            message: err.to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    if let Some(error) = response.error {
+        return Err(HyperlaneMidnightError::SubmitterReported {
+            kind: error.kind,
+            message: error.message,
+        }
+        .into());
+    }
+
+    let locations =
+        response
+            .locations
+            .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
+                message: "missing `locations` in response".to_string(),
+                raw: truncate(&raw, 1024),
+            })?;
+
+    if locations.len() != validators.len() {
+        return Err(HyperlaneMidnightError::SubmitterMalformed {
+            message: format!(
+                "expected {} location lists, got {}",
+                validators.len(),
+                locations.len()
+            ),
+            raw: truncate(&raw, 1024),
+        }
+        .into());
+    }
+
+    Ok(locations)
+}
+
 async fn run_submitter<R: Serialize>(
     ctx: &ToolkitContext,
     request: &R,
@@ -283,13 +470,12 @@ async fn run_submitter<R: Serialize>(
         })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
+        stdin.write_all(&payload).await.map_err(|source| {
+            HyperlaneMidnightError::SubmitterSpawn {
                 path: ctx.binary_path.clone(),
                 source,
-            })?;
+            }
+        })?;
         stdin
             .shutdown()
             .await
@@ -394,7 +580,13 @@ mod tests {
             recipient: H256::from_low_u64_be(0xCD),
             body: vec![0u8; 64],
         };
-        let request = build_request(H256::from_low_u64_be(1), &ctx(), &message, metadata(), false);
+        let request = build_request(
+            H256::from_low_u64_be(1),
+            &ctx(),
+            &message,
+            metadata(),
+            false,
+        );
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"op\":\"submit\""));
         assert!(json.contains("\"version\":3"));
@@ -423,6 +615,47 @@ mod tests {
         let err = submit_handle(&ctx, &request).await.unwrap_err();
         let msg = format!("{err:?}").to_lowercase();
         assert!(msg.contains("malformed") || msg.contains("eof") || msg.contains("expected"));
+    }
+
+    #[tokio::test]
+    async fn storage_locations_length_mismatch_is_malformed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mock submitter: echo a well-formed `getStorageLocations` envelope
+        // whose `locations` array has fewer entries than the validators we
+        // request. This guards the positional validator->location mapping:
+        // the results must line up with the requested order, so a length
+        // mismatch has to surface as a clear error rather than silently
+        // misaligning.
+        let tmp = std::env::temp_dir().join(format!(
+            "midnight-toolkit-locmismatch-{}.sh",
+            std::process::id()
+        ));
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            // Two validators requested below, but only one location list back.
+            f.write_all(b"#!/bin/sh\necho '{\"locations\":[[\"s3://only-one\"]]}'\n")
+                .unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut ctx = ctx();
+        ctx.binary_path = tmp.to_string_lossy().into_owned();
+
+        let validators = vec![H160::repeat_byte(0x11), H160::repeat_byte(0x22)];
+        let err = query_storage_locations(&ctx, H256::from_low_u64_be(0xabcd), &validators)
+            .await
+            .unwrap_err();
+
+        let _ = std::fs::remove_file(&tmp);
+
+        // The guard reports the expected vs. actual list counts.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected 2 location lists, got 1"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]
