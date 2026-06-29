@@ -6,6 +6,7 @@
 pub mod application;
 mod config;
 mod error;
+mod indexer;
 mod indexer_client;
 pub mod ism;
 mod mailbox;
@@ -20,6 +21,7 @@ mod cross_boundary_tests;
 
 pub use config::ConnectionConf;
 pub use error::HyperlaneMidnightError;
+pub use indexer::{MidnightDeliveryIndexer, MidnightDispatchIndexer};
 pub use indexer_client::MidnightIndexerClient;
 pub use mailbox::MidnightMailbox;
 pub use provider::MidnightProvider;

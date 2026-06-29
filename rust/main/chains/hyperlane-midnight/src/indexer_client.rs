@@ -7,7 +7,11 @@ use url::Url;
 
 use hyperlane_core::ChainResult;
 
-use crate::state_decode::{decode_ism_state, IsmState};
+use hyperlane_core::{HyperlaneMessage, H256};
+
+use crate::state_decode::{
+    decode_deliveries, decode_dispatched_message, decode_ism_state, decode_nonce_count, IsmState,
+};
 use crate::HyperlaneMidnightError;
 
 /// How long a decoded ISM state is reused before re-reading from the indexer.
@@ -101,6 +105,34 @@ impl MidnightIndexerClient {
             cache.insert(address.to_string(), (state.clone(), Instant::now()));
         }
         Ok(state)
+    }
+
+    /// Read the dispatch `nonce` counter from the deployed `night` contract's
+    /// Mailbox state. This is the count of messages dispatched so far; valid
+    /// dispatch nonces are `0..count`. Not cached: the dispatch indexer reads
+    /// it once per scan to learn the sequence tip.
+    pub async fn read_nonce_count(&self, address: &str) -> ChainResult<u32> {
+        let bytes = self.contract_state(address).await?;
+        decode_nonce_count(&bytes)
+    }
+
+    /// Read the dispatched `HyperlaneMessage` stored at `nonce` in the deployed
+    /// `night` contract's `dispatched_messages` map. Returns `None` if no
+    /// message is stored at that nonce.
+    pub async fn read_dispatched_message(
+        &self,
+        address: &str,
+        nonce: u32,
+    ) -> ChainResult<Option<HyperlaneMessage>> {
+        let bytes = self.contract_state(address).await?;
+        decode_dispatched_message(&bytes, nonce)
+    }
+
+    /// Read the full `deliveries` set (delivered message ids) from the deployed
+    /// `night` contract's Mailbox state. The set is unordered.
+    pub async fn read_deliveries(&self, address: &str) -> ChainResult<Vec<H256>> {
+        let bytes = self.contract_state(address).await?;
+        decode_deliveries(&bytes)
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(

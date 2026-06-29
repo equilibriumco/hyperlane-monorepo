@@ -160,10 +160,10 @@ where
     }
 }
 
-/// Type-aliased flavors for the three concrete `T`s the relayer instantiates.
-/// These exist purely so `chains.rs` can read like `MidnightMessageIndexer::new()`
-/// instead of spelling out the generic.
-pub type MidnightMessageIndexerStub = MidnightStubIndexer<hyperlane_core::HyperlaneMessage>;
+/// Type-aliased flavors for the concrete `T`s the relayer still stubs.
+/// These exist purely so `chains.rs` can read like `MidnightMerkleTreeIndexerStub::new()`
+/// instead of spelling out the generic. The dispatch indexer is now real
+/// (`MidnightDispatchIndexer`, #16), so it no longer has a stub alias here.
 /// Stub for merkle tree insertion indexing.
 pub type MidnightMerkleTreeIndexerStub = MidnightStubIndexer<MerkleTreeInsertion>;
 /// Stub for IGP payment indexing.

@@ -47,3 +47,13 @@ midnight-storage-core = { version = "=1.2.0", features = ["layout-v2"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Build synthetic `ContractState` blobs in unit tests: construct the same
+# `StateValue` tree the deployed `night` Mailbox produces, then serialize it
+# with `tagged_serialize` and feed it through the decoders. EXACT-pinned to
+# the runtime graph above (`midnight-onchain-runtime = 3.1.0` pulls
+# onchain-state 3.0.0, base-crypto 1.0.0, storage 2.0.1), so the test builds
+# the byte-identical wire format the live indexer serves. Not used by any
+# non-test code.
+midnight-onchain-state = "=3.0.0"
+midnight-base-crypto = "=1.0.0"
+midnight-storage = "=2.0.1"
