@@ -8,10 +8,18 @@
 //! navigate the resulting `StateValue::Array` positionally.
 //!
 //! Field positions are taken from the compiled `night` readers'
-//! `queryLedgerState` paths (e.g. `_moduleType_0` reads `[0, 10]`) and are
-//! verified against live deployed state in the tests below. They are pinned
-//! to the field declaration order in `MessageIdMultisigIsm.compact`; a
-//! contract layout change shifts them, which the integration test catches.
+//! `queryLedgerState` paths and verified against live deployed state in the
+//! tests below: `_validatorCount_0` -> `[0, 8]`, `_thresholdValue_0` ->
+//! `[0, 9]`, `_moduleType_0` -> `[0, 10]`, and the `validators` map at
+//! `[0, 7]`. Slots `[0, 11..13]` are the module's private `_verify_*` scratch
+//! fields, so `module_type` sits one slot from scratch state. The paths are
+//! pinned to the field declaration order in `MessageIdMultisigIsm.compact`;
+//! any reorder/insert above or between these fields shifts them. To
+//! re-verify after a contract change, recompile `night.compact` and grep the
+//! `queryLedgerState` paths in `managed/night/contract/index.js`. The
+//! contracts-repo CI asserts these paths on every compile, and
+//! `decode_ism_state` below fails loudly if the decoded fields are mutually
+//! inconsistent.
 
 use hyperlane_core::ChainResult;
 use midnight_onchain_runtime::state::{ContractState, StateValue};
@@ -148,12 +156,35 @@ fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
 pub fn decode_ism_state(bytes: &[u8]) -> ChainResult<IsmState> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
-    Ok(IsmState {
+    let state = IsmState {
         validators: read_validators(nav(root, &ISM_VALIDATORS_PATH)?)?,
         validator_count: read_u8(nav(root, &ISM_VALIDATOR_COUNT_PATH)?)?,
         threshold: read_u8(nav(root, &ISM_THRESHOLD_PATH)?)?,
         module_type: read_u8(nav(root, &ISM_MODULE_TYPE_PATH)?)?,
-    })
+    };
+
+    // Structural sanity: the decoded slots must be mutually consistent. A
+    // mismatch means the positional paths read the wrong slots (e.g. a
+    // contract layout shift), not a legitimate on-chain state. `module_type`
+    // is validated separately in `ism::module_type_from_u8`, which keeps this
+    // decoder agnostic to which ISM variants the agent supports.
+    if state.validator_count as usize != state.validators.len() {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "validator_count {} does not match decoded validator set size {}",
+            state.validator_count,
+            state.validators.len()
+        ))
+        .into());
+    }
+    if state.threshold < 1 || state.threshold > state.validator_count {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "threshold {} out of range 1..={} (validator_count)",
+            state.threshold, state.validator_count
+        ))
+        .into());
+    }
+
+    Ok(state)
 }
 
 #[cfg(test)]

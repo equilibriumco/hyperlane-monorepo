@@ -1,10 +1,10 @@
 //! `InterchainSecurityModule` + `MultisigIsm` impls for Midnight.
 //!
 //! Both read from the deployed `night` contract's on-chain state via the
-//! indexer (a point-in-time `contractAction` query), decoded by
-//! [`crate::state_decode`]. `validators`, `threshold`, and `module_type`
-//! all come from one state snapshot, so the relayer always signs against
-//! the set the on-chain ISM will check — no config/chain drift.
+//! indexer (a one-shot `contractAction` HTTP query returning the latest
+//! state), decoded by [`crate::state_decode`]. `validators`, `threshold`,
+//! and `module_type` all come from one such read, so the relayer always
+//! signs against the set the on-chain ISM will check — no config/chain drift.
 //!
 //! `module_type` is read from chain rather than hardcoded: the Midnight
 //! WarpRoute only implements `MessageIdMultisig` today, so any other value
@@ -142,7 +142,7 @@ impl MultisigIsm for MidnightMultisigIsm {
         // metadata pipeline expects H256, so left-pad each with 12 zero
         // bytes — Ethereum's standard `addressToBytes32` convention used
         // elsewhere in the codebase. Validators and threshold come from the
-        // same snapshot, so they cannot drift apart.
+        // same single read, so they cannot drift apart.
         let padded: Vec<H256> = state
             .validators
             .iter()

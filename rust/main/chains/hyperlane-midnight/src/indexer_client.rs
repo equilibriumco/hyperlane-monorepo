@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -6,11 +10,24 @@ use hyperlane_core::ChainResult;
 use crate::state_decode::{decode_ism_state, IsmState};
 use crate::HyperlaneMidnightError;
 
+/// How long a decoded ISM state is reused before re-reading from the indexer.
+/// Short on purpose: it collapses the per-delivery read burst (the Mailbox
+/// re-reads the validator set to sort signatures on every `process`) while
+/// staying well under the relayer's 120s ISM cache, so an on-chain validator
+/// rotation is still picked up quickly.
+const ISM_STATE_TTL: Duration = Duration::from_secs(5);
+
 /// HTTP client for the Midnight indexer's GraphQL endpoint.
 #[derive(Debug, Clone)]
 pub struct MidnightIndexerClient {
     endpoint: Url,
     http: reqwest::Client,
+    /// Per-address cache of the decoded ISM state, shared across clones of
+    /// this client (it is cloned into the provider). Caches successful decodes
+    /// only. Note: the Mailbox and the ISM build separate client instances, so
+    /// they do not share this cache with each other — it removes the
+    /// per-delivery re-read within a single long-lived client.
+    ism_cache: Arc<Mutex<HashMap<String, (IsmState, Instant)>>>,
 }
 
 impl MidnightIndexerClient {
@@ -19,6 +36,7 @@ impl MidnightIndexerClient {
         Self {
             endpoint,
             http: reqwest::Client::new(),
+            ism_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -35,10 +53,13 @@ impl MidnightIndexerClient {
     }
 
     /// Fetch the full serialized ledger state of a deployed contract at the
-    /// latest observed block, hex-decoded into raw bytes. This is the
-    /// `contractAction` point-in-time query (HTTP), not the streaming
-    /// `contractActions` subscription. `address` is the contract address as
-    /// the indexer's `HexEncoded` scalar (hex, with or without `0x`).
+    /// indexer's latest observed block, hex-decoded into raw bytes. This is a
+    /// one-shot `contractAction(address)` HTTP query returning the latest
+    /// state, not the streaming `contractActions` subscription. No `offset` is
+    /// passed, so the read is not pinned to a fixed block; the schema's
+    /// `offset: ContractActionOffset` supports block-pinned reads if a future
+    /// caller needs them. `address` is the contract address as the indexer's
+    /// `HexEncoded` scalar (hex, with or without `0x`).
     pub async fn contract_state(&self, address: &str) -> Result<Vec<u8>, HyperlaneMidnightError> {
         let query =
             r#"query ($address: HexEncoded!) { contractAction(address: $address) { state } }"#;
@@ -63,9 +84,23 @@ impl MidnightIndexerClient {
 
     /// Read and decode the MessageIdMultisigIsm config (validators, threshold,
     /// module type) from the deployed `night` contract's on-chain state.
+    /// Cached for `ISM_STATE_TTL` to avoid a fresh network read + decode on
+    /// every Mailbox delivery.
     pub async fn read_ism_state(&self, address: &str) -> ChainResult<IsmState> {
+        if let Ok(cache) = self.ism_cache.lock() {
+            if let Some((state, fetched_at)) = cache.get(address) {
+                if fetched_at.elapsed() < ISM_STATE_TTL {
+                    return Ok(state.clone());
+                }
+            }
+        }
+
         let bytes = self.contract_state(address).await?;
-        decode_ism_state(&bytes)
+        let state = decode_ism_state(&bytes)?;
+        if let Ok(mut cache) = self.ism_cache.lock() {
+            cache.insert(address.to_string(), (state.clone(), Instant::now()));
+        }
+        Ok(state)
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(
