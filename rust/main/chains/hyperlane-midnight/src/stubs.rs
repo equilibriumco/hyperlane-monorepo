@@ -12,9 +12,11 @@
 //!
 //! These stubs let midnight build as origin so destination delivery works.
 //! They will be replaced by real impls under:
-//!   - #15  Validator: Merkle tree indexer
 //!   - #16  Message dispatch indexer + delivery indexer
 //!   - #19  Relayer: IGP payment indexer
+//!
+//! The merkle-tree indexer (#15) is no longer a stub — see
+//! [`crate::MidnightMerkleTreeHook`].
 //!
 //! All depend on #14 (Midnight indexer client) for chain-state reads.
 //!
@@ -25,8 +27,7 @@ use std::ops::RangeInclusive;
 use async_trait::async_trait;
 
 use hyperlane_core::{
-    ChainResult, Indexed, Indexer, InterchainGasPayment, LogMeta, MerkleTreeInsertion,
-    SequenceAwareIndexer, H512,
+    ChainResult, Indexed, Indexer, InterchainGasPayment, LogMeta, SequenceAwareIndexer, H512,
 };
 
 /// Generic stub `SequenceAwareIndexer` used for all three origin-side
@@ -94,7 +95,5 @@ where
 /// These exist purely so `chains.rs` can read like `MidnightMessageIndexer::new()`
 /// instead of spelling out the generic.
 pub type MidnightMessageIndexerStub = MidnightStubIndexer<hyperlane_core::HyperlaneMessage>;
-/// Stub for merkle tree insertion indexing.
-pub type MidnightMerkleTreeIndexerStub = MidnightStubIndexer<MerkleTreeInsertion>;
 /// Stub for IGP payment indexing.
 pub type MidnightIgpIndexerStub = MidnightStubIndexer<InterchainGasPayment>;
