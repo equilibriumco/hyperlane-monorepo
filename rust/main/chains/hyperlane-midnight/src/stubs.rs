@@ -23,12 +23,12 @@ use std::ops::RangeInclusive;
 
 use async_trait::async_trait;
 
+use hyperlane_core::ValidatorAnnounce;
 use hyperlane_core::{
     Announcement, ChainResult, HyperlaneChain, HyperlaneContract, HyperlaneDomain,
     HyperlaneProvider, Indexed, Indexer, InterchainGasPayment, LogMeta, MerkleTreeInsertion,
     SequenceAwareIndexer, SignedType, TxOutcome, H256, H512, U256,
 };
-use hyperlane_core::ValidatorAnnounce;
 
 use crate::MidnightProvider;
 

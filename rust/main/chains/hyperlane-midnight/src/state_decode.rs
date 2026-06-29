@@ -118,9 +118,10 @@ fn cell_atom(node: &StateValue<DefaultDB>) -> ChainResult<&[u8]> {
             })?;
             Ok(&atom.0)
         }
-        other => Err(
-            HyperlaneMidnightError::StateDecode(format!("expected cell leaf, got {other:?}")).into(),
-        ),
+        other => Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected cell leaf, got {other:?}"
+        ))
+        .into()),
     }
 }
 
@@ -130,7 +131,9 @@ fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     match bytes.len() {
         0 => Ok(0),
         1 => Ok(bytes[0]),
-        n => Err(HyperlaneMidnightError::StateDecode(format!("expected u8 leaf, got {n} bytes")).into()),
+        n => Err(
+            HyperlaneMidnightError::StateDecode(format!("expected u8 leaf, got {n} bytes")).into(),
+        ),
     }
 }
 
@@ -654,7 +657,10 @@ mod tests {
         let bytes = hex::decode(hex).expect("fixture is valid hex");
         let ism = decode_ism_state(&bytes).expect("decode ISM state");
 
-        assert_eq!(ism.module_type, 5, "module_type should be MessageIdMultisig");
+        assert_eq!(
+            ism.module_type, 5,
+            "module_type should be MessageIdMultisig"
+        );
         assert_eq!(ism.threshold, 2, "threshold");
         assert_eq!(ism.validator_count, 3, "validator_count");
         assert_eq!(

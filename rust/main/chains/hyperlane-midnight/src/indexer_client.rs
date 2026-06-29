@@ -226,7 +226,10 @@ mod tests {
         println!("decoded ISM state from chain: {ism:?}");
 
         // MessageIdMultisig is discriminant 5 in Hyperlane's ModuleType enum.
-        assert_eq!(ism.module_type, 5, "module_type should be MessageIdMultisig");
+        assert_eq!(
+            ism.module_type, 5,
+            "module_type should be MessageIdMultisig"
+        );
         // Decoded slot count must match the validators map.
         assert_eq!(
             ism.validator_count as usize,
@@ -234,7 +237,10 @@ mod tests {
             "validator_count must match decoded validator slots"
         );
         // A usable multisig: >= 1 validator and 1 <= threshold <= count.
-        assert!(!ism.validators.is_empty(), "expected at least one validator");
+        assert!(
+            !ism.validators.is_empty(),
+            "expected at least one validator"
+        );
         assert!(ism.threshold >= 1, "threshold must be at least 1");
         assert!(
             ism.threshold as usize <= ism.validators.len(),
