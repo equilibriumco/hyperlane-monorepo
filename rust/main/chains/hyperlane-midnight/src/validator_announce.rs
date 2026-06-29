@@ -124,7 +124,7 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
             // Midnight fees are denominated in DUST and computed by the wallet
-            // at submission time, so the relayer just needs non-zero
+            // at submission time, so the validator agent just needs non-zero
             // placeholders here (mirrors `MidnightMailbox::process`).
             gas_used: U256::from(1_u32),
             gas_price: FixedPointNumber::from_str("1")
@@ -139,9 +139,10 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
     ) -> Option<U256> {
         // Midnight fees are paid in DUST and are computed by the wallet inside
         // the submitter subprocess (the Rust `MidnightSigner` is a
-        // placeholder), so the relayer cannot pre-fund anything from here.
-        // `Some(0)` follows the Sealevel pattern: it signals "no extra tokens
-        // needed" rather than "unknown", so the relayer proceeds to announce.
+        // placeholder), so the validator agent cannot pre-fund anything from
+        // here. `Some(0)` follows the Sealevel pattern: it signals "no extra
+        // tokens needed" rather than "unknown", so the validator agent proceeds
+        // to announce.
         Some(U256::zero())
     }
 }

@@ -613,6 +613,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_locations_length_mismatch_is_malformed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mock submitter: echo a well-formed `getStorageLocations` envelope
+        // whose `locations` array has fewer entries than the validators we
+        // request. This guards the positional validator->location mapping:
+        // the results must line up with the requested order, so a length
+        // mismatch has to surface as a clear error rather than silently
+        // misaligning.
+        let tmp = std::env::temp_dir().join(format!(
+            "midnight-toolkit-locmismatch-{}.sh",
+            std::process::id()
+        ));
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            // Two validators requested below, but only one location list back.
+            f.write_all(b"#!/bin/sh\necho '{\"locations\":[[\"s3://only-one\"]]}'\n")
+                .unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut ctx = ctx();
+        ctx.binary_path = tmp.to_string_lossy().into_owned();
+
+        let validators = vec![H160::repeat_byte(0x11), H160::repeat_byte(0x22)];
+        let err = query_storage_locations(&ctx, H256::from_low_u64_be(0xabcd), &validators)
+            .await
+            .unwrap_err();
+
+        let _ = std::fs::remove_file(&tmp);
+
+        // The guard reports the expected vs. actual list counts.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected 2 location lists, got 1"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
     async fn timeout_elapses_and_kills_child() {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
