@@ -447,8 +447,7 @@ impl ChainConf {
                 Ok(Box::new(mailbox) as Box<dyn Mailbox>)
             }
             ChainConnectionConf::Midnight(conf) => {
-                let mailbox =
-                    h_midnight::MidnightMailbox::new(&locator, conf).context(ctx)?;
+                let mailbox = h_midnight::MidnightMailbox::new(&locator, conf).context(ctx)?;
                 Ok(Box::new(mailbox) as Box<dyn Mailbox>)
             }
         }
@@ -614,8 +613,10 @@ impl ChainConf {
             ChainConnectionConf::Midnight(_) => {
                 // TODO(#16): real dispatch indexer reading from the WarpRoute
                 // contract state via the Midnight indexer client (#14).
-                Ok(Box::new(h_midnight::stubs::MidnightMessageIndexerStub::new())
-                    as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
+                Ok(
+                    Box::new(h_midnight::stubs::MidnightMessageIndexerStub::new())
+                        as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>,
+                )
             }
         }
         .context(ctx)
@@ -963,8 +964,10 @@ impl ChainConf {
                 // TODO(#15): real merkle-tree-hook indexer reading leaf
                 // insertions from the WarpRoute contract state via the
                 // Midnight indexer client (#14).
-                Ok(Box::new(h_midnight::stubs::MidnightMerkleTreeIndexerStub::new())
-                    as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
+                Ok(
+                    Box::new(h_midnight::stubs::MidnightMerkleTreeIndexerStub::new())
+                        as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>,
+                )
             }
         }
         .context(ctx)
@@ -1136,13 +1139,9 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 // The ISM reads its module type from chain state (via the
                 // indexer) on each `module_type` call, not from config.
-                let indexer = h_midnight::MidnightIndexerClient::new(
-                    conf.indexer_graphql_url.clone(),
-                );
-                let provider = h_midnight::MidnightProvider::new(
-                    locator.domain.clone(),
-                    indexer,
-                );
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 let ism = h_midnight::ism::MidnightInterchainSecurityModule::new(
                     locator.address,
                     locator.domain.clone(),
@@ -1218,13 +1217,9 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 // Validators + threshold are read from chain state by the ISM
                 // itself (via the indexer), not sourced from config.
-                let indexer = h_midnight::MidnightIndexerClient::new(
-                    conf.indexer_graphql_url.clone(),
-                );
-                let provider = h_midnight::MidnightProvider::new(
-                    locator.domain.clone(),
-                    indexer,
-                );
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 let ism = h_midnight::ism::MidnightMultisigIsm::new(
                     locator.address,
                     locator.domain.clone(),

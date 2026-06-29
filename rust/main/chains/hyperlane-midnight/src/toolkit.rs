@@ -153,12 +153,12 @@ pub async fn submit_handle(
         .into());
     }
 
-    let tx_hash = response.tx_hash.ok_or_else(|| {
-        HyperlaneMidnightError::SubmitterMalformed {
+    let tx_hash = response
+        .tx_hash
+        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
             message: "missing `txHash` in response".to_string(),
             raw: truncate(&raw, 1024),
-        }
-    })?;
+        })?;
 
     Ok(ToolkitOutcome {
         transaction_id: parse_tx_hash(&tx_hash, &raw)?,
@@ -308,10 +308,9 @@ pub async fn announce_tx(
 ) -> ChainResult<ToolkitOutcome> {
     let bytes = storage_location.as_bytes();
     if bytes.is_empty() {
-        return Err(HyperlaneMidnightError::Other(
-            "announce: empty storage location".to_string(),
-        )
-        .into());
+        return Err(
+            HyperlaneMidnightError::Other("announce: empty storage location".to_string()).into(),
+        );
     }
     if bytes.len() > MAX_STORAGE_LOCATION_LEN {
         return Err(HyperlaneMidnightError::Other(format!(
@@ -351,12 +350,12 @@ pub async fn announce_tx(
         .into());
     }
 
-    let tx_hash = response.tx_hash.ok_or_else(|| {
-        HyperlaneMidnightError::SubmitterMalformed {
+    let tx_hash = response
+        .tx_hash
+        .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
             message: "missing `txHash` in response".to_string(),
             raw: truncate(&raw, 1024),
-        }
-    })?;
+        })?;
 
     Ok(ToolkitOutcome {
         transaction_id: parse_tx_hash(&tx_hash, &raw)?,
@@ -425,12 +424,13 @@ pub async fn query_storage_locations(
         .into());
     }
 
-    let locations = response.locations.ok_or_else(|| {
-        HyperlaneMidnightError::SubmitterMalformed {
-            message: "missing `locations` in response".to_string(),
-            raw: truncate(&raw, 1024),
-        }
-    })?;
+    let locations =
+        response
+            .locations
+            .ok_or_else(|| HyperlaneMidnightError::SubmitterMalformed {
+                message: "missing `locations` in response".to_string(),
+                raw: truncate(&raw, 1024),
+            })?;
 
     if locations.len() != validators.len() {
         return Err(HyperlaneMidnightError::SubmitterMalformed {
@@ -470,13 +470,12 @@ async fn run_submitter<R: Serialize>(
         })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .await
-            .map_err(|source| HyperlaneMidnightError::SubmitterSpawn {
+        stdin.write_all(&payload).await.map_err(|source| {
+            HyperlaneMidnightError::SubmitterSpawn {
                 path: ctx.binary_path.clone(),
                 source,
-            })?;
+            }
+        })?;
         stdin
             .shutdown()
             .await
@@ -581,7 +580,13 @@ mod tests {
             recipient: H256::from_low_u64_be(0xCD),
             body: vec![0u8; 64],
         };
-        let request = build_request(H256::from_low_u64_be(1), &ctx(), &message, metadata(), false);
+        let request = build_request(
+            H256::from_low_u64_be(1),
+            &ctx(),
+            &message,
+            metadata(),
+            false,
+        );
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"op\":\"submit\""));
         assert!(json.contains("\"version\":3"));
