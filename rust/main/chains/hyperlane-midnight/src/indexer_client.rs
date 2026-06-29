@@ -10,7 +10,8 @@ use hyperlane_core::ChainResult;
 use hyperlane_core::{HyperlaneMessage, H256};
 
 use crate::state_decode::{
-    decode_deliveries, decode_dispatched_message, decode_ism_state, decode_nonce_count, IsmState,
+    decode_deliveries, decode_dispatch_snapshot, decode_dispatched_message, decode_ism_state,
+    decode_nonce_count, DispatchSnapshot, IsmState,
 };
 use crate::HyperlaneMidnightError;
 
@@ -126,6 +127,16 @@ impl MidnightIndexerClient {
     ) -> ChainResult<Option<HyperlaneMessage>> {
         let bytes = self.contract_state(address).await?;
         decode_dispatched_message(&bytes, nonce)
+    }
+
+    /// Read the whole dispatch state (every dispatched `HyperlaneMessage` keyed
+    /// by nonce, plus the nonce counter) from a SINGLE state fetch. The dispatch
+    /// indexer uses this once per scan to serve a whole nonce range, instead of
+    /// re-fetching and re-scanning the full state per nonce. Decoding the count
+    /// and the messages from the same blob also keeps them mutually consistent.
+    pub async fn read_dispatch_snapshot(&self, address: &str) -> ChainResult<DispatchSnapshot> {
+        let bytes = self.contract_state(address).await?;
+        decode_dispatch_snapshot(&bytes)
     }
 
     /// Read the full `deliveries` set (delivered message ids) from the deployed

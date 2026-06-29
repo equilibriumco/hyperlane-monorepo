@@ -21,6 +21,8 @@
 //! `decode_ism_state` below fails loudly if the decoded fields are mutually
 //! inconsistent.
 
+use std::collections::HashMap;
+
 use hyperlane_core::{ChainResult, Decode as _, HyperlaneMessage, H256};
 use midnight_onchain_runtime::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
@@ -241,6 +243,53 @@ pub fn decode_nonce_count(bytes: &[u8]) -> ChainResult<u32> {
     })
 }
 
+/// Decode a single `dispatched_messages` map value (a `Bytes<141>` leaf) back
+/// into a `HyperlaneMessage`. The runtime trims trailing zero bytes from a
+/// `Bytes<141>` leaf, so a message whose body ends in zeros is stored as fewer
+/// than 141 bytes; right-pad back to the full fixed width before decoding.
+fn decode_message_value(node: &StateValue<DefaultDB>) -> ChainResult<HyperlaneMessage> {
+    let encoded = cell_atom(node)?;
+    if encoded.len() > ENCODED_MESSAGE_LEN {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "dispatched message is {} bytes, expected at most {ENCODED_MESSAGE_LEN}",
+            encoded.len()
+        ))
+        .into());
+    }
+    let mut full = [0u8; ENCODED_MESSAGE_LEN];
+    full[..encoded.len()].copy_from_slice(encoded);
+    HyperlaneMessage::read_from(&mut &full[..])
+        .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()).into())
+}
+
+/// Parse a `Uint<32>` map key's raw bytes (stored little-endian with trailing
+/// zeros trimmed) as a `u32`. Returns `None` if the key is wider than 4 bytes
+/// (not a valid nonce key).
+fn parse_nonce_key(key_bytes: &[u8]) -> Option<u32> {
+    if key_bytes.len() > 4 {
+        return None;
+    }
+    let mut le = [0u8; 4];
+    le[..key_bytes.len()].copy_from_slice(key_bytes);
+    Some(u32::from_le_bytes(le))
+}
+
+/// A single-read snapshot of the Mailbox dispatch state: every dispatched
+/// `HyperlaneMessage` keyed by nonce, plus the `nonce` counter, decoded from
+/// ONE serialized state blob.
+///
+/// The dispatch indexer uses this to serve a whole nonce range from one
+/// network fetch instead of re-fetching and re-scanning the full state per
+/// nonce. Decoding the count and the messages from the same blob also keeps
+/// them mutually consistent within a scan.
+#[derive(Debug, Clone)]
+pub struct DispatchSnapshot {
+    /// Every dispatched message, keyed by its nonce.
+    pub messages: HashMap<u32, HyperlaneMessage>,
+    /// The `nonce` counter: the number of messages dispatched so far.
+    pub nonce_count: u32,
+}
+
 /// Decode the dispatched message stored at the given nonce key in the
 /// `dispatched_messages: Map<Uint<32>, Bytes<141>>` ledger field back into a
 /// `HyperlaneMessage`. Returns `None` if no message is stored at that key.
@@ -270,32 +319,61 @@ pub fn decode_dispatched_message(
             .first()
             .map(|atom| atom.0.as_ref())
             .unwrap_or(&[][..]);
-        if key_bytes.len() > 4 {
+        if parse_nonce_key(key_bytes) != Some(nonce) {
             continue;
         }
-        let mut le = [0u8; 4];
-        le[..key_bytes.len()].copy_from_slice(key_bytes);
-        if u32::from_le_bytes(le) != nonce {
-            continue;
-        }
-        let encoded = cell_atom(&pair.1)?;
-        // The runtime trims trailing zero bytes from a `Bytes<141>` leaf, so a
-        // message whose body ends in zeros is stored as fewer than 141 bytes.
-        // Right-pad back to the full fixed width before decoding.
-        if encoded.len() > ENCODED_MESSAGE_LEN {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "dispatched message at nonce {nonce} is {} bytes, expected at most {ENCODED_MESSAGE_LEN}",
-                encoded.len()
-            ))
-            .into());
-        }
-        let mut full = [0u8; ENCODED_MESSAGE_LEN];
-        full[..encoded.len()].copy_from_slice(encoded);
-        let message = HyperlaneMessage::read_from(&mut &full[..])
-            .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()))?;
-        return Ok(Some(message));
+        return Ok(Some(decode_message_value(&pair.1)?));
     }
     Ok(None)
+}
+
+/// Decode the whole dispatch state (every dispatched message keyed by nonce,
+/// plus the nonce counter) from a single serialized state blob. The dispatch
+/// indexer reads this once per scan and serves the requested nonce range from
+/// the returned in-memory map, avoiding a network fetch + full-state scan per
+/// nonce.
+pub fn decode_dispatch_snapshot(bytes: &[u8]) -> ChainResult<DispatchSnapshot> {
+    let cs = decode_contract_state(bytes)?;
+    let root = cs.data.get_ref();
+
+    let n = read_counter_u64(nav(root, &MAILBOX_NONCE_PATH)?)?;
+    let nonce_count = u32::try_from(n).map_err(|_| {
+        HyperlaneMidnightError::StateDecode(format!("nonce counter {n} exceeds u32"))
+    })?;
+
+    let map = match nav(root, &MAILBOX_DISPATCHED_MESSAGES_PATH)? {
+        StateValue::Map(m) => m,
+        other => {
+            return Err(HyperlaneMidnightError::StateDecode(format!(
+                "expected map for dispatched_messages, got {other:?}"
+            ))
+            .into())
+        }
+    };
+
+    let mut messages = HashMap::with_capacity(map.size());
+    for entry in map.iter() {
+        let pair = &*entry;
+        let key_av = &*pair.0;
+        // The Uint<32> key is stored little-endian (trailing zeros trimmed).
+        let key_bytes = key_av
+            .value
+            .0
+            .first()
+            .map(|atom| atom.0.as_ref())
+            .unwrap_or(&[][..]);
+        // A key wider than 4 bytes is not a valid nonce key; skip it rather
+        // than fail the whole snapshot.
+        let Some(nonce) = parse_nonce_key(key_bytes) else {
+            continue;
+        };
+        messages.insert(nonce, decode_message_value(&pair.1)?);
+    }
+
+    Ok(DispatchSnapshot {
+        messages,
+        nonce_count,
+    })
 }
 
 /// Decode the `deliveries: Set<Bytes<32>>` ledger field into the set of
@@ -325,7 +403,7 @@ pub fn decode_deliveries(bytes: &[u8]) -> ChainResult<Vec<H256>> {
             .first()
             .map(|atom| atom.0.as_ref())
             .unwrap_or(&[][..]);
-        // The runtime trims trailing zero bytes; left-pad back to 32.
+        // The runtime trims trailing zero bytes; right-pad back to 32.
         if key_bytes.len() > 32 {
             return Err(HyperlaneMidnightError::StateDecode(format!(
                 "delivery id is {} bytes, expected at most 32",
@@ -345,7 +423,7 @@ mod tests {
     use super::*;
 
     use hyperlane_core::Encode as _;
-    use midnight_base_crypto::fab::AlignedValue;
+    use midnight_base_crypto::fab::{AlignedValue, ValueAtom};
     use midnight_onchain_state::state::ChargedState;
     use midnight_storage::arena::Sp;
     use midnight_storage::storage::{Array, HashMap};
@@ -461,6 +539,88 @@ mod tests {
         assert!(decode_dispatched_message(&bytes, 5)
             .expect("decode dispatched message")
             .is_none());
+    }
+
+    #[test]
+    fn decodes_correct_message_among_many_entries() {
+        // Multiple map entries exercise the key-scan: a wrong-entry bug would
+        // return the wrong message body/recipient for a requested nonce.
+        let mut map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new();
+        let mut expected = Vec::new();
+        for nonce in [0u32, 1, 7, 42] {
+            let msg = sample_message(nonce);
+            let full: [u8; ENCODED_MESSAGE_LEN] = msg.to_vec().try_into().unwrap();
+            map = map.insert(AlignedValue::from(nonce), cell(full));
+            expected.push((nonce, msg));
+        }
+        let bytes = mailbox_state_bytes(
+            StateValue::Map(HashMap::new()),
+            cell(43u64),
+            StateValue::Map(map),
+        );
+
+        // Each requested nonce returns exactly its own message.
+        for (nonce, msg) in &expected {
+            let decoded = decode_dispatched_message(&bytes, *nonce)
+                .expect("decode dispatched message")
+                .unwrap_or_else(|| panic!("message present at nonce {nonce}"));
+            assert_eq!(&decoded, msg, "nonce {nonce} returned the wrong message");
+            assert_eq!(decoded.nonce, *nonce);
+        }
+
+        // The same holds for the single-read snapshot decode.
+        let snapshot = decode_dispatch_snapshot(&bytes).expect("decode snapshot");
+        assert_eq!(snapshot.nonce_count, 43);
+        assert_eq!(snapshot.messages.len(), expected.len());
+        for (nonce, msg) in &expected {
+            assert_eq!(snapshot.messages.get(nonce), Some(msg));
+        }
+    }
+
+    #[test]
+    fn decodes_dispatched_message_right_padding_trimmed_value() {
+        // The runtime trims trailing zero bytes from a `Bytes<141>` leaf
+        // (`From<[u8; N]> for ValueAtom` drops trailing zeros). This message has
+        // an all-zero body, so its 141-byte encoding ends in many zeros and is
+        // stored as a SHORT atom; the decoder must right-pad back to 141.
+        let msg = HyperlaneMessage {
+            version: 3,
+            nonce: 9,
+            origin: 1,
+            sender: H256::repeat_byte(0x01),
+            destination: 2,
+            recipient: H256::repeat_byte(0x02),
+            // All-zero 64-byte body, so the wire encoding ends in many zeros.
+            body: vec![0u8; 64],
+        };
+        let encoded = msg.to_vec();
+        assert_eq!(encoded.len(), ENCODED_MESSAGE_LEN);
+        let full: [u8; ENCODED_MESSAGE_LEN] = encoded.clone().try_into().unwrap();
+
+        // Confirm the stored atom is actually shorter than 141 (the trim
+        // happened), so this test really exercises the right-pad branch and not
+        // the verbatim path.
+        let stored = ValueAtom::from(full);
+        assert!(
+            stored.0.len() < ENCODED_MESSAGE_LEN,
+            "expected the trailing-zero body to be trimmed on store, got {} bytes",
+            stored.0.len()
+        );
+
+        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
+            .insert(AlignedValue::from(9u32), cell(full));
+        let bytes = mailbox_state_bytes(
+            StateValue::Map(HashMap::new()),
+            cell(10u64),
+            StateValue::Map(map),
+        );
+
+        // Decoding right-pads back to the full 141 bytes and recovers the
+        // original message (including the all-zero body).
+        let decoded = decode_dispatched_message(&bytes, 9)
+            .expect("decode dispatched message")
+            .expect("message present at nonce 9");
+        assert_eq!(decoded, msg);
     }
 
     #[test]
