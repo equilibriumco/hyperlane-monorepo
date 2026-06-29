@@ -19,6 +19,12 @@ impl MidnightProvider {
     pub fn new(domain: HyperlaneDomain, indexer: MidnightIndexerClient) -> Self {
         Self { domain, indexer }
     }
+
+    /// Borrow the indexer client, for chain-state reads (e.g. the ISM reading
+    /// its validators/threshold/module-type from the deployed contract).
+    pub fn indexer(&self) -> &MidnightIndexerClient {
+        &self.indexer
+    }
 }
 
 impl HyperlaneChain for MidnightProvider {

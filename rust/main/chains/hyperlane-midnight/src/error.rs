@@ -67,6 +67,10 @@ pub enum HyperlaneMidnightError {
     #[error("indexer JSON error: {0}")]
     IndexerJson(#[from] serde_json::Error),
 
+    /// Failed to decode the contract ledger state served by the indexer.
+    #[error("contract state decode error: {0}")]
+    StateDecode(String),
+
     /// Catch-all.
     #[error("{0}")]
     Other(String),

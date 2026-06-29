@@ -1,35 +1,43 @@
 //! `InterchainSecurityModule` + `MultisigIsm` impls for Midnight.
 //!
-//! These return a hardcoded `ModuleType::MessageIdMultisig` and a
-//! `(validators, threshold)` pair read from `ConnectionConf`. The Midnight
-//! WarpRoute's on-chain ISM is a `MessageIdMultisigIsm` by design — there's
-//! one ISM variant in the protocol today — so the static module type is
-//! correct, not a workaround. The validator set + threshold IS a
-//! workaround: agent operators must keep the agent config in lockstep with
-//! on-chain state.
+//! Both read from the deployed `night` contract's on-chain state via the
+//! indexer (a one-shot `contractAction` HTTP query returning the latest
+//! state), decoded by [`crate::state_decode`]. `validators`, `threshold`,
+//! and `module_type` all come from one such read, so the relayer always
+//! signs against the set the on-chain ISM will check — no config/chain drift.
 //!
-//! TODO(#14): once the Midnight indexer client gains a point-in-time state
-//! reader, read `validators`, `threshold`, **and** module type from chain
-//! state at metadata-build time. `validators` and `threshold` should
-//! migrate together — set/threshold drift would either soft-brick delivery
-//! (relayer signs against the wrong set) or invalidate the on-chain check.
-//! `module_type()` should detect the variant from chain state instead of
-//! hardcoding, so additional ISM types (e.g. MerkleRootMultisig,
-//! AggregationIsm) can be added without code changes.
+//! `module_type` is read from chain rather than hardcoded: the Midnight
+//! WarpRoute only implements `MessageIdMultisig` today, so any other value
+//! means the deployed contract uses verification logic this agent build
+//! does not support, and we error rather than guess.
 
 use async_trait::async_trait;
 
 use hyperlane_core::{
     ChainResult, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneMessage,
-    HyperlaneProvider, InterchainSecurityModule, Metadata, ModuleType, MultisigIsm, H160, H256,
-    U256,
+    HyperlaneProvider, InterchainSecurityModule, Metadata, ModuleType, MultisigIsm, H256, U256,
 };
 
-use crate::{ConnectionConf, MidnightProvider};
+use crate::{HyperlaneMidnightError, MidnightProvider};
 
-/// Config-sourced `InterchainSecurityModule` for Midnight. Returns
-/// `MessageIdMultisig` — the only ISM variant the Midnight WarpRoute
-/// supports today.
+/// Map the on-chain `module_type` discriminant to a Hyperlane [`ModuleType`].
+/// The Midnight WarpRoute only implements `MessageIdMultisig`; any other
+/// value means the deployed contract uses verification logic this agent
+/// build does not support.
+fn module_type_from_u8(value: u8) -> ChainResult<ModuleType> {
+    if value == ModuleType::MessageIdMultisig as u8 {
+        Ok(ModuleType::MessageIdMultisig)
+    } else {
+        Err(HyperlaneMidnightError::StateDecode(format!(
+            "unsupported on-chain ISM module_type {value}: only {} (MessageIdMultisig) is supported",
+            ModuleType::MessageIdMultisig as u8
+        ))
+        .into())
+    }
+}
+
+/// Chain-sourced `InterchainSecurityModule` for Midnight. Reads the module
+/// type from the deployed contract's on-chain state.
 #[derive(Debug)]
 pub struct MidnightInterchainSecurityModule {
     address: H256,
@@ -67,7 +75,9 @@ impl HyperlaneContract for MidnightInterchainSecurityModule {
 #[async_trait]
 impl InterchainSecurityModule for MidnightInterchainSecurityModule {
     async fn module_type(&self) -> ChainResult<ModuleType> {
-        Ok(ModuleType::MessageIdMultisig)
+        let address = format!("{:x}", self.address);
+        let state = self.provider.indexer().read_ism_state(&address).await?;
+        module_type_from_u8(state.module_type)
     }
 
     async fn dry_run_verify(
@@ -83,30 +93,23 @@ impl InterchainSecurityModule for MidnightInterchainSecurityModule {
     }
 }
 
-/// Config-sourced `MultisigIsm` for Midnight.
+/// Chain-sourced `MultisigIsm` for Midnight. Reads validators + threshold
+/// from the deployed contract's on-chain state.
 #[derive(Debug)]
 pub struct MidnightMultisigIsm {
     address: H256,
     domain: HyperlaneDomain,
     provider: MidnightProvider,
-    validators: Vec<H160>,
-    threshold: u8,
 }
 
 impl MidnightMultisigIsm {
-    /// Construct from `ConnectionConf`'s validator list + threshold.
-    pub fn new(
-        address: H256,
-        domain: HyperlaneDomain,
-        provider: MidnightProvider,
-        conf: &ConnectionConf,
-    ) -> Self {
+    /// Construct an ISM handle. Validators + threshold are read from chain
+    /// state on each `validators_and_threshold` call, not from config.
+    pub fn new(address: H256, domain: HyperlaneDomain, provider: MidnightProvider) -> Self {
         Self {
             address,
             domain,
             provider,
-            validators: conf.validators.clone(),
-            threshold: conf.threshold,
         }
     }
 }
@@ -133,20 +136,22 @@ impl MultisigIsm for MidnightMultisigIsm {
         &self,
         _message: &HyperlaneMessage,
     ) -> ChainResult<(Vec<H256>, u8)> {
-        // ETH validator addresses are stored as H160 in ConnectionConf to
-        // match the on-chain Midnight contract's `Bytes<20>` field. The
-        // multisig metadata pipeline expects H256, so left-pad each
-        // address with 12 zero bytes — this matches Ethereum's standard
-        // `addressToBytes32` convention used elsewhere in the codebase.
-        let padded: Vec<H256> = self
+        let address = format!("{:x}", self.address);
+        let state = self.provider.indexer().read_ism_state(&address).await?;
+        // On-chain validators are `Bytes<20>` (ETH addresses); the multisig
+        // metadata pipeline expects H256, so left-pad each with 12 zero
+        // bytes — Ethereum's standard `addressToBytes32` convention used
+        // elsewhere in the codebase. Validators and threshold come from the
+        // same single read, so they cannot drift apart.
+        let padded: Vec<H256> = state
             .validators
             .iter()
             .map(|addr| {
                 let mut bytes = [0u8; 32];
-                bytes[12..].copy_from_slice(addr.as_bytes());
+                bytes[12..].copy_from_slice(addr);
                 H256::from(bytes)
             })
             .collect();
-        Ok((padded, self.threshold))
+        Ok((padded, state.threshold))
     }
 }

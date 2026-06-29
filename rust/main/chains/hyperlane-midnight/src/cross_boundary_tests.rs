@@ -61,7 +61,9 @@ fn build_mailbox(stub: &StubSubmitter) -> MidnightMailbox {
         Url::parse("http://127.0.0.1:8088/api/v3/graphql").unwrap(),
         Some(stub.binary_path().to_owned()),
     );
-    MidnightMailbox::new(&locator, &conf).unwrap()
+    MidnightMailbox::new(&locator, &conf)
+        .unwrap()
+        .with_validator_override(vec![])
 }
 
 fn sample_message() -> HyperlaneMessage {

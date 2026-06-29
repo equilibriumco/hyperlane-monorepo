@@ -31,5 +31,19 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-mult
 tracing = { workspace = true }
 url = { workspace = true }
 
+# Native decode of the Midnight contract ledger state served by the
+# indexer (`contractAction.state`). EXACT-pinned with `=` to the devnet's
+# ledger 8.x / indexer-standalone 4.0.1 graph (the versions midnight-indexer
+# uses). These crates implement the tagged-serialization format the decoder
+# depends on, so a caret range could let `cargo update` drift them within a
+# minor and silently break decode; bump manually (and re-test decode) when
+# intentionally tracking a new ledger release. `onchain-runtime` re-exports
+# `state::{ContractState, StateValue}`; `serialize` provides
+# `tagged_deserialize`; `storage-core` provides the `DefaultDB` backend (the
+# `layout-v2` feature must match the indexer).
+midnight-onchain-runtime = "=3.1.0"
+midnight-serialize = "=1.1.0"
+midnight-storage-core = { version = "=1.2.0", features = ["layout-v2"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
