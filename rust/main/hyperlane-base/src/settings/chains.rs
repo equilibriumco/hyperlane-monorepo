@@ -1055,21 +1055,9 @@ impl ChainConf {
                 Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
             ChainConnectionConf::Midnight(conf) => {
-                // TODO(#33): real ValidatorAnnounce backed by the on-chain
-                // ValidatorAnnounce contract via the Midnight indexer
-                // client (#14).
-                let indexer = h_midnight::MidnightIndexerClient::new(
-                    conf.indexer_graphql_url.clone(),
-                );
-                let provider = h_midnight::MidnightProvider::new(
-                    locator.domain.clone(),
-                    indexer,
-                );
-                Ok(Box::new(h_midnight::stubs::MidnightValidatorAnnounceStub::new(
-                    locator.address,
-                    locator.domain.clone(),
-                    provider,
-                )) as Box<dyn ValidatorAnnounce>)
+                let validator_announce =
+                    h_midnight::MidnightValidatorAnnounce::new(&locator, conf)?;
+                Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
         }
         .context("Building ValidatorAnnounce")
