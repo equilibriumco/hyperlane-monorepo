@@ -532,7 +532,7 @@ impl ChainConf {
         metrics: &CoreMetrics,
         advanced_log_meta: bool,
     ) -> Result<Box<dyn SequenceAwareIndexer<HyperlaneMessage>>> {
-        let ctx = "Building delivery indexer";
+        let ctx = "Building message indexer";
         let locator = self.locator(self.addresses.mailbox);
 
         match &self.connection {
