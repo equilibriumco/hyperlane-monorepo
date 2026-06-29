@@ -30,13 +30,83 @@ use async_trait::async_trait;
 
 use hyperlane_core::{
     accumulator::incremental::IncrementalMerkle, ChainCommunicationError, ChainResult, Checkpoint,
-    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider,
-    IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook, MerkleTreeInsertion,
-    ReorgPeriod, SequenceAwareIndexer, H256, H512, U256,
+    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneMessage,
+    HyperlaneProvider, IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook,
+    MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512, U256,
 };
 
-use crate::state_decode::{decode_dispatched_messages, decode_merkle_state};
+use crate::state_decode::{decode_dispatched_messages, decode_merkle_state, MerkleState};
 use crate::MidnightProvider;
+
+/// Midnight reads only finalized contract state (BFT finality; the runtime API
+/// exposes block-final state), so a configured `reorg_period` is ignored. Log
+/// it rather than silently dropping it, so an operator who set one sees why it
+/// has no effect (Sealevel asserts instead; we prefer not to panic).
+fn note_reorg_ignored(reorg_period: &ReorgPeriod) {
+    if !reorg_period.is_none() {
+        tracing::debug!(
+            ?reorg_period,
+            "Midnight reads finalized state only; ignoring configured reorg_period",
+        );
+    }
+}
+
+/// Build a checkpoint from decoded merkle state. Pure (no I/O) so it is unit-
+/// testable without a live indexer. Errors on an empty tree (nothing to sign
+/// yet), matching Sealevel/EVM; `index = count - 1`. Anchors on the chain's
+/// cached `current_root` — never recomputed — so the validator's
+/// local-replica-vs-chain comparison stays meaningful.
+fn checkpoint_from_merkle_state(
+    state: &MerkleState,
+    merkle_tree_hook_address: H256,
+    mailbox_domain: u32,
+) -> ChainResult<CheckpointAtBlock> {
+    let index = state.count.checked_sub(1).ok_or_else(|| {
+        ChainCommunicationError::from_contract_error_str(
+            "Midnight merkle tree is empty, cannot compute checkpoint",
+        )
+    })?;
+    Ok(CheckpointAtBlock {
+        checkpoint: Checkpoint {
+            merkle_tree_hook_address,
+            mailbox_domain,
+            root: state.current_root,
+            index,
+        },
+        block_height: None,
+    })
+}
+
+/// Build the `MerkleTreeInsertion`s whose leaf index falls in `range`, from the
+/// decoded dispatched messages. Pure (no I/O) so it is unit-testable. Under
+/// `IndexMode::Sequence` the framework hands a leaf-index range; the resulting
+/// `Indexed` carries `sequence = leaf_index` (the sequence cursor keys on it),
+/// `leaf_index == nonce`, and `message_id == HyperlaneMessage::id()`.
+fn insertions_in_range(
+    messages: &[(u32, HyperlaneMessage)],
+    range: &RangeInclusive<u32>,
+    address: H256,
+    block_number: u64,
+) -> Vec<(Indexed<MerkleTreeInsertion>, LogMeta)> {
+    messages
+        .iter()
+        .filter(|(nonce, _)| range.contains(nonce))
+        .map(|(nonce, message)| {
+            let insertion = MerkleTreeInsertion::new(*nonce, message.id());
+            let meta = LogMeta {
+                address,
+                block_number,
+                block_hash: H256::zero(),
+                transaction_id: H512::zero(),
+                transaction_index: 0,
+                // Midnight state carries no per-message tx granularity; the
+                // leaf index is the stable per-insertion ordinal.
+                log_index: U256::from(*nonce),
+            };
+            (insertion.into(), meta)
+        })
+        .collect()
+}
 
 /// Chain-sourced `MerkleTreeHook` + indexer for Midnight's monolithic
 /// WarpRoute. Reads the merkle `count` / `current_root` and the append-only
@@ -113,12 +183,12 @@ impl HyperlaneContract for MidnightMerkleTreeHook {
 #[async_trait]
 impl MerkleTreeHook for MidnightMerkleTreeHook {
     /// Reconstruct the incremental merkle tree by ingesting every dispatched
-    /// message id in nonce order. The result is byte-identical to the on-chain
-    /// tree (same leaves, same Hyperlane incremental-merkle algorithm).
-    /// Midnight has no point-in-time state reads (the indexer `offset` is
-    /// deferred), so `reorg_period` is ignored — Midnight has BFT finality and
-    /// no reorgs.
-    async fn tree(&self, _reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
+    /// message id in nonce order. Reproduces the on-chain tree (same leaves,
+    /// same Hyperlane incremental-merkle algorithm). Midnight has no
+    /// point-in-time state reads (the indexer `offset` is deferred), so
+    /// `reorg_period` is ignored — Midnight has BFT finality and no reorgs.
+    async fn tree(&self, reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
+        note_reorg_ignored(reorg_period);
         let messages = self.dispatched_messages().await?;
         let mut tree = IncrementalMerkle::default();
         for (_, message) in &messages {
@@ -130,7 +200,8 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
         })
     }
 
-    async fn count(&self, _reorg_period: &ReorgPeriod) -> ChainResult<u32> {
+    async fn count(&self, reorg_period: &ReorgPeriod) -> ChainResult<u32> {
+        note_reorg_ignored(reorg_period);
         Ok(self.merkle_state().await?.count)
     }
 
@@ -139,24 +210,11 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
     /// comparison is meaningful. Errors on an empty tree, matching Sealevel.
     async fn latest_checkpoint(
         &self,
-        _reorg_period: &ReorgPeriod,
+        reorg_period: &ReorgPeriod,
     ) -> ChainResult<CheckpointAtBlock> {
+        note_reorg_ignored(reorg_period);
         let state = self.merkle_state().await?;
-        let index = state.count.checked_sub(1).ok_or_else(|| {
-            ChainCommunicationError::from_contract_error_str(
-                "Midnight merkle tree is empty, cannot compute checkpoint",
-            )
-        })?;
-        let checkpoint = Checkpoint {
-            merkle_tree_hook_address: self.address,
-            mailbox_domain: self.domain.id(),
-            root: state.current_root,
-            index,
-        };
-        Ok(CheckpointAtBlock {
-            checkpoint,
-            block_height: None,
-        })
+        checkpoint_from_merkle_state(&state, self.address, self.domain.id())
     }
 
     /// Midnight cannot read point-in-time state yet (indexer `offset` is
@@ -181,28 +239,12 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     ) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
         let messages = self.dispatched_messages().await?;
         let block_number = u64::from(self.latest_height_u32().await?);
-
-        let out = messages
-            .into_iter()
-            .filter(|(nonce, _)| range.contains(nonce))
-            .map(|(nonce, message)| {
-                let insertion = MerkleTreeInsertion::new(nonce, message.id());
-                let meta = LogMeta {
-                    address: self.address,
-                    block_number,
-                    block_hash: H256::zero(),
-                    transaction_id: H512::zero(),
-                    transaction_index: 0,
-                    // Midnight state carries no per-message tx granularity;
-                    // the leaf index is the stable per-insertion ordinal.
-                    log_index: U256::from(nonce),
-                };
-                // `Indexed::from(MerkleTreeInsertion)` sets `sequence` to the
-                // leaf index, which the sequence cursor keys on.
-                (insertion.into(), meta)
-            })
-            .collect();
-        Ok(out)
+        Ok(insertions_in_range(
+            &messages,
+            &range,
+            self.address,
+            block_number,
+        ))
     }
 
     /// Midnight has BFT finality, so the latest observed height is final.
@@ -228,6 +270,73 @@ mod tests {
     use hyperlane_core::accumulator::incremental::IncrementalMerkle;
     use hyperlane_core::KnownHyperlaneDomain;
     use url::Url;
+
+    const TEST_DOMAIN: u32 = 1234;
+    fn test_addr() -> H256 {
+        H256::repeat_byte(0xaa)
+    }
+
+    // Empty tree (count == 0) is the day-one state of every deployment, before
+    // the first dispatch — the validator hits it at startup. `latest_checkpoint`
+    // must surface "no checkpoint", not index-underflow.
+    #[test]
+    fn checkpoint_errors_on_empty_tree() {
+        let state = MerkleState {
+            count: 0,
+            current_root: H256::zero(),
+        };
+        assert!(
+            checkpoint_from_merkle_state(&state, test_addr(), TEST_DOMAIN).is_err(),
+            "an empty tree has no checkpoint to sign"
+        );
+    }
+
+    #[test]
+    fn checkpoint_from_nonempty_state() {
+        let root = H256::repeat_byte(0x99);
+        let state = MerkleState {
+            count: 2,
+            current_root: root,
+        };
+        let cp = checkpoint_from_merkle_state(&state, test_addr(), TEST_DOMAIN)
+            .expect("non-empty tree yields a checkpoint");
+        assert_eq!(cp.checkpoint.index, 1, "index == count - 1");
+        assert_eq!(cp.checkpoint.root, root, "anchored on the cached current_root");
+        assert_eq!(cp.checkpoint.mailbox_domain, TEST_DOMAIN);
+        assert_eq!(cp.checkpoint.merkle_tree_hook_address, test_addr());
+    }
+
+    // The core indexer logic the validator consumes: which leaves a range
+    // yields, and that each carries `sequence == leaf_index` and the right
+    // message id. Exercised offline against the committed dispatched fixture.
+    #[test]
+    fn insertions_respect_range_and_sequence() {
+        let hex = include_str!("../tests/fixtures/night-state-dispatched.hex").trim();
+        let bytes = hex::decode(hex).expect("fixture is valid hex");
+        let messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
+        assert_eq!(messages.len(), 2, "fixture has two dispatches");
+
+        // Full range -> both leaves, sequence == leaf index, id == message.id().
+        let all = insertions_in_range(&messages, &(0..=1), test_addr(), 7);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0.sequence, Some(0));
+        assert_eq!(all[1].0.sequence, Some(1));
+        assert_eq!(
+            *all[0].0.inner(),
+            MerkleTreeInsertion::new(0, messages[0].1.id())
+        );
+        assert_eq!(all[0].1.log_index, U256::from(0u32));
+        assert_eq!(all[0].1.address, test_addr());
+        assert_eq!(all[0].1.block_number, 7);
+
+        // Sub-range -> only the matching leaf.
+        let one = insertions_in_range(&messages, &(1..=1), test_addr(), 7);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0.sequence, Some(1));
+
+        // Out-of-range -> nothing.
+        assert!(insertions_in_range(&messages, &(5..=9), test_addr(), 7).is_empty());
+    }
 
     /// Live integration test against a running Midnight devnet with at least
     /// one dispatch. Exercises the full merkle path end to end: the leaf
