@@ -7,7 +7,11 @@ use url::Url;
 
 use hyperlane_core::ChainResult;
 
-use crate::state_decode::{decode_ism_state, IsmState};
+use hyperlane_core::H256;
+
+use crate::state_decode::{
+    decode_deliveries, decode_dispatch_snapshot, decode_ism_state, DispatchSnapshot, IsmState,
+};
 use crate::HyperlaneMidnightError;
 
 /// How long a decoded ISM state is reused before re-reading from the indexer.
@@ -101,6 +105,23 @@ impl MidnightIndexerClient {
             cache.insert(address.to_string(), (state.clone(), Instant::now()));
         }
         Ok(state)
+    }
+
+    /// Read the whole dispatch state (every dispatched `HyperlaneMessage` keyed
+    /// by nonce, plus the nonce counter) from a SINGLE state fetch. The dispatch
+    /// indexer uses this once per scan to serve a whole nonce range, instead of
+    /// re-fetching and re-scanning the full state per nonce. Decoding the count
+    /// and the messages from the same blob also keeps them mutually consistent.
+    pub async fn read_dispatch_snapshot(&self, address: &str) -> ChainResult<DispatchSnapshot> {
+        let bytes = self.contract_state(address).await?;
+        decode_dispatch_snapshot(&bytes)
+    }
+
+    /// Read the full `deliveries` set (delivered message ids) from the deployed
+    /// `night` contract's Mailbox state. The set is unordered.
+    pub async fn read_deliveries(&self, address: &str) -> ChainResult<Vec<H256>> {
+        let bytes = self.contract_state(address).await?;
+        decode_deliveries(&bytes)
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(
@@ -205,7 +226,10 @@ mod tests {
         println!("decoded ISM state from chain: {ism:?}");
 
         // MessageIdMultisig is discriminant 5 in Hyperlane's ModuleType enum.
-        assert_eq!(ism.module_type, 5, "module_type should be MessageIdMultisig");
+        assert_eq!(
+            ism.module_type, 5,
+            "module_type should be MessageIdMultisig"
+        );
         // Decoded slot count must match the validators map.
         assert_eq!(
             ism.validator_count as usize,
@@ -213,7 +237,10 @@ mod tests {
             "validator_count must match decoded validator slots"
         );
         // A usable multisig: >= 1 validator and 1 <= threshold <= count.
-        assert!(!ism.validators.is_empty(), "expected at least one validator");
+        assert!(
+            !ism.validators.is_empty(),
+            "expected at least one validator"
+        );
         assert!(ism.threshold >= 1, "threshold must be at least 1");
         assert!(
             ism.threshold as usize <= ism.validators.len(),

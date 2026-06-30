@@ -30,10 +30,10 @@ use hyperlane_core::{
     ChainResult, Indexed, Indexer, InterchainGasPayment, LogMeta, SequenceAwareIndexer, H512,
 };
 
-/// Generic stub `SequenceAwareIndexer` used for all three origin-side
-/// indexers (dispatch / merkle / IGP). Returns no events and zero block
+/// Generic stub `SequenceAwareIndexer` for the one origin-side indexer Midnight
+/// still stubs (the IGP payment indexer, #19). Returns no events and zero block
 /// height — safe because the relayer never has work to do on midnight
-/// outbound today. Replaced by #15, #16, #19.
+/// outbound today. The dispatch (#16) and merkle (#15) indexers are now real.
 #[derive(Debug)]
 pub struct MidnightStubIndexer<T> {
     _marker: std::marker::PhantomData<T>,
@@ -91,9 +91,9 @@ where
     }
 }
 
-/// Type-aliased flavors for the three concrete `T`s the relayer instantiates.
-/// These exist purely so `chains.rs` can read like `MidnightMessageIndexer::new()`
-/// instead of spelling out the generic.
-pub type MidnightMessageIndexerStub = MidnightStubIndexer<hyperlane_core::HyperlaneMessage>;
+/// Type-aliased flavor for the one concrete `T` the relayer still stubs.
+/// The dispatch indexer (#16) and merkle indexer (#15) are now real
+/// (`MidnightDispatchIndexer` / `MidnightMerkleTreeHook`), so only the IGP
+/// payment indexer (#19) remains a stub.
 /// Stub for IGP payment indexing.
 pub type MidnightIgpIndexerStub = MidnightStubIndexer<InterchainGasPayment>;

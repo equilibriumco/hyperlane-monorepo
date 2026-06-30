@@ -115,7 +115,9 @@ impl Indexable for Delivery {
             HyperlaneDomainProtocol::Radix => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::RateLimited,
-            HyperlaneDomainProtocol::Midnight => CursorType::SequenceAware,
+            // Midnight deliveries are an unordered on-chain Set with no
+            // sequence; rate-limited matches EVM/Cosmos (see #16).
+            HyperlaneDomainProtocol::Midnight => CursorType::RateLimited,
         }
     }
 

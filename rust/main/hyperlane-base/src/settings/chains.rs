@@ -540,7 +540,7 @@ impl ChainConf {
         metrics: &CoreMetrics,
         advanced_log_meta: bool,
     ) -> Result<Box<dyn SequenceAwareIndexer<HyperlaneMessage>>> {
-        let ctx = "Building delivery indexer";
+        let ctx = "Building message indexer";
         let locator = self.locator(self.addresses.mailbox);
 
         match &self.connection {
@@ -619,13 +619,14 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
             }
-            ChainConnectionConf::Midnight(_) => {
-                // TODO(#16): real dispatch indexer reading from the WarpRoute
-                // contract state via the Midnight indexer client (#14).
-                Ok(
-                    Box::new(h_midnight::stubs::MidnightMessageIndexerStub::new())
-                        as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>,
-                )
+            ChainConnectionConf::Midnight(conf) => {
+                // Reads dispatched messages from the WarpRoute contract's
+                // `dispatched_messages` ledger map via the Midnight indexer
+                // client (#14); the `nonce` counter is the sequence tip.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDispatchIndexer::new(client, &locator);
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
             }
         }
         .context(ctx)
@@ -712,9 +713,15 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<H256>>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: delivery indexer is not yet implemented (see issue #16)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // Reads delivered message ids from the WarpRoute contract's
+                // `deliveries` ledger set via the Midnight indexer client
+                // (#14). Rate-limited: the full set is re-read each scan.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDeliveryIndexer::new(client, &locator);
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<H256>>)
+            }
         }
         .context(ctx)
     }
