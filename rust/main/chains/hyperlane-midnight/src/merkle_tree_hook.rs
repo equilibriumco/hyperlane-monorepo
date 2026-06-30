@@ -427,6 +427,7 @@ mod tests {
             root: String,
             index: u32,
             message_id: String,
+            domain_hash: String,
             inner: String,
             digest: String,
             validator: String,
@@ -488,6 +489,18 @@ mod tests {
             },
             message_id: h256(&vector.message_id),
         };
+
+        // Domain hash matches `domain_hash(merkle_tree_hook, origin)` — a redundant
+        // layer (it also feeds `inner` below), but it localises a domain-hash bug
+        // one step earlier instead of only surfacing in the inner-digest assert.
+        assert_eq!(
+            hyperlane_core::utils::domain_hash(
+                checkpoint.merkle_tree_hook_address,
+                checkpoint.mailbox_domain,
+            ),
+            h256(&vector.domain_hash),
+            "domain_hash(merkle_tree_hook, origin) must equal the EVM reference domainHash"
+        );
 
         // Rust signing hash == EVM oracle inner hash (BaseValidator.messageHash);
         // EIP-191 wrap == oracle digest. Byte-identical => format parity.
