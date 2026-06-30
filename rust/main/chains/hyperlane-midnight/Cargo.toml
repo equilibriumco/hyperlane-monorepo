@@ -46,6 +46,13 @@ midnight-serialize = "=1.1.0"
 midnight-storage-core = { version = "=1.2.0", features = ["layout-v2"] }
 
 [dev-dependencies]
+# Enable hyperlane-core's `ethers` feature in tests only — it gates
+# `SignedType::recover()`, which the #17 checkpoint-signing test uses to prove
+# a standard Hyperlane signature over a Midnight-origin checkpoint recovers to
+# the expected validator address (the exact production verify path). Feature
+# unification folds this into the non-test `async`-only dependency above when
+# building tests; no non-test code depends on it.
+hyperlane-core = { path = "../../hyperlane-core", features = ["async", "ethers"] }
 tempfile = { workspace = true }
 # Build synthetic `ContractState` blobs in unit tests: construct the same
 # `StateValue` tree the deployed `night` Mailbox produces, then serialize it
