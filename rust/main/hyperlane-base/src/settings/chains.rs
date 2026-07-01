@@ -362,9 +362,13 @@ impl ChainConf {
                 let provider = build_aleo_provider(self, conf, metrics, &locator, None)?;
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: HyperlaneProvider is not yet implemented (see issues #14-#20)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider =
+                    h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
+            }
         }
         .context(ctx)
     }
