@@ -66,6 +66,21 @@ const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 4];
 const MERKLE_COUNT_PATH: [usize; 2] = [1, 6];
 const CURRENT_ROOT_PATH: [usize; 2] = [1, 7];
 
+// Positional paths into the IGP contract's ledger state (#19). Unlike `night`
+// (whose fields nest under the [0]/[1] module groups), the IGP contract's
+// fields are FLAT top-level slots, in field-declaration order after the
+// ZOwnablePK + Initializable access-control fields (slots 0..3):
+// remote_gas_data(4), gas_payments(5), gas_payment_count(6), beneficiary(7).
+// Verified against the compiled `igp` readers in
+// `managed/igp/contract/index.js`: `_gasPaymentCount_0` reads idx 6,
+// `_gasPaymentAt_0` reads idx 5 (then a key lookup), `_isRegistered_0` idx 4,
+// `_beneficiaryValue_0` idx 7. These follow the declaration order in
+// `igp.compact`; a reorder/insert above or between them shifts the decoder.
+// The contracts-repo layout guard (`scripts/check-ledger-layout.mjs`) pins
+// these slots on every compile, same as it does for the `night` slots above.
+const IGP_GAS_PAYMENTS_PATH: [usize; 1] = [5];
+const IGP_GAS_PAYMENT_COUNT_PATH: [usize; 1] = [6];
+
 /// Length in bytes of an encoded `HyperlaneMessage` stored in the
 /// `dispatched_messages` map (`Bytes<141>`): version(1) + nonce(4) +
 /// origin(4) + sender(32) + destination(4) + recipient(32) + body(64).
@@ -569,6 +584,198 @@ pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, Hyperla
     Ok(out)
 }
 
+/// A decoded row from the IGP `gas_payments: Map<Uint<32>, GasPayment>`
+/// ledger field. Mirrors the on-chain `GasPayment` struct field-for-field;
+/// the IGP indexer (#19) maps it to `hyperlane_core::InterchainGasPayment`.
+/// Integer widths match the contract (`gasAmount` is the `Uint<64>` gas
+/// limit; `payment` is the `Uint<128>` NIGHT attached).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgpGasPayment {
+    /// The message this payment funds. Prover-supplied keccak id until the
+    /// keccak MIP lands (see the mocked-primitives note in `LIMITS.md`).
+    pub message_id: H256,
+    /// Destination Hyperlane domain.
+    pub destination: u32,
+    /// Requested destination gas (the `gasLimit` argument to `payForGas`).
+    pub gas_amount: u64,
+    /// NIGHT actually attached, in the token's smallest unit.
+    pub payment: u128,
+}
+
+/// A single-read snapshot of the IGP payment state: every recorded
+/// `GasPayment` keyed by its append index, plus the `gas_payment_count`
+/// counter, decoded from ONE serialized state blob — the same
+/// single-fetch-per-scan shape as [`DispatchSnapshot`]. Decoding the count
+/// and the rows from the same blob keeps them mutually consistent within a
+/// scan.
+#[derive(Debug, Clone)]
+pub struct IgpSnapshot {
+    /// Every recorded payment, keyed by its append index (`0..payment_count`).
+    pub payments: HashMap<u32, IgpGasPayment>,
+    /// The `gas_payment_count` counter: the number of payments recorded.
+    pub payment_count: u32,
+}
+
+/// Read a little-endian `Uint<32>` from an atom's bytes. The runtime trims
+/// trailing zero bytes, so a value is at most 4 bytes and `0` is empty.
+fn atom_u32(bytes: &[u8]) -> ChainResult<u32> {
+    if bytes.len() > 4 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected u32 atom of at most 4 bytes, got {}",
+            bytes.len()
+        ))
+        .into());
+    }
+    let mut le = [0u8; 4];
+    le[..bytes.len()].copy_from_slice(bytes);
+    Ok(u32::from_le_bytes(le))
+}
+
+/// Read a little-endian `Uint<64>` from an atom's bytes (trailing zeros
+/// trimmed on chain, so at most 8 bytes; empty == 0).
+fn atom_u64(bytes: &[u8]) -> ChainResult<u64> {
+    if bytes.len() > 8 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected u64 atom of at most 8 bytes, got {}",
+            bytes.len()
+        ))
+        .into());
+    }
+    let mut le = [0u8; 8];
+    le[..bytes.len()].copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(le))
+}
+
+/// Read a little-endian `Uint<128>` from an atom's bytes (trailing zeros
+/// trimmed on chain, so at most 16 bytes; empty == 0).
+fn atom_u128(bytes: &[u8]) -> ChainResult<u128> {
+    if bytes.len() > 16 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected u128 atom of at most 16 bytes, got {}",
+            bytes.len()
+        ))
+        .into());
+    }
+    let mut le = [0u8; 16];
+    le[..bytes.len()].copy_from_slice(bytes);
+    Ok(u128::from_le_bytes(le))
+}
+
+/// Read a `Bytes<32>` atom (trailing zeros trimmed on chain), right-padded
+/// back to the full 32 bytes — the same trim/pad handling the `Bytes<141>`
+/// and delivery-id decoders use.
+fn atom_bytes32(bytes: &[u8]) -> ChainResult<H256> {
+    if bytes.len() > 32 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected 32-byte atom, got {}",
+            bytes.len()
+        ))
+        .into());
+    }
+    let mut id = [0u8; 32];
+    id[..bytes.len()].copy_from_slice(bytes);
+    Ok(H256::from(id))
+}
+
+/// The per-field atoms of a struct-valued ledger `Map` value. A Compact
+/// struct stored as a map value is a single `Cell` whose `AlignedValue`
+/// concatenates one atom per field in declaration order — see the compiled
+/// IGP writer, which stores a `GasPayment` as
+/// `newCell(GasPaymentDescriptor.toValue(struct))` where `toValue` chains
+/// `messageId.toValue().concat(destination.toValue().concat(...))`. Returns
+/// the atom byte-slices in that order.
+fn struct_cell_atoms(node: &StateValue<DefaultDB>) -> ChainResult<Vec<&[u8]>> {
+    match node {
+        StateValue::Cell(sp) => {
+            let aligned = &**sp;
+            Ok(aligned.value.0.iter().map(|atom| &atom.0[..]).collect())
+        }
+        other => Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected cell for struct value, got {other:?}"
+        ))
+        .into()),
+    }
+}
+
+/// Decode a single `gas_payments` map value (the `GasPayment` struct cell)
+/// into an [`IgpGasPayment`]. The struct is stored as one cell whose atoms
+/// are, in order: messageId (`Bytes<32>`), destination (`Uint<32>`),
+/// gasAmount (`Uint<64>`), payment (`Uint<128>`) — the field-declaration
+/// order in `igp.compact` and the compiled writer's concatenation order.
+/// Fails loudly if the atom count is not exactly four, so a struct-layout
+/// change surfaces as a decode error rather than a silent field shift.
+fn decode_gas_payment(node: &StateValue<DefaultDB>) -> ChainResult<IgpGasPayment> {
+    let atoms = struct_cell_atoms(node)?;
+    if atoms.len() != 4 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected 4 atoms in a GasPayment struct cell \
+             (messageId, destination, gasAmount, payment), got {}",
+            atoms.len()
+        ))
+        .into());
+    }
+    Ok(IgpGasPayment {
+        message_id: atom_bytes32(atoms[0])?,
+        destination: atom_u32(atoms[1])?,
+        gas_amount: atom_u64(atoms[2])?,
+        payment: atom_u128(atoms[3])?,
+    })
+}
+
+/// Decode the whole IGP payment state (every recorded `GasPayment` keyed by
+/// its append index, plus the `gas_payment_count` counter) from a single
+/// serialized state blob. The IGP indexer (#19) reads this once per scan and
+/// serves the requested index range from the returned in-memory map — the
+/// same single-fetch shape as [`decode_dispatch_snapshot`]. Decoding the
+/// count and the rows from the same blob keeps them mutually consistent.
+pub fn decode_igp_snapshot(bytes: &[u8]) -> ChainResult<IgpSnapshot> {
+    let cs = decode_contract_state(bytes)?;
+    let root = cs.data.get_ref();
+
+    let n = read_counter_u64(nav(root, &IGP_GAS_PAYMENT_COUNT_PATH)?)?;
+    let payment_count = u32::try_from(n).map_err(|_| {
+        HyperlaneMidnightError::StateDecode(format!(
+            "gas_payment_count {n} exceeds u32 (the contract asserts each payment fits a Uint<32> key)"
+        ))
+    })?;
+
+    let map = match nav(root, &IGP_GAS_PAYMENTS_PATH)? {
+        StateValue::Map(m) => m,
+        other => {
+            return Err(HyperlaneMidnightError::StateDecode(format!(
+                "expected map for gas_payments, got {other:?}"
+            ))
+            .into())
+        }
+    };
+
+    let mut payments = HashMap::with_capacity(map.size());
+    for entry in map.iter() {
+        let pair = &*entry;
+        // Map key is a little-endian `Uint<32>` append index. `parse_nonce_key`
+        // is the same `<= 4-byte LE u32` parse the dispatch map uses; here the
+        // key is the gas-payment index, not a nonce.
+        let key_av = &*pair.0;
+        let key_bytes = key_av
+            .value
+            .0
+            .first()
+            .map(|atom| atom.0.as_ref())
+            .unwrap_or(&[][..]);
+        // A key wider than 4 bytes is not a valid index key; skip rather than
+        // fail the whole snapshot (mirrors `decode_dispatch_snapshot`).
+        let Some(idx) = parse_nonce_key(key_bytes) else {
+            continue;
+        };
+        payments.insert(idx, decode_gas_payment(&pair.1)?);
+    }
+
+    Ok(IgpSnapshot {
+        payments,
+        payment_count,
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -944,5 +1151,55 @@ mod tests {
             merkle.current_root,
             "local root rebuilt from the two dispatched messages must match on-chain current_root"
         );
+    }
+
+    // Decodes the IGP `gas_payments` + `gas_payment_count` state from a
+    // committed fixture, generated by
+    // `contracts/tests/utils/generate-igp-fixture.ts` (the Compact simulator
+    // runs the real `payForGas` circuit logic, then `ContractState.serialize()`
+    // produces the same tagged format the indexer serves — the same offline
+    // fixture approach as the #15 dispatch/merkle fixtures, because a live
+    // `payForGas` proof needs a >12 GB prover the local devnet can't supply).
+    //
+    // Three rows exercise the full struct decode:
+    //   * row 0 — a full 32-byte messageId, multi-byte destination/gasAmount
+    //     and a large payment (all four atoms non-empty, full width);
+    //   * row 1 — a messageId that trims to one byte on store (0x01 then
+    //     zeros) plus an overpayment (exercises the Bytes<32> right-pad);
+    //   * row 2 — gasAmount == 0 (an empty MIDDLE atom) and payment == 1 (a
+    //     one-byte atom), pinning that a zero field keeps its atom slot so
+    //     positional decoding of the following field stays aligned.
+    #[test]
+    fn decodes_igp_gas_payments_fixture() {
+        let hex = include_str!("../tests/fixtures/igp-state.hex").trim();
+        let bytes = hex::decode(hex).expect("fixture is valid hex");
+
+        let snapshot = decode_igp_snapshot(&bytes).expect("decode IGP snapshot");
+        assert_eq!(snapshot.payment_count, 3, "three payments recorded");
+        assert_eq!(snapshot.payments.len(), 3, "three rows decoded");
+
+        // row 0: full 32-byte messageId, quote payment.
+        let row0 = snapshot.payments.get(&0).expect("row 0 present");
+        assert_eq!(row0.message_id, H256::repeat_byte(0xaa));
+        assert_eq!(row0.destination, 99);
+        assert_eq!(row0.gas_amount, 100_000);
+        assert_eq!(row0.payment, 2_000_000_000_000_000);
+
+        // row 1: messageId trims to a single 0x01 byte on store; the decoder
+        // right-pads it back to 32. Overpayment recorded verbatim (no refund).
+        let row1 = snapshot.payments.get(&1).expect("row 1 present");
+        let mut want_id = [0u8; 32];
+        want_id[0] = 0x01;
+        assert_eq!(row1.message_id, H256::from(want_id));
+        assert_eq!(row1.destination, 99);
+        assert_eq!(row1.gas_amount, 100_000);
+        assert_eq!(row1.payment, 2_000_000_000_000_007);
+
+        // row 2: zero gasAmount (empty middle atom) + a one-byte payment.
+        let row2 = snapshot.payments.get(&2).expect("row 2 present");
+        assert_eq!(row2.message_id, H256::repeat_byte(0xcc));
+        assert_eq!(row2.destination, 99);
+        assert_eq!(row2.gas_amount, 0);
+        assert_eq!(row2.payment, 1);
     }
 }

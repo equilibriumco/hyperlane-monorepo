@@ -10,7 +10,8 @@ use hyperlane_core::ChainResult;
 use hyperlane_core::H256;
 
 use crate::state_decode::{
-    decode_deliveries, decode_dispatch_snapshot, decode_ism_state, DispatchSnapshot, IsmState,
+    decode_deliveries, decode_dispatch_snapshot, decode_igp_snapshot, decode_ism_state,
+    DispatchSnapshot, IgpSnapshot, IsmState,
 };
 use crate::HyperlaneMidnightError;
 
@@ -122,6 +123,16 @@ impl MidnightIndexerClient {
     pub async fn read_deliveries(&self, address: &str) -> ChainResult<Vec<H256>> {
         let bytes = self.contract_state(address).await?;
         decode_deliveries(&bytes)
+    }
+
+    /// Read the whole IGP payment state (every recorded `GasPayment` keyed by
+    /// its append index, plus the `gas_payment_count` counter) from a SINGLE
+    /// state fetch. The IGP indexer (#19) uses this once per scan to serve a
+    /// whole index range, mirroring `read_dispatch_snapshot`; decoding the
+    /// count and the rows from the same blob keeps them mutually consistent.
+    pub async fn read_igp_snapshot(&self, address: &str) -> ChainResult<IgpSnapshot> {
+        let bytes = self.contract_state(address).await?;
+        decode_igp_snapshot(&bytes)
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(
