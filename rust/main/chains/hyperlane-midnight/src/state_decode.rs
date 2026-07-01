@@ -537,16 +537,25 @@ pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, Hyperla
         kb[..n].copy_from_slice(&key_bytes[..n]);
         let nonce = u32::from_le_bytes(kb);
 
-        // Map value is the verbatim 141-byte encoded message.
+        // Map value is the wire-format encoded message. Compact trims trailing
+        // zero bytes from the stored `Bytes<141>` leaf, so a message whose tail
+        // is zero (e.g. a decimal-scaled amount ending in zero bytes — 10^17
+        // for a 6->18 decimal route ends in 0x0000) is stored as < 141 bytes.
+        // Right-pad back to the fixed width before decoding (the trimmed bytes
+        // were zeros); only an over-long value is an error. Mirrors
+        // `decode_single_message`. (The #15 simulator fixture used an identity
+        // scale, so its amount kept a non-zero tail and never triggered this.)
         let value = cell_atom(&pair.1)?;
-        if value.len() != ENCODED_MESSAGE_LEN {
+        if value.len() > ENCODED_MESSAGE_LEN {
             return Err(HyperlaneMidnightError::StateDecode(format!(
-                "dispatched message at nonce {nonce} is {} bytes, expected {ENCODED_MESSAGE_LEN}",
+                "dispatched message at nonce {nonce} is {} bytes, expected at most {ENCODED_MESSAGE_LEN}",
                 value.len()
             ))
             .into());
         }
-        let message = HyperlaneMessage::from(value.to_vec());
+        let mut full = [0u8; ENCODED_MESSAGE_LEN];
+        full[..value.len()].copy_from_slice(value);
+        let message = HyperlaneMessage::from(full.to_vec());
         if message.nonce != nonce {
             return Err(HyperlaneMidnightError::StateDecode(format!(
                 "dispatched message nonce field {} does not match map key {nonce}",
@@ -764,6 +773,52 @@ mod tests {
             .expect("decode dispatched message")
             .expect("message present at nonce 9");
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn decode_dispatched_messages_right_pads_trimmed_value() {
+        // Regression for the merkle-hook / dispatch-indexer batch path
+        // (`decode_dispatched_messages`, used by
+        // `MidnightMerkleTreeHook::fetch_logs_in_range`). The runtime trims
+        // trailing zero bytes from a `Bytes<141>` leaf, so a real dispatch
+        // whose decimal-scaled amount ends in zero bytes is stored as < 141
+        // bytes (a 6->18-decimal route scales 10^5 to 10^17, which ends in
+        // 0x0000 -> a 139-byte on-chain value). This path previously asserted
+        // exactly 141 and rejected such messages with
+        // "dispatched message ... is 139 bytes, expected 141"; it must right-pad
+        // like the singular decoder. The #15 simulator fixture used an identity
+        // scale (non-zero amount tail -> full 141 bytes), so it never caught
+        // this. An all-zero body trims the most and pins the branch.
+        let msg = HyperlaneMessage {
+            version: 3,
+            nonce: 0,
+            origin: 1234,
+            sender: H256::repeat_byte(0x01),
+            destination: 2,
+            recipient: H256::repeat_byte(0x02),
+            body: vec![0u8; 64],
+        };
+        let full: [u8; ENCODED_MESSAGE_LEN] = msg.to_vec().try_into().unwrap();
+        assert!(
+            ValueAtom::from(full).0.len() < ENCODED_MESSAGE_LEN,
+            "expected the trailing-zero tail to be trimmed on store"
+        );
+
+        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
+            .insert(AlignedValue::from(0u32), cell(full));
+        let bytes = mailbox_state_bytes(
+            StateValue::Map(HashMap::new()),
+            cell(1u64),
+            StateValue::Map(map),
+        );
+
+        let decoded = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
+        assert_eq!(decoded.len(), 1, "one dispatched message");
+        assert_eq!(decoded[0].0, 0, "nonce key");
+        assert_eq!(
+            decoded[0].1, msg,
+            "trimmed leaf must right-pad back to the original 141-byte message"
+        );
     }
 
     #[test]
