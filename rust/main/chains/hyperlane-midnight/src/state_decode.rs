@@ -1205,8 +1205,8 @@ mod tests {
 
     // The `GasPayment` struct is a 4-atom cell (messageId, destination,
     // gasAmount, payment). `decode_gas_payment` must reject any other shape
-    // loudly rather than silently mis-decode -- the fail-loud guard against a
-    // future struct-layout change. (The layout guard + fixture protect against
+    // loudly rather than silently decode it wrong -- the fail-loud guard against
+    // a future struct-layout change. (The layout guard + fixture protect against
     // real drift; this pins that the decoder itself refuses a wrong shape.)
     #[test]
     fn decode_gas_payment_rejects_wrong_shape() {
