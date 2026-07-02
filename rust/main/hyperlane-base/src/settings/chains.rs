@@ -803,9 +803,22 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn InterchainGasPaymaster>)
             }
-            ChainConnectionConf::Midnight(_) => Err(eyre!(
-                "Midnight: InterchainGasPaymaster is not yet implemented (see issue #19)"
-            )),
+            ChainConnectionConf::Midnight(conf) => {
+                // The IGP indexer struct doubles as the paymaster marker
+                // (the Aleo/Radix/CosmosNative pattern). It reads the IGP
+                // contract's `gas_payments` state via the indexer client
+                // (#14); the relayer never calls the paymaster trait itself,
+                // but every configured chain must supply the boxed object.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let paymaster = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(paymaster) as Box<dyn InterchainGasPaymaster>)
+            }
         }
         .context(ctx)
     }
@@ -886,11 +899,20 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
             }
-            ChainConnectionConf::Midnight(_) => {
-                // TODO(#19): real IGP indexer reading payments from the IGP
-                // contract state via the Midnight indexer client (#14).
-                Ok(Box::new(h_midnight::stubs::MidnightIgpIndexerStub::new())
-                    as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
+            ChainConnectionConf::Midnight(conf) => {
+                // Reads the append-only `gas_payments` map + `gas_payment_count`
+                // counter from the IGP contract state via the Midnight indexer
+                // client (#14); the counter is the sequence tip. Same struct as
+                // build_interchain_gas_paymaster above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let igp = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(igp) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
             }
         }
         .context(ctx)
