@@ -24,7 +24,10 @@
 //! SAME two-dispatch scenario as `night-state-dispatched.hex`, with digests and
 //! signatures produced by the independent `@hyperlane-xyz/utils` oracle. This
 //! test first drift-guards the fixture against the vector (one dispatch state),
-//! then runs the exact destination-side verification.
+//! then asserts the digest parity and runs the exact destination-side
+//! verification. The signing subset is chosen to be descending by address while
+//! ascending by set index, so the ordering requirement is exercised
+//! adversarially (a verifier matching by address would reject it).
 
 use hyperlane_core::{
     accumulator::incremental::IncrementalMerkle, Checkpoint, CheckpointWithMessageId, Signable,
@@ -42,6 +45,10 @@ struct MetadataVector {
     root: String,
     index: u32,
     message_id: String,
+    /// Inner checkpoint digest (`BaseValidator.messageHash`) from the oracle.
+    inner: String,
+    /// EIP-191-wrapped digest the validators signed, from the oracle.
+    digest: String,
     threshold: usize,
     /// Full validator set in configured (index) order, as the destination ISM
     /// walks it.
@@ -150,9 +157,21 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         // fixture's tip id, already asserted equal to the vector's.
         message_id: tip.1.id(),
     };
-    // Sanity: the reconstructed inner digest is well-formed (non-zero) — a cheap
-    // guard that localises a digest-construction regression here.
-    assert_ne!(checkpoint.signing_hash(), H256::zero(), "signing hash is set");
+    // Digest parity: the checkpoint the destination reconstructs hashes to the
+    // same inner + EIP-191 digest the validators signed (produced by the
+    // independent `@hyperlane-xyz/utils` oracle). Asserting this here localises a
+    // digest-construction regression to a clear failure, instead of surfacing as
+    // a confusing "signer not in set" once recovery runs against a wrong digest.
+    assert_eq!(
+        checkpoint.signing_hash(),
+        h256(&vector.inner),
+        "signing_hash must equal the oracle inner digest"
+    );
+    assert_eq!(
+        checkpoint.eth_signed_message_hash(),
+        h256(&vector.digest),
+        "EIP-191 digest must equal the oracle digest"
+    );
 
     let validators: Vec<H160> = vector
         .validators
@@ -202,6 +221,17 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
     assert_eq!(
         recovered,
         vec![validators[0], validators[2]],
-        "signers are the ascending subset {{0, 2}} the vector encodes"
+        "signers are the ascending set-index subset {{0, 2}} the vector encodes"
+    );
+
+    // Sharpened ordering check: those signers are DESCENDING by address (the
+    // vector's validator set is ordered so index 0 has a larger address than
+    // index 2). A verifier that matched by address order rather than set index
+    // would have rejected this order. Passing the forward-only walk above while
+    // this holds proves the ordering requirement is enforced by SET INDEX, not by
+    // address — a subset ascending under both orderings could not prove that.
+    assert!(
+        recovered[0] > recovered[1],
+        "signing subset must be descending by address so the index-order requirement is adversarial"
     );
 }
