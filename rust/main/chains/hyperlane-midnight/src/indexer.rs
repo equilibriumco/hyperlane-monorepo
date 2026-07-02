@@ -404,6 +404,53 @@ mod tests {
         assert_eq!(logs[0].1.block_number, TIP as u64);
     }
 
+    // #18: the relayer lists pending Midnight-origin messages by draining the
+    // dispatch indexer over the WarpRoute's `dispatched_messages` map. The unit
+    // tests above drive the range/skip logic with a synthetic snapshot; this one
+    // runs the REAL decode path (`decode_dispatch_snapshot`) on the committed #16
+    // fixture and feeds it through the exact `fetch_dispatch_logs` the production
+    // `Indexer::fetch_logs_in_range` calls, proving the relayer enumerates both
+    // dispatches with `Indexed.sequence == nonce` (the invariant the relayer's
+    // forward/backward message cursor relies on) and that the enumerated messages
+    // are the fixture's decoded messages (same keccak ids the merkle indexer and
+    // validator anchor on).
+    #[tokio::test]
+    async fn dispatch_enumerates_committed_fixture_in_sequence() {
+        let bytes =
+            hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
+                .expect("fixture is valid hex");
+
+        let snapshot = crate::state_decode::decode_dispatch_snapshot(&bytes)
+            .expect("decode dispatch snapshot");
+        // The #16 fixture is a two-dispatch scenario (nonces 0 and 1).
+        assert_eq!(snapshot.nonce_count, 2, "fixture has two dispatches");
+        let last_nonce = snapshot.nonce_count - 1;
+
+        let reader = FakeReader {
+            tip: TIP,
+            snapshot,
+            deliveries: vec![],
+        };
+
+        // Drain the full nonce range up to the tip, as the relayer's cursor does.
+        let logs = fetch_dispatch_logs(&reader, ADDRESS, 0..=last_nonce)
+            .await
+            .expect("fetch dispatch logs");
+
+        assert_eq!(logs.len(), 2, "both dispatched messages are enumerated");
+        assert_eq!(logs[0].0.inner().nonce, 0);
+        assert_eq!(logs[0].0.sequence, Some(0));
+        assert_eq!(logs[1].0.inner().nonce, 1);
+        assert_eq!(logs[1].0.sequence, Some(1));
+
+        // The enumerated messages are exactly the fixture's decoded messages.
+        let mut decoded = crate::state_decode::decode_dispatched_messages(&bytes)
+            .expect("decode dispatched messages");
+        decoded.sort_by_key(|(nonce, _)| *nonce);
+        assert_eq!(logs[0].0.inner().id(), decoded[0].1.id());
+        assert_eq!(logs[1].0.inner().id(), decoded[1].1.id());
+    }
+
     #[test]
     fn tip_saturates_above_u32_max() {
         // No block seen yet -> 0.

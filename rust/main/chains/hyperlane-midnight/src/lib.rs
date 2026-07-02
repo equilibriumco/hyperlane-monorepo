@@ -20,6 +20,8 @@ mod validator_announce;
 
 #[cfg(test)]
 mod cross_boundary_tests;
+#[cfg(test)]
+mod metadata_tests;
 
 pub use config::ConnectionConf;
 pub use error::HyperlaneMidnightError;
