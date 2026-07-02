@@ -40,7 +40,7 @@ use hyperlane_core::{
 };
 
 use crate::state_decode::IgpSnapshot;
-use crate::MidnightProvider;
+use crate::{MidnightIndexerClient, MidnightProvider};
 
 /// Build the `InterchainGasPayment`s whose append index falls in `range`, from
 /// a single decoded IGP `snapshot`. Pure (no I/O) so it is unit-testable
@@ -86,6 +86,69 @@ fn igp_payments_in_range(
     out
 }
 
+/// Contract address as the indexer's bare-hex scalar (no `0x`), matching the
+/// form the other Midnight state readers use.
+fn address_hex(address: &H256) -> String {
+    format!("{address:x}")
+}
+
+/// The minimal state reads the IGP indexer needs. Abstracting them behind a
+/// trait lets the async indexer paths be unit-tested against a synthetic
+/// in-memory reader (no network IO) — the same seam the dispatch indexer uses.
+/// Production uses the [`MidnightIndexerClient`] impl below.
+#[async_trait]
+trait IgpStateReader: Send + Sync {
+    /// Latest observed block height as a `u32` tip (saturating; "no block seen
+    /// yet" maps to 0).
+    async fn read_tip(&self) -> ChainResult<u32>;
+    /// The whole IGP payment state (every row keyed by append index + the
+    /// count) from a single state read.
+    async fn read_igp_snapshot(&self, address: &str) -> ChainResult<IgpSnapshot>;
+}
+
+#[async_trait]
+impl IgpStateReader for MidnightIndexerClient {
+    async fn read_tip(&self) -> ChainResult<u32> {
+        let height = self
+            .latest_block_height()
+            .await
+            .map_err(Into::<hyperlane_core::ChainCommunicationError>::into)?;
+        Ok(height
+            .map(|h| u32::try_from(h).unwrap_or(u32::MAX))
+            .unwrap_or(0))
+    }
+
+    async fn read_igp_snapshot(&self, address: &str) -> ChainResult<IgpSnapshot> {
+        MidnightIndexerClient::read_igp_snapshot(self, address).await
+    }
+}
+
+/// Serve an append-index `range` from a single decoded snapshot. Generic over
+/// the reader so unit tests drive it with a synthetic in-memory reader;
+/// production uses [`MidnightIndexerClient`]. One tip read + one snapshot read
+/// per scan, mirroring the dispatch indexer's single-read-per-scan shape.
+async fn fetch_igp_logs<R: IgpStateReader>(
+    reader: &R,
+    address: H256,
+    range: RangeInclusive<u32>,
+) -> ChainResult<Vec<(Indexed<InterchainGasPayment>, LogMeta)>> {
+    let tip = reader.read_tip().await?;
+    let snapshot = reader.read_igp_snapshot(&address_hex(&address)).await?;
+    Ok(igp_payments_in_range(&snapshot, address, tip, range))
+}
+
+/// The sequence tip (`gas_payment_count`) + block tip from a single snapshot
+/// read. Generic over the reader for the same unit-test reason as
+/// [`fetch_igp_logs`].
+async fn igp_sequence_count_and_tip<R: IgpStateReader>(
+    reader: &R,
+    address: H256,
+) -> ChainResult<(Option<u32>, u32)> {
+    let tip = reader.read_tip().await?;
+    let snapshot = reader.read_igp_snapshot(&address_hex(&address)).await?;
+    Ok((Some(snapshot.payment_count), tip))
+}
+
 /// Chain-sourced `InterchainGasPaymaster` + IGP payment indexer for Midnight.
 /// Reads the append-only `gas_payments` map and the `gas_payment_count`
 /// counter from the deployed IGP contract's on-chain state via the #14 indexer
@@ -105,33 +168,6 @@ impl MidnightInterchainGasPaymaster {
             domain,
             provider,
         }
-    }
-
-    /// Contract address as the indexer's bare-hex scalar (no `0x`), matching
-    /// the form the other Midnight state readers use.
-    fn address_hex(&self) -> String {
-        format!("{:x}", self.address)
-    }
-
-    /// Fetch + decode the whole IGP payment state in one read.
-    async fn igp_snapshot(&self) -> ChainResult<IgpSnapshot> {
-        self.provider
-            .indexer()
-            .read_igp_snapshot(&self.address_hex())
-            .await
-    }
-
-    /// Latest indexer block height, narrowed to the `u32` Hyperlane uses for
-    /// block numbers. Saturates rather than truncating; Midnight devnet heights
-    /// are far below `u32::MAX`.
-    async fn latest_height_u32(&self) -> ChainResult<u32> {
-        let height = self
-            .provider
-            .indexer()
-            .latest_block_height()
-            .await?
-            .unwrap_or(0);
-        Ok(u32::try_from(height).unwrap_or(u32::MAX))
     }
 }
 
@@ -163,17 +199,17 @@ impl Indexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
         &self,
         range: RangeInclusive<u32>,
     ) -> ChainResult<Vec<(Indexed<InterchainGasPayment>, LogMeta)>> {
-        let tip = self.latest_height_u32().await?;
-        let snapshot = self.igp_snapshot().await?;
-        Ok(igp_payments_in_range(&snapshot, self.address, tip, range))
+        fetch_igp_logs(self.provider.indexer(), self.address, range).await
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
         // Midnight has BFT finality and exposes only finalized state, so the
-        // latest height is the finalized height. Matches the dispatch/merkle
-        // indexers (Sealevel's IGP `unimplemented!()`s this instead because it
-        // reports slot separately; Midnight's tip is a plain height).
-        self.latest_height_u32().await
+        // latest height is the finalized height. In the sequence-aware path this
+        // is never called (the cursor takes its tip from
+        // `latest_sequence_count_and_tip`); returning a real height rather than
+        // panicking matches the dispatch/merkle indexers (Sealevel's IGP
+        // `unimplemented!()`s this instead because it reports slot separately).
+        IgpStateReader::read_tip(self.provider.indexer()).await
     }
 
     async fn fetch_logs_by_tx_hash(
@@ -188,11 +224,9 @@ impl Indexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
 #[async_trait]
 impl SequenceAwareIndexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        let tip = self.latest_height_u32().await?;
         // The `gas_payment_count` counter is the sequence tip: payments are
         // recorded at indices `0..count`.
-        let snapshot = self.igp_snapshot().await?;
-        Ok((Some(snapshot.payment_count), tip))
+        igp_sequence_count_and_tip(self.provider.indexer(), self.address).await
     }
 }
 
@@ -285,5 +319,60 @@ mod tests {
         let snapshot = snapshot_with(&[], 0);
         let logs = igp_payments_in_range(&snapshot, ADDRESS, TIP, 0..=10);
         assert!(logs.is_empty());
+    }
+
+    /// Synthetic in-memory reader, the seam that lets the async indexer paths
+    /// run without any network IO — mirrors the dispatch indexer's `FakeReader`.
+    struct FakeReader {
+        tip: u32,
+        snapshot: IgpSnapshot,
+    }
+
+    #[async_trait]
+    impl IgpStateReader for FakeReader {
+        async fn read_tip(&self) -> ChainResult<u32> {
+            Ok(self.tip)
+        }
+        async fn read_igp_snapshot(&self, _address: &str) -> ChainResult<IgpSnapshot> {
+            Ok(self.snapshot.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_logs_reads_tip_then_snapshot_and_serves_range() {
+        // Exercises the async orchestration behind `fetch_logs_in_range` (one
+        // tip read, one snapshot read, then the pure range serve) — not just the
+        // pure helper. Indices 0 and 2 exist; 1 is a gap and is skipped.
+        let reader = FakeReader {
+            tip: TIP,
+            snapshot: snapshot_with(&[0, 2], 3),
+        };
+        let logs = fetch_igp_logs(&reader, ADDRESS, 0..=2)
+            .await
+            .expect("fetch igp logs");
+
+        assert_eq!(logs.len(), 2, "gap index is skipped");
+        assert_eq!(logs[0].0.sequence, Some(0));
+        assert_eq!(logs[1].0.sequence, Some(2));
+        // The tip read flows into LogMeta.block_number, the snapshot into the
+        // payment rows.
+        assert_eq!(logs[0].1.block_number, TIP as u64);
+        assert_eq!(logs[0].1.address, ADDRESS);
+    }
+
+    #[tokio::test]
+    async fn sequence_count_is_payment_count_with_tip() {
+        // `latest_sequence_count_and_tip` returns (Some(gas_payment_count), tip)
+        // read from a single snapshot; the count is the counter, not however
+        // many rows a range happened to serve.
+        let reader = FakeReader {
+            tip: TIP,
+            snapshot: snapshot_with(&[0, 1, 2], 3),
+        };
+        let (count, tip) = igp_sequence_count_and_tip(&reader, ADDRESS)
+            .await
+            .expect("sequence count");
+        assert_eq!(count, Some(3));
+        assert_eq!(tip, TIP);
     }
 }

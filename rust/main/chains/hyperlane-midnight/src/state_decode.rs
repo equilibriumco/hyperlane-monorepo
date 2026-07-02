@@ -1202,4 +1202,28 @@ mod tests {
         assert_eq!(row2.gas_amount, 0);
         assert_eq!(row2.payment, 1);
     }
+
+    // The `GasPayment` struct is a 4-atom cell (messageId, destination,
+    // gasAmount, payment). `decode_gas_payment` must reject any other shape
+    // loudly rather than silently mis-decode -- the fail-loud guard against a
+    // future struct-layout change. (The layout guard + fixture protect against
+    // real drift; this pins that the decoder itself refuses a wrong shape.)
+    #[test]
+    fn decode_gas_payment_rejects_wrong_shape() {
+        // A single-atom cell exercises the `!= 4 atoms` branch.
+        let one_atom = cell(5u32);
+        let err = decode_gas_payment(&one_atom).expect_err("1-atom cell must be rejected");
+        assert!(
+            err.to_string().contains("4 atoms"),
+            "expected an atom-count error, got: {err}"
+        );
+
+        // A non-cell value is rejected by the struct-cell type check.
+        let not_a_cell = StateValue::Map(HashMap::new());
+        let err = decode_gas_payment(&not_a_cell).expect_err("non-cell must be rejected");
+        assert!(
+            err.to_string().contains("expected cell"),
+            "expected a cell-type error, got: {err}"
+        );
+    }
 }
