@@ -264,15 +264,60 @@ async fn count_returns_zero_for_destination_only_impl() {
     assert_eq!(mailbox.count(&ReorgPeriod::None).await.unwrap(), 0);
 }
 
+// `process_estimate_costs` now dry-runs `handle` (issue #80). A dry-run that
+// accepts the message returns `{"ok":true}` and the estimate keeps the fixed
+// non-zero placeholder cost (Midnight fees are DUST, computed by the wallet at
+// submit time). The request it sends must be the `dryRunHandle` op — proving
+// the estimate actually simulates rather than blindly succeeding.
 #[tokio::test]
-async fn process_estimate_costs_returns_non_zero_placeholder() {
-    let stub = StubSubmitter::always_returns("{}");
+async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
+    let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);
     let mailbox = build_mailbox(&stub);
     let estimate = mailbox
         .process_estimate_costs(&sample_message(), &sample_metadata())
         .await
         .unwrap();
     assert!(!estimate.gas_limit.is_zero());
+
+    let req = stub.captured_request();
+    assert_eq!(req["op"], "dryRunHandle");
+    assert_eq!(req["contractAddress"], format!("{TEST_CONTRACT_ADDRESS:x}"));
+    assert_eq!(req["isContractRecipient"], false);
+    // No transaction is built, so the node/proof endpoints are absent.
+    assert!(req.get("nodeRpcUrl").is_none());
+    assert!(req.get("proofServerUrl").is_none());
+}
+
+// The #80 fix, at the mailbox seam: a dry-run that detects a revert returns
+// `Err`, which `pending_message::prepare` maps to `ErrorEstimatingGas` and then
+// backs off — instead of the revert only surfacing at submit time on the
+// no-backoff path where it would busy-loop and starve other deliveries.
+#[tokio::test]
+async fn process_estimate_costs_errs_when_dry_run_detects_revert() {
+    let stub = StubSubmitter::always_returns(
+        r#"{"error":{"kind":"contractRevert","message":"Routes: sender not enrolled"}}"#,
+    );
+    let mailbox = build_mailbox(&stub);
+    let err = mailbox
+        .process_estimate_costs(&sample_message(), &sample_metadata())
+        .await
+        .unwrap_err();
+    let display = format!("{err}");
+    assert!(display.contains("contractRevert"), "unexpected error: {display}");
+    assert!(display.contains("not enrolled"), "unexpected error: {display}");
+}
+
+// Metadata too short to parse fails before the dry-run, so a structurally
+// broken message also errors (backs off) rather than reaching submit.
+#[tokio::test]
+async fn process_estimate_costs_errs_on_unparseable_metadata() {
+    let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);
+    let mailbox = build_mailbox(&stub);
+    let short = Metadata::new(vec![0u8; 10]);
+    let result = mailbox
+        .process_estimate_costs(&sample_message(), &short)
+        .await;
+    assert!(result.is_err(), "expected a metadata parse error");
 }
 
 #[tokio::test]
