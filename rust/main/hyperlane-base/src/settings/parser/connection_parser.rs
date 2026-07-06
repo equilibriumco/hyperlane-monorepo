@@ -777,6 +777,7 @@ pub fn build_aleo_connection_conf(
     }
 }
 
+#[cfg(feature = "midnight")]
 pub fn build_midnight_connection_conf(
     _rpcs: &[Url],
     chain: &ValueParser,
@@ -848,6 +849,7 @@ pub fn build_connection_conf(
         HyperlaneDomainProtocol::Aleo => {
             build_aleo_connection_conf(rpcs, chain, err, operation_batch)
         }
+        #[cfg(feature = "midnight")]
         HyperlaneDomainProtocol::Midnight => {
             build_midnight_connection_conf(rpcs, chain, err, operation_batch)
         }
@@ -861,10 +863,9 @@ pub fn build_connection_conf(
 pub fn is_protocol_supported(protocol: HyperlaneDomainProtocol) -> bool {
     use HyperlaneDomainProtocol::*;
     match protocol {
-        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron | Midnight => {
-            true
-        }
-        // Aleo is feature-gated - only supported when the "aleo" feature is enabled
+        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron => true,
+        // Aleo and Midnight are feature-gated - only supported when their feature is enabled
         Aleo => cfg!(feature = "aleo"),
+        Midnight => cfg!(feature = "midnight"),
     }
 }

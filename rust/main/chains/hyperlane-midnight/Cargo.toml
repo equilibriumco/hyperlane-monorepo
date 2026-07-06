@@ -37,11 +37,12 @@ url = { workspace = true }
 # uses). These crates implement the tagged-serialization format the decoder
 # depends on, so a caret range could let `cargo update` drift them within a
 # minor and silently break decode; bump manually (and re-test decode) when
-# intentionally tracking a new ledger release. `onchain-runtime` re-exports
-# `state::{ContractState, StateValue}`; `serialize` provides
-# `tagged_deserialize`; `storage-core` provides the `DefaultDB` backend (the
-# `layout-v2` feature must match the indexer).
-midnight-onchain-runtime = "=3.1.0"
+# intentionally tracking a new ledger release. `onchain-state` defines
+# `state::{ContractState, StateValue}` (depending on it directly rather than
+# `onchain-runtime` drops the `midnight-onchain-vm` layer the decoder never
+# uses); `serialize` provides `tagged_deserialize`; `storage-core` provides the
+# `DefaultDB` backend (the `layout-v2` feature must match the indexer).
+midnight-onchain-state = "=3.0.0"
 midnight-serialize = "=1.1.0"
 midnight-storage-core = { version = "=1.2.0", features = ["layout-v2"] }
 
@@ -56,11 +57,11 @@ hyperlane-core = { path = "../../hyperlane-core", features = ["async", "ethers"]
 tempfile = { workspace = true }
 # Build synthetic `ContractState` blobs in unit tests: construct the same
 # `StateValue` tree the deployed `night` Mailbox produces, then serialize it
-# with `tagged_serialize` and feed it through the decoders. EXACT-pinned to
-# the runtime graph above (`midnight-onchain-runtime = 3.1.0` pulls
-# onchain-state 3.0.0, base-crypto 1.0.0, storage 2.0.1), so the test builds
-# the byte-identical wire format the live indexer serves. Not used by any
-# non-test code.
-midnight-onchain-state = "=3.0.0"
+# with `tagged_serialize` and feed it through the decoders. `onchain-state` is
+# a normal dependency above (it defines `ContractState`/`StateValue`); these
+# two extra crates are only needed to *construct* the test blobs. EXACT-pinned
+# to the graph above (onchain-state 3.0.0 pulls base-crypto 1.0.0, storage
+# 2.0.1), so the test builds the byte-identical wire format the live indexer
+# serves. Not used by any non-test code.
 midnight-base-crypto = "=1.0.0"
 midnight-storage = "=2.0.1"

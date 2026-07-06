@@ -4,7 +4,7 @@
 //! The `night` contract has no usable generated decoder — its compiled TS
 //! `Ledger` type is empty because its ledger fields live in imported
 //! modules. So we deserialize the tagged ledger state with the same crates
-//! the indexer uses (`midnight-onchain-runtime` / `midnight-serialize`) and
+//! the indexer uses (`midnight-onchain-state` / `midnight-serialize`) and
 //! navigate the resulting `StateValue::Array` positionally.
 //!
 //! Field positions are taken from the compiled `night` readers'
@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use hyperlane_core::{ChainResult, Decode as _, HyperlaneMessage, H256};
-use midnight_onchain_runtime::state::{ContractState, StateValue};
+use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
 use midnight_storage_core::DefaultDB;
 
