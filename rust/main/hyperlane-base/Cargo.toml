@@ -62,7 +62,7 @@ hyperlane-test = { path = "../hyperlane-test" }
 hyperlane-aleo = { path = "../chains/hyperlane-aleo", optional = true }
 hyperlane-ethereum = { path = "../chains/hyperlane-ethereum" }
 hyperlane-fuel = { path = "../chains/hyperlane-fuel" }
-hyperlane-midnight = { path = "../chains/hyperlane-midnight" }
+hyperlane-midnight = { path = "../chains/hyperlane-midnight", optional = true }
 hyperlane-cosmos = { path = "../chains/hyperlane-cosmos" }
 hyperlane-starknet = { path = "../chains/hyperlane-starknet" }
 hyperlane-sealevel = { path = "../chains/hyperlane-sealevel" }
@@ -91,3 +91,4 @@ oneline-eyre = ["backtrace-oneline", "backtrace"]
 oneline-errors = ["oneline-eyre"]
 test-utils = ["dep:tempfile"]
 aleo = ["dep:hyperlane-aleo"]
+midnight = ["dep:hyperlane-midnight"]

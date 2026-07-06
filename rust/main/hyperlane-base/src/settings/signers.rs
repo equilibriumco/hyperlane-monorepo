@@ -319,6 +319,7 @@ impl ChainSigner for hyperlane_aleo::AleoSigner {
     }
 }
 
+#[cfg(feature = "midnight")]
 #[async_trait]
 impl BuildableWithSignerConf for hyperlane_midnight::MidnightSigner {
     async fn build(conf: &SignerConf) -> Result<Self, Report> {
@@ -334,6 +335,7 @@ impl BuildableWithSignerConf for hyperlane_midnight::MidnightSigner {
     }
 }
 
+#[cfg(feature = "midnight")]
 impl ChainSigner for hyperlane_midnight::MidnightSigner {
     fn address_string(&self) -> String {
         self.address().to_owned()

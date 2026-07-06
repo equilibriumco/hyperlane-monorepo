@@ -1,4 +1,16 @@
 //! Hyperlane Midnight chain integration.
+//!
+//! # Build feature
+//!
+//! This crate is an **optional** dependency of `hyperlane-base`, gated behind
+//! the `midnight` feature (off by default), mirroring how `hyperlane-aleo` is
+//! gated behind `aleo`. Agent binaries compile it -- and its heavy native
+//! decode stack (`midnight-onchain-*` and the transitive ZK proving crates
+//! `midnight-proofs` / `midnight-circuits` / `midnight-curves`) -- only when
+//! built with `--features midnight` (e.g. `cargo build -p relayer --features
+//! midnight`). A build without the feature drops the whole crate and that ZK
+//! dependency tree, and `is_protocol_supported` filters Midnight chains out of
+//! the agent config at parse time with an "enable with --features" warning.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
