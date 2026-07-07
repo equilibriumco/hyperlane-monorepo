@@ -179,11 +179,43 @@ impl Mailbox for MidnightMailbox {
 
     async fn process_estimate_costs(
         &self,
-        _message: &HyperlaneMessage,
-        _metadata: &Metadata,
+        message: &HyperlaneMessage,
+        metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
-        // Midnight fees are denominated in DUST and computed by the wallet at
-        // submission time. The relayer just needs a non-zero placeholder here.
+        // Dry-run `handle` against current chain state (no proving, no
+        // submission). A message that would revert (unenrolled sender, amount
+        // over escrow, paused, replay, failed ISM, ...) returns `Err` here, so
+        // the relayer catches it at prepare time and applies the standard
+        // exponential backoff — rather than the revert only surfacing at submit
+        // time on the no-backoff `ErrorSubmitting` path, where it would
+        // busy-loop and starve every other inbound delivery (issue #80). This
+        // mirrors every other Hyperlane chain, whose `process_estimate_costs`
+        // simulates the call.
+        //
+        // Prepare the metadata exactly as `process` does (parse + sort by
+        // validator index + pad) so the dry-run executes what a real
+        // submission would — in particular the on-chain ISM's forward-only
+        // two-pointer walk requires signatures in validator-set order, so an
+        // unsorted vector would spuriously "revert".
+        let mut parsed = parse_metadata(metadata.as_ref())?;
+        let validators = self.validator_order().await?;
+        if !validators.is_empty() {
+            sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
+        }
+        let request = toolkit::build_dry_run_request(
+            self.address,
+            &self.toolkit_ctx,
+            message,
+            parsed,
+            false,
+        );
+        toolkit::dry_run_handle(&self.toolkit_ctx, &request).await?;
+
+        // The message would be accepted on-chain. Midnight fees are denominated
+        // in DUST and computed by the wallet at submission time, so the cost
+        // fields stay a fixed placeholder — unchanged from the previous stub,
+        // which keeps the gas-payment-enforcement policies that read these
+        // fields behaving exactly as before.
         Ok(TxCostEstimate {
             gas_limit: U256::from(1_000_000_u32),
             gas_price: FixedPointNumber::from_str("1")

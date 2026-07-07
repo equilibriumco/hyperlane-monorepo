@@ -13,6 +13,10 @@ const SUBMIT_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(120);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
+// Dry-run fetches state and executes `handle` locally (keccak/ecrecover
+// witnesses, no proving, no broadcast) — heavier than the `isDelivered`
+// read but far cheaper than a real submission.
+const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum byte length of a storage location, matching the on-chain
 /// `Bytes<480>` buffer and the `MAX_STORAGE_LOCATION_LEN` circuit. A location
@@ -80,6 +84,42 @@ pub struct WireMetadata {
     pub index: u32,
     /// Validator signatures, padded to 16 entries.
     pub signatures: Vec<String>,
+}
+
+/// JSON payload for the `dryRunHandle` op — same message + metadata as
+/// `submit`, minus the node/proof endpoints (no transaction is built).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DryRunHandleRequest<'a> {
+    /// Operation discriminator.
+    pub op: &'static str,
+    /// Deployed WarpRoute contract address.
+    pub contract_address: String,
+    /// Indexer GraphQL endpoint (HTTP).
+    pub indexer_graphql_url: String,
+    /// Indexer GraphQL endpoint (WebSocket).
+    pub indexer_ws_url: String,
+    /// Midnight network id.
+    pub network_id: String,
+    /// Hyperlane message.
+    pub message: WireMessage<'a>,
+    /// MessageIdMultisigIsm metadata.
+    pub metadata: WireMetadata,
+    /// Whether the recipient is a contract address.
+    pub is_contract_recipient: bool,
+}
+
+/// JSON envelope returned by the `dryRunHandle` op.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DryRunResponse {
+    /// `true` when the message would be accepted on-chain (no revert).
+    #[serde(default)]
+    pub ok: Option<bool>,
+    /// Structured error when the message would revert, or on a transport
+    /// failure talking to the indexer.
+    #[serde(default)]
+    pub error: Option<SubmitError>,
 }
 
 /// JSON envelope returned by the `submit` op.
@@ -513,6 +553,22 @@ async fn run_submitter<R: Serialize>(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Build the wire-format message shared by the `submit` and `dryRunHandle`
+/// payloads. `sender`/`recipient` keep the `0x` prefix (only the contract
+/// address is bare-hex at the Midnight-SDK seam — see `query_delivered`).
+fn wire_message(message: &HyperlaneMessage) -> WireMessage<'_> {
+    WireMessage {
+        version: message.version,
+        nonce: message.nonce.to_string(),
+        origin: message.origin,
+        sender: format!("0x{:x}", message.sender),
+        destination: message.destination,
+        recipient: format!("0x{:x}", message.recipient),
+        body: format!("0x{}", hex::encode(&message.body)),
+        _marker: std::marker::PhantomData,
+    }
+}
+
 /// Build a `SubmitRequest` from a HyperlaneMessage + metadata.
 pub fn build_request<'a>(
     contract_address: H256,
@@ -530,18 +586,67 @@ pub fn build_request<'a>(
         node_rpc_url: ctx.node_rpc_url.clone(),
         proof_server_url: ctx.proof_server_url.clone(),
         network_id: ctx.network_id.clone(),
-        message: WireMessage {
-            version: message.version,
-            nonce: message.nonce.to_string(),
-            origin: message.origin,
-            sender: format!("0x{:x}", message.sender),
-            destination: message.destination,
-            recipient: format!("0x{:x}", message.recipient),
-            body: format!("0x{}", hex::encode(&message.body)),
-            _marker: std::marker::PhantomData,
-        },
+        message: wire_message(message),
         metadata,
         is_contract_recipient,
+    }
+}
+
+/// Build a `DryRunHandleRequest` mirroring `build_request` so the dry-run
+/// executes exactly what `process` would submit — only the op and the
+/// absence of node/proof endpoints differ.
+pub fn build_dry_run_request<'a>(
+    contract_address: H256,
+    ctx: &ToolkitContext,
+    message: &'a HyperlaneMessage,
+    metadata: WireMetadata,
+    is_contract_recipient: bool,
+) -> DryRunHandleRequest<'a> {
+    DryRunHandleRequest {
+        op: "dryRunHandle",
+        contract_address: format!("{contract_address:x}"),
+        indexer_graphql_url: ctx.indexer_graphql_url.clone(),
+        indexer_ws_url: ctx.indexer_ws_url.clone(),
+        network_id: ctx.network_id.clone(),
+        message: wire_message(message),
+        metadata,
+        is_contract_recipient,
+    }
+}
+
+/// Dry-run `handle` against current chain state via the submitter, WITHOUT
+/// proving or submitting. `Ok(())` means the message would be accepted
+/// on-chain; `Err` means it would revert (mapped from the submitter's
+/// structured error) or the submitter failed. The relayer's
+/// `process_estimate_costs` uses this so a reverting message is caught at
+/// prepare time and backs off instead of busy-looping (issue #80).
+pub async fn dry_run_handle(
+    ctx: &ToolkitContext,
+    request: &DryRunHandleRequest<'_>,
+) -> ChainResult<()> {
+    let raw = run_submitter(ctx, request, DRY_RUN_TIMEOUT).await?;
+    let response: DryRunResponse =
+        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
+            message: err.to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    if let Some(error) = response.error {
+        return Err(HyperlaneMidnightError::SubmitterReported {
+            kind: error.kind,
+            message: error.message,
+        }
+        .into());
+    }
+
+    if response.ok == Some(true) {
+        Ok(())
+    } else {
+        Err(HyperlaneMidnightError::SubmitterMalformed {
+            message: "dryRunHandle response missing both `ok` and `error`".to_string(),
+            raw: truncate(&raw, 1024),
+        }
+        .into())
     }
 }
 
@@ -689,4 +794,97 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("timeout") || display.contains("SIGKILL"));
     }
+
+    // Write an executable mock submitter that prints `json_response` on
+    // stdout, mirroring the inline scripts above. Caller removes the file.
+    fn write_mock_submitter(tag: &str, json_response: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("midnight-toolkit-{tag}-{}.sh", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(format!("#!/bin/sh\necho '{json_response}'\n").as_bytes())
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn sample_message() -> HyperlaneMessage {
+        HyperlaneMessage {
+            version: 3,
+            nonce: 42,
+            origin: 5,
+            sender: H256::from_low_u64_be(0xAB),
+            destination: 1234,
+            recipient: H256::from_low_u64_be(0xCD),
+            body: vec![0u8; 64],
+        }
+    }
+
+    #[test]
+    fn build_dry_run_request_serializes_to_expected_shape() {
+        let msg = sample_message();
+        let request = build_dry_run_request(H256::from_low_u64_be(1), &ctx(), &msg, metadata(), false);
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"op\":\"dryRunHandle\""));
+        assert!(json.contains("\"version\":3"));
+        assert!(json.contains("\"isContractRecipient\":false"));
+        // The dry-run payload omits the node/proof endpoints — no tx is built.
+        assert!(!json.contains("nodeRpcUrl"));
+        assert!(!json.contains("proofServerUrl"));
+    }
+
+    // `{"ok":true}` -> the message would be accepted -> `Ok(())`, which the
+    // relayer reads as "gas estimate succeeded, proceed".
+    #[tokio::test]
+    async fn dry_run_ok_response_is_ok() {
+        let script = write_mock_submitter("dryrun-ok", "{\"ok\":true}");
+        let mut ctx = ctx();
+        ctx.binary_path = script.to_string_lossy().into_owned();
+        let msg = sample_message();
+        let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
+        let result = dry_run_handle(&ctx, &request).await;
+        let _ = std::fs::remove_file(&script);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    // A structured revert error -> `Err` carrying the kind + message, which
+    // the relayer turns into `ErrorEstimatingGas` -> exponential backoff.
+    #[tokio::test]
+    async fn dry_run_error_response_maps_to_submitter_reported() {
+        let script = write_mock_submitter(
+            "dryrun-revert",
+            "{\"error\":{\"kind\":\"contractRevert\",\"message\":\"Mailbox: bad version\"}}",
+        );
+        let mut ctx = ctx();
+        ctx.binary_path = script.to_string_lossy().into_owned();
+        let msg = sample_message();
+        let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
+        let err = dry_run_handle(&ctx, &request).await.unwrap_err();
+        let _ = std::fs::remove_file(&script);
+        let display = format!("{err}");
+        assert!(display.contains("contractRevert"), "unexpected error: {display}");
+        assert!(display.contains("bad version"), "unexpected error: {display}");
+    }
+
+    // Neither `ok` nor `error` -> malformed. Defensive: the Node op always
+    // sends one or the other, so this only fires on a protocol drift.
+    #[tokio::test]
+    async fn dry_run_missing_ok_and_error_is_malformed() {
+        let script = write_mock_submitter("dryrun-empty", "{}");
+        let mut ctx = ctx();
+        ctx.binary_path = script.to_string_lossy().into_owned();
+        let msg = sample_message();
+        let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
+        let err = dry_run_handle(&ctx, &request).await.unwrap_err();
+        let _ = std::fs::remove_file(&script);
+        let display = format!("{err:?}").to_lowercase();
+        assert!(
+            display.contains("missing") || display.contains("malformed"),
+            "unexpected error: {display}"
+        );
+    }
+
+    // The submitter-timeout / SIGKILL path is shared with all ops via
+    // `run_submitter`, covered by `timeout_elapses_and_kills_child` above.
 }
