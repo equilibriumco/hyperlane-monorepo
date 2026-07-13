@@ -382,7 +382,6 @@ impl HyperlaneDomainProtocol {
         use HyperlaneDomainProtocol::*;
         match self {
             Ethereum => format!("{:?}", H160::from(addr)),
-            Cardano => format!("{addr:?}"),
             _ => format!("{addr:?}"),
         }
     }

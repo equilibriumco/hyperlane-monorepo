@@ -17,7 +17,7 @@ use hyperlane_base::{
 use hyperlane_core::{HyperlaneDomain, HyperlaneMessage, QueueOperation};
 use prometheus::IntGauge;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, instrument, trace};
 
 use super::{blacklist::AddressBlacklist, metadata::AppContextClassifier, pending_message::*};
 use crate::{db_loader::DbLoaderExt, settings::matching_list::MatchingList};
@@ -47,6 +47,8 @@ pub struct MessageDbLoader {
 struct ForwardBackwardIterator {
     low_nonce_iter: DirectionalNonceIterator,
     high_nonce_iter: DirectionalNonceIterator,
+    /// Allows one jump when the iterator was created before any messages were indexed.
+    bootstrap_from_empty: bool,
     // here for debugging purposes
     _domain: String,
 }
@@ -76,6 +78,7 @@ impl ForwardBackwardIterator {
         Self {
             low_nonce_iter,
             high_nonce_iter,
+            bootstrap_from_empty: high_nonce.is_none(),
             _domain: domain,
         }
     }
@@ -90,6 +93,10 @@ impl ForwardBackwardIterator {
     /// - Messages are indexed at a higher nonce (e.g., 4337)
     /// - The iterator needs to jump to the newly indexed range
     fn refresh_high_nonce(&mut self) {
+        if !self.bootstrap_from_empty {
+            return;
+        }
+
         let db = &self.high_nonce_iter.db;
         if let Ok(Some(highest_nonce)) = db.retrieve_highest_seen_message_nonce() {
             let current_nonce = self.high_nonce_iter.nonce.unwrap_or(0);
@@ -115,6 +122,7 @@ impl ForwardBackwardIterator {
                     );
                     self.high_nonce_iter.nonce = Some(highest_nonce);
                     self.low_nonce_iter.nonce = highest_nonce.checked_sub(1);
+                    self.bootstrap_from_empty = false;
                 }
             }
         }
@@ -132,9 +140,11 @@ impl ForwardBackwardIterator {
                 // Always prioritize advancing the high nonce iterator, as
                 // we have a preference for higher nonces
                 (MessageStatus::Processed, _) => {
+                    self.bootstrap_from_empty = false;
                     self.high_nonce_iter.iterate();
                 }
                 (MessageStatus::Processable(high_nonce_message), _) => {
+                    self.bootstrap_from_empty = false;
                     self.high_nonce_iter.iterate();
                     return Ok(Some(high_nonce_message));
                 }
@@ -142,9 +152,11 @@ impl ForwardBackwardIterator {
                 // Low nonce messages are only processed if the high nonce iterator
                 // can't make any progress
                 (_, MessageStatus::Processed) => {
+                    self.bootstrap_from_empty = false;
                     self.low_nonce_iter.iterate();
                 }
                 (_, MessageStatus::Processable(low_nonce_message)) => {
+                    self.bootstrap_from_empty = false;
                     self.low_nonce_iter.iterate();
                     return Ok(Some(low_nonce_message));
                 }
@@ -299,12 +311,10 @@ impl DbLoaderExt for MessageDbLoader {
         // nonce.
         // Scan until we find next nonce without delivery confirmation.
         if let Some(msg) = self.try_get_unprocessed_message().await? {
-            info!(
-                nonce = msg.nonce,
-                origin = msg.origin,
-                destination = msg.destination,
+            trace!(
+                ?msg,
                 cursor = ?self.nonce_iterator,
-                "db_loader found unprocessed message"
+                "db_loader working on message"
             );
             let destination = msg.destination;
 
@@ -333,10 +343,7 @@ impl DbLoaderExt for MessageDbLoader {
 
             // Skip if the message is intended for a destination we do not service
             if !self.send_channels.contains_key(&destination) {
-                info!(
-                    nonce = msg.nonce,
-                    destination, "Message destined for unknown domain, skipping"
-                );
+                debug!(?msg, "Message destined for unknown domain, skipping");
                 return Ok(());
             }
 
@@ -344,17 +351,14 @@ impl DbLoaderExt for MessageDbLoader {
             let destination_msg_ctx = if let Some(ctx) = self.destination_ctxs.get(&destination) {
                 ctx
             } else {
-                info!(
-                    nonce = msg.nonce,
-                    destination, "Message destined for unknown message context, skipping",
+                debug!(
+                    ?msg,
+                    "Message destined for unknown message context, skipping"
                 );
                 return Ok(());
             };
 
-            info!(
-                nonce = msg.nonce,
-                destination, "Sending message to submitter"
-            );
+            debug!(%msg, "Sending message to submitter");
 
             let app_context_classifier =
                 AppContextClassifier::new(self.metric_app_contexts.clone());

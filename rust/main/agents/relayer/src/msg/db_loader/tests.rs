@@ -302,3 +302,79 @@ async fn test_forward_backward_iterator() {
         Some(MAX_ONCHAIN_NONCE + 1)
     );
 }
+
+#[tokio::test]
+async fn iterator_bootstraps_from_empty_database_only_once() {
+    let mut mock_db = MockDb::new();
+    mock_db
+        .expect_domain()
+        .return_const(dummy_domain(0, "dummy_domain"));
+
+    let mut highest_nonce_calls = 0;
+    mock_db
+        .expect_retrieve_highest_seen_message_nonce()
+        .times(2)
+        .returning(move || {
+            highest_nonce_calls += 1;
+            if highest_nonce_calls == 1 {
+                Ok(None)
+            } else {
+                Ok(Some(10))
+            }
+        });
+    mock_db
+        .expect_retrieve_message_by_nonce()
+        .with(mockall::predicate::eq(0))
+        .times(2)
+        .returning(|_| Ok(None));
+
+    let mut iterator = ForwardBackwardIterator::new(Arc::new(mock_db));
+    assert!(iterator
+        .try_get_next_message(&dummy_message_loader_metrics())
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(iterator.high_nonce_iter.nonce, Some(10));
+    assert_eq!(iterator.low_nonce_iter.nonce, Some(9));
+    assert!(!iterator.bootstrap_from_empty);
+
+    iterator.refresh_high_nonce();
+    assert_eq!(iterator.high_nonce_iter.nonce, Some(10));
+    assert_eq!(iterator.low_nonce_iter.nonce, Some(9));
+}
+
+#[tokio::test]
+async fn iterator_does_not_jump_across_a_gap_after_progress() {
+    let domain = dummy_domain(0, "dummy_domain");
+    let message = dummy_hyperlane_message(&domain, 0);
+    let mut mock_db = MockDb::new();
+    mock_db.expect_domain().return_const(domain);
+    mock_db
+        .expect_retrieve_highest_seen_message_nonce()
+        .times(1)
+        .returning(|| Ok(None));
+    mock_db
+        .expect_retrieve_message_by_nonce()
+        .with(mockall::predicate::eq(0))
+        .times(1)
+        .returning(move |_| Ok(Some(message.clone())));
+    mock_db
+        .expect_retrieve_processed_by_nonce()
+        .times(1)
+        .returning(|_| Ok(Some(false)));
+
+    let mut iterator = ForwardBackwardIterator::new(Arc::new(mock_db));
+    assert_eq!(
+        iterator
+            .try_get_next_message(&dummy_message_loader_metrics())
+            .await
+            .unwrap()
+            .unwrap()
+            .nonce,
+        0
+    );
+
+    iterator.refresh_high_nonce();
+    assert_eq!(iterator.high_nonce_iter.nonce, Some(1));
+    assert_eq!(iterator.low_nonce_iter.nonce, None);
+}

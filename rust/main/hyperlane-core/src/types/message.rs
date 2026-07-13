@@ -165,11 +165,6 @@ impl HyperlaneMessage {
     pub fn id(&self) -> H256 {
         H256::from_slice(Keccak256::new().chain(self.to_vec()).finalize().as_slice())
     }
-
-    /// Get message ID for merkle tree insertion (keccak256 hash of encoded message)
-    pub fn id_for_merkle_tree(&self) -> H256 {
-        H256::from_slice(Keccak256::new().chain(self.to_vec()).finalize().as_slice())
-    }
 }
 
 #[cfg(test)]
