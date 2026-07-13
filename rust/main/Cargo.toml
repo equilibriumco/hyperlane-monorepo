@@ -339,13 +339,14 @@ tag = "ledger-9.1.0.0-rc.3"
 git = "https://github.com/midnightntwrk/midnight-ledger"
 tag = "transient-crypto-2.2.0-rc.1"
 
-# Vendored size-of 0.1.5 with the target-invalid function-pointer ABIs removed.
-# Pulled transitively (starknet-types-core -> cainome -> abigen), size-of 0.1.5
-# lists ABIs like `aapcs`/`win64` unconditionally; rustc >= 1.95 rejects them
-# with E0570 on targets where they are invalid (e.g. aarch64-apple-darwin). The
-# ledger-9.1 decode graph forces rustc >= 1.95 (sysinfo 0.39 uses `cfg_select`),
-# and 0.1.5 is upstream's newest release, so vendor + patch it. See
-# vendor/size-of/src/core_impls.rs for the one-line change.
+# Patched fork of size-of 0.1.5. Pulled transitively (starknet-types-core ->
+# cainome -> abigen), size-of 0.1.5 lists ABIs like `aapcs`/`win64`
+# unconditionally; rustc >= 1.95 rejects them with E0570 on targets where they
+# are invalid (e.g. aarch64-apple-darwin). The ledger-9.1 decode graph forces
+# rustc >= 1.95 (sysinfo 0.39 uses `cfg_select`), and 0.1.5 is upstream's newest
+# release under this name, so we patch it. The fork drops the target-invalid
+# ABIs; see its README for the full rationale.
 [patch.crates-io.size-of]
-path = "vendor/size-of"
+git = "https://github.com/equilibriumco/size-of"
+rev = "f0725127cc0fb193b93376a3789b9312f580fe95"
 
