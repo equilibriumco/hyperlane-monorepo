@@ -4,7 +4,7 @@ use crate::blockfrost_provider::{
 use crate::consts::SCRIPT_HASH_ADDR_PREFIX;
 use crate::types::{
     extract_script_hash_from_address, hyperlane_address_to_policy_id,
-    hyperlane_address_to_script_hash, ScriptHash,
+    hyperlane_address_to_script_hash, IsmConfig, ScriptHash,
 };
 use pallas_codec::minicbor;
 use pallas_primitives::conway::PlutusData;
@@ -43,11 +43,11 @@ pub struct ResolvedRecipient {
     /// What kind of recipient this is
     pub recipient_kind: RecipientKind,
     /// Custom ISM override (from datum)
-    pub ism: Option<ScriptHash>,
+    pub ism: Option<IsmConfig>,
     /// Recipient's NFT policy ID (28 bytes)
     pub recipient_policy: [u8; 28],
     /// For generic recipients with an ISM override: the UTXO holding the
-    /// HyperlaneRecipientDatum at the recipient's script address.
+    /// authenticated ISM config datum at the recipient's script address.
     /// The relayer adds this as a reference input so the mailbox can read
     /// the ism field on-chain without spending the recipient's state.
     pub ism_config_utxo: Option<Utxo>,
@@ -143,7 +143,7 @@ impl RecipientResolver {
             "Resolved recipient: script_hash={}, kind={:?}, ism={:?}",
             hex::encode(script_hash),
             recipient_kind,
-            ism.map(hex::encode)
+            ism.as_ref().map(|config| hex::encode(config.script_hash))
         );
 
         Ok(ResolvedRecipient {
@@ -167,7 +167,7 @@ impl RecipientResolver {
 /// token_type sub-structure, it's a WarpRoute. Otherwise falls back to Generic.
 fn detect_recipient_kind_and_ism(
     utxo: &Utxo,
-) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
+) -> Result<(RecipientKind, Option<IsmConfig>), ResolverError> {
     let inline_datum = match &utxo.inline_datum {
         Some(d) => d,
         None => return Ok((RecipientKind::GenericRecipient, None)),
@@ -196,7 +196,7 @@ fn detect_recipient_kind_and_ism(
 /// and token_type is Constr 0/1/2 (Collateral/Synthetic/Native)
 fn detect_from_plutus_data(
     data: &PlutusData,
-) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
+) -> Result<(RecipientKind, Option<IsmConfig>), ResolverError> {
     let (tag, fields) = match data {
         PlutusData::Constr(c) => (c.tag, c.fields.iter().collect::<Vec<_>>()),
         _ => return Ok((RecipientKind::GenericRecipient, None)),
@@ -217,37 +217,48 @@ fn detect_from_plutus_data(
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
-    // Extract ISM from field 3 (Option<ScriptHash>)
-    let ism = parse_optional_script_hash_cbor(fields[3]);
+    // Extract ISM from field 3 (Option<IsmConfig>)
+    let ism = parse_optional_ism_config_cbor(fields[3]);
 
     Ok((RecipientKind::WarpRoute, ism))
 }
 
-fn parse_optional_script_hash_cbor(data: &PlutusData) -> Option<ScriptHash> {
+fn parse_optional_ism_config_cbor(data: &PlutusData) -> Option<IsmConfig> {
     match data {
         PlutusData::Constr(c) => {
-            // Some = Constr 0 (tag 121) with 1 field
-            if c.tag == 121 {
-                if let Some(PlutusData::BoundedBytes(bytes)) = c.fields.first() {
-                    let bytes: &[u8] = bytes.as_ref();
-                    if bytes.len() == 28 {
-                        let mut hash = [0u8; 28];
-                        hash.copy_from_slice(bytes);
-                        return Some(hash);
-                    }
+            // Some = Constr 0 [IsmConfig], IsmConfig = Constr 0 [hash, policy]
+            let config = match (c.tag, c.fields.first()) {
+                (121, Some(PlutusData::Constr(config)))
+                    if config.tag == 121 && config.fields.len() == 2 =>
+                {
+                    config
                 }
-            }
+                _ => return None,
+            };
+            let script_hash = parse_28_byte_field(config.fields.first()?)?;
+            let state_nft_policy = parse_28_byte_field(config.fields.get(1)?)?;
+            return Some(IsmConfig {
+                script_hash,
+                state_nft_policy,
+            });
             // None = Constr 1 (tag 122)
-            None
         }
         _ => None,
     }
 }
 
+fn parse_28_byte_field(data: &PlutusData) -> Option<[u8; 28]> {
+    let PlutusData::BoundedBytes(bytes) = data else {
+        return None;
+    };
+    let bytes: &[u8] = bytes.as_ref();
+    bytes.try_into().ok()
+}
+
 /// Detect from JSON (Blockfrost JSON datum format).
 fn detect_from_json(
     json: &serde_json::Value,
-) -> Result<(RecipientKind, Option<ScriptHash>), ResolverError> {
+) -> Result<(RecipientKind, Option<IsmConfig>), ResolverError> {
     let fields = match json.get("fields").and_then(|f| f.as_array()) {
         Some(f) => f,
         None => return Ok((RecipientKind::GenericRecipient, None)),
@@ -270,7 +281,7 @@ fn detect_from_json(
     }
 
     // Extract ISM from field 3
-    let ism = parse_optional_script_hash_json(&fields[3]);
+    let ism = parse_optional_ism_config_json(&fields[3]);
 
     Ok((RecipientKind::WarpRoute, ism))
 }
@@ -289,14 +300,14 @@ const CANONICAL_CONFIG_NFT_POLICY: &str =
 /// Find the canonical config NFT UTXO at the recipient's script address.
 ///
 /// Queries for `CANONICAL_CONFIG_NFT_POLICY / hex(script_hash)` and parses
-/// the datum as `Option<ScriptHash>` (the ISM override, or None for default).
+/// the datum as `Option<IsmConfig>` (the ISM override, or None for default).
 ///
 /// Returns (ism_override, utxo_to_use_as_reference_input).
 async fn find_generic_recipient_ism(
     provider: &BlockfrostProvider,
     script_hash: &ScriptHash,
     _network: CardanoNetwork,
-) -> (Option<ScriptHash>, Option<Utxo>) {
+) -> (Option<IsmConfig>, Option<Utxo>) {
     let script_hash_hex = hex::encode(script_hash);
     let asset_name_hex = script_hash_hex.clone();
 
@@ -337,39 +348,76 @@ async fn find_generic_recipient_ism(
     (ism, Some(utxo))
 }
 
-/// Parse an ISM config datum (CBOR hex or JSON) as `Option<ScriptHash>`.
+/// Parse an ISM config datum (CBOR hex or JSON) as `Option<IsmConfig>`.
 ///
 /// Datum format:
 /// - `None`  = Constr 1 [] (tag 122, no fields)
-/// - `Some`  = Constr 0 [ByteArray(28)] (tag 121, 1 field)
-fn parse_ism_config_datum(inline_datum: &str) -> Option<ScriptHash> {
+/// - `Some`  = Constr 0 [Constr 0 [hash, state_nft_policy]]
+fn parse_ism_config_datum(inline_datum: &str) -> Option<IsmConfig> {
     let hex_str = inline_datum.trim_matches('"');
     if let Ok(cbor_bytes) = hex::decode(hex_str) {
         if let Ok(data) = minicbor::decode::<PlutusData>(&cbor_bytes) {
-            return parse_optional_script_hash_cbor(&data);
+            return parse_optional_ism_config_cbor(&data);
         }
     }
     // JSON fallback
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(inline_datum) {
-        return parse_optional_script_hash_json(&json);
+        return parse_optional_ism_config_json(&json);
     }
     None
 }
 
-fn parse_optional_script_hash_json(json: &serde_json::Value) -> Option<ScriptHash> {
+fn parse_optional_ism_config_json(json: &serde_json::Value) -> Option<IsmConfig> {
     let constructor = json.get("constructor").and_then(|c| c.as_u64())?;
 
     if constructor == 0 {
         // Some
         let fields = json.get("fields").and_then(|f| f.as_array())?;
-        let hash_hex = fields.first()?.get("bytes")?.as_str()?;
-        let hash_bytes = hex::decode(hash_hex).ok()?;
-        if hash_bytes.len() == 28 {
-            let mut hash = [0u8; 28];
-            hash.copy_from_slice(&hash_bytes);
-            return Some(hash);
+        let config = fields.first()?;
+        if config.get("constructor").and_then(|c| c.as_u64()) != Some(0) {
+            return None;
         }
+        let config_fields = config.get("fields").and_then(|f| f.as_array())?;
+        let script_hash = parse_28_byte_json(config_fields.first()?)?;
+        let state_nft_policy = parse_28_byte_json(config_fields.get(1)?)?;
+        return Some(IsmConfig {
+            script_hash,
+            state_nft_policy,
+        });
     }
     // constructor 1 = None
     None
+}
+
+fn parse_28_byte_json(json: &serde_json::Value) -> Option<[u8; 28]> {
+    let bytes = hex::decode(json.get("bytes")?.as_str()?).ok()?;
+    bytes.try_into().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_authenticated_ism_config_cbor() {
+        let hash = "aa".repeat(28);
+        let policy = "bb".repeat(28);
+        let datum = format!("d8799fd8799f581c{hash}581c{policy}ffff");
+
+        assert_eq!(
+            parse_ism_config_datum(&datum),
+            Some(IsmConfig {
+                script_hash: [0xaa; 28],
+                state_nft_policy: [0xbb; 28],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_unauthenticated_ism_config() {
+        let hash = "aa".repeat(28);
+        let datum = format!("d8799f581c{hash}ff");
+
+        assert_eq!(parse_ism_config_datum(&datum), None);
+    }
 }

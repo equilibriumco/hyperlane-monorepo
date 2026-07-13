@@ -18,6 +18,13 @@ pub type ScriptHash = [u8; 28];
 /// Policy ID (same as script hash, 28 bytes)
 pub type PolicyId = [u8; 28];
 
+/// ISM script plus the one-shot policy authenticating its state UTXO.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IsmConfig {
+    pub script_hash: ScriptHash,
+    pub state_nft_policy: PolicyId,
+}
+
 /// Cardano address (bech32 string)
 pub type CardanoAddress = String;
 
@@ -424,7 +431,7 @@ pub struct WarpRouteDatum {
     pub config: WarpRouteConfig,
     pub owner: [u8; 28], // VerificationKeyHash
     pub total_bridged: i64,
-    pub ism: Option<ScriptHash>,
+    pub ism: Option<IsmConfig>,
 }
 
 /// Warp route redeemer (matches Aiken WarpRouteRedeemer)

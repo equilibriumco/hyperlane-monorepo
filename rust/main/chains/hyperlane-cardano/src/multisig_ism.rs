@@ -230,9 +230,17 @@ impl CardanoMultisigIsm {
             let domain = match &fields[0] {
                 PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
                     let val: i128 = (*i).into();
-                    val as u32
+                    u32::try_from(val).map_err(|_| {
+                        ChainCommunicationError::from_other_str(&format!(
+                            "Validator domain is outside u32 range: {val}"
+                        ))
+                    })?
                 }
-                _ => continue,
+                _ => {
+                    return Err(ChainCommunicationError::from_other_str(
+                        "Validator domain is not an integer",
+                    ))
+                }
             };
 
             // Parse pubkeys list
@@ -338,18 +346,34 @@ impl CardanoMultisigIsm {
             let domain = match &fields[0] {
                 PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
                     let val: i128 = (*i).into();
-                    val as u32
+                    u32::try_from(val).map_err(|_| {
+                        ChainCommunicationError::from_other_str(&format!(
+                            "Threshold domain is outside u32 range: {val}"
+                        ))
+                    })?
                 }
-                _ => continue,
+                _ => {
+                    return Err(ChainCommunicationError::from_other_str(
+                        "Threshold domain is not an integer",
+                    ))
+                }
             };
 
             // Parse threshold
             let threshold = match &fields[1] {
                 PlutusData::BigInt(pallas_primitives::conway::BigInt::Int(i)) => {
                     let val: i128 = (*i).into();
-                    val as u32
+                    u32::try_from(val).map_err(|_| {
+                        ChainCommunicationError::from_other_str(&format!(
+                            "Threshold is outside u32 range: {val}"
+                        ))
+                    })?
                 }
-                _ => continue,
+                _ => {
+                    return Err(ChainCommunicationError::from_other_str(
+                        "Threshold is not an integer",
+                    ))
+                }
             };
 
             thresholds.push((domain, threshold));
@@ -400,12 +424,15 @@ impl CardanoMultisigIsm {
 
         // Parse validators list (field 0)
         // Format: list of (domain, list of validator pubkeys)
-        let empty_vec = vec![];
         let validators_list = fields
             .first()
             .and_then(|f| f.get("list"))
             .and_then(|l| l.as_array())
-            .unwrap_or(&empty_vec);
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(
+                    "Invalid ISM datum: validators field is not a list",
+                )
+            })?;
 
         let mut validators = Vec::new();
         for entry in validators_list {
@@ -415,14 +442,26 @@ impl CardanoMultisigIsm {
                     .first()
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as u32;
+                    .ok_or_else(|| {
+                        ChainCommunicationError::from_other_str(
+                            "Invalid ISM datum: validator domain is missing",
+                        )
+                    })?;
+                let domain = u32::try_from(domain).map_err(|_| {
+                    ChainCommunicationError::from_other_str(
+                        "Invalid ISM datum: validator domain exceeds u32",
+                    )
+                })?;
 
-                let empty_pubkeys = vec![];
                 let pubkeys_list = fields
                     .get(1)
                     .and_then(|p| p.get("list"))
                     .and_then(|l| l.as_array())
-                    .unwrap_or(&empty_pubkeys);
+                    .ok_or_else(|| {
+                        ChainCommunicationError::from_other_str(
+                            "Invalid ISM datum: validator keys field is not a list",
+                        )
+                    })?;
 
                 let mut eth_addresses = Vec::new();
                 for pk in pubkeys_list {
@@ -457,12 +496,15 @@ impl CardanoMultisigIsm {
 
         // Parse thresholds list (field 1)
         // Format: list of (domain, threshold)
-        let empty_thresholds = vec![];
         let thresholds_list = fields
             .get(1)
             .and_then(|f| f.get("list"))
             .and_then(|l| l.as_array())
-            .unwrap_or(&empty_thresholds);
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(
+                    "Invalid ISM datum: thresholds field is not a list",
+                )
+            })?;
 
         let mut thresholds = Vec::new();
         for entry in thresholds_list {
@@ -472,13 +514,31 @@ impl CardanoMultisigIsm {
                     .first()
                     .and_then(|d| d.get("int"))
                     .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as u32;
+                    .ok_or_else(|| {
+                        ChainCommunicationError::from_other_str(
+                            "Invalid ISM datum: threshold domain is missing",
+                        )
+                    })?;
+                let domain = u32::try_from(domain).map_err(|_| {
+                    ChainCommunicationError::from_other_str(
+                        "Invalid ISM datum: threshold domain exceeds u32",
+                    )
+                })?;
 
                 let threshold = fields
                     .get(1)
                     .and_then(|t| t.get("int"))
                     .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as u32;
+                    .ok_or_else(|| {
+                        ChainCommunicationError::from_other_str(
+                            "Invalid ISM datum: threshold is missing",
+                        )
+                    })?;
+                let threshold = u32::try_from(threshold).map_err(|_| {
+                    ChainCommunicationError::from_other_str(
+                        "Invalid ISM datum: threshold exceeds u32",
+                    )
+                })?;
 
                 thresholds.push((domain, threshold));
             }
@@ -541,23 +601,43 @@ impl MultisigIsm for CardanoMultisigIsm {
         // Get validators and threshold for the message's origin domain
         let origin_domain = message.origin;
 
-        let validators = datum
+        let configured_validators = datum
             .validators
             .iter()
             .find(|(d, _)| *d == origin_domain)
-            .map(|(_, v)| {
-                v.iter()
-                    .map(|pubkey| H256::from(*pubkey))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+            .map(|(_, validators)| validators)
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "No validator set configured for origin domain {origin_domain}"
+                ))
+            })?;
 
-        let threshold = datum
+        let configured_threshold = datum
             .thresholds
             .iter()
             .find(|(d, _)| *d == origin_domain)
-            .map(|(_, t)| *t as u8)
-            .unwrap_or(0);
+            .map(|(_, threshold)| *threshold)
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "No threshold configured for origin domain {origin_domain}"
+                ))
+            })?;
+        let threshold = u8::try_from(configured_threshold).map_err(|_| {
+            ChainCommunicationError::from_other_str(&format!(
+                "Threshold {configured_threshold} exceeds u8"
+            ))
+        })?;
+        if threshold == 0 || usize::from(threshold) > configured_validators.len() {
+            return Err(ChainCommunicationError::from_other_str(&format!(
+                "Invalid threshold {threshold} for {} validators",
+                configured_validators.len()
+            )));
+        }
+
+        let validators = configured_validators
+            .iter()
+            .map(|pubkey| H256::from(*pubkey))
+            .collect::<Vec<_>>();
 
         Ok((validators, threshold))
     }

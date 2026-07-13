@@ -201,6 +201,9 @@ pub struct HyperlaneTxBuilder {
     conf: ConnectionConf,
     /// Cached protocol parameter: lovelace cost per UTXO byte
     coins_per_utxo_byte: OnceCell<u64>,
+    /// Cached PlutusV3 cost model, fetched from protocol params.
+    /// Must match the chain exactly or script_data_hash is wrong.
+    plutus_v3_cost_model: OnceCell<Vec<i64>>,
     /// Cache for script serialised sizes (script_hash → bytes).
     /// Script sizes are immutable once deployed, so this never needs invalidation.
     script_size_cache: RwLock<HashMap<String, u64>>,
@@ -211,6 +214,9 @@ pub struct HyperlaneTxBuilder {
     /// successfully-submitted TX. Avoids querying Blockfrost between rapid
     /// submissions, working around the 25-40s index lag in Blockfrost's API.
     last_tx_state: Mutex<Option<ChainedUtxoState>>,
+    /// Latest locally-submitted continuation for each ISM state NFT policy.
+    /// Needed when consecutive messages select different per-recipient ISMs.
+    ism_states: Mutex<HashMap<String, Utxo>>,
     /// Cached per-role ExUnits from the last successful evaluation.
     /// Reused when Blockfrost evaluate fails for tracked-state TXs.
     cached_process_ex_units: Mutex<Option<CachedProcessExUnits>>,
@@ -298,9 +304,11 @@ impl HyperlaneTxBuilder {
             resolver,
             conf: conf.clone(),
             coins_per_utxo_byte: OnceCell::new(),
+            plutus_v3_cost_model: OnceCell::new(),
             script_size_cache: RwLock::new(HashMap::new()),
             smt: Mutex::new(None),
             last_tx_state: Mutex::new(None),
+            ism_states: Mutex::new(HashMap::new()),
             cached_process_ex_units: Mutex::new(None),
             recently_spent: Mutex::new(HashMap::new()),
         }
@@ -323,6 +331,21 @@ impl HyperlaneTxBuilder {
 
     async fn peek_last_tx_state(&self) -> Option<ChainedUtxoState> {
         self.last_tx_state.lock().await.clone()
+    }
+
+    async fn set_ism_state(&self, policy: &str, utxo: Utxo) {
+        self.ism_states
+            .lock()
+            .await
+            .insert(policy.to_ascii_lowercase(), utxo);
+    }
+
+    async fn peek_ism_state(&self, policy: &str) -> Option<Utxo> {
+        self.ism_states
+            .lock()
+            .await
+            .get(&policy.to_ascii_lowercase())
+            .cloned()
     }
 
     /// TTL for recently-spent UTxO cache entries (1× Blockfrost lag)
@@ -430,6 +453,22 @@ impl HyperlaneTxBuilder {
                 }
             })
             .await
+    }
+
+    /// Get the PlutusV3 cost model from protocol parameters, cached after first fetch.
+    ///
+    /// Unlike other protocol params there is no safe default: an incorrect cost model
+    /// yields a wrong script data hash and the ledger rejects the transaction, so a
+    /// fetch failure must propagate rather than fall back to a constant.
+    async fn get_plutus_v3_cost_model(&self) -> Result<Vec<i64>, TxBuilderError> {
+        self.plutus_v3_cost_model
+            .get_or_try_init(|| async {
+                let model = self.provider.get_plutus_v3_cost_model().await?;
+                debug!("Fetched PlutusV3 cost model: {} entries", model.len());
+                Ok::<_, TxBuilderError>(model)
+            })
+            .await
+            .cloned()
     }
 
     /// Get script size in bytes, using a cache to avoid redundant Blockfrost queries.
@@ -885,8 +924,22 @@ impl HyperlaneTxBuilder {
                 None
             };
 
-        // 4. Find ISM UTXO (use chained state or fetch from chain)
-        let ism_utxo = if let Some(ci) = chained {
+        // 4. Find the selected ISM's state by its authenticated NFT policy.
+        let ism_policy_hex = resolved
+            .ism
+            .as_ref()
+            .map(|config| hex::encode(config.state_nft_policy))
+            .unwrap_or_else(|| self.conf.ism_policy_id.clone());
+        let ism_asset_name = "49534d205374617465";
+        let ism_utxo = if let Some(tracked) = self.peek_ism_state(&ism_policy_hex).await {
+            debug!(
+                "Using tracked ISM UTXO for policy {}: {}#{}",
+                ism_policy_hex, tracked.tx_hash, tracked.output_index
+            );
+            tracked
+        } else if let Some(ci) =
+            chained.filter(|ci| ci.ism_utxo.has_asset(&ism_policy_hex, ism_asset_name))
+        {
             debug!(
                 "Using chained ISM UTXO: {}#{}",
                 ci.ism_utxo.tx_hash, ci.ism_utxo.output_index
@@ -894,20 +947,17 @@ impl HyperlaneTxBuilder {
             ci.ism_utxo.clone()
         } else {
             match &resolved.ism {
-                Some(override_ism_hash) => {
-                    // Per-recipient ISM override: find the state UTXO by script address.
-                    // The WarpRouteDatum.ism field holds the override ISM's script hash.
-                    let hash_hex = hex::encode(override_ism_hash);
-                    info!("Using override ISM: script_hash={}", hash_hex);
-                    let utxos = self.provider.get_script_utxos(&hash_hex).await?;
-                    utxos
-                        .into_iter()
-                        .find(|u| u.inline_datum.is_some())
-                        .ok_or_else(|| {
-                            TxBuilderError::ScriptNotFound(format!(
-                                "Override ISM state UTXO not found at script {hash_hex}"
-                            ))
-                        })?
+                Some(override_ism) => {
+                    // The override commits to both its code and one-shot state NFT.
+                    let hash_hex = hex::encode(override_ism.script_hash);
+                    let policy_hex = hex::encode(override_ism.state_nft_policy);
+                    info!(
+                        "Using override ISM: script_hash={}, state_nft_policy={}",
+                        hash_hex, policy_hex
+                    );
+                    self.provider
+                        .find_utxo_by_nft(&policy_hex, ism_asset_name)
+                        .await?
                 }
                 None => {
                     let utxo = self
@@ -1193,6 +1243,7 @@ impl HyperlaneTxBuilder {
             recipient_redeemer_cbor,
             recipient_continuation_datum_cbor,
             ism_utxo,
+            ism_state_nft_policy: ism_policy_hex,
             additional_utxos,
             message_id,
             metadata: metadata.to_vec(),
@@ -1517,6 +1568,8 @@ impl HyperlaneTxBuilder {
                     state.payer_utxo.output_index,
                     state.payer_total_input,
                 );
+                self.set_ism_state(&components.ism_state_nft_policy, state.ism_utxo.clone())
+                    .await;
                 self.set_last_tx_state(state).await;
             }
             Err(e) => {
@@ -1904,6 +1957,8 @@ impl HyperlaneTxBuilder {
                 .expect("mailbox continuation datum always set");
             match self.extract_chained_state(&components, &signed_tx, datum_cbor, &actual_hash) {
                 Ok(state) => {
+                    self.set_ism_state(&components.ism_state_nft_policy, state.ism_utxo.clone())
+                        .await;
                     chained_state = Some(state.clone());
                     last_good_state = Some(state);
                 }
@@ -2347,7 +2402,7 @@ impl HyperlaneTxBuilder {
         }
 
         // Add ISM config UTXO as reference input for generic recipients with an ISM override.
-        // The mailbox reads the HyperlaneRecipientDatum.ism field from this UTXO on-chain.
+        // The mailbox reads the authenticated ISM config from this UTXO on-chain.
         if let Some(ref ism_config) = components.ism_config_utxo {
             let ism_config_input = utxo_to_input(ism_config)?;
             tx = tx.reference_input(ism_config_input);
@@ -3204,7 +3259,7 @@ impl HyperlaneTxBuilder {
         // Set language view for PlutusV3 (required for script_data_hash calculation)
         // Using the Conway PlutusV3 cost model from protocol parameters
         // For now, using placeholder values - in production, fetch from protocol params
-        let plutus_v3_cost_model: Vec<i64> = get_plutus_v3_cost_model();
+        let plutus_v3_cost_model = self.get_plutus_v3_cost_model().await?;
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
         // Build the transaction
@@ -3631,7 +3686,7 @@ impl HyperlaneTxBuilder {
 
         // 9. Build, sign and submit
         // Set language view for PlutusV3 (required for script_data_hash calculation)
-        let plutus_v3_cost_model: Vec<i64> = get_plutus_v3_cost_model();
+        let plutus_v3_cost_model = self.get_plutus_v3_cost_model().await?;
         tx = tx.language_view(ScriptKind::PlutusV3, plutus_v3_cost_model);
 
         let built_tx = tx
@@ -3836,6 +3891,8 @@ pub struct ProcessTxComponents {
     pub recipient_continuation_datum_cbor: Option<Vec<u8>>,
     /// ISM UTXO (to be spent for verification)
     pub ism_utxo: Utxo,
+    /// Policy ID authenticating the selected ISM state UTXO.
+    pub ism_state_nft_policy: String,
     /// Additional inputs (UTXO, must_be_spent)
     pub additional_utxos: Vec<(Utxo, bool)>,
     /// Message ID (32 bytes)
@@ -3865,8 +3922,8 @@ pub struct ProcessTxComponents {
     /// When Some, the mailbox continuation output uses this datum instead of
     /// copying the original UTXO's datum.
     pub mailbox_continuation_datum_cbor: Option<Vec<u8>>,
-    /// GenericRecipient: UTXO holding HyperlaneRecipientDatum at the recipient's script
-    /// address. Added as a reference input so the mailbox can read the ism field on-chain.
+    /// GenericRecipient: UTXO holding authenticated ISM config at the recipient's
+    /// script address. Added as a reference input for mailbox selection.
     pub ism_config_utxo: Option<Utxo>,
 }
 
@@ -4564,7 +4621,7 @@ fn build_warp_route_continuation_datum(
 
         let total_bridged = extract_int(&fields[2]).unwrap_or(0);
 
-        // Preserve ism field as-is (Option<ScriptHash>)
+        // Preserve ism field as-is (Option<IsmConfig>)
         let ism = fields[3].clone();
 
         (config, owner_bytes, total_bridged, ism)
@@ -4792,32 +4849,6 @@ pub struct MultisigMetadata {
     pub validator_signatures: Vec<crate::types::ValidatorSignature>,
 }
 
-/// Get the PlutusV3 cost model for Conway era transactions
-/// These values are from the Cardano Preview network protocol parameters
-fn get_plutus_v3_cost_model() -> Vec<i64> {
-    vec![
-        100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4, 16000,
-        100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100, 16000, 100,
-        94375, 32, 132994, 32, 61462, 4, 72010, 178, 0, 1, 22151, 32, 91189, 769, 4, 2, 85848,
-        123203, 7305, -900, 1716, 549, 57, 85848, 0, 1, 1, 1000, 42921, 4, 2, 24548, 29498, 38, 1,
-        898148, 27279, 1, 51775, 558, 1, 39184, 1000, 60594, 1, 141895, 32, 83150, 32, 15299, 32,
-        76049, 1, 13169, 4, 22100, 10, 28999, 74, 1, 28999, 74, 1, 43285, 552, 1, 44749, 541, 1,
-        33852, 32, 68246, 32, 72362, 32, 7243, 32, 7391, 32, 11546, 32, 85848, 123203, 7305, -900,
-        1716, 549, 57, 85848, 0, 1, 90434, 519, 0, 1, 74433, 32, 85848, 123203, 7305, -900, 1716,
-        549, 57, 85848, 0, 1, 1, 85848, 123203, 7305, -900, 1716, 549, 57, 85848, 0, 1, 955506,
-        213312, 0, 2, 270652, 22588, 4, 1457325, 64566, 4, 20467, 1, 4, 0, 141992, 32, 100788, 420,
-        1, 1, 81663, 32, 59498, 32, 20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32,
-        43053543, 10, 53384111, 14333, 10, 43574283, 26308, 10, 16000, 100, 16000, 100, 962335, 18,
-        2780678, 6, 442008, 1, 52538055, 3756, 18, 267929, 18, 76433006, 8868, 18, 52948122, 18,
-        1995836, 36, 3227919, 12, 901022, 1, 166917843, 4307, 36, 284546, 36, 158221314, 26549, 36,
-        74698472, 36, 333849714, 1, 254006273, 72, 2174038, 72, 2261318, 64571, 4, 207616, 8310, 4,
-        1293828, 28716, 63, 0, 1, 1006041, 43623, 251, 0, 1, 100181, 726, 719, 0, 1, 100181, 726,
-        719, 0, 1, 100181, 726, 719, 0, 1, 107878, 680, 0, 1, 95336, 1, 281145, 18848, 0, 1,
-        180194, 159, 1, 1, 158519, 8942, 0, 1, 159378, 8813, 0, 1, 107490, 3298, 1, 106057, 655, 1,
-        1964219, 24520, 3,
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4946,8 +4977,9 @@ mod tests {
         // Set network ID
         tx = tx.network_id(0);
 
-        // Add language view (PlutusV3)
-        let cost_model = get_plutus_v3_cost_model();
+        // This encoding-only test does not submit to a ledger; production paths
+        // fetch the exact network cost model through HyperlaneTxBuilder.
+        let cost_model = vec![0; 251];
         tx = tx.language_view(ScriptKind::PlutusV3, cost_model);
 
         // Build the transaction

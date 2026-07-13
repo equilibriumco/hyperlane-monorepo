@@ -2,8 +2,8 @@ use blockfrost::{BlockfrostAPI, BlockfrostError, Order, Pagination};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::Semaphore;
-use tokio::time::{sleep, Duration};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration, Instant};
 use tracing::instrument;
 
 #[derive(Error, Debug)]
@@ -26,8 +26,8 @@ pub enum BlockfrostProviderError {
 pub struct BlockfrostProvider {
     api: BlockfrostAPI,
     network: CardanoNetwork,
-    /// Rate limiter: max 8 concurrent requests (staying under 10/sec limit)
-    rate_limiter: Arc<Semaphore>,
+    /// Earliest time at which the next API request may start.
+    rate_limiter: Arc<Mutex<Instant>>,
     /// How many blocks behind the tip to report as latest.
     /// Prevents advancing past blocks that Blockfrost hasn't finished
     /// indexing for address-transaction queries.
@@ -118,6 +118,8 @@ impl Utxo {
 /// Prevents indefinite hangs when the API is unresponsive, which would
 /// block the relayer's prepare queue for the entire destination domain.
 const BLOCKFROST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Space request starts to stay below Blockfrost's 10 requests/second limit.
+const BLOCKFROST_REQUEST_INTERVAL: Duration = Duration::from_millis(110);
 
 impl BlockfrostProvider {
     /// Create a new Blockfrost provider
@@ -131,8 +133,7 @@ impl BlockfrostProvider {
         Self {
             api,
             network,
-            // Allow max 5 concurrent requests to stay under 10/sec limit
-            rate_limiter: Arc::new(Semaphore::new(5)),
+            rate_limiter: Arc::new(Mutex::new(Instant::now())),
             confirmation_block_delay,
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
@@ -158,17 +159,14 @@ impl BlockfrostProvider {
             .map_err(BlockfrostProviderError::from)
     }
 
-    /// Rate-limited delay between API calls
-    /// Blockfrost free tier limit is 10 req/sec, so we use 150ms delay with 5 concurrent
+    /// Globally space API request starts across all concurrent callers.
     async fn rate_limit(&self) {
-        let _permit = self
-            .rate_limiter
-            .acquire()
-            .await
-            .expect("rate limiter semaphore closed");
-        // 150ms delay with 5 concurrent = max ~33 req/sec theoretical,
-        // but with serial pagination this gives us breathing room
-        sleep(Duration::from_millis(150)).await;
+        let mut next_request = self.rate_limiter.lock().await;
+        let now = Instant::now();
+        if *next_request > now {
+            sleep(*next_request - now).await;
+        }
+        *next_request = Instant::now() + BLOCKFROST_REQUEST_INTERVAL;
     }
 
     /// Get the current network
@@ -229,14 +227,6 @@ impl BlockfrostProvider {
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         tracing::debug!("Address {} has no UTXOs (404)", address);
                         return Ok(all_utxos); // Return what we have so far (or empty)
-                    }
-                    // Handle 429 (rate limit) errors by returning what we have
-                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!("Rate limited while fetching UTXOs for {}, returning {} UTXOs collected so far", address, all_utxos.len());
-                        if all_utxos.is_empty() {
-                            return Err(e);
-                        }
-                        return Ok(all_utxos);
                     }
                     return Err(e);
                 }
@@ -641,6 +631,38 @@ impl BlockfrostProvider {
             .map_err(|e| BlockfrostProviderError::Deserialization(e.to_string()))
     }
 
+    /// Get the PlutusV3 cost model in canonical ledger order.
+    ///
+    /// Read from `cost_models_raw`, which is already a canonically ordered array.
+    /// The cost model must match the chain's exactly: the language view feeds the
+    /// script data hash, so a single missing or extra entry makes every script
+    /// transaction fail with `ScriptIntegrityHashMismatch`. The parameter set grows
+    /// at hard forks (350 entries at protocol 11.0), so it cannot be hardcoded.
+    #[instrument(skip(self))]
+    pub async fn get_plutus_v3_cost_model(&self) -> Result<Vec<i64>, BlockfrostProviderError> {
+        let params = self.get_protocol_parameters().await?;
+
+        let raw = params
+            .get("cost_models_raw")
+            .and_then(|c| c.get("PlutusV3"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                BlockfrostProviderError::Deserialization(
+                    "PlutusV3 cost model missing from cost_models_raw".to_string(),
+                )
+            })?;
+
+        raw.iter()
+            .map(|v| {
+                v.as_i64().ok_or_else(|| {
+                    BlockfrostProviderError::Deserialization(format!(
+                        "non-integer PlutusV3 cost model entry: {v}"
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// Get all script UTXOs (useful for finding mailbox, registry, ISM states)
     #[instrument(skip(self))]
     pub async fn get_script_utxos(
@@ -667,10 +689,10 @@ impl BlockfrostProvider {
         let mut page = 1;
         const PAGE_SIZE: usize = 100;
 
-        // Manually paginate with rate limiting between each page
+        // Newest-first allows recent range queries to stop before scanning full history.
         loop {
             self.rate_limit().await;
-            let pagination = Pagination::new(Order::Asc, page, PAGE_SIZE);
+            let pagination = Pagination::new(Order::Desc, page, PAGE_SIZE);
 
             let txs = match self
                 .with_timeout(self.api.addresses_transactions(address, pagination))
@@ -682,19 +704,12 @@ impl BlockfrostProvider {
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(result);
                     }
-                    // Handle 429 rate limit - return what we have if possible
-                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!(
-                            "Rate limited while fetching transactions, continuing with {} txs",
-                            result.len()
-                        );
-                        break;
-                    }
                     return Err(e);
                 }
             };
 
             let page_len = txs.len();
+            let mut reached_before_range = false;
 
             // Convert and filter each transaction immediately
             for tx in txs {
@@ -703,7 +718,8 @@ impl BlockfrostProvider {
                 // Filter by block range if specified
                 if let Some(from) = from_block {
                     if block_height < from {
-                        continue;
+                        reached_before_range = true;
+                        break;
                     }
                 }
                 if let Some(to) = to_block {
@@ -720,12 +736,13 @@ impl BlockfrostProvider {
                 });
             }
 
-            if page_len < PAGE_SIZE {
+            if reached_before_range || page_len < PAGE_SIZE {
                 break;
             }
             page += 1;
         }
 
+        result.sort_unstable_by_key(|tx| (tx.block_height, tx.tx_index));
         Ok(result)
     }
 
@@ -756,13 +773,6 @@ impl BlockfrostProvider {
                     let error_str = format!("{e:?}");
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(result);
-                    }
-                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!(
-                            "Rate limited while fetching asset transactions, continuing with {} txs",
-                            result.len()
-                        );
-                        break;
                     }
                     return Err(e);
                 }
@@ -920,14 +930,6 @@ impl BlockfrostProvider {
                     if error_str.contains("404") || error_str.contains("Not Found") {
                         return Ok(all_txs);
                     }
-                    // Handle 429 rate limit - return what we have
-                    if error_str.contains("429") || error_str.contains("Too Many Requests") {
-                        tracing::warn!(
-                            "Rate limited while fetching block txs, returning {} txs",
-                            all_txs.len()
-                        );
-                        break;
-                    }
                     return Err(e);
                 }
             };
@@ -1003,6 +1005,12 @@ pub struct TransactionRedeemer {
     pub fee: u64,
 }
 
+impl TransactionRedeemer {
+    pub fn is_spend_for_script(&self, script_hash: &str) -> bool {
+        self.purpose.eq_ignore_ascii_case("spend") && self.script_hash == script_hash
+    }
+}
+
 /// Block info
 #[derive(Debug, Clone)]
 pub struct BlockInfo {
@@ -1065,5 +1073,22 @@ mod tests {
         assert!(utxo.has_asset("abc123", "def456"));
         assert!(!utxo.has_asset("abc123", "other"));
         assert_eq!(utxo.lovelace(), 5000000);
+    }
+
+    #[test]
+    fn redeemer_matches_purpose_and_script_hash() {
+        let redeemer = TransactionRedeemer {
+            tx_index: 0,
+            purpose: "Spend".to_string(),
+            script_hash: "expected".to_string(),
+            redeemer_data_hash: String::new(),
+            datum_hash: String::new(),
+            unit_mem: 0,
+            unit_steps: 0,
+            fee: 0,
+        };
+
+        assert!(redeemer.is_spend_for_script("expected"));
+        assert!(!redeemer.is_spend_for_script("attacker"));
     }
 }

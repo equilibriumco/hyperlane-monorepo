@@ -129,7 +129,7 @@ impl CardanoInterchainGasPaymasterIndexer {
         };
 
         for redeemer in redeemers {
-            if redeemer.purpose != "Spend" {
+            if !redeemer.is_spend_for_script(&self.conf.igp_script_hash) {
                 continue;
             }
 

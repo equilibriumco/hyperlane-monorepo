@@ -362,8 +362,11 @@ impl CardanoMailboxIndexer {
                 "Redeemer purpose: {}, data_hash: {}",
                 redeemer.purpose, redeemer.redeemer_data_hash
             );
-            if redeemer.purpose != "spend" && redeemer.purpose != "Spend" {
-                info!("Skipping non-spend redeemer");
+            if !redeemer.is_spend_for_script(&self.conf.mailbox_script_hash) {
+                debug!(
+                    script_hash = redeemer.script_hash,
+                    "Skipping redeemer from another script"
+                );
                 continue;
             }
 

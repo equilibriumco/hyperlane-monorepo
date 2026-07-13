@@ -35,27 +35,6 @@ const VA_MIN_USABLE_UTXO: u64 = 5_000_000;
 const VA_DEFAULT_MEM: u64 = 14_000_000;
 const VA_DEFAULT_STEPS: u64 = 10_000_000_000;
 
-fn get_plutus_v3_cost_model() -> Vec<i64> {
-    vec![
-        100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4, 16000,
-        100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100, 16000, 100, 94375, 32,
-        132994, 32, 61462, 4, 72010, 178, 0, 1, 22151, 32, 91189, 769, 4, 2, 85848, 123203, 7305,
-        -900, 1716, 549, 57, 85848, 0, 1, 1, 1000, 42921, 4, 2, 24548, 29498, 38, 1, 898148, 27279,
-        1, 51775, 558, 1, 39184, 1000, 60594, 1, 141895, 32, 83150, 32, 15299, 32, 76049, 1, 13169,
-        4, 22100, 10, 28999, 74, 1, 28999, 74, 1, 43285, 552, 1, 44749, 541, 1, 33852, 32, 68246,
-        32, 72362, 32, 7243, 32, 7391, 32, 11546, 32, 85848, 123203, 7305, -900, 1716, 549, 57,
-        85848, 0, 1, 90434, 519, 0, 1, 74433, 32, 85848, 123203, 7305, -900, 1716, 549, 57, 85848,
-        0, 1, 1, 85848, 123203, 7305, -900, 1716, 549, 57, 85848, 0, 1, 955506, 213312, 0, 2,
-        270652, 22588, 4, 1457325, 64566, 4, 20467, 1, 4, 0, 141992, 32, 100788, 420, 1, 1, 81663,
-        32, 59498, 32, 20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32, 43053543, 10,
-        53384111, 14333, 10, 43574283, 26308, 10, 16000, 100, 16000, 100, 962335, 18, 2780678, 6,
-        442008, 1, 52538055, 3756, 18, 267929, 18, 76433006, 8868, 18, 52948122, 18, 1995836, 36,
-        3227919, 12, 901022, 1, 166917843, 4307, 36, 284546, 36, 158221314, 26549, 36, 74698472,
-        36, 333849714, 1, 254006273, 72, 2174038, 72, 2261318, 64571, 4, 207616, 8310, 4, 1293828,
-        28716, 63, 0, 1, 1006041, 43623, 251, 0, 1,
-    ]
-}
-
 #[derive(Debug)]
 pub struct CardanoValidatorAnnounce {
     provider: Arc<BlockfrostProvider>,
@@ -431,8 +410,11 @@ impl CardanoValidatorAnnounce {
             .chain_update(signing_hash.as_bytes())
             .finalize();
 
-        // Recovery ID from v: v=27 → 0, v=28 → 1
-        let recovery_id = RecoveryId::try_from((sig.v as u8).wrapping_sub(27)).map_err(|e| {
+        // Accept both normalized (0/1) and legacy Ethereum (27/28) recovery IDs.
+        let normalized_v = normalize_recovery_id(sig.v).ok_or_else(|| {
+            ChainCommunicationError::from_other_str(&format!("Invalid recovery ID v={}", sig.v))
+        })?;
+        let recovery_id = RecoveryId::try_from(normalized_v).map_err(|e| {
             ChainCommunicationError::from_other_str(&format!(
                 "Invalid recovery ID v={}: {e}",
                 sig.v
@@ -563,6 +545,13 @@ impl CardanoValidatorAnnounce {
             .await
             .map_err(ChainCommunicationError::from_other)?;
 
+        // Fetched before the (synchronous) closure below, which cannot await.
+        let cost_model = self
+            .provider
+            .get_plutus_v3_cost_model()
+            .await
+            .map_err(ChainCommunicationError::from_other)?;
+
         // Build initial TX with placeholder ExUnits and fee
         let build_tx = |fee: u64, ex_units: ExUnits| -> ChainResult<Vec<u8>> {
             let va_output =
@@ -601,8 +590,9 @@ impl CardanoValidatorAnnounce {
                 ));
             }
 
-            // Cost model
-            staging = staging.language_view(ScriptKind::PlutusV3, get_plutus_v3_cost_model());
+            // Cost model must come from live protocol params: a stale one produces a
+            // wrong script data hash and the ledger rejects the announce transaction.
+            staging = staging.language_view(ScriptKind::PlutusV3, cost_model.clone());
 
             // Disclosed signer
             let payer_hash: Hash<28> = Hash::new(*payer.payment_credential_hash());
@@ -712,6 +702,28 @@ impl CardanoValidatorAnnounce {
             gas_used: U256::from(final_fee),
             gas_price: FixedPointNumber::zero(),
         })
+    }
+}
+
+fn normalize_recovery_id(v: u64) -> Option<u8> {
+    match v {
+        0 | 1 => Some(v as u8),
+        27 | 28 => Some((v - 27) as u8),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_recovery_id;
+
+    #[test]
+    fn normalizes_both_recovery_id_conventions() {
+        assert_eq!(normalize_recovery_id(0), Some(0));
+        assert_eq!(normalize_recovery_id(1), Some(1));
+        assert_eq!(normalize_recovery_id(27), Some(0));
+        assert_eq!(normalize_recovery_id(28), Some(1));
+        assert_eq!(normalize_recovery_id(29), None);
     }
 }
 

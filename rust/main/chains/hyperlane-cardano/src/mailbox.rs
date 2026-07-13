@@ -3,9 +3,7 @@ use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
 use crate::recipient_resolver::RecipientResolver;
 use crate::tx_builder::{HyperlaneTxBuilder, ProcessTxComponents, TxBuilderError};
-use crate::types::{
-    hyperlane_address_to_policy_id, script_hash_to_h256, MailboxDatum, MerkleTreeState,
-};
+use crate::types::{script_hash_to_h256, MailboxDatum, MerkleTreeState};
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use hyperlane_core::accumulator::incremental::IncrementalMerkle;
@@ -460,16 +458,14 @@ impl Mailbox for CardanoMailbox {
 
     async fn recipient_ism(&self, recipient: H256) -> ChainResult<H256> {
         let recipient_bytes: [u8; 32] = recipient.into();
-        if hyperlane_address_to_policy_id(&recipient_bytes).is_some() {
-            match self.resolver.resolve(&recipient_bytes).await {
-                Ok(resolved) => {
-                    if let Some(ism_hash) = resolved.ism {
-                        return Ok(script_hash_to_h256(&ism_hash));
-                    }
+        match self.resolver.resolve(&recipient_bytes).await {
+            Ok(resolved) => {
+                if let Some(ism) = resolved.ism {
+                    return Ok(script_hash_to_h256(&ism.script_hash));
                 }
-                Err(e) => {
-                    debug!("Could not resolve recipient ISM, using default: {e}");
-                }
+            }
+            Err(e) => {
+                debug!("Could not resolve recipient ISM, using default: {e}");
             }
         }
         self.default_ism().await
