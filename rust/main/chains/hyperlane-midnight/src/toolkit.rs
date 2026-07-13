@@ -9,7 +9,19 @@ use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512};
 
 use crate::HyperlaneMidnightError;
 
-const SUBMIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the relayer waits for the submitter subprocess to build the handle
+/// proof and land the tx. A real handle proof (multisig + ZK verify) can take
+/// many minutes on a RAM-constrained host, so this is overridable via
+/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` (default 120s) — mirrors the proof server's
+/// own `MIDNIGHT_PROOF_SERVER_JOB_TIMEOUT`.
+fn submit_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("MIDNIGHT_SUBMIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(120),
+    )
+}
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(120);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -82,7 +94,9 @@ pub struct WireMetadata {
     pub root: String,
     /// Merkle tree index.
     pub index: u32,
-    /// Validator signatures, padded to 16 entries.
+    /// Validator signatures — the real, quorum-sized set the metadata carried
+    /// (at most `MAX_VALIDATORS`), forwarded unpadded. The Midnight submitter
+    /// pads the on-chain `Vector<4>` by repeating slot 0.
     pub signatures: Vec<String>,
 }
 
@@ -178,7 +192,7 @@ pub async fn submit_handle(
     ctx: &ToolkitContext,
     request: &SubmitRequest<'_>,
 ) -> ChainResult<ToolkitOutcome> {
-    let raw = run_submitter(ctx, request, SUBMIT_TIMEOUT).await?;
+    let raw = run_submitter(ctx, request, submit_timeout()).await?;
     let response: SubmitResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),
@@ -670,7 +684,7 @@ mod tests {
             merkle_tree_hook: "0x00".to_string(),
             root: "0x11".to_string(),
             index: 7,
-            signatures: vec!["0x22".to_string(); 16],
+            signatures: vec!["0x22".to_string(); 2],
         }
     }
 

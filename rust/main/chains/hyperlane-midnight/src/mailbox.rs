@@ -11,7 +11,14 @@ use hyperlane_core::{
 use crate::toolkit::{self, ToolkitContext, WireMetadata};
 use crate::{ConnectionConf, HyperlaneMidnightError, MidnightIndexerClient, MidnightProvider};
 
-const MAX_SIGNATURES: usize = 16;
+// Upper bound on how many validator signatures a metadata blob may carry,
+// matching the on-chain `MessageIdMultisigIsm.MAX_VALIDATORS` (#22 reduced this
+// from 16 to 4 to keep the handle proof tractable). The relayer forwards the
+// real, quorum-sized signature set (typically `threshold` entries) verbatim;
+// the Midnight submitter (`relayer/src/checkpoint-digest.ts`) is what pads the
+// on-chain `Vector<4, ...>` by repeating slot 0, so DO NOT pad here — a
+// zero-signature pad would recover to a garbage pubkey and be rejected.
+const MAX_SIGNATURES: usize = 4;
 const SIGNATURE_LEN: usize = 65;
 const METADATA_HEADER_LEN: usize = 32 + 32 + 4;
 
@@ -237,7 +244,7 @@ impl Mailbox for MidnightMailbox {
     }
 }
 
-// Layout: merkle_tree_hook (32) || root (32) || index (u32 BE, 4) || sigs (65 each, up to 16).
+// Layout: merkle_tree_hook (32) || root (32) || index (u32 BE, 4) || sigs (65 each, up to 4).
 fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
     if bytes.len() < METADATA_HEADER_LEN {
         return Err(HyperlaneMidnightError::Other(format!(
@@ -280,11 +287,8 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
         })
         .collect();
 
-    let padding = format!("0x{}", hex::encode([0u8; SIGNATURE_LEN]));
-    while signatures.len() < MAX_SIGNATURES {
-        signatures.push(padding.clone());
-    }
-
+    // No padding: forward exactly the real signatures the metadata carried.
+    // The Midnight submitter pads the on-chain `Vector<4>` by repeating slot 0.
     Ok(WireMetadata {
         merkle_tree_hook,
         root,
@@ -294,7 +298,8 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
 }
 
 /// Reorder the real signatures in `metadata` by their signer's index in
-/// `validators`, then re-pad to `MAX_SIGNATURES` with zero signatures.
+/// `validators`. No padding is added — the Midnight submitter pads the
+/// on-chain `Vector<4>` by repeating slot 0.
 /// Errors if any signature recovers to an address not present in
 /// `validators` — that indicates either a malformed validator config or a
 /// genuinely invalid signature; either way the on-chain ISM would reject
@@ -341,9 +346,6 @@ fn sort_signatures_by_validator_index(
     indexed.sort_by_key(|(i, _)| *i);
 
     metadata.signatures = indexed.into_iter().map(|(_, s)| s).collect();
-    while metadata.signatures.len() < MAX_SIGNATURES {
-        metadata.signatures.push(zero_sig_hex.clone());
-    }
     Ok(())
 }
 
@@ -423,10 +425,10 @@ mod tests {
         assert_eq!(parsed.merkle_tree_hook, format!("0x{}", hex::encode([0xABu8; 32])));
         assert_eq!(parsed.root, format!("0x{}", hex::encode([0xCDu8; 32])));
         assert_eq!(parsed.index, 42);
-        assert_eq!(parsed.signatures.len(), MAX_SIGNATURES);
+        // No padding: exactly the two real signatures the blob carried.
+        assert_eq!(parsed.signatures.len(), 2);
         assert_eq!(parsed.signatures[0], format!("0x{}", hex::encode([0x11u8; SIGNATURE_LEN])));
         assert_eq!(parsed.signatures[1], format!("0x{}", hex::encode([0x22u8; SIGNATURE_LEN])));
-        assert_eq!(parsed.signatures[2], format!("0x{}", hex::encode([0u8; SIGNATURE_LEN])));
     }
 
     #[test]
@@ -462,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sort_signatures_reorders_by_validator_index_and_repads() {
+    async fn sort_signatures_reorders_by_validator_index_and_drops_padding() {
         use ethers::signers::{LocalWallet, Signer};
 
         let k0: LocalWallet =
@@ -500,20 +502,16 @@ mod tests {
         let sig1_hex = format!("0x{}", hex::encode(<[u8; 65]>::from(sig1)));
         let zero_hex = format!("0x{}", hex::encode([0u8; SIGNATURE_LEN]));
 
-        // Insert signatures in REVERSE validator-index order, plus padding.
-        metadata.signatures = vec![sig1_hex.clone(), sig0_hex.clone()];
-        while metadata.signatures.len() < MAX_SIGNATURES {
-            metadata.signatures.push(zero_hex.clone());
-        }
+        // Insert signatures in REVERSE validator-index order, plus a stale zero
+        // pad that the sort must drop (it never re-pads).
+        metadata.signatures = vec![sig1_hex.clone(), sig0_hex.clone(), zero_hex.clone()];
 
         sort_signatures_by_validator_index(&message, &mut metadata, &validators).unwrap();
 
-        assert_eq!(metadata.signatures.len(), MAX_SIGNATURES);
+        // Reordered to validator-index order, zero padding dropped, no re-pad.
+        assert_eq!(metadata.signatures.len(), 2);
         assert_eq!(metadata.signatures[0], sig0_hex);
         assert_eq!(metadata.signatures[1], sig1_hex);
-        for s in metadata.signatures.iter().skip(2) {
-            assert_eq!(*s, zero_hex);
-        }
     }
 
     #[tokio::test]

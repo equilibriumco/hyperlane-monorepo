@@ -310,6 +310,7 @@ mod tests {
     // yields, and that each carries `sequence == leaf_index` and the right
     // message id. Exercised offline against the committed dispatched fixture.
     #[test]
+    #[ignore = "night-state-dispatched fixture is ledger-8 (v6) + pre-#22 (32-byte pubkey) contract-state; regenerate for ledger-9.1 v8 / 64-byte registry via contracts/tests/utils/generate-dispatch-fixture.ts"]
     fn insertions_respect_range_and_sequence() {
         let hex = include_str!("../tests/fixtures/night-state-dispatched.hex").trim();
         let bytes = hex::decode(hex).expect("fixture is valid hex");
@@ -415,6 +416,7 @@ mod tests {
     // vector describe one dispatch state (drift guard), then asserts the Rust
     // signing path matches the EVM oracle byte-for-byte.
     #[test]
+    #[ignore = "night-state fixture is ledger-8 (v6) + pre-#22 (32-byte pubkey) contract-state; regenerate for ledger-9.1 v8 / 64-byte registry via contracts/tests/utils/generate-*.ts"]
     fn checkpoint_signing_matches_evm_reference_vector() {
         use hyperlane_core::{CheckpointWithMessageId, Signable, Signature, SignedType, H160};
         use serde::Deserialize;

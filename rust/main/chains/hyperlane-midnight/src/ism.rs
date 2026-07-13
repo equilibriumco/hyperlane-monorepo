@@ -138,11 +138,13 @@ impl MultisigIsm for MidnightMultisigIsm {
     ) -> ChainResult<(Vec<H256>, u8)> {
         let address = format!("{:x}", self.address);
         let state = self.provider.indexer().read_ism_state(&address).await?;
-        // On-chain validators are `Bytes<20>` (ETH addresses); the multisig
-        // metadata pipeline expects H256, so left-pad each with 12 zero
-        // bytes — Ethereum's standard `addressToBytes32` convention used
-        // elsewhere in the codebase. Validators and threshold come from the
-        // same single read, so they cannot drift apart.
+        // On-chain validators are `Bytes<64>` secp256k1 pubkeys (#22); the
+        // state decoder derives each 20-byte ETH address as
+        // `keccak256(pubkey)[12..]`. The multisig metadata pipeline expects
+        // H256, so left-pad each with 12 zero bytes — Ethereum's standard
+        // `addressToBytes32` convention used elsewhere in the codebase.
+        // Validators and threshold come from the same single read, so they
+        // cannot drift apart.
         let padded: Vec<H256> = state
             .validators
             .iter()

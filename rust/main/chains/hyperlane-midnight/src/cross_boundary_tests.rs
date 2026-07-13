@@ -162,10 +162,11 @@ async fn process_request_json_pins_wire_shape() {
     assert_eq!(md["index"], 7);
 
     let sigs = md["signatures"].as_array().unwrap();
-    assert_eq!(sigs.len(), 16);
+    // No zero-padding: the relayer forwards exactly the real signatures; the
+    // Midnight submitter pads the on-chain `Vector<4>` by repeating slot 0 (#22).
+    assert_eq!(sigs.len(), 2);
     assert_eq!(sigs[0].as_str().unwrap(), format!("0x{}", hex::encode([0x11; 65])));
     assert_eq!(sigs[1].as_str().unwrap(), format!("0x{}", hex::encode([0x22; 65])));
-    assert_eq!(sigs[2].as_str().unwrap(), format!("0x{}", hex::encode([0u8; 65])));
 }
 
 #[tokio::test]

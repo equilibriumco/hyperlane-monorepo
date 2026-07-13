@@ -90,7 +90,10 @@ const ENCODED_MESSAGE_LEN: usize = 141;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsmState {
     /// Validator addresses (20-byte ETH addresses), ordered by on-chain
-    /// slot index 0..validator_count.
+    /// slot index 0..validator_count. The on-chain registry stores each
+    /// validator as a `Bytes<64>` secp256k1 public key (X_be || Y_be, the
+    /// uncompressed SEC1 body without the 0x04 tag, #22); the decoder
+    /// derives the address as `keccak256(pubkey)[12..]`.
     pub validators: Vec<[u8; 20]>,
     /// Number of populated validator slots.
     pub validator_count: u8,
@@ -160,16 +163,25 @@ fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     }
 }
 
-/// Read a `Bytes<20>` leaf (an ETH validator address).
-fn read_bytes20(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 20]> {
+/// Read a `Bytes<64>` leaf (a validator's secp256k1 public key, stored as
+/// X_be(32) || Y_be(32) — the uncompressed SEC1 body without the 0x04 tag).
+/// The runtime trims trailing zero bytes from a stored `Bytes<N>` leaf
+/// (`From<[u8; N]> for ValueAtom` drops them), so a pubkey whose Y coordinate
+/// ends in zero bytes is stored shorter than 64; right-pad back to the fixed
+/// width, the same trim/pad handling as the `Bytes<141>` message and
+/// `Bytes<32>` atom decoders. Only an over-long value is an error.
+fn read_bytes64(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 64]> {
     let bytes = cell_atom(node)?;
-    <[u8; 20]>::try_from(bytes).map_err(|_| {
-        HyperlaneMidnightError::StateDecode(format!(
-            "expected 20-byte address, got {} bytes",
+    if bytes.len() > 64 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected 64-byte secp256k1 public key, got {} bytes",
             bytes.len()
         ))
-        .into()
-    })
+        .into());
+    }
+    let mut pubkey = [0u8; 64];
+    pubkey[..bytes.len()].copy_from_slice(bytes);
+    Ok(pubkey)
 }
 
 /// Read a `Counter` / `Uint<64>` leaf. Compact stores it as a little-endian
@@ -214,8 +226,12 @@ fn read_bytes32(node: &StateValue<DefaultDB>) -> ChainResult<H256> {
     })
 }
 
-/// Read the `validators: Map<Uint<8>, Bytes<20>>` ledger field, returned in
-/// ascending slot-index order (the order the on-chain multisig expects).
+/// Read the `validators: Map<Uint<8>, Bytes<64>>` ledger field — each value
+/// is a secp256k1 public key (X_be || Y_be, the uncompressed SEC1 body the
+/// in-circuit `secp256k1EcdsaVerify` checks against) — and derive each
+/// validator's 20-byte ETH address as `keccak256(pubkey)[12..]`, the standard
+/// Ethereum address derivation. Returned in ascending slot-index order (the
+/// order the on-chain multisig expects).
 fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
     let map = match node {
         StateValue::Map(m) => m,
@@ -238,7 +254,10 @@ fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
             .and_then(|atom| atom.0.first())
             .copied()
             .unwrap_or(0);
-        let addr = read_bytes20(&pair.1)?;
+        let pubkey = read_bytes64(&pair.1)?;
+        let digest = ethers::utils::keccak256(pubkey);
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&digest[12..]);
         entries.push((idx, addr));
     }
     entries.sort_by_key(|(idx, _)| *idx);
@@ -1050,10 +1069,131 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
+    /// Serialize a synthetic ISM `StateValue` tree into the tagged
+    /// `ContractState` wire bytes. The root mirrors the deployed layout: a
+    /// 2-element array whose `[0]` element holds the MessageIdMultisigIsm
+    /// module, with `validators` at `[0,7]`, `validator_count` at `[0,8]`,
+    /// `threshold` at `[0,9]` and `module_type` at `[0,10]`. Slots before
+    /// `validators` are filled with `Null` so the pinned paths line up.
+    fn ism_state_bytes(
+        validators: StateValue<DefaultDB>,
+        validator_count: u8,
+        threshold: u8,
+        module_type: u8,
+    ) -> Vec<u8> {
+        let mut ism = vec![StateValue::Null; 7]; // [0,0]..[0,6]
+        ism.push(validators); // [0,7]
+        ism.push(cell(validator_count)); // [0,8]
+        ism.push(cell(threshold)); // [0,9]
+        ism.push(cell(module_type)); // [0,10]
+        let root = array(vec![
+            array(ism),       // [0] ownership + ISM module
+            StateValue::Null, // [1] Mailbox module (unused here)
+        ]);
+        let cs = ContractState::<DefaultDB> {
+            data: ChargedState::new(root),
+            ..ContractState::default()
+        };
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&cs, &mut bytes).expect("serialize synthetic state");
+        bytes
+    }
+
+    /// Real secp256k1 keypair for the pubkey-registry tests: the 64-byte
+    /// registry value (X_be || Y_be, the uncompressed SEC1 body without the
+    /// 0x04 tag — exactly what the contract's `enrollValidator` stores) plus
+    /// the ETH address derived from it, cross-checked against ethers' own
+    /// independent secret-key -> address path so the derivation under test
+    /// cannot silently drift.
+    fn validator_keypair(priv_hex: &str) -> ([u8; 64], [u8; 20]) {
+        use ethers::core::k256::elliptic_curve::sec1::ToEncodedPoint;
+        use ethers::core::k256::PublicKey;
+        use ethers::signers::{LocalWallet, Signer};
+
+        let wallet: LocalWallet = priv_hex.parse().unwrap();
+        let point = PublicKey::from(&wallet.signer().verifying_key()).to_encoded_point(false);
+        assert_eq!(point.as_bytes()[0], 0x04, "uncompressed SEC1 tag");
+        let pubkey: [u8; 64] = point.as_bytes()[1..].try_into().unwrap();
+        // The registry-value -> identity derivation under test.
+        let derived: [u8; 20] = ethers::utils::keccak256(pubkey)[12..].try_into().unwrap();
+        assert_eq!(derived, wallet.address().0, "keccak256(pubkey)[12..]");
+        (pubkey, derived)
+    }
+
+    // The validators registry stores `Bytes<64>` secp256k1 pubkeys (#22);
+    // the decoder must derive each ETH address as `keccak256(pubkey)[12..]`
+    // and return them in ascending slot-index order regardless of the map's
+    // iteration order (entries are inserted out of order here).
+    #[test]
+    fn decodes_synthetic_ism_state_from_pubkey_registry() {
+        let (pk0, addr0) =
+            validator_keypair("1111111111111111111111111111111111111111111111111111111111111111");
+        let (pk1, addr1) =
+            validator_keypair("2222222222222222222222222222222222222222222222222222222222222222");
+
+        // `validators: Map<Uint<8>, Bytes<64>>`, keyed by slot index; slot 1
+        // inserted first to exercise the sort-by-key ordering.
+        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
+            .insert(AlignedValue::from(1u8), cell(pk1))
+            .insert(AlignedValue::from(0u8), cell(pk0));
+        let bytes = ism_state_bytes(StateValue::Map(map), 2, 2, 5);
+
+        let ism = decode_ism_state(&bytes).expect("decode ISM state");
+        assert_eq!(ism.module_type, 5, "module_type");
+        assert_eq!(ism.threshold, 2, "threshold");
+        assert_eq!(ism.validator_count, 2, "validator_count");
+        assert_eq!(
+            ism.validators,
+            vec![addr0, addr1],
+            "addresses derived from the 64-byte pubkeys, in slot order"
+        );
+    }
+
+    // The runtime trims trailing zero bytes from a stored `Bytes<64>` leaf
+    // (`From<[u8; N]> for ValueAtom` drops them), so a pubkey whose Y
+    // coordinate ends in 0x00 is stored SHORT; `read_bytes64` must right-pad
+    // back to 64 before hashing, or such a validator (~1 in 256 keys) would
+    // fail to decode. Synthetic bytes rather than a real curve point — the
+    // decoder never validates the point, and forcing a zero tail pins the
+    // pad branch deterministically.
+    #[test]
+    fn decodes_pubkey_with_trailing_zeros_trimmed_on_store() {
+        let mut pubkey = [0x5Au8; 64];
+        pubkey[61..].fill(0);
+        // Confirm the store actually trims, so this exercises the pad branch.
+        assert_eq!(
+            ValueAtom::from(pubkey).0.len(),
+            61,
+            "expected the trailing-zero tail to be trimmed on store"
+        );
+        let expected: [u8; 20] = ethers::utils::keccak256(pubkey)[12..].try_into().unwrap();
+
+        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
+            .insert(AlignedValue::from(0u8), cell(pubkey));
+        let bytes = ism_state_bytes(StateValue::Map(map), 1, 1, 5);
+
+        let ism = decode_ism_state(&bytes).expect("decode ISM state");
+        assert_eq!(
+            ism.validators,
+            vec![expected],
+            "trimmed leaf must right-pad back to the full 64-byte pubkey before hashing"
+        );
+    }
+
     // Real `night` state captured from the local devnet indexer
     // (deploy with validators 0x19e7../0x1563../0x5cbd.., threshold 2,
     // module_type 5).
+    //
+    // IGNORED until the fixture is regenerated: this blob predates #22, so
+    // its `validators` map still stores 20-byte ETH addresses. The decoder
+    // now expects `Bytes<64>` secp256k1 pubkeys and derives the address via
+    // `keccak256(pubkey)[12..]`, so decoding the stale blob yields garbage
+    // addresses. Once the contracts repo regenerates `night-state.hex` from
+    // a deploy that enrolls the SAME three validator keys as 64-byte pubkeys,
+    // the derived addresses below are unchanged — drop the `#[ignore]`
+    // without touching the assertions.
     #[test]
+    #[ignore = "night-state.hex fixture must be regenerated for 64-byte pubkey registry (#22) — see contracts repo"]
     fn decodes_live_night_ism_state() {
         let hex = include_str!("../tests/fixtures/night-state.hex").trim();
         let bytes = hex::decode(hex).expect("fixture is valid hex");
@@ -1088,6 +1228,7 @@ mod tests {
     // root check is skipped; with dispatches present it is a full decode +
     // root-parity test.
     #[test]
+    #[ignore = "night-state fixture is ledger-8 (v6) + pre-#22 (32-byte pubkey) contract-state; regenerate for ledger-9.1 v8 / 64-byte registry via contracts/tests/utils/generate-*.ts"]
     fn decodes_live_night_merkle_state() {
         use hyperlane_core::accumulator::incremental::IncrementalMerkle;
 
@@ -1128,6 +1269,7 @@ mod tests {
     // leaves means the root is a real branch hash `keccak(leaf0 || leaf1)`, not
     // a trivial single-leaf root.
     #[test]
+    #[ignore = "night-state-dispatched fixture is ledger-8 (v6) + pre-#22 (32-byte pubkey) contract-state; regenerate for ledger-9.1 v8 / 64-byte registry via contracts/tests/utils/generate-dispatch-fixture.ts"]
     fn decodes_dispatched_night_merkle_state() {
         use hyperlane_core::accumulator::incremental::IncrementalMerkle;
 
@@ -1170,6 +1312,7 @@ mod tests {
     //     one-byte atom), pinning that a zero field keeps its atom slot so
     //     positional decoding of the following field stays aligned.
     #[test]
+    #[ignore = "igp-state fixture is ledger-8 (v6) contract-state; regenerate for ledger-9.1 v8 via contracts/tests/utils/generate-igp-fixture.ts"]
     fn decodes_igp_gas_payments_fixture() {
         let hex = include_str!("../tests/fixtures/igp-state.hex").trim();
         let bytes = hex::decode(hex).expect("fixture is valid hex");
