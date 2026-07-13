@@ -467,10 +467,7 @@ async fn query_message(
             };
 
             // Process redeemer: constructor == 1, fields[2].bytes == message_id
-            let constructor = datum
-                .json_value
-                .get("constructor")
-                .and_then(|c| c.as_u64());
+            let constructor = datum.json_value.get("constructor").and_then(|c| c.as_u64());
             if constructor != Some(1) {
                 continue;
             }
@@ -497,10 +494,7 @@ async fn query_message(
                     .unwrap_or_else(|| tx.block_time.to_string());
                 println!("  Time:       {}", datetime);
 
-                println!(
-                    "\n  Explorer: {}",
-                    ctx.explorer_tx_url(&tx.tx_hash)
-                );
+                println!("\n  Explorer: {}", ctx.explorer_tx_url(&tx.tx_hash));
                 return Ok(());
             }
         }

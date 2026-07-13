@@ -837,10 +837,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
         state_nft_script_cbor: &[u8],     // state_nft applied script (one-shot)
         recipient_script_cbor: &[u8],     // recipient validator (e.g. greeting) for ref UTXO
         script_address: &str,
-        config_asset_name: &[u8],  // recipient's script hash bytes (28 bytes) — asset name
-        config_datum_cbor: &[u8],  // Option<ScriptHash> datum for config UTXO
-        state_datum_cbor: &[u8],   // initial state datum (e.g. GreetingDatum)
-        owner_pkh: &[u8; 28],      // required signer (passes greeting's Init check)
+        config_asset_name: &[u8], // recipient's script hash bytes (28 bytes) — asset name
+        config_datum_cbor: &[u8], // Option<IsmConfig> datum for config UTXO
+        state_datum_cbor: &[u8],  // initial state datum (e.g. GreetingDatum)
+        owner_pkh: &[u8; 28],     // required signer (passes greeting's Init check)
         state_output_lovelace: u64,
         ref_output_lovelace: u64,
     ) -> Result<BuiltTransaction> {
@@ -897,7 +897,9 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let fee_estimate = 3_500_000u64;
         let total_outputs = min_config_lovelace + state_output_lovelace + ref_output_lovelace;
         let available = init_signal_utxo.lovelace + fee_utxo.lovelace;
-        let change = available.saturating_sub(total_outputs).saturating_sub(fee_estimate);
+        let change = available
+            .saturating_sub(total_outputs)
+            .saturating_sub(fee_estimate);
 
         let mut staging = StagingTransaction::new()
             // init-signal UTXO (at script address, spent with Init redeemer)
@@ -933,12 +935,18 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(canonical_policy),
                 build_mint_redeemer(),
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .add_mint_redeemer(
                 Hash::new(state_policy),
                 build_mint_redeemer(),
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             // Spend redeemer for init-signal UTXO (Init = Constr 0 [])
             .add_spend_redeemer(
@@ -947,12 +955,19 @@ impl<'a> HyperlaneTxBuilder<'a> {
                     init_signal_utxo.output_index as u64,
                 ),
                 init_redeemer,
-                Some(ExUnits { mem: 1_000_000, steps: 500_000_000 }),
+                Some(ExUnits {
+                    mem: 1_000_000,
+                    steps: 500_000_000,
+                }),
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
-            .network_id(if matches!(self.network, Network::Testnet) { 0 } else { 1 });
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
 
         if change >= 1_000_000 {
             staging = staging.output(Output::new(payer_addr, change));

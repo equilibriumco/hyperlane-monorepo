@@ -449,6 +449,21 @@ async fn finalize_warp_deployment(
     let warp_route_script = hex::decode(&deploy_ctx.warp_route_applied.compiled_code)
         .with_context(|| "Invalid warp route script CBOR")?;
 
+    // The reference-script output must satisfy the ledger's min-UTxO, which scales
+    // with script size and coinsPerUTxOByte. Both grow at protocol updates, so this
+    // must be derived from live params rather than pinned to a constant.
+    let params = deploy_ctx.client.get_protocol_params().await?;
+    let ref_output_lovelace = crate::commands::deploy::calculate_min_lovelace_for_ref_script(
+        warp_route_script.len(),
+        params.coins_per_utxo_byte,
+    );
+    println!(
+        "  Reference script output: {} ADA ({} bytes, {} lovelace/byte)",
+        ref_output_lovelace / 1_000_000,
+        warp_route_script.len(),
+        params.coins_per_utxo_byte
+    );
+
     let tx_builder = HyperlaneTxBuilder::new(&deploy_ctx.client, ctx.pallas_network());
     let warp_tx = tx_builder
         .build_init_recipient_two_utxo_tx(
@@ -460,7 +475,7 @@ async fn finalize_warp_deployment(
             &deploy_ctx.warp_address,
             warp_datum,
             5_000_000,
-            20_000_000, // Increased to cover minUTxO with ~4KB script + NFT
+            ref_output_lovelace,
         )
         .await?;
 
@@ -490,7 +505,7 @@ async fn finalize_warp_deployment(
             reference_script_utxo: Some(ReferenceScriptUtxo {
                 tx_hash: warp_tx_hash.clone(),
                 output_index: 1,
-                lovelace: 20_000_000, // Matches ref_output_lovelace above
+                lovelace: ref_output_lovelace,
             }),
             token_policy: extra_info
                 .get("token_policy")
@@ -759,13 +774,16 @@ async fn deploy_synthetic_route(
     // Prepare deployment context (shared with collateral/native routes)
     let deploy_ctx = prepare_warp_deployment(ctx).await?;
 
-    // Compute synthetic_token policy (parameterized by warp_route_hash)
+    // Bind the synthetic policy to both warp code and this route's unique state NFT.
     let warp_route_param_cbor = encode_script_hash_param(&deploy_ctx.warp_route_applied.policy_id)?;
-    let synthetic_token_applied = apply_validator_param(
+    let warp_state_param_cbor = encode_script_hash_param(&deploy_ctx.warp_nft_applied.policy_id)?;
+    let warp_route_param_hex = hex::encode(&warp_route_param_cbor);
+    let warp_state_param_hex = hex::encode(&warp_state_param_cbor);
+    let synthetic_token_applied = apply_validator_params(
         &ctx.contracts_dir,
         "synthetic_token",
         "synthetic_token",
-        &hex::encode(&warp_route_param_cbor),
+        &[&warp_route_param_hex, &warp_state_param_hex],
     )?;
     let synthetic_policy_id = &synthetic_token_applied.policy_id;
     println!("  Synthetic Token Policy: {}", synthetic_policy_id.green());
@@ -2292,14 +2310,24 @@ async fn transfer(
         );
 
         // Load and add the minting policy script
-        // The synthetic minting policy is parameterized by the warp route hash
+        // The synthetic policy is bound to this route's code and state NFT.
         let warp_hash_param = encode_script_hash_param(warp_script_hash)?;
-        let mint_policy_applied = apply_validator_param(
+        let warp_policy_param = encode_script_hash_param(&warp_policy_id)?;
+        let warp_hash_param_hex = hex::encode(&warp_hash_param);
+        let warp_policy_param_hex = hex::encode(&warp_policy_param);
+        let mint_policy_applied = apply_validator_params(
             &ctx.contracts_dir,
             "synthetic_token",
             "synthetic_token",
-            &hex::encode(&warp_hash_param),
+            &[&warp_hash_param_hex, &warp_policy_param_hex],
         )?;
+        if mint_policy_applied.policy_id.as_str() != minting_policy {
+            return Err(anyhow!(
+                "Synthetic policy parameter mismatch: datum={}, computed={}",
+                minting_policy,
+                mint_policy_applied.policy_id
+            ));
+        }
         let mint_script = hex::decode(&mint_policy_applied.compiled_code)?;
         staging = staging.script(ScriptKind::PlutusV3, mint_script);
 
@@ -2761,8 +2789,9 @@ fn extract_u32_for_transfer(data: &PlutusData) -> Result<u32> {
         PlutusData::BigInt(BigInt::Int(i)) => {
             let inner = &i.0;
             match i64::try_from(*inner) {
-                Ok(val) => u32::try_from(val)
-                    .map_err(|_| anyhow!("Integer out of u32 range: {}", val)),
+                Ok(val) => {
+                    u32::try_from(val).map_err(|_| anyhow!("Integer out of u32 range: {}", val))
+                }
                 Err(_) => Err(anyhow!("Integer too large for i64")),
             }
         }
@@ -2784,10 +2813,10 @@ fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
 /// Deploy the synthetic minting policy as a reference script UTXO
 ///
 /// This is required for the relayer to mint synthetic tokens when processing inbound transfers.
-/// The minting policy is parameterized by the warp route script hash, so we need to:
+/// The minting policy is parameterized by the warp route script hash and state NFT policy, so we need to:
 /// 1. Find the synthetic warp route by its NFT policy
 /// 2. Extract the warp route script hash from its address
-/// 3. Apply the parameter to the synthetic_token minting policy
+/// 3. Apply both parameters to the synthetic_token minting policy
 /// 4. Deploy the resulting script as a reference script UTXO with a marker NFT
 async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) -> Result<()> {
     println!(
@@ -2937,11 +2966,14 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
     // Step 4: Compute the minting policy script
     println!("\n{}", "Step 4: Computing minting policy script...".cyan());
     let warp_hash_param = encode_script_hash_param(&warp_route_hash)?;
-    let mint_policy_applied = apply_validator_param(
+    let warp_policy_param = encode_script_hash_param(warp_policy)?;
+    let warp_hash_param_hex = hex::encode(&warp_hash_param);
+    let warp_policy_param_hex = hex::encode(&warp_policy_param);
+    let mint_policy_applied = apply_validator_params(
         &ctx.contracts_dir,
         "synthetic_token",
         "synthetic_token",
-        &hex::encode(&warp_hash_param),
+        &[&warp_hash_param_hex, &warp_policy_param_hex],
     )?;
 
     // Verify the computed policy ID matches the one in the datum

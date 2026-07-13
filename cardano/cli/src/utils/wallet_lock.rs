@@ -33,7 +33,8 @@ impl WalletLock {
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
-            return Err(err).with_context(|| format!("Failed to acquire wallet lock: {}", lock_path));
+            return Err(err)
+                .with_context(|| format!("Failed to acquire wallet lock: {}", lock_path));
         }
 
         Ok(Self { _file: file })

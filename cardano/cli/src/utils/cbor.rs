@@ -391,18 +391,21 @@ pub fn build_igp_datum(
 
 /// Build an ISM config datum for the canonical config NFT UTXO.
 ///
-/// Encodes `Option<ScriptHash>` as Plutus data:
+/// Encodes `Option<IsmConfig>` as Plutus data:
 /// - `None`       → `Constr 1 []` = `d87980`
-/// - `Some(hash)` → `Constr 0 [ByteArray(hash)]` = `d8799f581c{hash}ff`
-pub fn build_ism_config_datum(ism: Option<&[u8; 28]>) -> Vec<u8> {
+/// - `Some(config)` → `Constr 0 [Constr 0 [hash, state_nft_policy]]`
+pub fn build_ism_config_datum(ism: Option<(&[u8; 28], &[u8; 28])>) -> Vec<u8> {
     let mut builder = CborBuilder::new();
     match ism {
         None => {
             builder.start_constr(1).end_constr();
         }
-        Some(hash) => {
+        Some((hash, state_nft_policy)) => {
+            builder.start_constr(0);
             builder.start_constr(0);
             builder.bytes_raw(hash);
+            builder.bytes_raw(state_nft_policy);
+            builder.end_constr();
             builder.end_constr();
         }
     }
@@ -1187,6 +1190,20 @@ mod tests {
         let redeemer = build_mint_redeemer();
         // Constructor 0 with empty fields
         assert_eq!(redeemer, vec![0xd8, 0x79, 0x9f, 0xff]);
+    }
+
+    #[test]
+    fn test_build_ism_config_datum_binds_state_policy() {
+        let hash = [0xaa; 28];
+        let policy = [0xbb; 28];
+        let datum = build_ism_config_datum(Some((&hash, &policy)));
+        let decoded = decode_plutus_datum(&hex::encode(datum)).unwrap();
+
+        assert_eq!(decoded["constructor"], 0);
+        let config = &decoded["fields"][0];
+        assert_eq!(config["constructor"], 0);
+        assert_eq!(config["fields"][0]["bytes"], hex::encode(hash));
+        assert_eq!(config["fields"][1]["bytes"], hex::encode(policy));
     }
 
     #[test]

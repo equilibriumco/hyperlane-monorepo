@@ -86,7 +86,10 @@ pub async fn execute(ctx: &CliContext, args: DeployArgs) -> Result<()> {
 /// Calculate minimum lovelace for a reference script UTXO
 /// Formula: (160 + addressSize + scriptSize) * coinsPerUTxOByte
 /// We add a 10% buffer for safety
-fn calculate_min_lovelace_for_ref_script(script_size: usize, coins_per_utxo_byte: u64) -> u64 {
+pub(crate) fn calculate_min_lovelace_for_ref_script(
+    script_size: usize,
+    coins_per_utxo_byte: u64,
+) -> u64 {
     // Overhead: 160 (base) + 57 (typical script address) + 10 (value) + 30 (other)
     const OVERHEAD: u64 = 160 + 57 + 10 + 30;
     let base = (OVERHEAD + script_size as u64) * coins_per_utxo_byte;

@@ -5,7 +5,9 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 
 use crate::utils::blockfrost::BlockfrostClient;
-use crate::utils::cbor::{build_igp_datum, build_ism_config_datum, build_ism_datum, build_mailbox_datum};
+use crate::utils::cbor::{
+    build_igp_datum, build_ism_config_datum, build_ism_datum, build_mailbox_datum,
+};
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{
     apply_validator_param, apply_validator_params, encode_output_reference,
@@ -83,6 +85,10 @@ enum InitCommands {
         /// Custom ISM script hash (optional, uses default if not specified)
         #[arg(long)]
         custom_ism: Option<String>,
+
+        /// State NFT policy ID for --custom-ism (required with --custom-ism)
+        #[arg(long, requires = "custom_ism")]
+        custom_ism_policy: Option<String>,
 
         /// Cardano domain ID (defaults to network: mainnet=2001, preprod=2002, preview=2003)
         #[arg(long)]
@@ -214,6 +220,7 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         InitCommands::Recipient {
             mailbox_hash,
             custom_ism,
+            custom_ism_policy,
             domain,
             owner,
             custom_contracts,
@@ -228,6 +235,7 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
                 ctx,
                 mailbox_hash,
                 custom_ism,
+                custom_ism_policy,
                 domain,
                 owner,
                 custom_contracts,
@@ -1087,6 +1095,7 @@ async fn init_recipient(
     ctx: &CliContext,
     mailbox_hash: Option<String>,
     custom_ism: Option<String>,
+    custom_ism_policy: Option<String>,
     domain: Option<u32>,
     owner: Option<String>,
     custom_contracts: String,
@@ -1104,6 +1113,12 @@ async fn init_recipient(
             custom_validator
         )
         .cyan()
+    );
+    println!(
+        "{}",
+        "SECURITY: constructor-0 Init MUST require the recipient owner signature; \
+         canonical config authentication relies on this invariant."
+            .yellow()
     );
 
     let api_key = ctx.require_api_key()?;
@@ -1155,6 +1170,9 @@ async fn init_recipient(
     if let Some(ref ism) = custom_ism {
         println!("  custom ISM: {}", ism);
     }
+    if let Some(ref policy) = custom_ism_policy {
+        println!("  custom ISM state NFT policy: {}", policy);
+    }
 
     // Step 1: Apply (verified_message_nft_policy, owner) to recipient validator
     let verified_msg_cbor = encode_script_hash_param(&verified_msg_nft_policy)?;
@@ -1196,8 +1214,7 @@ async fn init_recipient(
         "\n  Canonical config NFT policy: {}",
         canonical_applied.policy_id.green()
     );
-    let script_hash_bytes =
-        hex::decode(&script_hash).with_context(|| "Invalid script hash hex")?;
+    let script_hash_bytes = hex::decode(&script_hash).with_context(|| "Invalid script hash hex")?;
 
     // Step 3: Select wallet UTXOs — only 2 needed (TX1 spends fee_utxo, TX2 spends change)
     let utxos = client.get_utxos(&wallet_address).await?;
@@ -1244,21 +1261,29 @@ async fn init_recipient(
         collateral_utxo.tx_hash, collateral_utxo.output_index
     );
 
-    // ISM config datum: Option<ScriptHash>
+    // ISM config datum: Option<IsmConfig { script_hash, state_nft_policy }>
     let config_datum = {
-        let ism_bytes = match &custom_ism {
-            Some(hex_str) => {
-                let bytes = hex::decode(hex_str).with_context(|| "Invalid ISM hash hex")?;
-                if bytes.len() != 28 {
-                    return Err(anyhow!("ISM hash must be 28 bytes"));
-                }
-                let mut arr = [0u8; 28];
-                arr.copy_from_slice(&bytes);
-                Some(arr)
-            }
-            None => None,
+        let decode_policy = |value: &str, label: &str| -> Result<[u8; 28]> {
+            let value = value.strip_prefix("0x").unwrap_or(value);
+            let bytes = hex::decode(value).with_context(|| format!("Invalid {label} hex"))?;
+            bytes
+                .try_into()
+                .map_err(|_| anyhow!("{label} must be 28 bytes"))
         };
-        build_ism_config_datum(ism_bytes.as_ref())
+        let ism_config = match (&custom_ism, &custom_ism_policy) {
+            (Some(hash), Some(policy)) => Some((
+                decode_policy(hash, "ISM hash")?,
+                decode_policy(policy, "ISM state NFT policy")?,
+            )),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(anyhow!("--custom-ism-policy is required with --custom-ism"))
+            }
+            (None, Some(_)) => {
+                return Err(anyhow!("--custom-ism is required with --custom-ism-policy"))
+            }
+        };
+        build_ism_config_datum(ism_config.as_ref().map(|(hash, policy)| (hash, policy)))
     };
 
     // Initial state datum (default: GreetingDatum { last_greeting: #"", greeting_count: 0 })
@@ -1287,7 +1312,10 @@ async fn init_recipient(
 
     // TX1: send 2 ADA init-signal to script address
     let init_signal_lovelace = 2_000_000u64;
-    println!("\n{}", "TX1: Funding init-signal UTXO at script address...".cyan());
+    println!(
+        "\n{}",
+        "TX1: Funding init-signal UTXO at script address...".cyan()
+    );
     let tx1 = tx_builder
         .build_send_ada_tx(&keypair, &fee_utxo, &script_addr, init_signal_lovelace)
         .await?;
@@ -1302,9 +1330,7 @@ async fn init_recipient(
         "{}",
         "  Waiting for TX1 outputs to be indexed (max 60s)...".cyan()
     );
-    let init_signal_utxo = client
-        .wait_for_utxo(&script_addr, &tx1_hash, 0, 60)
-        .await?;
+    let init_signal_utxo = client.wait_for_utxo(&script_addr, &tx1_hash, 0, 60).await?;
     let fee_change_utxo = client
         .wait_for_utxo(&wallet_address, &tx1_hash, 1, 60)
         .await?;
@@ -1321,21 +1347,28 @@ async fn init_recipient(
 
     // Apply state_nft seed = init_signal_utxo (consumed in TX2)
     println!("\n{}", "Applying seed to state_nft...".cyan());
-    let seed_cbor = encode_output_reference(&init_signal_utxo.tx_hash, init_signal_utxo.output_index)?;
+    let seed_cbor =
+        encode_output_reference(&init_signal_utxo.tx_hash, init_signal_utxo.output_index)?;
     let seed_cbor_hex = hex::encode(&seed_cbor);
     let state_nft_applied =
         apply_validator_param(&ctx.contracts_dir, "state_nft", "state_nft", &seed_cbor_hex)?;
-    println!("  State NFT policy: {}", state_nft_applied.policy_id.green());
+    println!(
+        "  State NFT policy: {}",
+        state_nft_applied.policy_id.green()
+    );
 
     // TX2: canonical init (spend init-signal + fee change, mint canonical + state NFTs)
     let canonical_cbor =
         hex::decode(&canonical_applied.compiled_code).with_context(|| "Invalid canonical CBOR")?;
-    let state_nft_cbor = hex::decode(&state_nft_applied.compiled_code)
-        .with_context(|| "Invalid state NFT CBOR")?;
-    let recipient_cbor = hex::decode(&recipient_applied.compiled_code)
-        .with_context(|| "Invalid recipient CBOR")?;
+    let state_nft_cbor =
+        hex::decode(&state_nft_applied.compiled_code).with_context(|| "Invalid state NFT CBOR")?;
+    let recipient_cbor =
+        hex::decode(&recipient_applied.compiled_code).with_context(|| "Invalid recipient CBOR")?;
 
-    println!("\n{}", "TX2: Building canonical NFT init transaction...".cyan());
+    println!(
+        "\n{}",
+        "TX2: Building canonical NFT init transaction...".cyan()
+    );
     let tx2 = tx_builder
         .build_init_canonical_nft_tx(
             &keypair,
@@ -1377,8 +1410,14 @@ async fn init_recipient(
     println!("{}", "Script Info:".cyan());
     println!("  Script hash:             {}", script_hash.green());
     println!("  Address:                 {}", script_addr);
-    println!("  State NFT policy:        {}", state_nft_applied.policy_id.green());
-    println!("  Canonical config policy: {}", canonical_applied.policy_id.green());
+    println!(
+        "  State NFT policy:        {}",
+        state_nft_applied.policy_id.green()
+    );
+    println!(
+        "  Canonical config policy: {}",
+        canonical_applied.policy_id.green()
+    );
     println!();
     println!("{}", "Outputs (TX2):".cyan());
     println!("  #0 config UTXO  — canonical NFT + ISM config datum  @ script address");
@@ -1540,8 +1579,7 @@ async fn init_all(
     );
     println!(
         "{}",
-        "Note: IGP not initialized by 'init all'. Run 'init igp' separately."
-            .yellow()
+        "Note: IGP not initialized by 'init all'. Run 'init igp' separately.".yellow()
     );
 
     Ok(())

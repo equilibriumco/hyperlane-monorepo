@@ -1510,13 +1510,15 @@ pub(crate) fn parse_igp_datum(
                     .get("int")
                     .and_then(|i| i.as_u64())
                     .ok_or_else(|| anyhow!("Gas oracle entry has invalid or missing domain"))?;
-                let domain =
-                    u32::try_from(domain).map_err(|_| anyhow!("Gas oracle domain out of u32 range: {domain}"))?;
+                let domain = u32::try_from(domain)
+                    .map_err(|_| anyhow!("Gas oracle domain out of u32 range: {domain}"))?;
 
                 let oracle_fields = items[1]
                     .get("fields")
                     .and_then(|f| f.as_array())
-                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: missing oracle fields"))?;
+                    .ok_or_else(|| {
+                        anyhow!("Gas oracle for domain {domain}: missing oracle fields")
+                    })?;
 
                 if oracle_fields.len() < 3 {
                     return Err(anyhow!(
@@ -1532,11 +1534,15 @@ pub(crate) fn parse_igp_datum(
                 let exchange_rate = oracle_fields[1]
                     .get("int")
                     .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: invalid exchange_rate"))?;
+                    .ok_or_else(|| {
+                        anyhow!("Gas oracle for domain {domain}: invalid exchange_rate")
+                    })?;
                 let gas_overhead = oracle_fields[2]
                     .get("int")
                     .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Gas oracle for domain {domain}: invalid gas_overhead"))?;
+                    .ok_or_else(|| {
+                        anyhow!("Gas oracle for domain {domain}: invalid gas_overhead")
+                    })?;
 
                 gas_oracles.push((domain, gas_price, exchange_rate, gas_overhead));
             }
