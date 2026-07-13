@@ -42,6 +42,10 @@ if [ -z "$BLOCKFROST_API_KEY" ]; then
     log_error "BLOCKFROST_API_KEY not set in .env"
     exit 1
 fi
+if [ -z "$CARDANO_SIGNING_KEY" ] || [ ! -f "$CARDANO_SIGNING_KEY" ]; then
+    log_error "CARDANO_SIGNING_KEY must point to an existing payment signing key"
+    exit 1
+fi
 
 # Check CLI exists
 CLI="$CLI_DIR/target/release/hyperlane-cardano"
@@ -70,7 +74,7 @@ DISPATCH_OUTPUT=$($CLI mailbox dispatch \
     --recipient "$TEST_RECIPIENT" \
     --body "$MESSAGE" \
     --api-key "$BLOCKFROST_API_KEY" \
-    --signing-key "$SCRIPT_DIR/../testnet-keys/payment.skey" \
+    --signing-key "$CARDANO_SIGNING_KEY" \
     --deployments-dir "$SCRIPT_DIR/../deployments" \
     --contracts-dir "$SCRIPT_DIR/../contracts" \
     --network preview 2>&1) || {

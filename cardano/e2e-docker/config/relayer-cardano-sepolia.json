@@ -70,6 +70,9 @@
       "rpcUrls": [
         {
           "http": "${SEPOLIA_RPC_URL}"
+        },
+        {
+          "http": "https://sepolia.gateway.tenderly.co"
         }
       ],
       "signer": {
@@ -81,6 +84,7 @@
   },
   "db": "/data/relayer_db",
   "destinationChainNames": "cardanopreview,sepolia",
+  "log": { "level": "debug", "format": "pretty" },
   "gasPaymentEnforcement": [
     {
       "type": "none"
