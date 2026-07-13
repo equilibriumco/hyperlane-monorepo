@@ -25,7 +25,7 @@ The CLI can be configured via environment variables or command-line flags:
 # Environment variables
 export BLOCKFROST_API_KEY="your-api-key"
 export CARDANO_NETWORK="preview"  # mainnet, preprod, preview
-export CARDANO_SIGNING_KEY="./testnet-keys/payment.skey"
+export CARDANO_SIGNING_KEY="/path/to/payment.skey"
 
 # Or use command-line flags
 hyperlane-cardano --network preview --api-key <key> --signing-key <path> <command>
@@ -252,7 +252,7 @@ hyperlane-cardano ism set-validators \
   --validators 0xd8154f73d04cc7f7f0c332793692e6e6f6b2402e \
   --threshold 1 \
   --ism-policy <ism_policy_id> \
-  --signing-key ../testnet-keys/payment.skey
+  --signing-key /path/to/payment.skey
 ```
 
 ### 4. Verify Deployment

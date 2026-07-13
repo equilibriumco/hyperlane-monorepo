@@ -525,7 +525,7 @@ flowchart TB
 
 ### Synthetic Tokens
 
-Warp routes mint/burn synthetic tokens representing assets from other chains. The `synthetic_token.ak` minting policy is parameterized with the warp route NFT policy -- only the warp route can authorize minting/burning.
+Warp routes mint/burn synthetic tokens representing assets from other chains. The `synthetic_token.ak` policy is parameterized by both the warp validator hash and route state NFT policy, then requires `ReceiveTransfer` for minting or `TransferRemote` for burning.
 
 ### NFT Summary Table
 
@@ -625,7 +625,7 @@ On Cardano, Hyperlane recipients are Plutus V3 scripts that receive cross-chain 
 
 #### Datum Structure
 
-The `HyperlaneRecipientDatum` wrapper is available for recipients that need custom ISM support or nonce tracking:
+The `HyperlaneRecipientDatum` wrapper is available for application metadata and nonce tracking. ISM selection comes from the separately authenticated canonical config UTXO:
 
 ```aiken
 type HyperlaneRecipientDatum<inner> {
@@ -679,12 +679,14 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
       Init -> list.has(tx.extra_signatories, owner) && is_ada_only(own_input)
       Reclaim -> list.has(tx.extra_signatories, owner) && is_ada_only(own_input)
       HandleMessage { message, message_id } -> {
-        // Message UTXO (holds verified_message_nft): just check burn
+        expect list.has(tx.extra_signatories, owner)
+        // Message UTXO: require the matching state spend as well as the burn
         // State UTXO (holds greeting state NFT): full message processing
         let is_message_utxo = quantity_of(own_input, verified_message_nft_policy, message_id) == 1
 
         if is_message_utxo {
           verified_nft_burned(tx, verified_message_nft_policy, message_id)
+            && matching_state_input_spent(tx, message, message_id)
         } else {
           expect Some(raw_datum) = datum
           expect old_datum: GreetingDatum = raw_datum
@@ -705,6 +707,8 @@ Key points:
 - `HandleMessage` carries the full `Message` and `message_id`
 - Verifies `keccak256(encode_message(message)) == message_id`
 - The `verified_message_nft` burn proves the mailbox created the message
+- Both message and state inputs require the same `HandleMessage`; the message UTXO cannot be grief-burned alone
+- The reference recipient owner signs delivery, preventing fake-state substitution; permissionless custom recipients must authenticate their own state NFT instead
 - `Init` and `Reclaim` redeemers require owner signature and ADA-only input
 - The `None` datum branch handles the message UTXO (no contract-specific datum)
 
@@ -749,13 +753,26 @@ type VerifiedMessageDatum {
 
 #### The verified_message_nft Minting Policy
 
-Parameterized by the mailbox policy ID. Only allows minting when the mailbox NFT is present in the transaction inputs (proving ISM verification occurred). Burning is always allowed for 32-byte asset names with negative quantities.
+Parameterized by the mailbox policy ID. Minting requires the canonical mailbox input to use `Process`, and the minted asset name must equal that redeemer's `message_id`. Burning is allowed for 32-byte asset names with negative quantities.
 
 ### Canonical Config NFT (Per-Recipient ISM Override)
 
-The `canonical_config_nft.ak` policy enables per-recipient ISM override configuration. It is a fixed (non-parameterized) policy whose ID is a protocol constant. The asset name of the minted token is the recipient's script hash (28 bytes), allowing the relayer to derive the config token for any `0x02 + script_hash` recipient without per-recipient pre-configuration.
+The `canonical_config_nft.ak` policy authenticates per-recipient ISM selection. It is a fixed (non-parameterized) policy whose ID is a protocol constant. The asset name of the minted token is the recipient's script hash (28 bytes), allowing the relayer to derive the config token for any `0x02 + script_hash` recipient without per-recipient pre-configuration.
 
-Minting is only allowed when a spent input at the recipient's script address carries a constructor-0 redeemer (the `Init` tag), ensuring only the legitimate contract owner can mint the config token.
+Minting is only allowed when a spent input at the recipient's script address carries a constructor-0 redeemer (the `Init` tag).
+
+> **Hard security requirement:** every `0x02` recipient using this mechanism must owner-gate constructor 0. The fixed policy cannot inspect an arbitrary recipient's semantics. A permissionless constructor-0 path lets an attacker mint another config token and select attacker-controlled ISM state. Do not enable per-recipient ISM overrides for external recipients until this invariant has been audited, or a trusted ISM registry replaces the convention.
+
+An override commits to both the ISM script hash and its one-shot state NFT policy:
+
+```aiken
+type IsmConfig {
+  script_hash: ScriptHash,
+  state_nft_policy: PolicyId,
+}
+```
+
+The selected ISM input must carry `ISM State` under that exact policy. This authenticates independently deployed per-recipient ISM state as well as the code.
 
 ### Deployment
 
@@ -772,6 +789,13 @@ BLOCKFROST_API_KEY=your_api_key ./cli/target/release/hyperlane-cardano \
 ```
 
 The CLI handles parameterization, NFT minting, and initial state creation. Output includes recipient script hash, state NFT policy ID, recipient script address, and TX hash. The `verified_message_nft_policy` is auto-derived from the mailbox deployment.
+
+To select an independently deployed ISM, pass both authenticated identifiers:
+
+```bash
+  --custom-ism <script_hash> \
+  --custom-ism-policy <state_nft_policy>
+```
 
 See the [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md) for full step-by-step instructions.
 
@@ -864,17 +888,17 @@ Both Native ADA and Collateral tokens are locked directly in the warp route stat
 ```bash
 # Native (ADA)
 hyperlane-cardano warp deploy --token-type native --decimals 6 \
-  --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
+  --signing-key /path/to/payment.skey --contracts-dir ./contracts
 
 # Collateral
 hyperlane-cardano warp deploy --token-type collateral \
   --token-policy <POLICY_ID> --token-asset <ASSET_NAME> --decimals 6 \
-  --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
+  --signing-key /path/to/payment.skey --contracts-dir ./contracts
 
 # Synthetic
 hyperlane-cardano warp deploy --token-type synthetic --decimals 6 \
   --remote-decimals 18 \
-  --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
+  --signing-key /path/to/payment.skey --contracts-dir ./contracts
 ```
 
 ### Enroll Remote Router
@@ -884,7 +908,7 @@ hyperlane-cardano warp enroll-router \
   --warp-policy <WARP_NFT_POLICY> \
   --domain 43113 \
   --router 0x<REMOTE_ROUTER_PADDED_TO_32_BYTES> \
-  --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
+  --signing-key /path/to/payment.skey --contracts-dir ./contracts
 ```
 
 ### Transfer Tokens (Outbound)
@@ -895,7 +919,7 @@ hyperlane-cardano warp transfer \
   --domain 43113 \
   --recipient 0x<REMOTE_RECIPIENT> \
   --amount 1000000 \
-  --signing-key ./testnet-keys/payment.skey --contracts-dir ./contracts
+  --signing-key /path/to/payment.skey --contracts-dir ./contracts
 ```
 
 Amount is in the smallest unit (lovelace for ADA).
@@ -949,7 +973,7 @@ WarpRouteDatum {
   },
   owner: VerificationKeyHash,
   total_bridged: Int,
-  ism: Option<ScriptHash>
+  ism: Option<IsmConfig>
 }
 ```
 

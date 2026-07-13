@@ -526,6 +526,7 @@ Requirements for custom recipients:
 - Your contract must be an Aiken project with a compiled `plutus.json` blueprint
 - The validator must accept a policy ID as its first parameter
 - The CLI will automatically apply the parameter using `aiken blueprint apply`
+- Constructor 0 (`Init`) **must require the recipient owner's signature**. The canonical config NFT policy relies on this invariant; without it, an attacker can install an ISM override for the recipient.
 
 There are two parameterization patterns for recipients:
 
@@ -3047,4 +3048,3 @@ MerkleTreeHook: no value expected
 This happens because the default Mailbox hook is MerkleTreeHook alone, which
 does not accept ETH. Switch to the 5-argument form with the AggregationHook as
 shown above.
-
