@@ -89,7 +89,7 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 
 | Contract                      | Purpose                 | Parameters                                  | Dependencies                    |
 | ----------------------------- | ----------------------- | ------------------------------------------- | ------------------------------- |
-| **greeting**                  | Example message handler | verified_message_nft_policy                 | mailbox (verified_message_nft)  |
+| **greeting**                  | Example message handler | verified_message_nft_policy, owner          | mailbox (verified_message_nft)  |
 | **warp_route**                | Token bridge            | mailbox_policy_id                                | mailbox                    |
 
 ### Dependency Graph
@@ -479,22 +479,26 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --custom-validator greeting
 ```
 
-This:
+This applies two parameters — `verified_message_nft_policy` and `owner` (the owner defaults to the signing key's public key hash; override with `--owner <pkh>`) — to the `greeting` validator, then deploys the **three-UTXO canonical-config pattern** over **two transactions**:
 
-1. Applies the `verified_message_nft_policy` parameter to the `greeting` validator
-2. Creates a state NFT for the recipient
-3. Creates two UTXOs:
-   - State UTXO at script address with datum (greeting state)
-   - Reference script UTXO at deployer address with "ref" NFT + validator script
+- **TX1** funds an ADA-only "init-signal" UTXO at the recipient's script address.
+- **TX2** spends that UTXO with the `Init` redeemer (owner-signed), mints the canonical config NFT and the state NFT, and creates the three outputs.
+
+The three outputs are:
+
+- **#0 Config UTXO** — script address, canonical config NFT + ISM config datum (holds the per-recipient ISM override, or `None` for the default ISM)
+- **#1 State UTXO** — script address, state NFT + initial state datum
+- **#2 Reference Script UTXO** — deployer address, "ref" NFT + validator script
 
 Output:
 
 ```
-Recipient deployed!
+Recipient Deployment Summary (Canonical Config NFT Pattern)
   Script Hash: e4edab59ad48a709b58318c714142f6ceb5a3c87bd2f983054e64bec
   State NFT Policy: cda0f0a48a73a90c06ac73f21f29f94a1377d5dbcbc346bab2ce93df
-  State UTXO: abc123...#0
-  Reference Script UTXO: abc123...#1
+  #0 config UTXO  — canonical NFT + ISM config datum  @ script address
+  #1 state UTXO   — state NFT + initial datum          @ script address
+  #2 ref script   — ref NFT + recipient script CBOR    @ deployer address
 ```
 
 The greeting contract's datum tracks the last greeting and a counter:
@@ -526,18 +530,17 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 Requirements for custom recipients:
 
 - Your contract must be an Aiken project with a compiled `plutus.json` blueprint
-- The validator must accept a policy ID as its first parameter
-- The CLI will automatically apply the parameter using `aiken blueprint apply`
+- The validator must accept two parameters, in order: `verified_message_nft_policy: PolicyId` and `owner: VerificationKeyHash`. The CLI applies both with `aiken blueprint apply` (the owner defaults to the signing key; override with `--owner <pkh>`).
 - Constructor 0 (`Init`) **must require the recipient owner's signature**. The canonical config NFT policy relies on this invariant; without it, an attacker can install an ISM override for the recipient.
 
 There are two parameterization patterns for recipients:
 
 **Pattern 1: Verified message pattern** (recommended for generic recipients like greeting):
 
-The contract is parameterized by `verified_message_nft_policy`. The mailbox creates a verified message NFT when processing inbound messages, and the recipient verifies its presence.
+The contract is parameterized by `verified_message_nft_policy` and `owner`. The mailbox creates a verified message NFT when processing inbound messages, and the recipient verifies its presence; the owner gates `Init` (and typically message handling).
 
 ```aiken
-validator my_recipient(verified_message_nft_policy: PolicyId) {
+validator my_recipient(verified_message_nft_policy: PolicyId, owner: VerificationKeyHash) {
   spend(datum, redeemer, own_ref, tx) {
     // Verify that a verified message NFT is present in the transaction
     expect has_verified_message_nft(tx, verified_message_nft_policy)
@@ -546,6 +549,27 @@ validator my_recipient(verified_message_nft_policy: PolicyId) {
   }
 }
 ```
+
+#### Selecting a per-recipient ISM override
+
+By default a recipient is verified by the mailbox's default ISM. To route a recipient through its own ISM, pass **both** the ISM script hash and its state-NFT policy at init:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init recipient \
+  --custom-contracts ./path/to/your/contracts \
+  --custom-module my_recipient \
+  --custom-validator my_recipient \
+  --custom-ism <ism_script_hash> \
+  --custom-ism-policy <ism_state_nft_policy>
+```
+
+- `--custom-ism-policy` is **required whenever `--custom-ism` is given** (the CLI rejects one without the other). Both identifiers are written into the config UTXO's `IsmConfig { script_hash, state_nft_policy }` datum, which the mailbox reads to authenticate the override.
+- The override ISM must hold its own `ISM State` NFT under the given policy — the script hash alone is not accepted. This authenticates the ISM's validator set, not just its code.
+- **Security requirement**: only enable an override for a recipient whose constructor-0 `Init` is owner-gated (see above). Because the canonical config NFT is minted purely on a constructor-0 spend of the recipient script, a recipient that does not owner-gate `Init` lets an attacker install their own `IsmConfig` and bypass verification. Do not enable overrides for external recipients until this is audited.
 
 > **Note**: Warp routes use a different co-spending pattern internally (parameterized by `mailbox_policy_id`), but this is handled by the built-in warp route contracts. Custom recipients should always use the verified message NFT pattern above.
 
@@ -1537,7 +1561,7 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
 | `mailbox`                    | Spend | `verified_message_nft_policy: PolicyId, ism_nft_policy: PolicyId` | Derived from `verified_message_nft` and ISM state NFT | Verified message minting + ISM verification |
 | `multisig_ism`               | Spend | (none)                                                        | -                                                    | No parameters needed                       |
 | `verified_message_nft`       | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint verified message NFTs |
-| `greeting`                   | Spend | `verified_message_nft_policy: PolicyId`                       | Derived from `verified_message_nft`                  | Example recipient, verifies message NFT    |
+| `greeting`                   | Spend | `verified_message_nft_policy: PolicyId, owner: VerificationKeyHash` | Derived from `verified_message_nft`; owner defaults to signing key | Example recipient, verifies message NFT    |
 | `warp_route`                 | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Co-spends with mailbox                     |
 
 ### Why Stable vs Changing Parameters Matter
@@ -1635,27 +1659,30 @@ For recipients (e.g., the greeting contract):
 
 The CLI:
 
-1. Reads `mailbox_policy_id` from `deployment_info.json`
-2. Applies it to the specified validator from the custom contracts' `plutus.json`
-3. Creates the state NFT and deploys the two-UTXO pattern
+1. Reads `verified_message_nft_policy` from the mailbox's applied parameters in `deployment_info.json`
+2. Applies it, together with the owner key hash, to the specified validator from the custom contracts' `plutus.json`
+3. Mints the canonical config and state NFTs and deploys the three-UTXO canonical-config pattern
 
 ### Manual Parameterization Example
 
 If you need to manually apply parameters (e.g., for custom contracts):
 
 ```bash
-# 1. Get the mailbox_policy_id from deployment info
-MAILBOX_POLICY=$(cat deployments/preview/deployment_info.json | jq -r '.mailbox.state_nft_policy')
+# 1. Get the verified_message_nft_policy (recipients are parameterized by this,
+#    NOT by the mailbox state NFT policy) and your owner key hash
+VERIFIED_MSG_NFT_POLICY=$(jq -r '.verified_message_nft.policy_id' deployments/preview/deployment_info.json)
+OWNER_PKH=$(cat deployments/preview/owner.pkh)   # 28-byte hex of the recipient owner
 
-# 2. Apply parameter to your custom recipient
+# 2. Apply both parameters to your custom recipient (order matters)
 cd contracts
 aiken blueprint apply \
   -v my_custom_recipient.my_custom_recipient \
   -o ../deployments/preview/my_custom_recipient_applied.plutus \
-  "$MAILBOX_POLICY"
+  "$VERIFIED_MSG_NFT_POLICY" \
+  "$OWNER_PKH"
 
 # 3. The resulting script hash will differ from the base script
-# because the parameter is now embedded in the bytecode
+# because the parameters are now embedded in the bytecode
 ```
 
 ---
