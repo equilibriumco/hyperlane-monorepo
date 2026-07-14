@@ -3,8 +3,10 @@ use aiken/collection/list
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
-use cardano/transaction.{InlineDatum, Input, Output, OutputReference, Transaction}
-use cardano/assets.{Value, lovelace_of, merge, quantity_of, zero, flatten}
+use cardano/assets.{Value, flatten, lovelace_of, merge, quantity_of, zero}
+use cardano/transaction.{
+  InlineDatum, Input, Output, OutputReference, Transaction,
+}
 
 /// Utility functions for Hyperlane Cardano contracts
 /// Script hash type alias
@@ -62,11 +64,7 @@ pub fn has_script_input(tx: Transaction, script_hash: ScriptHash) -> Bool {
 /// Get the total value locked in inputs from a script
 pub fn get_script_input_value(tx: Transaction, script_hash: ScriptHash) -> Value {
   let inputs = find_script_inputs(tx, script_hash)
-  list.foldl(
-    inputs,
-    zero,
-    fn(input, acc) { merge(acc, input.output.value) },
-  )
+  list.foldl(inputs, zero, fn(input, acc) { merge(acc, input.output.value) })
 }
 
 /// Check that value is preserved (output >= input for lovelace AND all native tokens).
@@ -79,10 +77,7 @@ pub fn value_preserved(input_value: Value, output_value: Value) -> Bool {
 
 /// Check that all native tokens (non-lovelace) in the input are present
 /// in the output with equal or greater quantity.
-pub fn native_tokens_preserved(
-  input_value: Value,
-  output_value: Value,
-) -> Bool {
+pub fn native_tokens_preserved(input_value: Value, output_value: Value) -> Bool {
   list.all(
     flatten(input_value),
     fn(item) {
@@ -122,7 +117,7 @@ pub fn native_tokens_preserved_except(
 /// Convert a Hyperlane address (32 bytes) to a Cardano script hash (28 bytes)
 /// The first 4 bytes are the credential type prefix, next 28 bytes are the actual hash
 pub fn hyperlane_address_to_script_hash(addr: ByteArray) -> Option<ScriptHash> {
-  if bytearray.length(addr) == 32 {
+  if bytearray.length(addr) == 32 && bytearray.take(addr, 4) == #"02000000" {
     // Skip first 4 bytes (credential type prefix), take next 28 bytes
     // bytearray.slice uses inclusive end index, so 4-31 = 28 bytes
     Some(bytearray.slice(addr, 4, 31))
@@ -147,7 +142,7 @@ pub fn policy_id_to_hyperlane_address(policy_id: ByteArray) -> ByteArray {
 
 /// Extract a policy ID from a Hyperlane address (if prefix is 0x01)
 pub fn hyperlane_address_to_policy_id(addr: ByteArray) -> Option<ByteArray> {
-  if bytearray.length(addr) == 32 && bytearray.at(addr, 0) == 1 {
+  if bytearray.length(addr) == 32 && bytearray.take(addr, 4) == #"01000000" {
     Some(bytearray.slice(addr, 4, 31))
   } else {
     None

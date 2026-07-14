@@ -2,22 +2,27 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken/crypto.{VerificationKeyHash, keccak_256}
+use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Script}
 use cardano/assets
-use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use cardano/transaction.{
-  InlineDatum, Input, Output, OutputReference, Spend, Transaction,
+  InlineDatum, Input, NoDatum, Output, OutputReference, Spend, Transaction,
 }
 use merkle
 use smt
 use types.{
-  Checkpoint, Domain, HyperlaneAddress, MailboxDatum,
-  MailboxRedeemer, Message, MerkleTreeState, MultisigIsmRedeemer, Native, PolicyId,
-  ScriptHash, VerifiedMessageDatum, Verify, WarpRouteConfig, WarpRouteDatum,
-  encode_message, Dispatch, Process, SetDefaultIsm, TransferOwnership, MigrateMailbox,
+  Checkpoint, Dispatch, Domain, HyperlaneAddress, IsmConfig, MailboxDatum,
+  MailboxRedeemer, MerkleTreeState, Message, MigrateMailbox, MultisigIsmRedeemer,
+  Native, PolicyId, Process, ReceiveTransfer, ScriptHash, SetDefaultIsm,
+  TransferOwnership, VerifiedMessageDatum, Verify, WarpRouteConfig,
+  WarpRouteDatum, WarpRouteRedeemer, encode_message,
 }
-use utils.{find_input, hyperlane_address_to_script_hash, is_signed_by, policy_id_to_hyperlane_address, validate_migrate, value_preserved}
+use utils.{
+  find_input, hyperlane_address_to_policy_id, hyperlane_address_to_script_hash,
+  is_signed_by, policy_id_to_hyperlane_address, validate_migrate,
+  value_preserved,
+}
 
 /// Fixed policy ID of canonical_config_nft.ak (non-parameterized validator).
 /// Any config UTXO at a generic recipient's address MUST hold a token from
@@ -166,15 +171,19 @@ fn validate_process(
     )
 
   // 4. Verify ISM approves the message (with NFT authenticity check)
-  let ism_hash = get_recipient_ism(message.recipient, datum.default_ism, tx)
-  expect verify_ism_for_message(ism_hash, datum.default_ism, ism_nft_policy, message_id, tx, metadata)
+  let ism_config =
+    get_recipient_ism(message.recipient, datum.default_ism, ism_nft_policy, tx)
+  expect verify_ism_for_message(ism_config, message_id, tx, metadata)
 
   // 5. For script-hash recipients (0x02 prefix), verify verified message delivery.
   //    NFT-policy recipients (0x01 prefix, e.g. warp routes) handle their own
   //    validation as spent inputs in the same TX.
-  let is_script_recipient = bytearray.at(message.recipient, 0) == 2
+  expect bytearray.length(message.recipient) == 32
+  let recipient_prefix = bytearray.at(message.recipient, 0)
   expect
-    if is_script_recipient {
+    if recipient_prefix == 1 {
+      warp_receive_matches(message, message_id, tx)
+    } else if recipient_prefix == 2 {
       verified_nft_minted(message_id, tx, verified_message_nft_policy) && verified_message_delivered(
         message,
         message_id,
@@ -250,7 +259,8 @@ fn verified_message_delivered(
   verified_message_nft_policy: PolicyId,
 ) -> Bool {
   // Extract recipient script hash from the 32-byte Hyperlane address
-  expect Some(recipient_hash) = hyperlane_address_to_script_hash(message.recipient)
+  expect Some(recipient_hash) =
+    hyperlane_address_to_script_hash(message.recipient)
 
   let expected_datum =
     VerifiedMessageDatum {
@@ -273,7 +283,11 @@ fn verified_message_delivered(
 
       // Check output contains verified_message_nft with message_id as asset name
       let nft_valid =
-        assets.quantity_of(output.value, verified_message_nft_policy, message_id) == 1
+        assets.quantity_of(
+          output.value,
+          verified_message_nft_policy,
+          message_id,
+        ) == 1
 
       // Check datum matches
       let datum_valid =
@@ -290,7 +304,35 @@ fn verified_message_delivered(
   )
 }
 
-fn get_sender_address(tx: Transaction, sender_ref: OutputReference) -> HyperlaneAddress {
+/// Require an NFT-addressed recipient to spend its state UTXO with the exact
+/// ReceiveTransfer redeemer. This prevents a standalone mailbox Process from
+/// consuming the replay-nullifier before the warp route delivers the transfer.
+fn warp_receive_matches(
+  message: Message,
+  message_id: ByteArray,
+  tx: Transaction,
+) -> Bool {
+  expect Some(policy_id) = hyperlane_address_to_policy_id(message.recipient)
+  expect Some(warp_input) =
+    list.find(
+      tx.inputs,
+      fn(input) { assets.quantity_of(input.output.value, policy_id, #"") == 1 },
+    )
+  expect Some(raw_redeemer) =
+    pairs.get_first(tx.redeemers, Spend(warp_input.output_reference))
+  expect warp_redeemer: WarpRouteRedeemer = raw_redeemer
+
+  when warp_redeemer is {
+    ReceiveTransfer { message: warp_message, message_id: warp_message_id } ->
+      warp_message == message && warp_message_id == message_id
+    _ -> False
+  }
+}
+
+fn get_sender_address(
+  tx: Transaction,
+  sender_ref: OutputReference,
+) -> HyperlaneAddress {
   expect Some(input) =
     list.find(tx.inputs, fn(i) { i.output_reference == sender_ref })
 
@@ -330,8 +372,14 @@ fn find_state_nft_policy(value: assets.Value) -> Option<ByteArray> {
 fn get_recipient_ism(
   recipient: HyperlaneAddress,
   default_ism: ScriptHash,
+  default_ism_nft_policy: PolicyId,
   tx: Transaction,
-) -> ScriptHash {
+) -> IsmConfig {
+  let default_config =
+    IsmConfig {
+      script_hash: default_ism,
+      state_nft_policy: default_ism_nft_policy,
+    }
   let prefix = bytearray.at(recipient, 0)
   // Bytes 4..31 carry either the NFT policy (0x01) or script hash (0x02)
   let addr_payload = bytearray.drop(recipient, 4)
@@ -339,28 +387,28 @@ fn get_recipient_ism(
     // Warp routes: ISM override is in the state UTXO datum (spent input)
     when find_warp_route_ism(addr_payload, tx.inputs) is {
       Some(ism) -> ism
-      None -> default_ism
+      None -> default_config
     }
   } else if prefix == 2 {
-    // Generic script recipients: ISM override is in a HyperlaneRecipientDatum
-    // provided as a reference input at the recipient's script address
+    // Generic script recipients: ISM override is in the authenticated config
+    // UTXO provided as a reference input at the recipient's script address.
     when find_generic_recipient_ism(addr_payload, tx.reference_inputs) is {
       Some(ism) -> ism
-      None -> default_ism
+      None -> default_config
     }
   } else {
-    default_ism
+    default_config
   }
 }
 
 fn find_warp_route_ism(
   policy_id: PolicyId,
   inputs: List<Input>,
-) -> Option<ScriptHash> {
+) -> Option<IsmConfig> {
   let maybe_input =
     list.find(
       inputs,
-      fn(input) { !dict.is_empty(assets.tokens(input.output.value, policy_id)) },
+      fn(input) { assets.quantity_of(input.output.value, policy_id, #"") == 1 },
     )
   when maybe_input is {
     None -> None
@@ -376,7 +424,7 @@ fn find_warp_route_ism(
 }
 
 /// Look for a reference input at the recipient's script address that carries a
-/// "hyperlane-config" token and parse its datum as Option<ScriptHash>.
+/// "hyperlane-config" token and parse its datum as Option<IsmConfig>.
 ///
 /// The "hyperlane-config" token requirement prevents an attacker from planting a
 /// plain datum at the recipient's address: minting requires the recipient script
@@ -384,7 +432,7 @@ fn find_warp_route_ism(
 fn find_generic_recipient_ism(
   script_hash: ScriptHash,
   reference_inputs: List<Input>,
-) -> Option<ScriptHash> {
+) -> Option<IsmConfig> {
   let maybe_input =
     list.find(
       reference_inputs,
@@ -410,7 +458,7 @@ fn find_generic_recipient_ism(
     Some(input) ->
       when input.output.datum is {
         InlineDatum(datum_data) -> {
-          expect ism_override: Option<ScriptHash> = datum_data
+          expect ism_override: Option<IsmConfig> = datum_data
           ism_override
         }
         _ -> None
@@ -419,9 +467,7 @@ fn find_generic_recipient_ism(
 }
 
 fn verify_ism_for_message(
-  ism_hash: ScriptHash,
-  default_ism: ScriptHash,
-  ism_nft_policy: PolicyId,
+  ism_config: IsmConfig,
   message_id: ByteArray,
   tx: Transaction,
   metadata: ByteArray,
@@ -433,17 +479,14 @@ fn verify_ism_for_message(
     fn(input) {
       when input.output.address.payment_credential is {
         Script(hash) ->
-          if hash == ism_hash {
-            // For the default ISM: also verify authenticity via the one-shot state NFT.
-            // For override ISMs: the script hash from the warp route datum is sufficient;
-            // requiring a specific NFT policy would block legitimate override deployments.
-            let has_nft =
-              if ism_hash == default_ism {
-                !dict.is_empty(assets.tokens(input.output.value, ism_nft_policy))
-              } else {
-                True
-              }
-            has_nft && verify_ism_redeemer_message_id(
+          if hash == ism_config.script_hash {
+            // Every stateful ISM must be authenticated by the canonical state NFT.
+            // Script hash alone authenticates code, not the datum-held validator set.
+            assets.quantity_of(
+              input.output.value,
+              ism_config.state_nft_policy,
+              #"49534d205374617465",
+            ) == 1 && verify_ism_redeemer_message_id(
               input.output_reference,
               message_id,
               tx,
@@ -494,11 +537,14 @@ fn verified_nft_minted(
 // ============================================================================
 
 // 28-byte (56 hex chars) constants for ScriptHash / PolicyId
-const test_default_ism = #"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00"
+const test_default_ism =
+  #"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00"
 
-const test_override_ism = #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const test_override_ism =
+  #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-const test_warp_policy = #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+const test_warp_policy =
+  #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 // 32-byte Hyperlane address: 0x01 prefix + 3 zero bytes + 28-byte policy id
 const test_warp_recipient =
@@ -510,12 +556,18 @@ const test_generic_recipient =
 
 fn unbounded_validity_range() -> Interval<Int> {
   Interval {
-    lower_bound: IntervalBound { bound_type: NegativeInfinity, is_inclusive: False },
-    upper_bound: IntervalBound { bound_type: PositiveInfinity, is_inclusive: False },
+    lower_bound: IntervalBound {
+      bound_type: NegativeInfinity,
+      is_inclusive: False,
+    },
+    upper_bound: IntervalBound {
+      bound_type: PositiveInfinity,
+      is_inclusive: False,
+    },
   }
 }
 
-fn make_warp_input(ism_override: Option<ScriptHash>) -> Input {
+fn make_warp_input(ism_override: Option<IsmConfig>) -> Input {
   let datum =
     WarpRouteDatum {
       config: WarpRouteConfig {
@@ -530,10 +582,7 @@ fn make_warp_input(ism_override: Option<ScriptHash>) -> Input {
     }
 
   Input {
-    output_reference: OutputReference {
-      transaction_id: #"0000000000000000000000000000000000000000000000000000000000000001",
-      output_index: 0,
-    },
+    output_reference: test_warp_output_ref(),
     output: Output {
       address: Address {
         payment_credential: Script(test_warp_policy),
@@ -543,6 +592,13 @@ fn make_warp_input(ism_override: Option<ScriptHash>) -> Input {
       datum: InlineDatum(datum),
       reference_script: None,
     },
+  }
+}
+
+fn test_warp_output_ref() -> OutputReference {
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000001",
+    output_index: 0,
   }
 }
 
@@ -574,9 +630,8 @@ const test_generic_script_hash =
 // Use the real policy so tests exercise the actual check
 const test_canonical_policy = canonical_config_nft_policy
 
-fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
-  // Datum is Option<ScriptHash> (the new canonical config format)
-  let datum: Option<ScriptHash> = ism_override
+fn make_generic_ism_config_input(ism_override: Option<IsmConfig>) -> Input {
+  let datum: Option<IsmConfig> = ism_override
 
   Input {
     output_reference: OutputReference {
@@ -588,7 +643,11 @@ fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
         payment_credential: Script(test_generic_script_hash),
         stake_credential: None,
       },
-      value: assets.from_asset(test_canonical_policy, test_generic_script_hash, 1),
+      value: assets.from_asset(
+        test_canonical_policy,
+        test_generic_script_hash,
+        1,
+      ),
       datum: InlineDatum(datum),
       reference_script: None,
     },
@@ -597,27 +656,200 @@ fn make_generic_ism_config_input(ism_override: Option<ScriptHash>) -> Input {
 
 test get_recipient_ism_generic_no_ref_input_uses_default() {
   let tx = make_tx([], [])
-  get_recipient_ism(test_generic_recipient, test_default_ism, tx) == test_default_ism
+  get_recipient_ism(
+    test_generic_recipient,
+    test_default_ism,
+    test_ism_nft_policy,
+    tx,
+  ) == test_default_ism_config()
 }
 
 test get_recipient_ism_generic_no_override_uses_default() {
   let ref_input = make_generic_ism_config_input(None)
   let tx = make_tx([], [ref_input])
-  get_recipient_ism(test_generic_recipient, test_default_ism, tx) == test_default_ism
+  get_recipient_ism(
+    test_generic_recipient,
+    test_default_ism,
+    test_ism_nft_policy,
+    tx,
+  ) == test_default_ism_config()
 }
 
 test get_recipient_ism_generic_with_override_uses_override() {
-  let ref_input = make_generic_ism_config_input(Some(test_override_ism))
+  let ref_input =
+    make_generic_ism_config_input(Some(test_override_ism_config()))
   let tx = make_tx([], [ref_input])
-  get_recipient_ism(test_generic_recipient, test_default_ism, tx) == test_override_ism
+  get_recipient_ism(
+    test_generic_recipient,
+    test_default_ism,
+    test_ism_nft_policy,
+    tx,
+  ) == test_override_ism_config()
 }
 
 test get_recipient_ism_warp_no_override_uses_default() {
   let tx = make_tx([make_warp_input(None)], [])
-  get_recipient_ism(test_warp_recipient, test_default_ism, tx) == test_default_ism
+  get_recipient_ism(
+    test_warp_recipient,
+    test_default_ism,
+    test_ism_nft_policy,
+    tx,
+  ) == test_default_ism_config()
 }
 
 test get_recipient_ism_warp_with_override_uses_override() {
-  let tx = make_tx([make_warp_input(Some(test_override_ism))], [])
-  get_recipient_ism(test_warp_recipient, test_default_ism, tx) == test_override_ism
+  let tx = make_tx([make_warp_input(Some(test_override_ism_config()))], [])
+  get_recipient_ism(
+    test_warp_recipient,
+    test_default_ism,
+    test_ism_nft_policy,
+    tx,
+  ) == test_override_ism_config()
+}
+
+const test_ism_nft_policy =
+  #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+const test_message_id =
+  #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+fn test_default_ism_config() -> IsmConfig {
+  IsmConfig {
+    script_hash: test_default_ism,
+    state_nft_policy: test_ism_nft_policy,
+  }
+}
+
+fn test_override_ism_config() -> IsmConfig {
+  IsmConfig {
+    script_hash: test_override_ism,
+    state_nft_policy: test_ism_nft_policy,
+  }
+}
+
+fn test_inbound_warp_message() -> Message {
+  Message {
+    version: 3,
+    nonce: 1,
+    origin: 10,
+    sender: #"1111111111111111111111111111111111111111111111111111111111111111",
+    destination: 20,
+    recipient: test_warp_recipient,
+    body: #"abcd",
+  }
+}
+
+test warp_recipient_requires_matching_receive_redeemer() {
+  let message = test_inbound_warp_message()
+  let warp_redeemer: WarpRouteRedeemer =
+    ReceiveTransfer { message, message_id: test_message_id }
+  let raw_redeemer: Data = warp_redeemer
+  let base_tx = make_tx([make_warp_input(None)], [])
+  let tx =
+    Transaction {
+      ..base_tx,
+      redeemers: [Pair(Spend(test_warp_output_ref()), raw_redeemer)],
+    }
+
+  warp_receive_matches(message, test_message_id, tx)
+}
+
+test standalone_process_cannot_consume_warp_message() fail {
+  warp_receive_matches(
+    test_inbound_warp_message(),
+    test_message_id,
+    make_tx([make_warp_input(None)], []),
+  )
+}
+
+fn make_ism_verify_tx(has_state_nft: Bool) -> Transaction {
+  let state_asset_name =
+    if has_state_nft {
+      #"49534d205374617465"
+    } else {
+      #""
+    }
+  make_ism_verify_tx_with_asset(state_asset_name)
+}
+
+fn make_ism_verify_tx_with_asset(state_asset_name: ByteArray) -> Transaction {
+  let ism_ref =
+    OutputReference {
+      transaction_id: #"0000000000000000000000000000000000000000000000000000000000000003",
+      output_index: 0,
+    }
+  let value =
+    if bytearray.length(state_asset_name) > 0 {
+      assets.from_asset(test_ism_nft_policy, state_asset_name, 1)
+    } else {
+      assets.zero
+    }
+  let checkpoint =
+    Checkpoint {
+      origin: 1,
+      merkle_root: #"0000000000000000000000000000000000000000000000000000000000000000",
+      origin_merkle_tree_hook: #"0000000000000000000000000000000000000000000000000000000000000000",
+      merkle_index: 0,
+      message_id: test_message_id,
+    }
+  let ism_redeemer = Verify { checkpoint, validator_signatures: [] }
+  let raw_redeemer: Data = ism_redeemer
+  Transaction {
+    inputs: [
+      Input {
+        output_reference: ism_ref,
+        output: Output {
+          address: Address {
+            payment_credential: Script(test_override_ism),
+            stake_credential: None,
+          },
+          value,
+          datum: NoDatum,
+          reference_script: None,
+        },
+      },
+    ],
+    reference_inputs: [],
+    outputs: [],
+    fee: 0,
+    mint: assets.zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: unbounded_validity_range(),
+    extra_signatories: [],
+    redeemers: [Pair(Spend(ism_ref), raw_redeemer)],
+    datums: dict.empty,
+    id: #"0000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+test override_ism_requires_canonical_state_nft() {
+  !verify_ism_for_message(
+    test_override_ism_config(),
+    test_message_id,
+    make_ism_verify_tx(False),
+    #"01",
+  )
+}
+
+test authenticated_migrated_ism_state_is_accepted() {
+  verify_ism_for_message(
+    test_override_ism_config(),
+    test_message_id,
+    make_ism_verify_tx(True),
+    #"01",
+  )
+}
+
+test ism_reference_token_does_not_authenticate_state() {
+  !verify_ism_for_message(
+    test_override_ism_config(),
+    test_message_id,
+    make_ism_verify_tx_with_asset(#"726566"),
+    #"01",
+  )
 }

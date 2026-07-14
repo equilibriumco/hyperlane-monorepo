@@ -21,9 +21,12 @@ type InitRedeemer {
 /// any `0x02 + script_hash` recipient without per-recipient pre-configuration.
 ///
 /// Minting is only allowed when a spent input at `Script(asset_name)` carries a
-/// constructor-0 redeemer (the protocol-standard `Init` tag). This ensures only
-/// the legitimate contract owner can mint the config token — an attacker who
-/// lacks the script's `owner` key cannot produce a valid `Init` redeemer.
+/// constructor-0 redeemer (the protocol-standard `Init` tag).
+///
+/// SECURITY REQUIREMENT: this fixed policy cannot prove what constructor 0
+/// means for an arbitrary recipient. Every 0x02 recipient MUST owner-gate its
+/// constructor-0 Init path. Otherwise an attacker can mint a second config
+/// token and select attacker-controlled ISM state for that recipient.
 validator canonical_config_nft {
   mint(_redeemer: Data, policy_id: ByteArray, tx: Transaction) {
     let minted = assets.tokens(tx.mint, policy_id)

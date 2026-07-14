@@ -1,18 +1,24 @@
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/collection/pairs
 use aiken/crypto.{keccak_256}
+use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
-use cardano/address.{Credential, Script}
-use cardano/assets.{lovelace_of, quantity_of, tokens}
-use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
-use types.{
-  AssetName, Domain, HyperlaneAddress, Message, PolicyId, ScriptHash,
-  WarpRouteDatum, WarpRouteRedeemer, WarpTransferBody,
-  TransferRemote, ReceiveTransfer, EnrollRemoteRoute, MigrateWarp,
-  Collateral, Synthetic, Native,
-  encode_message,
+use cardano/address.{Address, Credential, Script}
+use cardano/assets.{from_asset, lovelace_of, quantity_of, tokens, zero}
+use cardano/transaction.{
+  InlineDatum, Input, NoDatum, Output, OutputReference, Spend, Transaction,
 }
-use utils.{assoc_find, find_input, is_signed_by, validate_migrate, value_preserved, native_tokens_preserved, native_tokens_preserved_except}
+use types.{
+  AssetName, Collateral, Dispatch, Domain, EnrollRemoteRoute, HyperlaneAddress,
+  MailboxRedeemer, Message, MigrateWarp, Native, PolicyId, Process,
+  ReceiveTransfer, ScriptHash, Synthetic, TransferRemote, WarpRouteDatum,
+  WarpRouteRedeemer, WarpTransferBody, encode_message,
+}
+use utils.{
+  assoc_find, find_input, is_signed_by, native_tokens_preserved,
+  native_tokens_preserved_except, validate_migrate, value_preserved,
+}
 
 /// Warp Route Validator
 /// Enables token bridging between Cardano and other Hyperlane-connected chains
@@ -21,9 +27,7 @@ use utils.{assoc_find, find_input, is_signed_by, validate_migrate, value_preserv
 /// 1. Relayer processes message from origin warp route
 /// 2. Calls ReceiveTransfer → tokens sent directly to recipient wallet address
 /// 3. minUTxO ADA is covered by source chain fees (relayer tops up if needed)
-validator warp_route(
-  mailbox_policy_id: PolicyId,
-) {
+validator warp_route(mailbox_policy_id: PolicyId) {
   spend(
     datum: Option<WarpRouteDatum>,
     redeemer: WarpRouteRedeemer,
@@ -48,9 +52,7 @@ validator warp_route(
         expect keccak_256(encode_message(message)) == message_id
         validate_receive_transfer(
           warp_datum,
-          message.origin,
-          message.sender,
-          message.body,
+          message,
           tx,
           own_ref,
           mailbox_policy_id,
@@ -63,7 +65,13 @@ validator warp_route(
 
       MigrateWarp { new_address } -> {
         let datum_as_data: Data = warp_datum
-        validate_migrate(warp_datum.owner, new_address, tx, own_ref, datum_as_data)
+        validate_migrate(
+          warp_datum.owner,
+          new_address,
+          tx,
+          own_ref,
+          datum_as_data,
+        )
       }
     }
   }
@@ -84,7 +92,15 @@ fn validate_transfer_remote(
   mailbox_policy_id: PolicyId,
 ) -> Bool {
   expect amount > 0
-  expect Some(_remote_route) = assoc_find(datum.config.remote_routes, destination)
+  // Reject local amounts that truncate to zero in the remote wire format.
+  expect
+    convert_local_to_wire(
+      amount,
+      datum.config.decimals,
+      datum.config.remote_decimals,
+    ) > 0
+  expect Some(remote_route) =
+    assoc_find(datum.config.remote_routes, destination)
   expect bytearray.length(recipient) == 32
 
   expect Some(own_input) = find_input(tx, own_ref)
@@ -107,12 +123,22 @@ fn validate_transfer_remote(
       Synthetic { minting_policy } ->
         validate_synthetic_burn(minting_policy, amount, tx)
 
-      Native ->
-        validate_native_lock(own_input.output, continuation, amount)
+      Native -> validate_native_lock(own_input.output, continuation, amount)
     }
   expect token_valid
 
-  expect mailbox_dispatch_called(mailbox_policy_id, tx)
+  expect
+    mailbox_dispatch_matches(
+      mailbox_policy_id,
+      destination,
+      remote_route,
+      recipient,
+      amount,
+      datum.config.decimals,
+      datum.config.remote_decimals,
+      own_ref,
+      tx,
+    )
 
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: WarpRouteDatum = cont_datum_data
@@ -133,35 +159,40 @@ fn validate_transfer_remote(
 /// Sends tokens directly to the recipient wallet address decoded from message body
 fn validate_receive_transfer(
   datum: WarpRouteDatum,
-  origin: Domain,
-  sender: HyperlaneAddress,
-  body: ByteArray,
+  message: Message,
   tx: Transaction,
   own_ref: OutputReference,
   mailbox_policy_id: PolicyId,
   message_id: ByteArray,
 ) -> Bool {
   // 1. Verify sender is an enrolled remote route
-  expect Some(expected_sender) = assoc_find(datum.config.remote_routes, origin)
-  expect sender == expected_sender
+  expect Some(expected_sender) =
+    assoc_find(datum.config.remote_routes, message.origin)
+  expect message.sender == expected_sender
 
-  // 2. Verify mailbox is calling us
-  expect mailbox_is_caller(mailbox_policy_id, tx)
+  // 2. Bind this warp input to the exact message recipient policy.
+  expect Some(own_input) = find_input(tx, own_ref)
+  expect bytearray.length(message.recipient) == 32
+  expect bytearray.at(message.recipient, 0) == 1
+  let recipient_policy = bytearray.drop(message.recipient, 4)
+  expect quantity_of(own_input.output.value, recipient_policy, #"") == 1
 
-  // 3. Decode the EVM TokenMessage body
-  expect Some(wire_transfer) = decode_evm_token_message(body)
+  // 3. Require the canonical mailbox input to process this exact message.
+  expect mailbox_process_matches(mailbox_policy_id, message, message_id, tx)
+
+  // 4. Decode the EVM TokenMessage body
+  expect Some(wire_transfer) = decode_evm_token_message(message.body)
   expect wire_transfer.amount > 0
 
-  // 4. Convert wire amount to local amount
-  let local_amount = convert_decimals(
-    wire_transfer.amount,
-    datum.config.remote_decimals,
-    datum.config.decimals,
-  )
+  // 5. Convert wire amount to local amount
+  let local_amount =
+    convert_decimals(
+      wire_transfer.amount,
+      datum.config.remote_decimals,
+      datum.config.decimals,
+    )
   expect local_amount > 0
 
-  // 5. Find own input
-  expect Some(own_input) = find_input(tx, own_ref)
   let own_address = own_input.output.address
 
   // 6. Find continuation output
@@ -222,8 +253,7 @@ fn validate_receive_transfer(
           policy_id,
           asset_name,
         )
-      _ ->
-        native_tokens_preserved(own_input.output.value, continuation.value)
+      _ -> native_tokens_preserved(own_input.output.value, continuation.value)
     }
   expect nft_ok
 
@@ -330,7 +360,11 @@ fn validate_synthetic_mint(
 // Native ADA Helpers
 // ============================================================================
 
-fn validate_native_lock(own_input: Output, own_output: Output, amount: Int) -> Bool {
+fn validate_native_lock(
+  own_input: Output,
+  own_output: Output,
+  amount: Int,
+) -> Bool {
   let input_ada = lovelace_of(own_input.value)
   let output_ada = lovelace_of(own_output.value)
   output_ada >= input_ada + amount
@@ -403,18 +437,73 @@ fn recipient_receives_ada(
 // Helper Functions
 // ============================================================================
 
-fn mailbox_is_caller(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
-  list.any(
+fn find_mailbox_input(
+  mailbox_policy_id: PolicyId,
+  tx: Transaction,
+) -> Option<Input> {
+  list.find(
     tx.inputs,
     fn(input) {
-      let policy_tokens = tokens(input.output.value, mailbox_policy_id)
-      !dict.is_empty(policy_tokens)
+      quantity_of(
+        input.output.value,
+        mailbox_policy_id,
+        #"4d61696c626f78205374617465",
+      ) == 1
     },
   )
 }
 
-fn mailbox_dispatch_called(mailbox_policy_id: PolicyId, tx: Transaction) -> Bool {
-  mailbox_is_caller(mailbox_policy_id, tx)
+fn mailbox_process_matches(
+  mailbox_policy_id: PolicyId,
+  expected_message: Message,
+  expected_message_id: ByteArray,
+  tx: Transaction,
+) -> Bool {
+  expect Some(mailbox_input) = find_mailbox_input(mailbox_policy_id, tx)
+  when pairs.get_first(tx.redeemers, Spend(mailbox_input.output_reference)) is {
+    Some(raw_redeemer) -> {
+      expect mailbox_redeemer: MailboxRedeemer = raw_redeemer
+      when mailbox_redeemer is {
+        Process { message, message_id, .. } ->
+          message == expected_message && message_id == expected_message_id
+        _ -> False
+      }
+    }
+    None -> False
+  }
+}
+
+fn mailbox_dispatch_matches(
+  mailbox_policy_id: PolicyId,
+  expected_destination: Domain,
+  expected_remote_route: HyperlaneAddress,
+  expected_recipient: HyperlaneAddress,
+  local_amount: Int,
+  local_decimals: Int,
+  remote_decimals: Int,
+  warp_ref: OutputReference,
+  tx: Transaction,
+) -> Bool {
+  expect Some(mailbox_input) = find_mailbox_input(mailbox_policy_id, tx)
+  when pairs.get_first(tx.redeemers, Spend(mailbox_input.output_reference)) is {
+    Some(raw_redeemer) -> {
+      expect mailbox_redeemer: MailboxRedeemer = raw_redeemer
+      when mailbox_redeemer is {
+        Dispatch { destination, recipient, body, sender_ref, .. } -> {
+          expect bytearray.length(body) >= 64
+          let wire_recipient = bytearray.slice(body, 0, 31)
+          let wire_amount = bytes_to_int(bytearray.slice(body, 32, 63))
+          destination == expected_destination && recipient == expected_remote_route && sender_ref == warp_ref && wire_recipient == expected_recipient && wire_amount == convert_local_to_wire(
+            local_amount,
+            local_decimals,
+            remote_decimals,
+          )
+        }
+        _ -> False
+      }
+    }
+    None -> False
+  }
 }
 
 fn decode_evm_token_message(body: ByteArray) -> Option<WarpTransferBody> {
@@ -429,13 +518,29 @@ fn decode_evm_token_message(body: ByteArray) -> Option<WarpTransferBody> {
   }
 }
 
-fn convert_decimals(wire_amount: Int, remote_decimals: Int, local_decimals: Int) -> Int {
+fn convert_decimals(
+  wire_amount: Int,
+  remote_decimals: Int,
+  local_decimals: Int,
+) -> Int {
   if local_decimals >= remote_decimals {
     let multiplier = pow10(local_decimals - remote_decimals)
     wire_amount * multiplier
   } else {
     let divisor = pow10(remote_decimals - local_decimals)
     wire_amount / divisor
+  }
+}
+
+fn convert_local_to_wire(
+  local_amount: Int,
+  local_decimals: Int,
+  remote_decimals: Int,
+) -> Int {
+  if remote_decimals >= local_decimals {
+    local_amount * pow10(remote_decimals - local_decimals)
+  } else {
+    local_amount / pow10(local_decimals - remote_decimals)
   }
 }
 
@@ -484,4 +589,203 @@ fn upsert_route_helper(
         [(d, r), ..upsert_route_helper(rest, domain, route, found)]
       }
   }
+}
+
+// ============================================================================
+// Mailbox binding tests
+// ============================================================================
+
+const test_mailbox_policy =
+  #"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+const test_message_id =
+  #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+const test_remote_route =
+  #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+const test_recipient =
+  #"000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+fn test_mailbox_ref() -> OutputReference {
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000001",
+    output_index: 0,
+  }
+}
+
+fn test_warp_ref() -> OutputReference {
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000002",
+    output_index: 0,
+  }
+}
+
+fn test_message() -> Message {
+  Message {
+    version: 3,
+    nonce: 1,
+    origin: 1,
+    sender: test_remote_route,
+    destination: 2,
+    recipient: #"01000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    body: #"abcd",
+  }
+}
+
+fn test_validity_range() -> Interval<Int> {
+  Interval {
+    lower_bound: IntervalBound {
+      bound_type: NegativeInfinity,
+      is_inclusive: False,
+    },
+    upper_bound: IntervalBound {
+      bound_type: PositiveInfinity,
+      is_inclusive: False,
+    },
+  }
+}
+
+fn test_tx(mailbox_redeemer: MailboxRedeemer) -> Transaction {
+  test_tx_with_mailbox_asset(mailbox_redeemer, #"4d61696c626f78205374617465")
+}
+
+fn test_tx_with_mailbox_asset(
+  mailbox_redeemer: MailboxRedeemer,
+  mailbox_asset_name: ByteArray,
+) -> Transaction {
+  let raw_redeemer: Data = mailbox_redeemer
+  Transaction {
+    inputs: [
+      Input {
+        output_reference: test_mailbox_ref(),
+        output: Output {
+          address: Address {
+            payment_credential: Script(
+              #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            ),
+            stake_credential: None,
+          },
+          value: from_asset(test_mailbox_policy, mailbox_asset_name, 1),
+          datum: NoDatum,
+          reference_script: None,
+        },
+      },
+    ],
+    reference_inputs: [],
+    outputs: [],
+    fee: 0,
+    mint: zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: test_validity_range(),
+    extra_signatories: [],
+    redeemers: [Pair(Spend(test_mailbox_ref()), raw_redeemer)],
+    datums: dict.empty,
+    id: #"0000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+test process_binding_accepts_exact_message() {
+  let redeemer =
+    Process {
+      message: test_message(),
+      metadata: #"01",
+      message_id: test_message_id,
+      smt_proof: [],
+    }
+  mailbox_process_matches(
+    test_mailbox_policy,
+    test_message(),
+    test_message_id,
+    test_tx(redeemer),
+  )
+}
+
+test process_binding_rejects_dispatch() {
+  let redeemer =
+    Dispatch {
+      destination: 2,
+      recipient: test_remote_route,
+      body: #"",
+      sender_ref: test_warp_ref(),
+      hook_metadata: #"",
+    }
+  !mailbox_process_matches(
+    test_mailbox_policy,
+    test_message(),
+    test_message_id,
+    test_tx(redeemer),
+  )
+}
+
+test process_binding_rejects_reference_token() fail {
+  let redeemer =
+    Process {
+      message: test_message(),
+      metadata: #"01",
+      message_id: test_message_id,
+      smt_proof: [],
+    }
+  mailbox_process_matches(
+    test_mailbox_policy,
+    test_message(),
+    test_message_id,
+    test_tx_with_mailbox_asset(redeemer, #"726566"),
+  )
+}
+
+fn test_dispatch_body(wire_amount: Int) -> ByteArray {
+  bytearray.concat(
+    test_recipient,
+    bytearray.from_int_big_endian(wire_amount, 32),
+  )
+}
+
+test dispatch_binding_accepts_exact_transfer() {
+  let redeemer =
+    Dispatch {
+      destination: 2,
+      recipient: test_remote_route,
+      body: test_dispatch_body(500),
+      sender_ref: test_warp_ref(),
+      hook_metadata: #"",
+    }
+  mailbox_dispatch_matches(
+    test_mailbox_policy,
+    2,
+    test_remote_route,
+    test_recipient,
+    5,
+    6,
+    8,
+    test_warp_ref(),
+    test_tx(redeemer),
+  )
+}
+
+test dispatch_binding_rejects_inflated_wire_amount() {
+  let redeemer =
+    Dispatch {
+      destination: 2,
+      recipient: test_remote_route,
+      body: test_dispatch_body(50_000),
+      sender_ref: test_warp_ref(),
+      hook_metadata: #"",
+    }
+  !mailbox_dispatch_matches(
+    test_mailbox_policy,
+    2,
+    test_remote_route,
+    test_recipient,
+    5,
+    6,
+    8,
+    test_warp_ref(),
+    test_tx(redeemer),
+  )
 }

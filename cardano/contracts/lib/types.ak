@@ -86,12 +86,20 @@ fn int_to_bytes_helper(n: Int, remaining: Int, acc: ByteArray) -> ByteArray {
 /// Standard wrapper for recipient datums
 /// Recipients should use this pattern to be compatible with the relayer
 pub type HyperlaneRecipientDatum<inner> {
-  /// Custom ISM override
+  /// Application-visible ISM metadata. Mailbox selection uses the authenticated
+  /// canonical config UTXO rather than trusting this state field.
   ism: Option<ScriptHash>,
   /// For ordering (optional)
   last_processed_nonce: Option<Int>,
   /// Contract-specific state
   inner: inner,
+}
+
+/// Authenticated ISM override. The policy identifies the one-shot state NFT
+/// whose datum configures the ISM at script_hash.
+pub type IsmConfig {
+  script_hash: ScriptHash,
+  state_nft_policy: PolicyId,
 }
 
 /// Standard redeemer for recipients
@@ -240,7 +248,10 @@ pub fn encode_domain_hash(origin: Int, merkle_tree_hook: ByteArray) -> ByteArray
 
 /// Encode checkpoint for hashing (after domain hash is computed)
 /// Format: domain_hash (32 bytes) || merkle_root (32 bytes) || merkle_index (4 bytes big-endian) || message_id (32 bytes)
-pub fn encode_checkpoint(checkpoint: Checkpoint, domain_hash: ByteArray) -> ByteArray {
+pub fn encode_checkpoint(
+  checkpoint: Checkpoint,
+  domain_hash: ByteArray,
+) -> ByteArray {
   let index_bytes = int_to_bytes(checkpoint.merkle_index, 4)
 
   domain_hash
@@ -358,7 +369,7 @@ pub type WarpRouteDatum {
   /// Total tokens bridged (for accounting)
   total_bridged: Int,
   /// Override default ISM for this warp route
-  ism: Option<ScriptHash>,
+  ism: Option<IsmConfig>,
 }
 
 /// Warp route redeemer
@@ -387,7 +398,6 @@ pub type WarpTransferBody {
   /// Amount of tokens
   amount: Int,
 }
-
 
 // ============================================================================
 // Validator Announce Types

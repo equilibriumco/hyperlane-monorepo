@@ -4,11 +4,13 @@ use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
 use cardano/transaction.{InlineDatum, OutputReference, Transaction}
 use types.{
-  Checkpoint, Domain, MultisigIsmDatum, MultisigIsmRedeemer, ValidatorSignature,
-  encode_checkpoint, encode_domain_hash, Verify, SetValidators, SetThreshold,
-  MigrateIsm,
+  Checkpoint, Domain, MigrateIsm, MultisigIsmDatum, MultisigIsmRedeemer,
+  SetThreshold, SetValidators, ValidatorSignature, Verify, encode_checkpoint,
+  encode_domain_hash,
 }
-use utils.{assoc_find, find_input, is_signed_by, validate_migrate, value_preserved}
+use utils.{
+  assoc_find, find_input, is_signed_by, validate_migrate, value_preserved,
+}
 
 /// Multisig ISM (Interchain Security Module) Validator
 /// Verifies message authenticity using N-of-M validator signatures
@@ -55,7 +57,13 @@ validator multisig_ism {
 
       MigrateIsm { new_address } -> {
         let datum_as_data: Data = ism_datum
-        validate_migrate(ism_datum.owner, new_address, tx, own_ref, datum_as_data)
+        validate_migrate(
+          ism_datum.owner,
+          new_address,
+          tx,
+          own_ref,
+          datum_as_data,
+        )
       }
     }
   }
@@ -72,20 +80,23 @@ fn verify_checkpoint(
   validator_signatures: List<ValidatorSignature>,
 ) -> Bool {
   // Get trusted validator addresses for the origin domain
-  expect Some(validator_addresses) = assoc_find(datum.validators, checkpoint.origin)
+  expect Some(validator_addresses) =
+    assoc_find(datum.validators, checkpoint.origin)
 
   // Get threshold for the origin domain
   expect Some(threshold) = assoc_find(datum.thresholds, checkpoint.origin)
+  expect threshold > 0
 
   // Compute the message hash that validators signed
   let message_hash = compute_checkpoint_hash(checkpoint)
 
   // Count valid signatures from trusted validators
-  let valid_count = count_valid_signatures(
-    validator_signatures,
-    validator_addresses,
-    message_hash,
-  )
+  let valid_count =
+    count_valid_signatures(
+      validator_signatures,
+      validator_addresses,
+      message_hash,
+    )
 
   // Must have at least threshold valid signatures
   valid_count >= threshold
@@ -98,7 +109,8 @@ fn verify_checkpoint(
 /// 3. eth_signed_message = keccak256("\x19Ethereum Signed Message:\n32" || checkpoint_digest)
 fn compute_checkpoint_hash(checkpoint: Checkpoint) -> ByteArray {
   // Step 1: domain_hash
-  let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
+  let domain_hash_encoded =
+    encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
   let domain_hash = keccak_256(domain_hash_encoded)
 
   // Step 2: checkpoint_digest
@@ -106,7 +118,8 @@ fn compute_checkpoint_hash(checkpoint: Checkpoint) -> ByteArray {
   let checkpoint_digest = keccak_256(checkpoint_encoded)
 
   // Step 3: EIP-191 hash (this is what validators actually sign)
-  let eip191_prefix = #"19457468657265756d205369676e6564204d6573736167653a0a3332"
+  let eip191_prefix =
+    #"19457468657265756d205369676e6564204d6573736167653a0a3332"
   let prefixed = bytearray.concat(eip191_prefix, checkpoint_digest)
   keccak_256(prefixed)
 }
@@ -125,15 +138,22 @@ fn count_valid_signatures(
       (0, []),
       fn(val_sig, acc) {
         let (count, seen) = acc
-        let ValidatorSignature { compressed_pubkey, uncompressed_pubkey, signature } =
-          val_sig
+        let ValidatorSignature {
+          compressed_pubkey,
+          uncompressed_pubkey,
+          signature,
+        } = val_sig
 
         let compressed_x = bytearray.drop(compressed_pubkey, 1)
         let uncompressed_x = bytearray.take(uncompressed_pubkey, 32)
         expect compressed_x == uncompressed_x
 
         let sig_valid =
-          verify_ecdsa_secp256k1_signature(compressed_pubkey, message_hash, signature)
+          verify_ecdsa_secp256k1_signature(
+            compressed_pubkey,
+            message_hash,
+            signature,
+          )
 
         if sig_valid {
           let address = pubkey_to_eth_address(uncompressed_pubkey)
@@ -264,4 +284,24 @@ fn validate_ism_continuation(
 
   // Value must be preserved (lovelace + all native tokens including state NFT)
   value_preserved(own_value, continuation.value)
+}
+
+test verify_checkpoint_rejects_zero_threshold() fail {
+  let origin = 1
+  let datum =
+    MultisigIsmDatum {
+      validators: [(origin, [])],
+      thresholds: [(origin, 0)],
+      owner: #"00000000000000000000000000000000000000000000000000000000",
+    }
+  let checkpoint =
+    Checkpoint {
+      origin,
+      merkle_root: #"0000000000000000000000000000000000000000000000000000000000000000",
+      origin_merkle_tree_hook: #"0000000000000000000000000000000000000000000000000000000000000000",
+      merkle_index: 0,
+      message_id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    }
+
+  verify_checkpoint(datum, checkpoint, [])
 }

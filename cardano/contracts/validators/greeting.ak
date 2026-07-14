@@ -1,14 +1,12 @@
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/collection/pairs
 use aiken/crypto.{VerificationKeyHash, keccak_256}
 use aiken/primitive/bytearray
-use cardano/assets
 use cardano/address.{Address}
-use cardano/transaction.{InlineDatum, OutputReference, Transaction}
-use types.{
-  Message, PolicyId,
-  encode_message,
-}
+use cardano/assets
+use cardano/transaction.{InlineDatum, OutputReference, Spend, Transaction}
+use types.{Message, PolicyId, encode_message}
 use utils.{find_input}
 
 pub type GreetingDatum {
@@ -23,16 +21,16 @@ pub type GreetingRedeemer {
   Init
   /// Handle a verified message delivered by the mailbox to this script address.
   /// Burns the verified_message_nft and updates the greeting state.
-  HandleMessage {
-    message: Message,
-    message_id: ByteArray,
-  }
+  HandleMessage { message: Message, message_id: ByteArray }
   /// Reclaim an ADA-only UTXO back to the wallet.
   /// Rejected for state/message UTXOs since those always carry a token.
   Reclaim
 }
 
-validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKeyHash) {
+validator greeting(
+  verified_message_nft_policy: PolicyId,
+  owner: VerificationKeyHash,
+) {
   spend(
     datum: Option<Data>,
     redeemer: GreetingRedeemer,
@@ -53,6 +51,10 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
         )
 
       HandleMessage { message, message_id } -> {
+        // The reference recipient is owner-operated. This prevents attackers
+        // from planting a fake state UTXO and grief-burning a pending message.
+        expect list.has(tx.extra_signatories, owner)
+
         // Determine UTXO type by checking which NFT the input holds:
         // - Message UTXO has verified_message_nft → just check burn
         // - State UTXO has the greeting state NFT → full message processing
@@ -64,7 +66,14 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
           ) == 1
 
         if is_message_utxo {
-          verified_nft_burned(tx, verified_message_nft_policy, message_id)
+          verified_nft_burned(tx, verified_message_nft_policy, message_id) && matching_state_input_spent(
+            tx,
+            own_input.output.address,
+            verified_message_nft_policy,
+            message,
+            message_id,
+            own_ref,
+          )
         } else {
           expect Some(raw_datum) = datum
           expect old_datum: GreetingDatum = raw_datum
@@ -79,14 +88,16 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
           expect new_datum: GreetingDatum = cont_datum
 
           expect keccak_256(encode_message(message)) == message_id
-          expect verified_nft_burned(tx, verified_message_nft_policy, message_id)
-          expect message_utxo_spent(
-            tx,
-            own_addr,
-            verified_message_nft_policy,
-            message_id,
-            own_ref,
-          )
+          expect
+            verified_nft_burned(tx, verified_message_nft_policy, message_id)
+          expect
+            message_utxo_spent(
+              tx,
+              own_addr,
+              verified_message_nft_policy,
+              message_id,
+              own_ref,
+            )
 
           new_datum.last_greeting == greeting && new_datum.greeting_count == old_datum.greeting_count + 1
         }
@@ -97,6 +108,44 @@ validator greeting(verified_message_nft_policy: PolicyId, owner: VerificationKey
   else(_) {
     fail
   }
+}
+
+/// Bind the message UTXO spend to the state UTXO's matching HandleMessage
+/// execution. Otherwise an attacker could burn the NFT and strand delivery.
+fn matching_state_input_spent(
+  tx: Transaction,
+  own_addr: Address,
+  nft_policy: PolicyId,
+  message: Message,
+  message_id: ByteArray,
+  message_ref: OutputReference,
+) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) {
+      if input.output_reference == message_ref || input.output.address != own_addr || assets.quantity_of(
+        input.output.value,
+        nft_policy,
+        message_id,
+      ) != 0 {
+        False
+      } else {
+        when pairs.get_first(tx.redeemers, Spend(input.output_reference)) is {
+          Some(raw_redeemer) -> {
+            expect state_redeemer: GreetingRedeemer = raw_redeemer
+            when state_redeemer is {
+              HandleMessage {
+                message: state_message,
+                message_id: state_message_id,
+              } -> state_message == message && state_message_id == message_id
+              _ -> False
+            }
+          }
+          None -> False
+        }
+      }
+    },
+  )
 }
 
 /// Check that the verified_message_nft with this message_id is being burned
