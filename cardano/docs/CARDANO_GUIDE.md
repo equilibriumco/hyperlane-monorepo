@@ -130,7 +130,7 @@ Generic Recipient Hash:     0x7fb8e3ae915c4c37... (28 bytes)
 Hyperlane Address (script): 0x020000007fb8e3ae915c4c37... (32 bytes)
 ```
 
-The mailbox's `verified_message_nft` minting/delivery is **conditional on the prefix**: only `0x02` recipients get verified message NFTs. Warp routes (`0x01`) validate independently by checking the mailbox is co-spending.
+The mailbox's `verified_message_nft` minting/delivery is **conditional on the prefix**: only `0x02` recipients get verified message NFTs. Both paths are bound to the mailbox `Process` redeemer itself, not merely to the mailbox state NFT appearing as a spent input. For `0x02` recipients the mailbox mints the verified message NFT (asset name = `message_id`) and delivers it to the recipient's script address. For `0x01` warp routes the binding is bidirectional in the same transaction: the mailbox `Process` requires a matching warp `ReceiveTransfer{message, message_id}`, and the warp route requires the mailbox to be spent with the matching `Process{message, message_id}`. Because `Dispatch` is permissionless, a mere "mailbox is co-spending" check would be forgeable — the redeemer match is what proves the message was ISM-verified and SMT replay-checked.
 
 ### Domain IDs
 
@@ -428,6 +428,8 @@ flowchart LR
     VERIFY --> THRESHOLD
 ```
 
+On-chain guarantees beyond the diagram: the threshold must be non-zero — a domain configured with threshold `0` is rejected by `verify_checkpoint`, so an empty signature set can never satisfy it — and duplicate signatures from the same validator address are counted once, so `N` copies of a single signature cannot meet an `N`-of-`M` threshold.
+
 ---
 
 ## 3. NFT Patterns
@@ -519,8 +521,8 @@ flowchart TB
 
 **Security Properties:**
 
-- Only mailbox can mint the NFT (parameterized minting policy)
-- NFT presence proves message authenticity
+- The NFT can only be minted in a transaction where the mailbox is spent with a `Process` redeemer, its asset name must equal that `Process`'s `message_id`, and minting is restricted to canonical `0x02` recipients
+- NFT presence therefore proves the mailbox ran `Process` (ISM-verified and SMT replay-checked) for that exact `message_id`, not merely that the mailbox was touched
 - Burning prevents double-processing
 
 ### Synthetic Tokens
@@ -1024,6 +1026,8 @@ Outbound (Cardano -> Remote):
 | Custom | Varies          | 18           | 10^(18-local)     |
 
 Wire amount: `wire_amount = local_amount * 10^(remote_decimals - local_decimals)`
+
+When the remote chain has fewer decimals than Cardano, this conversion floor-divides. An outbound transfer whose wire amount would truncate to `0` (dust below the remote precision) is rejected on-chain, so collateral is never locked without a corresponding remote credit.
 
 ---
 

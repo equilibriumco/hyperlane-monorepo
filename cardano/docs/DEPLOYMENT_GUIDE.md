@@ -442,6 +442,8 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --threshold 2
 ```
 
+> **Note**: The threshold must be at least `1`. `set-threshold` rejects `0`, and even if a `0` threshold were placed in the datum some other way, the ISM's `verify_checkpoint` rejects it on-chain — otherwise an empty signature set would satisfy the domain.
+
 ### 5.4 Verify Configuration
 
 ```bash
@@ -1219,6 +1221,12 @@ echo "3. Test a transfer using: warp transfer --domain $FUJI_DOMAIN ..."
 **Cause**: Collateral UTXO doesn't have enough ADA.
 
 **Solution**: Ensure collateral UTXO has at least 5 ADA and no other tokens.
+
+#### "ScriptIntegrityHashMismatch" / cost model errors
+
+**Cause**: The PlutusV3 cost model used to build the script-data hash must match the chain's exactly. The CLI and relayer read it live from `cost_models_raw` in the current protocol parameters (it is not hardcoded, because the parameter set grows at hard forks). If Blockfrost returns parameters without that field, transaction building fails rather than falling back to a stale table.
+
+**Solution**: Confirm `query params` returns a populated `cost_models_raw.PlutusV3`, and that `BLOCKFROST_API_KEY` points at the same network you are deploying to. Retry once the parameters endpoint responds normally.
 
 #### Parameter application fails
 
@@ -2169,6 +2177,8 @@ Example: Sending 10 ADA to Fuji
   wire_amount = 10,000,000 * 10^(18-6) = 10,000,000,000,000,000,000
               = 10.0 with 18 decimals
 ```
+
+> **Note**: When the remote chain has fewer decimals than Cardano, the conversion floor-divides and a small `local_amount` can truncate to a wire amount of `0`. The warp route rejects such transfers on-chain, so you cannot lock collateral without producing a corresponding remote credit. Size transfers above the remote decimal precision.
 
 ### Warp Route Identification
 
