@@ -1664,4 +1664,4 @@ These are part of the Hyperlane specification but not required for initial Carda
 
 ---
 
-_Last Updated: March 2026_
+_Last Updated: July 2026_
