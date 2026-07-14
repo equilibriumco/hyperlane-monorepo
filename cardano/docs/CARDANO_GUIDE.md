@@ -107,7 +107,7 @@ flowchart TB
 
 **How each contract ensures correctness:**
 
-- **Mailbox** ensures the **trusted ISM** verifies **this specific message**: it checks that an input with the exact script hash stored in `datum.default_ism` is being spent, then inspects that input's redeemer to confirm the checkpoint's `message_id` matches the expected one. This prevents both untrusted ISM attacks and signature replay.
+- **Mailbox** ensures the **trusted ISM** verifies **this specific message**: it resolves the ISM script hash for the recipient (the `default_ism`, or a per-recipient override taken from the recipient's authenticated config), checks that an input with that script hash **carrying the ISM's own state NFT** is being spent, then inspects that input's redeemer to confirm the checkpoint's `message_id` matches the expected one. This prevents untrusted-ISM attacks, datum-swapped ISM impostors, and signature replay.
 
 - **Recipient** ensures the message came from the mailbox by checking that the mailbox UTXO (identified by its state NFT) is being spent in the same transaction.
 
@@ -181,8 +181,8 @@ sequenceDiagram
     CardanoMailbox->>CardanoMailbox: Check not already processed
     CardanoMailbox->>ISM: Verify signatures (spent in same tx)
     ISM->>ISM: Verify threshold signatures<br/>against validator set
-    CardanoMailbox->>Recipient: Invoke recipient (spent in same tx)
-    Recipient->>Recipient: Handle message
+    CardanoMailbox->>Recipient: Bind recipient (warp: ReceiveTransfer same tx;<br/>generic: mint verified-message UTXO for later)
+    Recipient->>Recipient: Handle message (warp: now; generic: separate tx)
     CardanoMailbox->>CardanoMailbox: Update SMT (replay protection)
     deactivate CardanoMailbox
 
@@ -213,13 +213,13 @@ flowchart TB
     subgraph Redeemers["Redeemers"]
         MR["Mailbox: Process{<br/>message, metadata, message_id}"]
         IR["ISM: Verify{<br/>checkpoint, signatures}"]
-        RR["Recipient: HandleMessage{<br/>origin, sender, body}"]
+        RR["Warp Route: ReceiveTransfer{<br/>message, message_id}"]
     end
 
     subgraph Outputs["Transaction Outputs"]
         MO[/"Mailbox UTXO<br/>(updated SMT in datum)"/]
         IO[/"ISM UTXO<br/>(unchanged datum)"/]
-        RO[/"Recipient UTXO<br/>(updated state)"/]
+        RO[/"Warp Route UTXO<br/>(updated total_bridged)"/]
     end
 
     MI --> MR
@@ -500,7 +500,7 @@ flowchart TB
 flowchart TB
     subgraph Phase1["Phase 1: Mailbox Process (relayer TX)"]
         MB["Mailbox validates message<br/>+ ISM signature verification"]
-        MINT["Mint Verified Message NFT<br/>(only mailbox can mint)"]
+        MINT["Mint Verified Message NFT<br/>(requires mailbox Process;<br/>asset name = message_id)"]
         STORE["Create UTXO at recipient's<br/>script address with NFT +<br/>VerifiedMessageDatum"]
     end
 
