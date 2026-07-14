@@ -181,8 +181,8 @@ sequenceDiagram
     CardanoMailbox->>CardanoMailbox: Check not already processed
     CardanoMailbox->>ISM: Verify signatures (spent in same tx)
     ISM->>ISM: Verify threshold signatures<br/>against validator set
-    CardanoMailbox->>Recipient: Bind recipient (warp: ReceiveTransfer same tx;<br/>generic: mint verified-message UTXO for later)
-    Recipient->>Recipient: Handle message (warp: now; generic: separate tx)
+    CardanoMailbox->>Recipient: Bind recipient (warp - ReceiveTransfer same tx,<br/>generic - mint verified-message UTXO for later)
+    Recipient->>Recipient: Handle message (warp now, generic in separate tx)
     CardanoMailbox->>CardanoMailbox: Update SMT (replay protection)
     deactivate CardanoMailbox
 
@@ -500,7 +500,7 @@ flowchart TB
 flowchart TB
     subgraph Phase1["Phase 1: Mailbox Process (relayer TX)"]
         MB["Mailbox validates message<br/>+ ISM signature verification"]
-        MINT["Mint Verified Message NFT<br/>(requires mailbox Process;<br/>asset name = message_id)"]
+        MINT["Mint Verified Message NFT<br/>(requires mailbox Process,<br/>asset name = message_id)"]
         STORE["Create UTXO at recipient's<br/>script address with NFT +<br/>VerifiedMessageDatum"]
     end
 
