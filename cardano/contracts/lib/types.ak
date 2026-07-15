@@ -301,6 +301,31 @@ pub type MultisigIsmRedeemer {
   MigrateIsm { new_address: Address }
 }
 
+/// MerkleRoot multisig ISM redeemer.
+///
+/// Distinct type (and distinct script) from the MessageId `MultisigIsmRedeemer`.
+/// The delivered message is bound by a merkle inclusion proof against the signed
+/// checkpoint root, not by `checkpoint.message_id`. Admin variants mirror the
+/// MessageId ISM but carry distinct constructor names so both redeemer types can
+/// be imported side by side (e.g. in the mailbox).
+pub type MerkleRootIsmRedeemer {
+  /// Verify: a threshold signed `checkpoint.merkle_root`, and `delivered_message_id`
+  /// is proven to be the leaf at `delivered_index` under that root.
+  MerkleRootVerify {
+    checkpoint: Checkpoint,
+    validator_signatures: List<ValidatorSignature>,
+    delivered_message_id: ByteArray,
+    delivered_index: Int,
+    merkle_proof: List<ByteArray>,
+  }
+  /// Admin: set validators for a domain
+  MrSetValidators { domain: Domain, validators: List<ByteArray> }
+  /// Admin: set threshold for a domain
+  MrSetThreshold { domain: Domain, threshold: Int }
+  /// Admin: migrate state to a new script address (code upgrade)
+  MrMigrateIsm { new_address: Address }
+}
+
 // ============================================================================
 // IGP Types (Interchain Gas Paymaster)
 // ============================================================================
