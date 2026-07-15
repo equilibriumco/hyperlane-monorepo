@@ -1,6 +1,6 @@
 //! ISM command - Manage Interchain Security Module validators
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use pallas_primitives::conway::{BigInt, BoundedBytes, Constr, PlutusData};
@@ -9,6 +9,19 @@ use pallas_primitives::MaybeIndefArray;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::build_migrate_redeemer;
 use crate::utils::context::CliContext;
+
+/// Blueprint validator title for the deployed ISM's script, chosen by the ISM's
+/// module_type so spends attach the correct script (merkleroot vs messageid).
+fn ism_validator_title(ctx: &CliContext) -> Result<&'static str> {
+    let dep = ctx
+        .load_deployment_info()
+        .with_context(|| "Run 'deploy extract' first")?;
+    let mt = dep.ism.as_ref().and_then(|m| m.module_type.as_deref());
+    Ok(match mt {
+        Some("merkleroot") => "merkleroot_ism.merkleroot_ism.spend",
+        _ => "multisig_ism.multisig_ism.spend",
+    })
+}
 
 #[derive(Args)]
 pub struct IsmArgs {
@@ -423,7 +436,7 @@ pub(crate) async fn set_validators(
     // Load ISM script from blueprint
     let blueprint = ctx.load_blueprint()?;
     let ism_validator = blueprint
-        .find_validator("multisig_ism.multisig_ism.spend")
+        .find_validator(ism_validator_title(ctx)?)
         .ok_or_else(|| anyhow!("ISM validator not found in blueprint"))?;
     let ism_script_bytes = hex::decode(&ism_validator.compiled_code)?;
 
@@ -755,7 +768,7 @@ pub(crate) async fn set_threshold(
     // Load ISM script from blueprint
     let blueprint = ctx.load_blueprint()?;
     let ism_validator = blueprint
-        .find_validator("multisig_ism.multisig_ism.spend")
+        .find_validator(ism_validator_title(ctx)?)
         .ok_or_else(|| anyhow!("ISM validator not found in blueprint"))?;
     let ism_script_bytes = hex::decode(&ism_validator.compiled_code)?;
 
@@ -1259,7 +1272,7 @@ async fn migrate(
         println!("  Computing script from blueprint...");
         let blueprint = ctx.load_blueprint()?;
         let ism_validator = blueprint
-            .find_validator("multisig_ism.multisig_ism.spend")
+            .find_validator(ism_validator_title(ctx)?)
             .ok_or_else(|| anyhow!("ISM validator not found in blueprint"))?;
         let script_hash = crate::utils::crypto::script_hash_from_hex(&ism_validator.compiled_code)?;
         let blueprint_hash = hex::encode(script_hash);
