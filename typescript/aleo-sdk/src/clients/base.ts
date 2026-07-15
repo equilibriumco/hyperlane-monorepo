@@ -22,7 +22,7 @@ import {
   RETRY_ATTEMPTS,
   RETRY_DELAY_MS,
 } from '../utils/helper.js';
-import { toAleoNetworkId } from '../utils/types.js';
+import { AleoNetworkId, toAleoNetworkId } from '../utils/types.js';
 
 export type AnyAleoNetworkClient =
   | AleoMainnetNetworkClient
@@ -128,15 +128,47 @@ export class AleoBase {
     return programManager;
   }
 
+  private get networkPath(): string {
+    return this.chainId === AleoNetworkId.TESTNET ? 'testnet' : 'mainnet';
+  }
+
+  protected async findBlockHashByTxId(txId: string): Promise<string> {
+    const url = `${this.rpcUrls[0]}/${this.networkPath}/find/blockHash/${txId}`;
+    return retryAsync(
+      async () => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return JSON.parse(await res.text()) as string;
+      },
+      RETRY_ATTEMPTS,
+      RETRY_DELAY_MS,
+    );
+  }
+
   protected async queryMappingValue(
     programId: string,
     mappingName: string,
     key: string,
+    { retryOnNull = false }: { retryOnNull?: boolean } = {},
   ): Promise<any | undefined> {
     try {
       const result = await retryAsync(
-        () =>
-          this.aleoClient.getProgramMappingValue(programId, mappingName, key),
+        async () => {
+          const r = await this.aleoClient.getProgramMappingValue(
+            programId,
+            mappingName,
+            key,
+          );
+          // Freshly-finalized state can briefly lag behind the
+          // confirmed-transaction endpoint, so give callers that just
+          // confirmed a tx the option to retry until the mapping catches up.
+          if (r === null && retryOnNull) {
+            throw new Error(
+              `mapping value for ${programId}/${mappingName}/${key} not yet indexed`,
+            );
+          }
+          return r;
+        },
         RETRY_ATTEMPTS,
         RETRY_DELAY_MS,
       );
