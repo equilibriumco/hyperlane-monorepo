@@ -59,7 +59,8 @@
       "chainId": 11155111,
       "domainId": 11155111,
       "index": {
-        "from": ${SEPOLIA_INDEX_FROM}
+        "from": ${SEPOLIA_INDEX_FROM},
+        "chunk": 99999
       },
       "interchainGasPaymaster": "${SEPOLIA_IGP}",
       "interchainSecurityModule": "${SEPOLIA_ISM}",
@@ -69,10 +70,10 @@
       "protocol": "ethereum",
       "rpcUrls": [
         {
-          "http": "${SEPOLIA_RPC_URL}"
+          "http": "https://sepolia.gateway.tenderly.co"
         },
         {
-          "http": "https://sepolia.gateway.tenderly.co"
+          "http": "${SEPOLIA_RPC_URL}"
         }
       ],
       "signer": {
