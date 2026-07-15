@@ -19,5 +19,33 @@
     "tx_hash": "1a245db90c18086fc9146559d97c2db1acd3ab4a9976233414f1a0606a2009da",
     "output_index": 0,
     "lovelace": 15000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "3723efab656d11788752d3ca6c03ded9162b9fbc7f7b749445259abb",
+    "tx_hash": "b0a22158b690a71517223748e229dd1090da099598f8fb4c1656c0dd1cfce4ae",
+    "output_index": 0,
+    "lovelace": 35000000
+  },
+  {
+    "script_name": "merkle_root_multisig_ism",
+    "script_hash": "5c7f0f46906b141cb40443535e41e2958f63e7ef830ab4a2e3b0aaaf",
+    "tx_hash": "ea868d22ac34f04b3a430a0a90b044473ddb6a9271402054feaa10ee357b87ad",
+    "output_index": 0,
+    "lovelace": 18000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "b72d210705a1b971e7893db487fa24fe30a7caf604d74fb6b0f8b393",
+    "tx_hash": "b45d0ef1cec2305515583630091dae99d52be55b5606992f6245b78904c99bbc",
+    "output_index": 0,
+    "lovelace": 35000000
+  },
+  {
+    "script_name": "message_id_multisig_ism",
+    "script_hash": "673158fa70bf8097685a52443e94e6f9dc96c4f99f2607da1975f7b8",
+    "tx_hash": "00c0845dc6344f75b861c196c41eaa94fb26d513d7f2f71183c6b0fceef595e2",
+    "output_index": 0,
+    "lovelace": 17000000
   }
 ]
