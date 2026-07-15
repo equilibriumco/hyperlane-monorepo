@@ -3,13 +3,19 @@ import { wasmTypes } from '@cosmjs/cosmwasm-stargate';
 import { toUtf8 } from '@cosmjs/encoding';
 import { Uint53 } from '@cosmjs/math';
 import { Registry } from '@cosmjs/proto-signing';
-import { StargateClient, defaultRegistryTypes } from '@cosmjs/stargate';
+import { defaultRegistryTypes } from '@cosmjs/stargate';
 import { MsgExecuteContract } from 'cosmjs-types/cosmwasm/wasm/v1/tx.js';
+import { VersionedTransaction } from '@solana/web3.js';
 import type {
   providers as EV5Providers,
   PopulatedTransaction as EV5Transaction,
 } from 'ethers';
 
+import {
+  StargateClientCache,
+  disconnectStargateClient,
+  shouldCacheStargateClient,
+} from '@hyperlane-xyz/cosmos-sdk';
 import {
   Address,
   HexString,
@@ -48,6 +54,16 @@ export interface TransactionFeeEstimate {
   gasUnits: number | bigint;
   gasPrice: number | bigint;
   fee: number | bigint;
+}
+
+const stargateClientCache = new StargateClientCache(32);
+
+export function clearCachedStargateClients(): void {
+  stargateClientCache.clear();
+}
+
+function getStargateClient(url: string) {
+  return stargateClientCache.get(url);
 }
 
 export async function estimateTransactionFeeEthersV5({
@@ -140,17 +156,25 @@ export async function estimateTransactionFeeSolanaWeb3({
   provider: SolanaWeb3Provider;
 }): Promise<TransactionFeeEstimate> {
   const connection = provider.provider;
-  const { value } = await connection.simulateTransaction(
-    transaction.transaction,
-  );
+  const inner = transaction.transaction;
+  // The two arms are intentionally identical: `Connection.simulateTransaction`
+  // has separate overloads for legacy `Transaction` and `VersionedTransaction`
+  // and the union satisfies neither, so we branch purely to narrow `inner` to a
+  // concrete type and let overload resolution pick the matching signature.
+  const { value } =
+    inner instanceof VersionedTransaction
+      ? await connection.simulateTransaction(inner)
+      : await connection.simulateTransaction(inner);
   assert(!value.err, `Solana gas estimation failed: ${JSON.stringify(value)}`);
   const gasUnits = BigInt(value.unitsConsumed || 0);
   const recentFees = await connection.getRecentPrioritizationFees();
-  const gasPrice = BigInt(recentFees[0].prioritizationFee);
+  // prioritizationFee is in micro-lamports per compute unit; divide by 1e6 to get lamports
+  const microLamportsPerCu = BigInt(recentFees[0]?.prioritizationFee ?? 0);
+  const fee = (gasUnits * microLamportsPerCu) / 1_000_000n;
   return {
     gasUnits,
-    gasPrice,
-    fee: gasUnits * gasPrice,
+    gasPrice: microLamportsPerCu,
+    fee,
   };
 }
 
@@ -227,16 +251,27 @@ export async function estimateTransactionFeeCosmJsWasm({
   const wasmClient = await provider.provider;
   // @ts-ignore access a private field here to extract client URL
   const url: string = wasmClient.cometClient.client.url;
-  const stargateClient = StargateClient.connect(url);
+  const stargateClient = getStargateClient(url);
 
-  return estimateTransactionFeeCosmJs({
-    transaction: { type: ProviderType.CosmJs, transaction: message },
-    provider: { type: ProviderType.CosmJs, provider: stargateClient },
-    estimatedGasPrice,
-    sender,
-    senderPubKey,
-    memo,
-  });
+  try {
+    return await estimateTransactionFeeCosmJs({
+      transaction: { type: ProviderType.CosmJs, transaction: message },
+      provider: { type: ProviderType.CosmJs, provider: stargateClient },
+      estimatedGasPrice,
+      sender,
+      senderPubKey,
+      memo,
+    });
+  } catch (error) {
+    stargateClientCache.evict(url, stargateClient);
+    throw error;
+  } finally {
+    if (!shouldCacheStargateClient(url)) {
+      disconnectStargateClient(stargateClient);
+    } else {
+      stargateClientCache.release(stargateClient);
+    }
+  }
 }
 
 export async function estimateTransactionFeeCosmJsNative({
