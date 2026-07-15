@@ -137,7 +137,10 @@ The **relayer/validator** computes the root that gets signed for Cardano-origin 
 - Rust audit: the relayer's signed Cardano root already uses hyperlane-core `IncrementalMerkle` (standard) — no change needed.
 - Datum plumbing: relayer parses `module_type` (CBOR + JSON) and `module_type()` queries the ISM state UTXO on-chain; CLI datum builders emit the field. Relayer + CLI compile.
 
-**Remaining (not e2e-verifiable in a dev box — needs live Cardano/Sepolia/Blockfrost):**
+**Also done since:**
+- **B (relayer inbound) — done.** `parse_merkleroot_metadata` parses the Hyperlane MerkleRoot layout, recomputes the signed root via `branch_root`, and emits the `MerkleRootVerify` redeemer; dispatch is by metadata length. `branch_root` is unit-tested against the same vector as the on-chain `verify_proof`. Shared sig-recovery/encoding helpers added. `module_type()` is dynamic. Blueprint rebuilt (`plutus.json` now has `merkleroot_ism`).
+
+**Remaining (needs a live testnet/Blockfrost to exercise & verify):**
 - **A. CLI MerkleRoot deploy path** — deploy the `merkleroot_ism` script, set `module_type = MerkleRoot`, make the default ISM MerkleRoot, and preserve `module_type` on `set-validators`/`set-threshold` (see the TODO in `ism.rs`).
 - **B. Relayer MerkleRoot metadata → Plutus redeemer (Sepolia→Cardano).** `module_type()` is now dynamic, so the generic pipeline will select `MerkleRootMultisigMetadataBuilder` for a MerkleRoot ISM. Work: extend `parse_multisig_metadata` (`tx_builder/mod.rs:1098`) to parse the MerkleRoot metadata layout (merkleTreeHook | messageIndex | 32×32 proof | signedIndex | signatures); add a `MerkleRootVerify` redeemer to the relayer `types.rs` + `encode_ism_redeemer` (`tx_encoding.rs:268`); dispatch on `module_type` in the Process-build path.
 - **C. Cardano→Sepolia (the big lift).** NFT-following dispatch/leaf indexer + `IncrementalMerkle` of Cardano-origin leaves exposed via `MerkleTreeHook` so the generic builder can generate proofs; deploy `StaticMerkleRootMultisigIsm` on Sepolia and enroll.
