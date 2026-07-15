@@ -18,8 +18,8 @@ fn ism_validator_title(ctx: &CliContext) -> Result<&'static str> {
         .with_context(|| "Run 'deploy extract' first")?;
     let mt = dep.ism.as_ref().and_then(|m| m.module_type.as_deref());
     Ok(match mt {
-        Some("merkleroot") => "merkleroot_ism.merkleroot_ism.spend",
-        _ => "multisig_ism.multisig_ism.spend",
+        Some("merkleroot") => "merkle_root_multisig_ism.merkle_root_multisig_ism.spend",
+        _ => "message_id_multisig_ism.message_id_multisig_ism.spend",
     })
 }
 
@@ -338,9 +338,8 @@ pub(crate) async fn set_validators(
         );
     }
 
-    // Build the new datum
-    // TODO(merkleroot): preserve the ISM's existing module_type once MerkleRoot
-    // ISMs are deployable via the CLI; today all CLI-deployed ISMs are MessageId.
+    // Build the new datum, preserving the deployed ISM's module_type (the
+    // on-chain continuation check requires it to be unchanged).
     let new_datum = build_ism_datum(
         &new_validators_list,
         &new_thresholds_list,
@@ -680,9 +679,8 @@ pub(crate) async fn set_threshold(
     let new_validators_list = current_validators_map.clone();
     let new_thresholds_list = update_assoc(&current_thresholds_map, domain, threshold);
 
-    // Build the new datum
-    // TODO(merkleroot): preserve the ISM's existing module_type once MerkleRoot
-    // ISMs are deployable via the CLI; today all CLI-deployed ISMs are MessageId.
+    // Build the new datum, preserving the deployed ISM's module_type (the
+    // on-chain continuation check requires it to be unchanged).
     let new_datum = build_ism_datum(
         &new_validators_list,
         &new_thresholds_list,
@@ -1131,11 +1129,11 @@ async fn migrate(
         Some(h) => h,
         None => {
             println!("  Computing new script hash from blueprint...");
-            crate::utils::plutus::compute_blueprint_hash(
-                &ctx.contracts_dir,
-                "multisig_ism",
-                "multisig_ism",
-            )?
+            let slot = match ism_module_type(ctx)? {
+                crate::utils::cbor::IsmModuleType::MerkleRoot => "merkle_root_multisig_ism",
+                crate::utils::cbor::IsmModuleType::MessageId => "message_id_multisig_ism",
+            };
+            crate::utils::plutus::compute_blueprint_hash(&ctx.contracts_dir, slot, slot)?
         }
     };
     println!("  New Script Hash: {}", new_script_hash);

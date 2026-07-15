@@ -146,7 +146,13 @@ impl ExtractedValidator {
 /// Core Hyperlane validators
 pub struct HyperlaneValidators {
     pub mailbox: ExtractedValidator,
+    /// The default ISM flavour (equal to `message_id_ism` unless the caller
+    /// overrides it, e.g. `deploy extract --ism-module-type merkleroot`).
     pub ism: ExtractedValidator,
+    /// MessageId multisig ISM (`message_id_multisig_ism`)
+    pub message_id_ism: ExtractedValidator,
+    /// MerkleRoot multisig ISM (`merkle_root_multisig_ism`)
+    pub merkle_root_ism: ExtractedValidator,
     pub igp: Option<ExtractedValidator>,
     pub validator_announce: Option<ExtractedValidator>,
     pub warp_route: Option<ExtractedValidator>,
@@ -174,9 +180,14 @@ impl HyperlaneValidators {
                 .and_then(|def| ExtractedValidator::from_def(def, network).ok())
         };
 
+        let message_id_ism = find("message_id_multisig_ism")?;
+        let merkle_root_ism = find("merkle_root_multisig_ism")?;
+
         Ok(Self {
             mailbox: find("mailbox")?,
-            ism: find("multisig_ism")?,
+            ism: message_id_ism.clone(),
+            message_id_ism,
+            merkle_root_ism,
             igp: find_opt("igp", "spend"),
             validator_announce: find_opt("validator_announce", "spend"),
             warp_route: find_opt("warp_route", "spend"),

@@ -231,6 +231,10 @@ pub struct DeploymentInfo {
     pub mailbox: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ism: Option<ScriptInfo>,
+    /// Additional deployed ISM instances beyond the default (e.g. a MerkleRoot
+    /// ISM deployed alongside a default MessageId ISM, or vice versa).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt_isms: Vec<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub igp: Option<ScriptInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -250,6 +254,7 @@ impl DeploymentInfo {
             tx_id: None,
             mailbox: None,
             ism: None,
+            alt_isms: Vec::new(),
             igp: None,
             validator_announce: None,
             warp_routes: Vec::new(),

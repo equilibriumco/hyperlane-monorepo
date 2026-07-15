@@ -47,7 +47,8 @@ enum DeployCommands {
     /// Deploy a script as a reference script UTXO on-chain
     /// This allows the script to be referenced by other transactions without including it in the witness set
     ReferenceScript {
-        /// Name of the script to deploy (mailbox, multisig_ism, or path to .plutus file)
+        /// Name of the script to deploy (mailbox, message_id_multisig_ism,
+        /// merkle_root_multisig_ism, ism, or path to .plutus file)
         #[arg(long)]
         script: String,
 
@@ -142,26 +143,36 @@ async fn extract(
 
     // Extract validators
     let network = ctx.pallas_network();
-    let mut validators = HyperlaneValidators::extract(&blueprint, network)?;
+    let validators = HyperlaneValidators::extract(&blueprint, network)?;
 
     // Select which validator fills the default `ism` slot.
     let ism_mt = ism_module_type.to_lowercase();
-    if ism_mt == "merkleroot" {
-        let title = "merkleroot_ism.merkleroot_ism.spend";
-        let def = blueprint
-            .find_validator(title)
-            .ok_or_else(|| anyhow!("Validator {title} not found in blueprint"))?;
-        validators.ism = ExtractedValidator::from_def(def, network)?;
-        println!("  Default ISM: MerkleRoot ({})", validators.ism.hash);
-    } else if ism_mt != "messageid" {
+    if ism_mt != "messageid" && ism_mt != "merkleroot" {
         return Err(anyhow!(
             "--ism-module-type must be 'messageid' or 'merkleroot', got '{ism_module_type}'"
         ));
     }
+    let default_ism = if ism_mt == "merkleroot" {
+        &validators.merkle_root_ism
+    } else {
+        &validators.message_id_ism
+    };
+    println!(
+        "  Default ISM: {} ({})",
+        if ism_mt == "merkleroot" {
+            "MerkleRoot"
+        } else {
+            "MessageId"
+        },
+        default_ism.hash
+    );
 
+    // Both ISM flavours are always written out (as separate files), so either
+    // one can be initialized later as an alt ISM via `init ism --module-type`.
     let all_validators = vec![
         ("mailbox", Some(&validators.mailbox)),
-        ("multisig_ism", Some(&validators.ism)),
+        ("message_id_multisig_ism", Some(&validators.message_id_ism)),
+        ("merkle_root_multisig_ism", Some(&validators.merkle_root_ism)),
         ("igp", validators.igp.as_ref()),
         ("validator_announce", validators.validator_announce.as_ref()),
         ("warp_route", validators.warp_route.as_ref()),
@@ -256,8 +267,11 @@ async fn extract(
     if should_update("mailbox") {
         deployment_info.mailbox = Some(to_script_info(&validators.mailbox));
     }
-    if should_update("multisig_ism") || should_update("ism") {
-        let mut ism_info = to_script_info(&validators.ism);
+    if should_update("message_id_multisig_ism")
+        || should_update("merkle_root_multisig_ism")
+        || should_update("ism")
+    {
+        let mut ism_info = to_script_info(default_ism);
         ism_info.module_type = Some(ism_mt.clone());
         deployment_info.ism = Some(ism_info);
     }
@@ -582,9 +596,29 @@ async fn deploy_reference_script_internal(
                     mailbox.reference_script_utxo = Some(ref_utxo);
                 }
             }
-            "multisig_ism" | "merkleroot_ism" | "ism" => {
+            "ism" => {
+                // Generic alias: always targets the default ISM, regardless of flavour.
                 if let Some(ref mut ism) = deployment.ism {
                     ism.reference_script_utxo = Some(ref_utxo);
+                }
+            }
+            "message_id_multisig_ism" | "merkle_root_multisig_ism" => {
+                // A single reference script UTXO can be shared by every ISM instance
+                // (default or alt) of the same flavour.
+                let flavour = if script_name == "merkle_root_multisig_ism" {
+                    "merkleroot"
+                } else {
+                    "messageid"
+                };
+                if let Some(ref mut ism) = deployment.ism {
+                    if ism.module_type.as_deref() == Some(flavour) {
+                        ism.reference_script_utxo = Some(ref_utxo.clone());
+                    }
+                }
+                for alt in deployment.alt_isms.iter_mut() {
+                    if alt.module_type.as_deref() == Some(flavour) {
+                        alt.reference_script_utxo = Some(ref_utxo.clone());
+                    }
                 }
             }
             "igp" => {
@@ -627,18 +661,40 @@ async fn deploy_all_reference_scripts(
 ) -> Result<()> {
     println!("{}", "Deploying all core reference scripts...".cyan());
 
-    // Deploy the reference script for the actually-deployed ISM flavour, so the
-    // relayer references the correct script when spending the ISM.
-    let ism_script = match ctx
-        .load_deployment_info()
-        .ok()
-        .and_then(|d| d.ism.and_then(|m| m.module_type))
-        .as_deref()
-    {
-        Some("merkleroot") => "merkleroot_ism",
-        _ => "multisig_ism",
+    // Deploy a reference script for every ISM flavour actually deployed (the
+    // default ISM plus any alt ISMs), so the relayer can reference the correct
+    // script regardless of which ISM instance a message is verified against.
+    let ism_slot = |module_type: &str| -> &'static str {
+        if module_type == "merkleroot" {
+            "merkle_root_multisig_ism"
+        } else {
+            "message_id_multisig_ism"
+        }
     };
-    let scripts = ["mailbox", ism_script];
+
+    let mut scripts: Vec<&'static str> = vec!["mailbox"];
+    if let Ok(deployment) = ctx.load_deployment_info() {
+        let mut flavours: Vec<String> = Vec::new();
+        let default_mt = deployment
+            .ism
+            .as_ref()
+            .and_then(|m| m.module_type.clone())
+            .unwrap_or_else(|| "messageid".to_string());
+        flavours.push(default_mt);
+        for alt in &deployment.alt_isms {
+            if let Some(mt) = &alt.module_type {
+                if !flavours.contains(mt) {
+                    flavours.push(mt.clone());
+                }
+            }
+        }
+        for mt in &flavours {
+            scripts.push(ism_slot(mt));
+        }
+    } else {
+        // No deployment info yet - fall back to the default MessageId ISM.
+        scripts.push("message_id_multisig_ism");
+    }
 
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
@@ -738,20 +794,37 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
     // Load from blueprint
     let blueprint = PlutusBlueprint::from_file(&ctx.plutus_json_path())?;
 
-    // Map common names to validator titles
-    let title = match script_name {
-        "mailbox" => "mailbox.mailbox.spend",
-        "multisig_ism" | "ism" => "multisig_ism.multisig_ism.spend",
-        "merkleroot_ism" => "merkleroot_ism.merkleroot_ism.spend",
-        "igp" => "igp.igp.spend",
-        "validator_announce" => "validator_announce.validator_announce.spend",
-        "warp_route" => "warp_route.warp_route.spend",
-        "generic_recipient" => "generic_recipient.generic_recipient.spend",
-        _ => script_name, // Try as exact title
+    // Map common names to validator titles. "ism" is a generic alias that
+    // resolves to whichever flavour is recorded as the default in deployment info.
+    let title: String = match script_name {
+        "mailbox" => "mailbox.mailbox.spend".to_string(),
+        "message_id_multisig_ism" => {
+            "message_id_multisig_ism.message_id_multisig_ism.spend".to_string()
+        }
+        "merkle_root_multisig_ism" => {
+            "merkle_root_multisig_ism.merkle_root_multisig_ism.spend".to_string()
+        }
+        "ism" => {
+            let default_mt = ctx
+                .load_deployment_info()
+                .ok()
+                .and_then(|d| d.ism.and_then(|m| m.module_type))
+                .unwrap_or_else(|| "messageid".to_string());
+            if default_mt == "merkleroot" {
+                "merkle_root_multisig_ism.merkle_root_multisig_ism.spend".to_string()
+            } else {
+                "message_id_multisig_ism.message_id_multisig_ism.spend".to_string()
+            }
+        }
+        "igp" => "igp.igp.spend".to_string(),
+        "validator_announce" => "validator_announce.validator_announce.spend".to_string(),
+        "warp_route" => "warp_route.warp_route.spend".to_string(),
+        "generic_recipient" => "generic_recipient.generic_recipient.spend".to_string(),
+        _ => script_name.to_string(), // Try as exact title
     };
 
     let validator = blueprint
-        .find_validator(title)
+        .find_validator(&title)
         .ok_or_else(|| anyhow!("Validator '{}' not found in blueprint", title))?;
 
     if !validator.parameters.is_empty() {
@@ -764,7 +837,7 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
 
     let cbor = hex::decode(&validator.compiled_code)?;
     let hash = validator.hash.clone();
-    let short_name = title.split('.').next().unwrap_or(title).to_string();
+    let short_name = title.split('.').next().unwrap_or(&title).to_string();
 
     Ok((cbor, hash, short_name))
 }

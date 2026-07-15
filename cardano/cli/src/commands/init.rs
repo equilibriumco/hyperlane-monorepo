@@ -43,7 +43,13 @@ enum InitCommands {
         dry_run: bool,
     },
 
-    /// Initialize the MultisigISM contract
+    /// Initialize a MultisigISM contract instance
+    ///
+    /// Defaults to (re-)initializing the deployment's default ISM flavour
+    /// (as chosen by `deploy extract --ism-module-type`). Passing a
+    /// `--module-type` that differs from the default initializes a *new*
+    /// ISM instance of that flavour and records it under `alt_isms` in
+    /// deployment_info.json, so both ISM flavours can be live at once.
     Ism {
         /// Origin domain IDs (comma-separated, e.g., "43113,421614")
         #[arg(long)]
@@ -60,6 +66,11 @@ enum InitCommands {
         /// UTXO to use for minting state NFT
         #[arg(long)]
         utxo: Option<String>,
+
+        /// ISM flavour to initialize: "messageid" or "merkleroot".
+        /// Defaults to the deployment's default ISM flavour.
+        #[arg(long = "module-type")]
+        module_type: Option<String>,
 
         /// Dry run
         #[arg(long)]
@@ -215,8 +226,9 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             validators,
             thresholds,
             utxo,
+            module_type,
             dry_run,
-        } => init_ism(ctx, &domains, validators, thresholds, utxo, dry_run).await,
+        } => init_ism(ctx, &domains, validators, thresholds, utxo, module_type, dry_run).await,
         InitCommands::Recipient {
             mailbox_hash,
             custom_ism,
@@ -625,19 +637,35 @@ async fn init_ism(
     validators: Option<String>,
     thresholds: Option<String>,
     utxo: Option<String>,
+    module_type: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    init_ism_internal(ctx, domains, validators, thresholds, utxo, dry_run, &[]).await?;
+    init_ism_internal(
+        ctx,
+        domains,
+        validators,
+        thresholds,
+        utxo,
+        module_type,
+        dry_run,
+        &[],
+    )
+    .await?;
     Ok(())
 }
 
-/// Internal ISM init that tracks spent UTXOs and returns the spent UTXO reference
+/// Internal ISM init that tracks spent UTXOs and returns the spent UTXO reference.
+///
+/// Initializes either the deployment's default ISM (when `module_type` is unset or
+/// matches the default flavour) or a new alt ISM instance (when `module_type` names
+/// the other flavour), appending it to `deployment.alt_isms`.
 async fn init_ism_internal(
     ctx: &CliContext,
     domains: &str,
     validators: Option<String>,
     thresholds: Option<String>,
     utxo: Option<String>,
+    module_type: Option<String>,
     dry_run: bool,
     exclude_utxos: &[String],
 ) -> Result<Option<String>> {
@@ -735,25 +763,63 @@ async fn init_ism_internal(
     )?;
     println!("  State NFT Policy ID: {}", applied.policy_id.green());
 
-    // Get ISM script address
+    // The deployment's default ISM flavour is chosen at `deploy extract` time and
+    // recorded in deployment_info. --module-type defaults to it, so existing
+    // invocations keep initializing the default ISM unchanged.
     let deployment = ctx
         .load_deployment_info()
         .with_context(|| "Run 'deploy extract' first")?;
-    let ism_addr = deployment
+    let default_mt = deployment
         .ism
         .as_ref()
-        .map(|m| m.address.clone())
-        .ok_or_else(|| anyhow!("ISM address not found in deployment info"))?;
+        .and_then(|m| m.module_type.clone())
+        .unwrap_or_else(|| "messageid".to_string());
+    let target_mt = module_type
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| default_mt.clone());
+    if target_mt != "messageid" && target_mt != "merkleroot" {
+        return Err(anyhow!(
+            "--module-type must be 'messageid' or 'merkleroot', got '{target_mt}'"
+        ));
+    }
+    let is_default = target_mt == default_mt;
 
-    // The ism flavour is chosen at `deploy extract` time and recorded in the datum.
-    let ism_module_type = match deployment
-        .ism
-        .as_ref()
-        .and_then(|m| m.module_type.as_deref())
-    {
-        Some("merkleroot") => crate::utils::cbor::IsmModuleType::MerkleRoot,
-        _ => crate::utils::cbor::IsmModuleType::MessageId,
+    // Resolve the target ISM's script address + hash. The default flavour's
+    // address comes straight from deployment info (set by `deploy extract`);
+    // an alt flavour is computed directly from the blueprint since it may not
+    // have been recorded as `deployment.ism` yet.
+    let (ism_addr, ism_hash) = if is_default {
+        let ism = deployment
+            .ism
+            .as_ref()
+            .ok_or_else(|| anyhow!("ISM address not found in deployment info"))?;
+        (ism.address.clone(), ism.hash.clone())
+    } else {
+        let blueprint = ctx.load_blueprint()?;
+        let slot = if target_mt == "merkleroot" {
+            "merkle_root_multisig_ism"
+        } else {
+            "message_id_multisig_ism"
+        };
+        let title = format!("{slot}.{slot}.spend");
+        let def = blueprint
+            .find_validator(&title)
+            .ok_or_else(|| anyhow!("Validator {title} not found in blueprint"))?;
+        let extracted =
+            crate::utils::plutus::ExtractedValidator::from_def(def, ctx.pallas_network())?;
+        (extracted.address, extracted.hash)
     };
+
+    let ism_module_type = if target_mt == "merkleroot" {
+        crate::utils::cbor::IsmModuleType::MerkleRoot
+    } else {
+        crate::utils::cbor::IsmModuleType::MessageId
+    };
+    println!(
+        "  ISM Module Type: {}{}",
+        target_mt,
+        if is_default { " (default)" } else { " (alt)" }
+    );
     println!("  ISM Address: {}", ism_addr);
 
     // Parse validators if provided, otherwise use empty lists
@@ -834,25 +900,35 @@ async fn init_ism_internal(
 
     // Update deployment info with complete initialization details
     let mut deployment = deployment;
-    if let Some(ref mut ism) = deployment.ism {
-        // ISM is not parameterized, so no applied_parameters
+    let state_nft = StateNftInfo {
+        policy_id: applied.policy_id.clone(),
+        asset_name_hex: hex::encode(ism_asset_name.as_bytes()),
+        asset_name: ism_asset_name.to_string(),
+        seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
+    };
 
-        // Record state NFT info
-        ism.state_nft = Some(StateNftInfo {
-            policy_id: applied.policy_id.clone(),
-            asset_name_hex: hex::encode(ism_asset_name.as_bytes()),
-            asset_name: ism_asset_name.to_string(),
-            seed_utxo: format!("{}#{}", input_utxo.tx_hash, input_utxo.output_index),
-        });
+    if is_default {
+        if let Some(ref mut ism) = deployment.ism {
+            // ISM is not parameterized, so no applied_parameters
+            ism.state_nft = Some(state_nft);
+            ism.init_tx_hash = Some(tx_hash.clone());
+            ism.state_utxo = Some(state_utxo_ref.clone());
+            ism.initialized = true;
 
-        // Record initialization details
-        ism.init_tx_hash = Some(tx_hash.clone());
-        ism.state_utxo = Some(state_utxo_ref.clone());
-        ism.initialized = true;
-
-        // Legacy fields
-        ism.utxo = Some(state_utxo_ref);
-        ism.state_nft_policy = Some(applied.policy_id.clone());
+            // Legacy fields
+            ism.utxo = Some(state_utxo_ref.clone());
+            ism.state_nft_policy = Some(applied.policy_id.clone());
+        }
+    } else {
+        let mut alt_ism = crate::utils::types::ScriptInfo::new(ism_hash, ism_addr.clone());
+        alt_ism.module_type = Some(target_mt.clone());
+        alt_ism.state_nft = Some(state_nft);
+        alt_ism.init_tx_hash = Some(tx_hash.clone());
+        alt_ism.state_utxo = Some(state_utxo_ref.clone());
+        alt_ism.initialized = true;
+        alt_ism.utxo = Some(state_utxo_ref.clone());
+        alt_ism.state_nft_policy = Some(applied.policy_id.clone());
+        deployment.alt_isms.push(alt_ism);
     }
     ctx.save_deployment_info(&deployment)?;
     println!("\n{}", "✓ Deployment info updated".green());
@@ -1493,8 +1569,17 @@ async fn init_all(
     let mut step = 1;
 
     println!("\n{}", format!("{}. Initializing ISM...", step).cyan());
-    let ism_spent =
-        init_ism_internal(ctx, origin_domains, None, None, None, dry_run, &spent_utxos).await?;
+    let ism_spent = init_ism_internal(
+        ctx,
+        origin_domains,
+        None,
+        None,
+        None,
+        None,
+        dry_run,
+        &spent_utxos,
+    )
+    .await?;
     if let Some(utxo) = ism_spent {
         spent_utxos.push(utxo);
     }
