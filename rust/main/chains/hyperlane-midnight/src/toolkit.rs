@@ -341,35 +341,57 @@ pub struct AnnounceRequest {
     pub network_id: String,
     /// `0x`-prefixed 20-byte validator address.
     pub validator: String,
-    /// `0x`-prefixed hex of the storage location bytes (unpadded; the
-    /// submitter zero-pads to the on-chain `Bytes<480>` buffer).
+    /// `0x`-prefixed hex of the FULL zero-padded `Bytes<480>` location buffer
+    /// — the exact bytes the validator signed over (#90). The submitter
+    /// forwards it verbatim; the on-chain digest hashes the padded buffer.
     pub storage_location: String,
-    /// Real byte length of the storage location.
-    pub location_len: u16,
-    /// `0x`-prefixed 65-byte ECDSA signature.
+    /// `0x`-prefixed 65-byte ECDSA signature (r || s || v).
     pub signature: String,
+    /// `0x`-prefixed 64-byte secp256k1 public-key body (X_be || Y_be, no 0x04
+    /// SEC1 tag), recovered off-chain from the signature. Midnight's Compact
+    /// has no in-circuit ecrecover, so the verify-based `announce` circuit
+    /// takes the pubkey and derives the validator address from it (#90).
+    pub pubkey: String,
 }
 
-/// Submit an `announce` write tx via the submitter. Rejects an empty or
-/// over-long (> `MAX_STORAGE_LOCATION_LEN`) storage location before spawning
-/// the subprocess so the on-chain asserts never fire on input we can catch.
+/// Submit an `announce` write tx via the submitter. Expects `storage_location`
+/// to be the padded `MAX_STORAGE_LOCATION_LEN`-byte buffer the validator signed
+/// over (the shared validator agent pads before signing, #90) with a trailing
+/// NUL, and `pubkey` to be the 64-byte body recovered off-chain. Validates both
+/// before spawning the subprocess so the on-chain asserts never fire on input
+/// we can catch.
 pub async fn announce_tx(
     ctx: &ToolkitContext,
     contract_address: H256,
     validator: H160,
     storage_location: &str,
     signature: &[u8],
+    pubkey: &[u8],
 ) -> ChainResult<ToolkitOutcome> {
     let bytes = storage_location.as_bytes();
-    if bytes.is_empty() {
+    if bytes.len() != MAX_STORAGE_LOCATION_LEN {
+        return Err(HyperlaneMidnightError::Other(format!(
+            "announce: storage location must be the padded {MAX_STORAGE_LOCATION_LEN}-byte buffer, got {} bytes",
+            bytes.len()
+        ))
+        .into());
+    }
+    if bytes[0] == 0 {
         return Err(
             HyperlaneMidnightError::Other("announce: empty storage location".to_string()).into(),
         );
     }
-    if bytes.len() > MAX_STORAGE_LOCATION_LEN {
+    // A trailing NUL must survive so off-chain readers can trim the padding.
+    if bytes[MAX_STORAGE_LOCATION_LEN - 1] != 0 {
+        return Err(HyperlaneMidnightError::Other(
+            "announce: storage location fills the padded buffer with no trailing NUL".to_string(),
+        )
+        .into());
+    }
+    if pubkey.len() != 64 {
         return Err(HyperlaneMidnightError::Other(format!(
-            "announce: storage location is {} bytes, exceeds on-chain bound of {MAX_STORAGE_LOCATION_LEN}",
-            bytes.len()
+            "announce: pubkey must be the 64-byte X_be||Y_be body, got {} bytes",
+            pubkey.len()
         ))
         .into());
     }
@@ -385,8 +407,8 @@ pub async fn announce_tx(
         network_id: ctx.network_id.clone(),
         validator: format!("0x{validator:x}"),
         storage_location: format!("0x{}", hex::encode(bytes)),
-        location_len: bytes.len() as u16,
         signature: format!("0x{}", hex::encode(signature)),
+        pubkey: format!("0x{}", hex::encode(pubkey)),
     };
 
     let raw = run_submitter(ctx, &request, ANNOUNCE_TIMEOUT).await?;
@@ -498,7 +520,22 @@ pub async fn query_storage_locations(
         .into());
     }
 
-    Ok(locations)
+    // Defence-in-depth: the on-chain buffer is zero-padded to 480 bytes and the
+    // TS read op already trims at the first NUL, but trim again here so a padded
+    // string can never leak through — the validator agent compares the returned
+    // location against its own UNPADDED `announcement_location()` and would
+    // re-announce forever on a mismatch.
+    let trimmed = locations
+        .into_iter()
+        .map(|per_validator| {
+            per_validator
+                .into_iter()
+                .map(|loc| loc.split('\0').next().unwrap_or("").to_string())
+                .collect()
+        })
+        .collect();
+
+    Ok(trimmed)
 }
 
 async fn run_submitter<R: Serialize>(
