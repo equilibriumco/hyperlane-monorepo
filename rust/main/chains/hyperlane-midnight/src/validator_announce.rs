@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use hyperlane_core::{
     Announcement, ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber,
-    HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider, SignedType, TxOutcome,
-    ValidatorAnnounce, H160, H256, U256,
+    HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider, Signable, SignedType,
+    TxOutcome, ValidatorAnnounce, H160, H256, U256,
 };
 
 use crate::toolkit::{self, ToolkitContext};
@@ -75,6 +75,57 @@ fn derive_ws_url(http: &url::Url) -> String {
     ws.to_string()
 }
 
+/// Recover the signer's secp256k1 public key from a 65-byte Ethereum signature
+/// (`r || s || v`) over `digest`, returning the 64-byte SEC1 uncompressed body
+/// (`X_be || Y_be`, no `0x04` tag) — exactly what the on-chain `announce`
+/// circuit takes as its `pubkey` param (#90). k256 is reached via `ethers`
+/// (already a dependency; the same crate `state_decode.rs` uses to derive
+/// addresses from stored pubkeys).
+fn recover_pubkey_body(digest: H256, sig65: &[u8; 65]) -> ChainResult<[u8; 64]> {
+    use ethers::core::k256::ecdsa::{
+        recoverable::{Id as RecoveryId, Signature as RecoverableSignature},
+        Signature as K256Signature,
+    };
+    use ethers::core::k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let v = sig65[64];
+    // Hyperlane validators emit legacy {27, 28} recovery bytes; k256 wants {0, 1}.
+    let rec_byte = if v >= 27 { v - 27 } else { v };
+    let recovery_id = RecoveryId::new(rec_byte).map_err(|err| {
+        ChainCommunicationError::from_other_str(&format!("announce: invalid recovery id {v}: {err}"))
+    })?;
+    let sig = K256Signature::try_from(&sig65[..64]).map_err(|err| {
+        ChainCommunicationError::from_other_str(&format!("announce: malformed signature: {err}"))
+    })?;
+    let rsig = RecoverableSignature::new(&sig, recovery_id).map_err(|err| {
+        ChainCommunicationError::from_other_str(&format!(
+            "announce: bad recoverable signature: {err}"
+        ))
+    })?;
+    // `digest` is the already-hashed EIP-191 announcement digest (the prehash
+    // the validator signed over), so recover directly from these bytes.
+    let digest_bytes = digest.to_fixed_bytes();
+    let vk = rsig
+        .recover_verifying_key_from_digest_bytes(digest_bytes.as_ref().into())
+        .map_err(|err| {
+            ChainCommunicationError::from_other_str(&format!(
+                "announce: failed to recover pubkey: {err}"
+            ))
+        })?;
+    let point = vk.to_encoded_point(false);
+    let bytes = point.as_bytes();
+    // Uncompressed SEC1 is 65 bytes: 0x04 || X(32) || Y(32).
+    if bytes.len() != 65 {
+        return Err(ChainCommunicationError::from_other_str(&format!(
+            "announce: unexpected pubkey encoding length {}",
+            bytes.len()
+        )));
+    }
+    let mut body = [0u8; 64];
+    body.copy_from_slice(&bytes[1..65]);
+    Ok(body)
+}
+
 impl HyperlaneChain for MidnightValidatorAnnounce {
     fn domain(&self) -> &HyperlaneDomain {
         &self.domain
@@ -98,7 +149,7 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
         validators: &[H256],
     ) -> ChainResult<Vec<Vec<String>>> {
         // The on-chain validator key is the low 20 bytes of the H256 (the
-        // ecrecover output / EVM-style address), matching the Aleo port and
+        // EVM-style address the pubkey derives to), matching the Aleo port and
         // the `Bytes<20>` validator key on the contract.
         let validators: Vec<H160> = validators.iter().map(|v| H160::from(*v)).collect();
         toolkit::query_storage_locations(&self.toolkit_ctx, self.address, &validators).await
@@ -106,10 +157,18 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
 
     async fn announce(&self, announcement: SignedType<Announcement>) -> ChainResult<TxOutcome> {
         let validator = announcement.value.validator;
-        let storage_location = announcement.value.storage_location;
-        // `SignedType::signature` is a 65-byte ECDSA signature; pass it
-        // through unchanged so the on-chain ecrecover can verify it.
+        // The validator agent has already padded this to the fixed 480-byte
+        // buffer for Midnight (`announcement_location`), which is what it signed
+        // over; forward it verbatim.
+        let storage_location = announcement.value.storage_location.clone();
+        // `SignedType::signature` is a 65-byte ECDSA signature (r || s || v).
         let signature: [u8; 65] = announcement.signature.into();
+        // Midnight's Compact has no in-circuit ecrecover, so the verify-based
+        // `announce` circuit takes the signer's public key and derives the
+        // validator address from it (#90). Recover the pubkey off-chain from the
+        // EIP-191 announcement digest the validator signed.
+        let digest = announcement.value.eth_signed_message_hash();
+        let pubkey = recover_pubkey_body(digest, &signature)?;
 
         let outcome = toolkit::announce_tx(
             &self.toolkit_ctx,
@@ -117,6 +176,7 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
             validator,
             &storage_location,
             &signature,
+            &pubkey,
         )
         .await?;
 
@@ -206,8 +266,8 @@ mod tests {
 
     #[test]
     fn h256_to_h160_takes_low_20_bytes() {
-        // H160::from(H256) keeps the low 20 bytes — the ecrecover-style
-        // validator key used on the contract.
+        // H160::from(H256) keeps the low 20 bytes — the EVM-style 20-byte
+        // validator address used on the contract.
         let mut raw = [0u8; 32];
         for (i, b) in raw.iter_mut().enumerate() {
             *b = i as u8;
@@ -226,25 +286,88 @@ mod tests {
         assert_eq!(needed, Some(U256::zero()));
     }
 
+    // A well-formed 65-byte signature over an arbitrary hash, so `announce`'s
+    // off-chain pubkey recovery succeeds and the location/pubkey validation in
+    // `announce_tx` is what a test exercises. The value it signs is irrelevant
+    // — recovery yields *some* pubkey and the length checks fire before it is
+    // ever used on-chain.
+    fn valid_sig() -> [u8; 65] {
+        use ethers::signers::LocalWallet;
+        let wallet: LocalWallet =
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap();
+        let sig = wallet.sign_hash(ethers::types::H256([0x42u8; 32]));
+        <[u8; 65]>::from(sig)
+    }
+
+    // Zero-pad a location into the fixed 480-byte buffer, as the validator agent
+    // does before signing.
+    fn padded(location: &str) -> String {
+        let mut bytes = location.as_bytes().to_vec();
+        bytes.resize(toolkit::MAX_STORAGE_LOCATION_LEN, 0);
+        String::from_utf8(bytes).unwrap()
+    }
+
     #[tokio::test]
-    async fn announce_rejects_overlong_location() {
+    async fn announce_rejects_non_480_location() {
+        // The fork expects the agent-padded 480-byte buffer; an unpadded
+        // location is rejected before the subprocess.
         let va = va("/usr/bin/true");
-        let location = "x".repeat(toolkit::MAX_STORAGE_LOCATION_LEN + 1);
-        let signed = signed_announcement(H160::repeat_byte(0x11), location, [0u8; 65]);
+        let signed = signed_announcement(H160::repeat_byte(0x11), "s3://loc".to_string(), valid_sig());
         let err = va.announce(signed).await.unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("exceeds on-chain bound") || msg.contains("480"),
+            msg.contains("padded") && msg.contains("480"),
             "unexpected error: {msg}"
         );
     }
 
     #[tokio::test]
-    async fn announce_rejects_empty_location() {
+    async fn announce_rejects_all_null_location() {
+        // A 480-byte buffer whose first byte is NUL is an empty location.
         let va = va("/usr/bin/true");
-        let signed = signed_announcement(H160::repeat_byte(0x11), String::new(), [0u8; 65]);
+        let signed = signed_announcement(H160::repeat_byte(0x11), padded(""), valid_sig());
         let err = va.announce(signed).await.unwrap_err();
         assert!(format!("{err}").contains("empty storage location"));
+    }
+
+    #[tokio::test]
+    async fn announce_rejects_location_with_no_trailing_nul() {
+        // 480 meaningful bytes leave no terminator, so trim-on-read would be
+        // ill-defined; rejected.
+        let va = va("/usr/bin/true");
+        let full = "x".repeat(toolkit::MAX_STORAGE_LOCATION_LEN);
+        let signed = signed_announcement(H160::repeat_byte(0x11), full, valid_sig());
+        let err = va.announce(signed).await.unwrap_err();
+        assert!(format!("{err}").contains("no trailing NUL"));
+    }
+
+    #[test]
+    fn recover_pubkey_body_derives_validator() {
+        // The off-chain recovery must reproduce the validator address the way
+        // the circuit will on-chain: keccak256(X_be || Y_be)[12..] == validator.
+        use ethers::signers::{LocalWallet, Signer};
+        use ethers::utils::keccak256;
+
+        let wallet: LocalWallet =
+            "2222222222222222222222222222222222222222222222222222222222222222"
+                .parse()
+                .unwrap();
+        let validator = H160::from(wallet.address().0);
+        let announcement = Announcement {
+            validator,
+            mailbox_address: H256::repeat_byte(0xab),
+            mailbox_domain: 1234,
+            storage_location: padded("s3://hyperlane-validator-0/us-east-1"),
+        };
+        let digest = announcement.eth_signed_message_hash();
+        let sig = wallet.sign_hash(ethers::types::H256(digest.0));
+        let sig_bytes = <[u8; 65]>::from(sig);
+
+        let pubkey = recover_pubkey_body(digest, &sig_bytes).unwrap();
+        let derived = &keccak256(pubkey)[12..];
+        assert_eq!(derived, validator.as_bytes());
     }
 
     #[tokio::test]
@@ -265,12 +388,11 @@ mod tests {
     #[tokio::test]
     async fn signed_announcement_signature_round_trips() {
         // A real ECDSA-signed announcement keeps its 65-byte signature intact
-        // through the SignedType -> announce path, so the on-chain ecrecover
-        // sees the exact bytes the validator produced. The agent never
-        // recomputes the digest (the validator signs, the contract verifies);
-        // this guards the pass-through.
+        // through the SignedType -> announce path, so the on-chain verify sees
+        // the exact bytes the validator produced. The agent never recomputes
+        // the digest (the validator signs, the contract verifies); this guards
+        // the pass-through.
         use ethers::signers::{LocalWallet, Signer};
-        use hyperlane_core::Signable;
 
         let wallet: LocalWallet =
             "1111111111111111111111111111111111111111111111111111111111111111"

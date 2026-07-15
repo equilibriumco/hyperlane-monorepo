@@ -577,14 +577,23 @@ impl Validator {
     }
 
     fn announcement_location(&self) -> Result<String> {
+        use hyperlane_core::HyperlaneDomainProtocol;
         let location = self.checkpoint_syncer.announcement_location();
-        if self.origin_chain.domain_protocol() == hyperlane_core::HyperlaneDomainProtocol::Aleo {
-            Self::aleo_announcement_location(location)
-        } else {
-            Ok(location)
+        // Both Aleo and Midnight hash a fixed 480-byte padded location in their
+        // on-chain ValidatorAnnounce (their in-circuit keccak cannot hash a
+        // runtime-length prefix), so the validator must pad before signing. The
+        // padding shape is identical, hence the shared helper.
+        match self.origin_chain.domain_protocol() {
+            HyperlaneDomainProtocol::Aleo | HyperlaneDomainProtocol::Midnight => {
+                Self::aleo_announcement_location(location)
+            }
+            _ => Ok(location),
         }
     }
 
+    // Pad an announcement location to a fixed 480-byte C string (nulls fill the
+    // tail). Shared by Aleo and Midnight; the name is kept to avoid churn on the
+    // public fork.
     fn aleo_announcement_location(announcement_location: String) -> Result<String> {
         // Aleo announcement locations are fixed size C strings of 480 bytes (include nulls)
         let mut bytes = announcement_location.into_bytes();
