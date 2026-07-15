@@ -76,14 +76,17 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 
 ### Core Contracts
 
-| Contract                  | Purpose                      | Parameters                                                  | Dependencies                             |
-| ------------------------- | ---------------------------- | ----------------------------------------------------------- | ---------------------------------------- |
-| **state_nft**             | Unique NFT minting policy    | UTXO reference                                              | None                                     |
-| **mailbox**               | Message dispatch/process hub | verified_message_nft_policy, ism_nft_policy                 | verified_message_nft                        |
-| **multisig_ism**          | Signature verification       | None                                                        | None                                     |
-| **verified_message_nft**  | Verified message token       | mailbox_policy_id                                           | mailbox (state NFT)                      |
+| Contract                        | Purpose                       | Parameters                                                  | Dependencies                             |
+| -------------------------------- | ------------------------------ | ----------------------------------------------------------- | ---------------------------------------- |
+| **state_nft**                    | Unique NFT minting policy      | UTXO reference                                              | None                                     |
+| **mailbox**                      | Message dispatch/process hub   | verified_message_nft_policy, ism_nft_policy                 | verified_message_nft                        |
+| **message_id_multisig_ism**      | MessageId signature verification | None                                                       | None                                     |
+| **merkle_root_multisig_ism**     | MerkleRoot signature verification | None                                                      | None                                     |
+| **verified_message_nft**         | Verified message token         | mailbox_policy_id                                           | mailbox (state NFT)                      |
 
 > **Note**: The mailbox validator is parameterized with `verified_message_nft_policy` (for verified message tokens) and `ism_nft_policy`. Replay protection uses a sparse Merkle tree (SMT) in the mailbox datum instead of a separate NFT policy. The `verified_message_nft` policy is parameterized by `mailbox_policy_id` (stable across upgrades) to ensure it persists even when the mailbox code is updated. Warp routes are identified by their state NFT policy ID (Hyperlane address = `0x01000000 || nft_policy_id`). Generic script recipients use `0x02000000 || script_hash`. See [Appendix: Script Parameterization](#appendix-script-parameterization) for details.
+>
+> **ISM naming**: there are two ISM validators — `message_id_multisig_ism` (verifies a MessageId multisig proof, no merkle tree needed) and `merkle_root_multisig_ism` (verifies a merkle inclusion proof against a signed root). A deployment always has one **default** ISM (chosen at `deploy extract --ism-module-type`) plus optionally one or more **alt** ISM instances of the other flavour, recorded in `deployment_info.json` under `ism` (default) and `alt_isms[]`. See [Deploying Both ISM Flavours (Dual-ISM)](#34-deploying-both-ism-flavours-dual-ism).
 
 ### Recipient Contracts
 
@@ -103,10 +106,11 @@ By default, the CLI waits for transaction confirmation before returning. This pr
                     ┌─────────────────┼─────────────────┐
                     │                                   │
                     ▼                                   ▼
-          ┌─────────────────┐                 ┌─────────────────┐
-          │     MAILBOX     │                 │   MULTISIG_ISM  │
-          │   (Validator)   │                 │   (Validator)   │
-          └────────┬────────┘                 └─────────────────┘
+          ┌─────────────────┐                 ┌───────────────────────────┐
+          │     MAILBOX     │                 │  MESSAGE_ID_MULTISIG_ISM  │
+          │   (Validator)   │                 │  MERKLE_ROOT_MULTISIG_ISM │
+          └────────┬────────┘                 │  (default + alt_isms[])  │
+                   │                          └───────────────────────────┘
                    │
                    │ mailbox_policy_id
                    │
@@ -133,12 +137,13 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 
 The contracts must be deployed in this order due to dependencies:
 
-1. **Extract all validators** from plutus.json
-2. **Initialize Core Contracts** (mailbox, ISM) - applies parameters, creates state NFTs, produces parameterized scripts
-3. **Deploy Reference Scripts** - deploy the parameterized scripts as on-chain reference scripts
-4. **Configure Mailbox** - set default ISM using ism_policy_id
+1. **Extract all validators** from plutus.json (writes both `message_id_multisig_ism.*` and `merkle_root_multisig_ism.*`; `--ism-module-type` picks the default)
+2. **Initialize Core Contracts** (mailbox, default ISM) - applies parameters, creates state NFTs, produces parameterized scripts
+3. **Deploy Reference Scripts** - deploy the parameterized scripts (mailbox + default ISM + any `alt_isms[]`) as on-chain reference scripts
+4. **Configure Mailbox** - set default ISM using its **script hash** (`ism.hash`, not the state NFT policy)
 5. **Configure ISM** - set validators and thresholds for each origin domain
 6. **Deploy Recipients/Warp Routes** - recipients parameterized with verified_message_nft_policy; warp routes with mailbox_policy_id
+7. **(Optional) Initialize IGP** - `init all` does not do this; run `init igp` separately if gas payments are needed
 
 > **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
 
@@ -169,7 +174,8 @@ Expected output:
 
 ```
 "mailbox.mailbox.spend"
-"multisig_ism.multisig_ism.spend"
+"message_id_multisig_ism.message_id_multisig_ism.spend"
+"merkle_root_multisig_ism.merkle_root_multisig_ism.spend"
 "state_nft.state_nft.mint"
 "greeting.greeting.spend"
 "verified_message_nft.verified_message_nft.mint"
@@ -190,15 +196,18 @@ cd cardano
 ./cli/target/release/hyperlane-cardano \
   --network $NETWORK \
   deploy extract \
-  --output deployments/$NETWORK
+  --output deployments/$NETWORK \
+  --ism-module-type messageid
 ```
+
+`--ism-module-type` selects which ISM flavour fills the mailbox's **default** `ism` slot in `deployment_info.json` (`messageid` or `merkleroot`; defaults to `messageid` if omitted). Regardless of which flavour is chosen as default, `deploy extract` always writes **both** ISM validators' files — `message_id_multisig_ism.*` and `merkle_root_multisig_ism.*` — so either flavour can be initialized later (see [Deploying Both ISM Flavours (Dual-ISM)](#34-deploying-both-ism-flavours-dual-ism)).
 
 This creates:
 
 - `deployments/$NETWORK/*.plutus` - Cardano CLI compatible script files
 - `deployments/$NETWORK/*.hash` - Script hash files
 - `deployments/$NETWORK/*.addr` - Bech32 script addresses
-- `deployments/$NETWORK/deployment_info.json` - Deployment metadata
+- `deployments/$NETWORK/deployment_info.json` - Deployment metadata (records the chosen flavour under `ism.moduleType`)
 
 ### 2.2 View Validator Information
 
@@ -215,7 +224,8 @@ ls deployments/$NETWORK/
 
 # Expected files:
 # mailbox.plutus, mailbox.hash, mailbox.addr
-# multisig_ism.plutus, multisig_ism.hash, multisig_ism.addr
+# message_id_multisig_ism.plutus, message_id_multisig_ism.hash, message_id_multisig_ism.addr
+# merkle_root_multisig_ism.plutus, merkle_root_multisig_ism.hash, merkle_root_multisig_ism.addr
 # state_nft.plutus (base, not parameterized)
 # ...
 ```
@@ -228,24 +238,7 @@ Initialization applies parameters to the contracts, creates state NFTs, and sets
 
 ### 3.1 Initialize All Core Contracts (Recommended)
 
-```bash
-BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
-./cli/target/release/hyperlane-cardano \
-  --signing-key $CARDANO_SIGNING_KEY \
-  --network $NETWORK \
-  init all \
-  --domain 2003 \
-  --origin-domains "43113,11155111"
-```
-
-Parameters:
-
-- `--domain`: Local Cardano domain ID (2003 for preview, 2002 for preprod)
-- `--origin-domains`: Comma-separated list of origin chain domain IDs to configure
-
-#### Optional: Configure ISM and Validator Announce in One Command
-
-`init all` supports optional flags to configure ISM validators, thresholds, and perform the validator announcement in a single command:
+`init all` initializes the mailbox and the **default** ISM (the flavour chosen at `deploy extract --ism-module-type`), and can also configure ISM validators/thresholds and announce the validator, all in one command. `--validators`, `--thresholds`, `--storage-location`, and `--validator-key` are technically optional at the CLI level, but skipping them leaves the ISM with **no validators and threshold 0** — the on-chain ISM rejects every checkpoint at threshold 0 (see [5.3](#53-set-ism-threshold)), so no message will ever verify until you configure them. In practice always pass the full set:
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -254,21 +247,25 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --network $NETWORK \
   init all \
   --domain 2003 \
-  --origin-domains "43113,11155111" \
-  --validators "43113:d8154f73d04cc7f7f0c332793692e6e6f6b2402e,895ae30bc83ff1493b9cf7781b0b813d23659857" \
-  --thresholds "43113:1;11155111:1" \
+  --origin-domains 11155111 \
+  --validators "11155111:d8154f73d04cc7f7f0c332793692e6e6f6b2402e,895ae30bc83ff1493b9cf7781b0b813d23659857,43e915573d9f1383cbf482049e4a012290759e7f" \
+  --thresholds "11155111:1" \
   --storage-location "s3://my-bucket/my-region/my-folder" \
   --validator-key "0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764"
 ```
 
-Optional parameters:
+Parameters:
 
-- `--validators`: ISM validators per domain. Format: `"domain:addr1,addr2;domain2:addr3"`
-- `--thresholds`: ISM threshold per domain. Format: `"domain:threshold;domain2:threshold"`
-- `--storage-location`: S3 URL for validator checkpoint storage announcement
-- `--validator-key`: ECDSA hex key for validator announce signature
+- `--domain`: Local Cardano domain ID (2003 for preview, 2002 for preprod). This is the domain the ISM/validator-announce identify Cardano as, on the *remote* chains.
+- `--origin-domains`: Comma-separated list of remote origin domain IDs this ISM will verify messages from (e.g. `11155111` for Sepolia).
+- `--validators`: ISM validators per origin domain. Format: `"domain:addr1,addr2;domain2:addr3"` (20-byte / 40-hex-char EVM addresses, no `0x` prefix).
+- `--thresholds`: ISM threshold per origin domain. Format: `"domain:threshold;domain2:threshold"`.
+- `--storage-location`: S3 URL announcing where the **Cardano validator's** checkpoints live, for the outbound (Cardano → remote) direction. Format is `s3://<bucket>/<region>/<folder>` — the region is part of the path, not a separate field.
+- `--validator-key`: ECDSA secp256k1 hex key used to sign the validator announcement (the same key the Cardano validator agent uses for checkpoint signing).
 
 Each step waits for on-chain confirmation before proceeding to the next.
+
+> **Note**: `init all` does **not** initialize the IGP (Interchain Gas Paymaster). Run `init igp` separately — see [3.5](#35-initialize-the-igp).
 
 ### 3.2 Initialize Individually (Alternative)
 
@@ -294,7 +291,7 @@ Mailbox initialized!
   UTXO: abc123...#0
 ```
 
-#### Initialize Multisig ISM
+#### Initialize the Default ISM
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -302,9 +299,9 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --signing-key $CARDANO_SIGNING_KEY \
   --network $NETWORK \
   init ism \
-  --domains "43113,11155111" \
-  --validators "43113:ab8cc5ae0dcce3d0dff1925a70cda0250f06ba21" \
-  --thresholds "43113:1;11155111:1"
+  --domains 11155111 \
+  --validators "11155111:ab8cc5ae0dcce3d0dff1925a70cda0250f06ba21" \
+  --thresholds "11155111:1"
 ```
 
 Parameters:
@@ -312,6 +309,7 @@ Parameters:
 - `--domains`: Origin domain IDs (comma-separated)
 - `--validators`: Format: "domain:addr1,addr2;domain2:addr3"
 - `--thresholds`: Format: "domain:threshold;domain2:threshold"
+- `--module-type`: ISM flavour to (re-)initialize — `messageid` or `merkleroot`. Defaults to the deployment's default flavour (from `deploy extract --ism-module-type`); this command with no `--module-type` re-initializes that same default ISM. Passing the *other* flavour instead initializes a new, additional ISM instance and appends it to `deployment_info.json`'s `alt_isms[]` — see [3.4](#34-deploying-both-ism-flavours-dual-ism).
 
 Output:
 
@@ -329,6 +327,45 @@ ISM initialized!
   --network $NETWORK \
   init status
 ```
+
+### 3.4 Deploying Both ISM Flavours (Dual-ISM)
+
+A deployment is not limited to a single ISM instance. It always has one **default** ISM (the flavour chosen at `deploy extract --ism-module-type`, initialized by `init all` / `init ism`) and can additionally have one or more **alt** ISM instances of the other flavour. This lets the mailbox's default stay MessageId (cheap, no tree backfill) while a specific recipient opts into MerkleRoot (or vice versa).
+
+After `init all` has initialized the default flavour, stand up the other flavour as an alt ISM by passing `--module-type` with the flavour that differs from the default:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init ism \
+  --domains 11155111 \
+  --validators "11155111:ab8cc5ae0dcce3d0dff1925a70cda0250f06ba21" \
+  --thresholds "11155111:1" \
+  --module-type merkleroot
+```
+
+- `--module-type` defaults to the deployment's default flavour — passing that same value re-initializes `deployment_info.json`'s `ism` entry.
+- Passing the **other** flavour deploys a brand-new ISM instance (its own state NFT, its own validator set) and appends it to `deployment_info.json`'s `alt_isms[]` array; the mailbox's default ISM is untouched.
+- Recipients opt a specific ISM in via `init recipient --custom-ism <script_hash> --custom-ism-policy <state_nft_policy>`, pointing at either the default ISM or any entry in `alt_isms[]` (see [Selecting a per-recipient ISM override](#selecting-a-per-recipient-ism-override)).
+- `deploy reference-scripts-all` (Phase 4) automatically deploys a reference script for the default ISM **and every entry in `alt_isms[]`**, so no extra step is needed to make an alt ISM referenceable.
+
+### 3.5 Initialize the IGP
+
+`init all` does **not** set up the Interchain Gas Paymaster — it only covers the mailbox, default ISM, and (optionally) the validator announcement. Run `init igp` separately if you need gas payments:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init igp \
+  --oracle "11155111:1000000000:7171:150000"
+```
+
+- `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`.
+- `--beneficiary`: address that can claim collected fees (defaults to the signing key's public key hash).
 
 ---
 
@@ -348,15 +385,17 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   deploy reference-scripts-all
 ```
 
-This deploys:
+This deploys a reference script (15 ADA minimum UTXO each) for:
 
-- Mailbox validator (15 ADA minimum UTXO)
-- Multisig ISM validator (15 ADA minimum UTXO)
+- The mailbox validator
+- The **default** ISM (whichever flavour is recorded in `deployment_info.json`'s `ism`)
+- Every ISM flavour recorded under `deployment_info.json`'s `alt_isms[]` (see [Dual-ISM](#34-deploying-both-ism-flavours-dual-ism)) — so if you initialized both a MessageId and a MerkleRoot ISM, this single command deploys reference scripts for both.
 
 ### 4.2 Deploy Individual Reference Script (Alternative)
 
 ```bash
 # Deploy a specific script by name (uses applied script automatically)
+# Valid names: mailbox, message_id_multisig_ism, merkle_root_multisig_ism
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
   --signing-key $CARDANO_SIGNING_KEY \
@@ -404,8 +443,8 @@ chains:
 After ISM is initialized, update the mailbox to use the correct ISM:
 
 ```bash
-# Get the ISM script hash from deployment info
-ISM_HASH=$(cat deployments/$NETWORK/multisig_ism.hash)
+# Get the ISM script hash from deployment info (default flavour — see deploy extract --ism-module-type)
+ISM_HASH=$(cat deployments/$NETWORK/message_id_multisig_ism.hash)  # or merkle_root_multisig_ism.hash
 
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
@@ -1269,6 +1308,36 @@ aiken --version  # Should be v1.0.0+
 curl -sSfL https://install.aiken-lang.org | bash
 ```
 
+#### Deployer/init operations fail with UTXO selection errors (`NoCollateralInputs`, `BadInputsUTxO`, or seemingly-random init failures)
+
+**Cause**: `init`/seed operations need clean, ADA-only UTXOs to pick from. A wallet whose UTXOs are mostly token-bearing (leftover NFTs/tokens from prior deployments) can fail to find a suitable collateral or seed UTXO.
+
+**Solution**: Consolidate and then split out clean ADA-only outputs before a deployment run:
+
+```bash
+./cli/target/release/hyperlane-cardano --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  utxo consolidate --max 20
+
+./cli/target/release/hyperlane-cardano --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  utxo split --utxo <tx_hash>#<index> --count 10 --amount 20000000
+```
+
+Also do not run the CLI **concurrently** against the same signing key (e.g. in parallel scripts) — both invocations can pick the same collateral/input UTXO and one will fail with `NoCollateralInputs` / `BadInputsUTxO`. Run deployment commands sequentially.
+
+#### Validator never publishes `checkpoint_0` after a mailbox redeploy
+
+**Symptom**: after redeploying the mailbox (new state NFT policy) and clearing the validator's S3 checkpoints/DB, the validator ingests the first leaf but `checkpoint_queue_len` stays `0` and it never signs.
+
+**Cause**: the validator only captures and signs the tip as part of its *startup* routine. A validator process that was already running through the mailbox redeploy keeps operating against its old in-memory state.
+
+**Solution**: after redeploying the mailbox — and after clearing the validator's S3 checkpoints, reorg flag, and local DB volume for that chain — **restart** the validator process/container (`docker compose restart validator-cardano` or equivalent). A stale `local_merkle_root` left in the DB will otherwise also trigger a reorg flag and the validator will refuse to sign at all.
+
+#### `greeting receive` fails despite a valid verified message NFT
+
+**Cause**: `greeting receive` (and any recipient action gated by the `owner` parameter) must be signed by the **recipient owner key** — the key whose public key hash was passed as `--owner` at `init recipient` (defaults to the init signer's key if `--owner` was omitted). Signing with a different key fails the on-chain owner check even if the message itself is valid.
+
+**Solution**: use the same signing key that deployed/owns the recipient, or re-derive the owner pkh with `cat deployments/$NETWORK/owner.pkh` and confirm it matches your signing key's hash.
+
 ---
 
 ## Complete Deployment Script
@@ -1284,11 +1353,16 @@ export NETWORK="preview"
 export BLOCKFROST_API_KEY="your_api_key_here"
 export CARDANO_SIGNING_KEY="./keys/payment.skey"
 export LOCAL_DOMAIN=2003
-export ORIGIN_DOMAINS="43113,11155111"  # Fuji, Sepolia
+export ORIGIN_DOMAINS="11155111"  # Sepolia
+export ISM_MODULE_TYPE="messageid"  # or "merkleroot" - see Phase 3.4 for running both
 
-# ISM configuration (optional for init all)
-export VALIDATORS="43113:d8154f73d04cc7f7f0c332793692e6e6f6b2402e"
-export THRESHOLDS="43113:1;11155111:1"
+# ISM configuration (required for a working ISM - threshold 0 rejects everything on-chain)
+export VALIDATORS="11155111:d8154f73d04cc7f7f0c332793692e6e6f6b2402e,895ae30bc83ff1493b9cf7781b0b813d23659857,43e915573d9f1383cbf482049e4a012290759e7f"
+export THRESHOLDS="11155111:2"
+
+# Validator announcement (outbound direction: Cardano validator -> remote chains)
+export STORAGE_LOCATION="s3://my-bucket/my-region/my-folder"
+export VALIDATOR_KEY="0x2e0afff1080232cd5fc8fe769dd72f5766e4e0b66e5528fa93f80e75aca9e764"
 
 CLI="./cli/target/release/hyperlane-cardano"
 DEPLOY_DIR="./deployments/$NETWORK"
@@ -1302,11 +1376,12 @@ echo ""
 echo "Step 1: Building contracts..."
 cd contracts && aiken build && cd ..
 
-# Step 2: Extract validators
+# Step 2: Extract validators (writes both message_id_multisig_ism.* and
+# merkle_root_multisig_ism.*; --ism-module-type picks the *default* one)
 echo "Step 2: Extracting validators..."
-$CLI --network $NETWORK deploy extract --output $DEPLOY_DIR
+$CLI --network $NETWORK deploy extract --output $DEPLOY_DIR --ism-module-type $ISM_MODULE_TYPE
 
-# Step 3: Initialize core contracts + configure ISM (applies parameters)
+# Step 3: Initialize core contracts + configure ISM + announce validator
 echo "Step 3: Initializing core contracts..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
@@ -1314,17 +1389,29 @@ $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   --domain $LOCAL_DOMAIN \
   --origin-domains "$ORIGIN_DOMAINS" \
   --validators "$VALIDATORS" \
-  --thresholds "$THRESHOLDS"
+  --thresholds "$THRESHOLDS" \
+  --storage-location "$STORAGE_LOCATION" \
+  --validator-key "$VALIDATOR_KEY"
 
-# Step 4: Deploy reference scripts (must be after init to use parameterized scripts)
+# Step 3b: Initialize the IGP (init all does NOT do this)
+echo "Step 3b: Initializing IGP..."
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  init igp --oracle "11155111:1000000000:7171:150000"
+
+# Step 4: Deploy reference scripts (mailbox + default ISM + every alt_isms[] entry)
 echo "Step 4: Deploying reference scripts..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   deploy reference-scripts-all
 
-# Step 5: Configure mailbox with ISM
+# Step 5: Configure mailbox with default ISM
 echo "Step 5: Configuring mailbox..."
-ISM_HASH=$(cat $DEPLOY_DIR/multisig_ism.hash)
+if [ "$ISM_MODULE_TYPE" = "merkleroot" ]; then
+  ISM_HASH=$(cat $DEPLOY_DIR/merkle_root_multisig_ism.hash)
+else
+  ISM_HASH=$(cat $DEPLOY_DIR/message_id_multisig_ism.hash)
+fi
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   mailbox set-default-ism --ism-hash $ISM_HASH
@@ -1334,7 +1421,10 @@ echo "Step 6: Generating agent configs..."
 $CLI --network $NETWORK \
   config update-relayer --dry-run
 
-# Step 7: Generate .env file
+# Step 7: Generate .env file (starting point only - variable names drift from
+# what e2e-docker/.env expects, and verifiedMessageNftScriptCbor/warp entries
+# can be stale; reconcile by hand against "Appendix: Agent Configuration
+# Requirements" below)
 echo "Step 7: Generating .env file..."
 $CLI --network $NETWORK \
   config generate-env --output $DEPLOY_DIR/.env.generated
@@ -1348,7 +1438,7 @@ $CLI --network $NETWORK ism show
 echo ""
 echo "=== Deployment Complete ==="
 echo "Deployment info saved to: $DEPLOY_DIR/deployment_info.json"
-echo "Environment file: $DEPLOY_DIR/.env.generated"
+echo "Environment file: $DEPLOY_DIR/.env.generated (reconcile by hand, see caveat above)"
 ```
 
 ---
@@ -1388,23 +1478,24 @@ After deployment, your `deployment_info.json` will contain addresses like:
 
 ### Deploy Commands
 
-| Command                        | Description                         |
-| ------------------------------ | ----------------------------------- |
-| `deploy extract`               | Extract validators from plutus.json |
-| `deploy info`                  | Show validator information          |
-| `deploy generate-config`       | Generate deployment configuration   |
-| `deploy reference-script`      | Deploy single reference script      |
-| `deploy reference-scripts-all` | Deploy all core reference scripts   |
+| Command                        | Description                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `deploy extract`               | Extract validators from plutus.json (`--ism-module-type messageid\|merkleroot` picks the default ISM; writes both flavours' files regardless) |
+| `deploy info`                  | Show validator information                                                       |
+| `deploy generate-config`       | Generate deployment configuration                                                |
+| `deploy reference-script`      | Deploy single reference script                                                   |
+| `deploy reference-scripts-all` | Deploy reference scripts for mailbox + default ISM + every `alt_isms[]` entry     |
 
 ### Init Commands
 
-| Command          | Description                                                              |
-| ---------------- | ------------------------------------------------------------------------ |
-| `init mailbox`   | Initialize mailbox contract                                              |
-| `init ism`       | Initialize multisig ISM                                                  |
-| `init recipient` | Initialize a recipient contract                                          |
-| `init all`       | Initialize all core contracts (optionally configure ISM + validator too)  |
-| `init status`    | Show initialization status                                               |
+| Command          | Description                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| `init mailbox`   | Initialize mailbox contract                                                                                 |
+| `init ism`       | Initialize an ISM instance (`--module-type` selects/adds a flavour — see [Dual-ISM](#34-deploying-both-ism-flavours-dual-ism)) |
+| `init igp`       | Initialize the Interchain Gas Paymaster (not covered by `init all`)                                          |
+| `init recipient` | Initialize a recipient contract                                                                              |
+| `init all`       | Initialize mailbox + default ISM (optionally configure ISM validators + validator announce too); does NOT init IGP |
+| `init status`    | Show initialization status                                                                                   |
 
 ### Mailbox Commands
 
@@ -1559,7 +1650,8 @@ The scripts in Hyperlane-Cardano have dependencies that must be resolved in a sp
 | ---------------------------- | ----- | ------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------ |
 | `state_nft`                  | Mint  | `utxo_ref: OutputReference`                                   | Any unspent UTXO                                     | One-shot minting, ensures unique NFT       |
 | `mailbox`                    | Spend | `verified_message_nft_policy: PolicyId, ism_nft_policy: PolicyId` | Derived from `verified_message_nft` and ISM state NFT | Verified message minting + ISM verification |
-| `multisig_ism`               | Spend | (none)                                                        | -                                                    | No parameters needed                       |
+| `message_id_multisig_ism`    | Spend | (none)                                                        | -                                                    | No parameters needed; MessageId flavour    |
+| `merkle_root_multisig_ism`   | Spend | (none)                                                        | -                                                    | No parameters needed; MerkleRoot flavour   |
 | `verified_message_nft`       | Mint  | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Ensures only mailbox can mint verified message NFTs |
 | `greeting`                   | Spend | `verified_message_nft_policy: PolicyId, owner: VerificationKeyHash` | Derived from `verified_message_nft`; owner defaults to signing key | Example recipient, verifies message NFT    |
 | `warp_route`                 | Spend | `mailbox_policy_id: PolicyId`                                 | `state_nft` policy for mailbox                       | Co-spends with mailbox                     |
@@ -1720,6 +1812,13 @@ cd cardano
 
 Use `--dry-run` to preview without writing changes.
 
+> **`config generate-env` caveat**: treat its output as a *starting point*, not a drop-in `.env`. Its variable names drift from what the `e2e-docker` stack's `.env` actually expects — e.g. it emits `CARDANO_VERIFIED_MSG_POLICY_ID` with no accompanying CBOR field, it can carry stale/duplicate warp route entries from earlier deployments, and it leaves placeholders for `CARDANO_SIGNER_KEY` / `CARDANO_INDEX_FROM`. Reconcile the generated file by hand against the **Environment Variables Overview** below and `e2e-docker/.env.example` before using it. In particular, the H256 address forms the agents actually read are:
+>
+> - `CARDANO_MAILBOX` / `CARDANO_ISM` / `CARDANO_IGP` = `0x00000000` + the contract's **script hash** (`.mailbox.hash` / `.ism.hash` / `.igp.hash` — *not* the state NFT policy)
+> - `CARDANO_VALIDATOR_ANNOUNCE` = `0x00000000` + the VA **policy id** (`.validator_announce.hash` — for the VA this field holds the policy id, since VA has no separate spend-script/state-NFT split)
+>
+> See [Extracting Variables from deployment_info.json](#extracting-variables-from-deployment_infojson) below for the corrected extraction commands.
+
 ### Manual Configuration
 
 If you need to extract values manually, see the sections below.
@@ -1731,17 +1830,22 @@ If you need to extract values manually, see the sections below.
 | Variable                          | Description                           | Source                                    |
 | --------------------------------- | ------------------------------------- | ----------------------------------------- |
 | `BLOCKFROST_API_KEY`              | Blockfrost API key for Cardano access | Blockfrost dashboard                      |
-| `CARDANO_MAILBOX`                 | Mailbox identifier (H256 format)      | `0x00000000` + `.mailbox.stateNftPolicy`  |
-| `CARDANO_VALIDATOR_ANNOUNCE`      | Validator announce (H256 format)      | `0x00000000` + `.validator_announce.hash` |
+| `CARDANO_MAILBOX`                 | Mailbox identifier (H256 format)      | `0x00000000` + `.mailbox.hash` (script hash — **not** the state NFT policy) |
+| `CARDANO_VALIDATOR_ANNOUNCE`      | Validator announce (H256 format)      | `0x00000000` + `.validator_announce.hash` (VA's policy id) |
 | `CARDANO_MERKLE_TREE_HOOK`        | Merkle tree hook (H256 format)        | `0x00000000` + `.mailbox.hash`            |
-| `CARDANO_ISM`                     | ISM identifier (H256 format)          | `0x00000000` + `.ism.stateNftPolicy`      |
+| `CARDANO_ISM`                     | Default ISM identifier (H256 format)  | `0x00000000` + `.ism.hash` (script hash — **not** the state NFT policy) |
+| `CARDANO_IGP`                     | IGP identifier (H256 format)          | `0x00000000` + `.igp.hash` (script hash)  |
 | `CARDANO_MAILBOX_POLICY_ID`       | Mailbox state NFT policy              | `.mailbox.stateNftPolicy`                 |
 | `CARDANO_MAILBOX_SCRIPT_HASH`     | Mailbox validator script hash         | `.mailbox.hash`                           |
 | `CARDANO_MAILBOX_REF_UTXO`        | Mailbox reference script UTXO         | `.mailbox.referenceScriptUtxo`            |
-| `CARDANO_ISM_SCRIPT_HASH`         | ISM validator script hash             | `.ism.hash`                               |
-| `CARDANO_ISM_STATE_NFT_POLICY_ID` | ISM state NFT policy                  | `.ism.stateNftPolicy`                     |
-| `CARDANO_ISM_REF_UTXO`            | ISM reference script UTXO             | `.ism.referenceScriptUtxo`                |
+| `CARDANO_ISM_SCRIPT_HASH`         | Default ISM validator script hash     | `.ism.hash`                               |
+| `CARDANO_ISM_STATE_NFT_POLICY_ID` | Default ISM state NFT policy          | `.ism.stateNftPolicy`                     |
+| `CARDANO_ISM_REF_UTXO`            | Default ISM reference script UTXO     | `.ism.referenceScriptUtxo`                |
+| `CARDANO_IGP_SCRIPT_HASH`         | IGP validator script hash             | `.igp.hash`                               |
+| `CARDANO_IGP_STATE_NFT_POLICY_ID` | IGP state NFT policy                  | `.igp.stateNftPolicy`                     |
 | `CARDANO_VA_POLICY_ID`            | Validator announce policy ID          | `.validator_announce.hash`                |
+| `CARDANO_VERIFIED_MSG_NFT_POLICY_ID`   | Verified message NFT policy      | `.verified_message_nft.policy_id`         |
+| `CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR` | Verified message NFT applied CBOR (mailbox-parameterized — see [critical gotcha](#troubleshooting-parameterization-issues) below) | `deployments/<net>/verified_message_nft_applied.plutus` `.cborHex` |
 | `CARDANO_INDEX_FROM`              | Block height to start indexing        | See note below                            |
 
 #### Validator-Only Variables
@@ -1765,29 +1869,36 @@ If you need to extract values manually, see the sections below.
 
 ### Extracting Variables from deployment_info.json
 
-> **Tip**: Use `config generate-env` to auto-generate all these values. The manual extraction below is for reference only.
+> **Tip**: Use `config generate-env` as a starting point, but its variable names drift from what `e2e-docker/.env` expects — see the caveat above. The manual extraction below produces the values the agents actually need.
 
 After deploying Cardano contracts, extract the required values:
 
 ```bash
 cd cardano/deployments/preview
 
-# H256 Contract Addresses (with 0x00000000 prefix)
-export CARDANO_MAILBOX=0x00000000$(jq -r '.mailbox.stateNftPolicy' deployment_info.json)
+# H256 Contract Addresses (with 0x00000000 prefix) - use .hash (script hash), NOT .stateNftPolicy
+export CARDANO_MAILBOX=0x00000000$(jq -r '.mailbox.hash' deployment_info.json)
 export CARDANO_VALIDATOR_ANNOUNCE=0x00000000$(jq -r '.validator_announce.hash' deployment_info.json)
 export CARDANO_MERKLE_TREE_HOOK=0x00000000$(jq -r '.mailbox.hash' deployment_info.json)
-export CARDANO_ISM=0x00000000$(jq -r '.ism.stateNftPolicy' deployment_info.json)
+export CARDANO_ISM=0x00000000$(jq -r '.ism.hash' deployment_info.json)
+export CARDANO_IGP=0x00000000$(jq -r '.igp.hash' deployment_info.json)
 
 # Policy IDs and Script Hashes
 export CARDANO_MAILBOX_POLICY_ID=$(jq -r '.mailbox.stateNftPolicy' deployment_info.json)
 export CARDANO_MAILBOX_SCRIPT_HASH=$(jq -r '.mailbox.hash' deployment_info.json)
 export CARDANO_ISM_SCRIPT_HASH=$(jq -r '.ism.hash' deployment_info.json)
 export CARDANO_ISM_STATE_NFT_POLICY_ID=$(jq -r '.ism.stateNftPolicy' deployment_info.json)
+export CARDANO_IGP_SCRIPT_HASH=$(jq -r '.igp.hash' deployment_info.json)
+export CARDANO_IGP_STATE_NFT_POLICY_ID=$(jq -r '.igp.stateNftPolicy' deployment_info.json)
 export CARDANO_VA_POLICY_ID=$(jq -r '.validator_announce.hash' deployment_info.json)
 
 # Reference Script UTXOs
 export CARDANO_MAILBOX_REF_UTXO=$(jq -r '.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
 export CARDANO_ISM_REF_UTXO=$(jq -r '.ism.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
+
+# Verified Message NFT (mailbox-parameterized - regenerate after every mailbox redeploy)
+export CARDANO_VERIFIED_MSG_NFT_POLICY_ID=$(jq -r '.verified_message_nft.policy_id' deployment_info.json)
+export CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR=$(python3 -c "import json;print(json.load(open('verified_message_nft_applied.plutus'))['cborHex'])")
 ```
 
 #### One-liner Export Script
@@ -1795,14 +1906,17 @@ export CARDANO_ISM_REF_UTXO=$(jq -r '.ism.referenceScriptUtxo | "\(.txHash)#\(.o
 ```bash
 cd cardano/deployments/preview
 eval $(jq -r '
-  "export CARDANO_MAILBOX=0x00000000" + .mailbox.stateNftPolicy,
+  "export CARDANO_MAILBOX=0x00000000" + .mailbox.hash,
   "export CARDANO_VALIDATOR_ANNOUNCE=0x00000000" + .validator_announce.hash,
   "export CARDANO_MERKLE_TREE_HOOK=0x00000000" + .mailbox.hash,
-  "export CARDANO_ISM=0x00000000" + .ism.stateNftPolicy,
+  "export CARDANO_ISM=0x00000000" + .ism.hash,
+  "export CARDANO_IGP=0x00000000" + .igp.hash,
   "export CARDANO_MAILBOX_POLICY_ID=" + .mailbox.stateNftPolicy,
   "export CARDANO_MAILBOX_SCRIPT_HASH=" + .mailbox.hash,
   "export CARDANO_ISM_SCRIPT_HASH=" + .ism.hash,
   "export CARDANO_ISM_STATE_NFT_POLICY_ID=" + .ism.stateNftPolicy,
+  "export CARDANO_IGP_SCRIPT_HASH=" + .igp.hash,
+  "export CARDANO_IGP_STATE_NFT_POLICY_ID=" + .igp.stateNftPolicy,
   "export CARDANO_VA_POLICY_ID=" + .validator_announce.hash,
   "export CARDANO_MAILBOX_REF_UTXO=" + (.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"),
   "export CARDANO_ISM_REF_UTXO=" + (.ism.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)")
@@ -1885,7 +1999,7 @@ To announce with the correct format:
 
 ### Example Complete Relayer Config for Cardano
 
-> **Tip**: Use `config update-relayer` to generate this automatically. The command derives all parameterized values (verified message NFT) from the Plutus blueprint.
+> **Tip**: Use `config update-relayer` to generate this automatically. The command derives all parameterized values (verified message NFT) from the Plutus blueprint. This example mirrors the actual working config template at `cardano/e2e-docker/config/relayer-cardano-sepolia.json` — note the top-level `mailbox` / `interchainSecurityModule` / `merkleTreeHook` / `validatorAnnounce` / `interchainGasPaymaster` fields all use the **`0x00000000` prefix** (not `0x02000000` — that prefix is only for generic script recipients, not the mailbox/ISM/IGP themselves), and `mailbox`/`interchainSecurityModule`/`interchainGasPaymaster` are built from the **script hash**, not the state NFT policy (`connection.mailboxPolicyId` etc. hold the policy separately, for a different purpose):
 
 ```json
 {
@@ -1895,8 +2009,12 @@ To announce with the correct format:
       "domainId": 2003,
       "protocol": "cardano",
       "chainId": 2003,
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 20,
+        "reorgPeriod": 5
+      },
       "connection": {
-        "type": "blockfrost",
         "url": "https://cardano-preview.blockfrost.io/api/v0",
         "apiKey": "${BLOCKFROST_API_KEY}",
         "network": "preview",
@@ -1908,19 +2026,23 @@ To announce with the correct format:
         "ismScriptHash": "<ism_script_hash>",
         "ismAssetNameHex": "<ism_nft_asset_name>",
         "ismReferenceScriptUtxo": "<tx_hash>#0",
-        "igpPolicyId": "<igp_state_nft_policy_id>",
-        "validatorAnnouncePolicyId": "<va_state_nft_policy_id>",
+        "igpScriptHash": "<igp_script_hash>",
+        "validatorAnnouncePolicyId": "<va_policy_id>",
         "verifiedMessageNftPolicyId": "<verified_msg_nft_policy_id>",
-        "verifiedMessageNftScriptCbor": "<cbor_hex_from_applied_script>",
-        "warpRouteReferenceScriptUtxo": "<tx_hash>#1"
+        "verifiedMessageNftScriptCbor": "<cbor_hex_from_verified_message_nft_applied.plutus>",
+        "warpRouteReferenceScriptUtxo": "<tx_hash>#1",
+        "confirmationBlockDelay": 5
       },
       "index": {
         "from": 3936000
       },
-      "mailbox": "0x02000000<mailbox_script_hash>",
-      "validatorAnnounce": "0x00000000<va_state_nft_policy_id>",
-      "merkleTreeHook": "0x00000000<mailbox_state_nft_policy_id>",
-      "interchainSecurityModule": "0x02000000<ism_script_hash>"
+      "rpcUrls": [{ "http": "https://cardano-preview.blockfrost.io/api/v0" }],
+      "signer": { "type": "hexKey", "key": "${CARDANO_SIGNER_KEY}" },
+      "mailbox": "0x00000000<mailbox_script_hash>",
+      "validatorAnnounce": "0x00000000<va_policy_id>",
+      "merkleTreeHook": "0x00000000<mailbox_script_hash>",
+      "interchainSecurityModule": "0x00000000<ism_script_hash>",
+      "interchainGasPaymaster": "0x00000000<igp_script_hash>"
     }
   }
 }
@@ -1961,6 +2083,8 @@ python3 -c "import json;print(json.load(open('deployments/preview/verified_messa
 python3 -c "import json,hashlib;c=json.load(open('deployments/preview/verified_message_nft_applied.plutus'))['cborHex'];print(hashlib.blake2b(bytes([3])+bytes.fromhex(c),digest_size=28).hexdigest())"
 ```
 
+**Recipients bake in the same policy — redeploy them too.** `verified_message_nft` isn't only read by the relayer; every recipient contract (including `greeting`) is itself parameterized by `verified_message_nft_policy` (see [Script Parameterization Table](#script-parameterization-table)). After a mailbox redeploy, a recipient deployed against the *old* policy can never recognize the NFT the relayer delivers — there is no config value to patch, the policy is baked into the recipient's own script hash and address. Redeploy the recipient (`init recipient` again — it gets a new script address) whenever the mailbox is redeployed. See `design/merkleroot-ism-binding.md` §12 for the full mailbox-parameterization chain.
+
 **MerkleRoot ISM: inbound messages never leave `CouldNotFetchMetadata` / "Unable to reach quorum"**
 
 A MerkleRoot ISM needs a merkle **inclusion proof**, so the relayer must index the origin's tree from **leaf 0** (`highest_known_leaf_index()` is `None` until leaf 0 is stored — there is no snapshot import). For a **fresh** origin mailbox this is automatic. For a **busy shared** origin mailbox (e.g. the official Sepolia mailbox, ~870k leaves) you must backfill the whole tree once per fresh `relayer_db`:
@@ -1969,7 +2093,7 @@ A MerkleRoot ISM needs a merkle **inclusion proof**, so the relayer must index t
 2. Use an RPC with a large `eth_getLogs` range and set `index.chunk` near its cap. dRPC free tier caps at 10 000 blocks; **Tenderly allows ~500 000** — put it first in `rpcUrls` and set `"chunk": 99999`. The backfill then finishes in minutes.
 3. Optionally add a relayer `whitelist` (`{"origindomain": [<origin>]}` or a specific `messageid`) so the message cursor doesn't hammer the destination RPC for undeliverable historical messages while the tree builds.
 
-If the origin is a busy shared mailbox and you don't want a backfill, use a **MessageId** ISM there instead (no tree required).
+If the origin is a busy shared mailbox and you don't want a backfill, use a **MessageId** ISM there instead (no tree required) — this is also why the mailbox's *default* ISM should generally stay MessageId, with MerkleRoot only opted into per-recipient via [Dual-ISM](#34-deploying-both-ism-flavours-dual-ism) when a proof is actually needed. See `design/merkleroot-ism-binding.md` §11 and §13 for the full operational rationale.
 
 ---
 

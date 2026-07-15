@@ -88,6 +88,11 @@
   "log": { "level": "debug", "format": "pretty" },
   "gasPaymentEnforcement": [
     {
+      "type": "minimum",
+      "payment": "1000000",
+      "matchingList": [{ "origindomain": [2003] }]
+    },
+    {
       "type": "none"
     }
   ],
