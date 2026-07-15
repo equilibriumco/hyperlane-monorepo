@@ -582,7 +582,7 @@ async fn deploy_reference_script_internal(
                     mailbox.reference_script_utxo = Some(ref_utxo);
                 }
             }
-            "multisig_ism" | "ism" => {
+            "multisig_ism" | "merkleroot_ism" | "ism" => {
                 if let Some(ref mut ism) = deployment.ism {
                     ism.reference_script_utxo = Some(ref_utxo);
                 }
@@ -627,7 +627,18 @@ async fn deploy_all_reference_scripts(
 ) -> Result<()> {
     println!("{}", "Deploying all core reference scripts...".cyan());
 
-    let scripts = ["mailbox", "multisig_ism"];
+    // Deploy the reference script for the actually-deployed ISM flavour, so the
+    // relayer references the correct script when spending the ISM.
+    let ism_script = match ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.ism.and_then(|m| m.module_type))
+        .as_deref()
+    {
+        Some("merkleroot") => "merkleroot_ism",
+        _ => "multisig_ism",
+    };
+    let scripts = ["mailbox", ism_script];
 
     // Track spent UTXOs to avoid reusing them
     let mut spent_utxos: Vec<String> = Vec::new();
@@ -731,6 +742,7 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
     let title = match script_name {
         "mailbox" => "mailbox.mailbox.spend",
         "multisig_ism" | "ism" => "multisig_ism.multisig_ism.spend",
+        "merkleroot_ism" => "merkleroot_ism.merkleroot_ism.spend",
         "igp" => "igp.igp.spend",
         "validator_announce" => "validator_announce.validator_announce.spend",
         "warp_route" => "warp_route.warp_route.spend",
