@@ -142,6 +142,54 @@
         "outputIndex": 1,
         "lovelace": 29000000
       }
+    },
+    {
+      "warpType": "collateral",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "e6ee86718d557a9abcefbce1860e61f140c215c465691a58688b1085",
+      "address": "addr_test1wrnwapn3342h4x4ua77wrpswv8c5pss4c3jkjxjcdz93ppglv8h5j",
+      "nftPolicy": "e84b7ca7fafaf6a96e18a777db724a94c191161a7d3829d0e3912464",
+      "initTxHash": "bee214463a6006bbb3bdc65c1292389ed5597b054a4052cdb42b3a3da3e96dfb",
+      "referenceScriptUtxo": {
+        "txHash": "bee214463a6006bbb3bdc65c1292389ed5597b054a4052cdb42b3a3da3e96dfb",
+        "outputIndex": 1,
+        "lovelace": 29000000
+      },
+      "tokenPolicy": "4485fc4c31c80e7449dab7464bdcd19247ce29d74e1fe28de1044650",
+      "tokenAsset": "4354455354"
+    },
+    {
+      "warpType": "collateral",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "e6ee86718d557a9abcefbce1860e61f140c215c465691a58688b1085",
+      "address": "addr_test1wrnwapn3342h4x4ua77wrpswv8c5pss4c3jkjxjcdz93ppglv8h5j",
+      "nftPolicy": "f4293dcd425ecef793d5be17f9f0e5037ad5c0e2e81671c5f99d897b",
+      "initTxHash": "f57e8b33b2e230a218eeeef74681e690130286d18828f2c00a64ec9ce2a3703d",
+      "referenceScriptUtxo": {
+        "txHash": "f57e8b33b2e230a218eeeef74681e690130286d18828f2c00a64ec9ce2a3703d",
+        "outputIndex": 1,
+        "lovelace": 29000000
+      },
+      "tokenPolicy": "4485fc4c31c80e7449dab7464bdcd19247ce29d74e1fe28de1044650",
+      "tokenAsset": "4354455354"
+    },
+    {
+      "warpType": "collateral",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "e6ee86718d557a9abcefbce1860e61f140c215c465691a58688b1085",
+      "address": "addr_test1wrnwapn3342h4x4ua77wrpswv8c5pss4c3jkjxjcdz93ppglv8h5j",
+      "nftPolicy": "a08189946ce872f914c38369f4b337ab8140b2fc4fc16273e459be07",
+      "initTxHash": "15c651bc194babbdf545e1e0b98765e8efd98cd345827f37176e26ffd9bac885",
+      "referenceScriptUtxo": {
+        "txHash": "15c651bc194babbdf545e1e0b98765e8efd98cd345827f37176e26ffd9bac885",
+        "outputIndex": 1,
+        "lovelace": 29000000
+      },
+      "tokenPolicy": "4485fc4c31c80e7449dab7464bdcd19247ce29d74e1fe28de1044650",
+      "tokenAsset": "4354455354"
     }
   ],
   "recipients": [
