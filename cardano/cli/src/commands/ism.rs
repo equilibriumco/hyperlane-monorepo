@@ -23,6 +23,19 @@ fn ism_validator_title(ctx: &CliContext) -> Result<&'static str> {
     })
 }
 
+/// The deployed ISM's module_type, so datum rebuilds during admin ops preserve
+/// it (the on-chain continuation check requires the module_type to be unchanged).
+fn ism_module_type(ctx: &CliContext) -> Result<crate::utils::cbor::IsmModuleType> {
+    let dep = ctx
+        .load_deployment_info()
+        .with_context(|| "Run 'deploy extract' first")?;
+    let mt = dep.ism.as_ref().and_then(|m| m.module_type.as_deref());
+    Ok(match mt {
+        Some("merkleroot") => crate::utils::cbor::IsmModuleType::MerkleRoot,
+        _ => crate::utils::cbor::IsmModuleType::MessageId,
+    })
+}
+
 #[derive(Args)]
 pub struct IsmArgs {
     #[command(subcommand)]
@@ -332,7 +345,7 @@ pub(crate) async fn set_validators(
         &new_validators_list,
         &new_thresholds_list,
         &owner,
-        crate::utils::cbor::IsmModuleType::MessageId,
+        ism_module_type(ctx)?,
     )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
@@ -674,7 +687,7 @@ pub(crate) async fn set_threshold(
         &new_validators_list,
         &new_thresholds_list,
         &owner,
-        crate::utils::cbor::IsmModuleType::MessageId,
+        ism_module_type(ctx)?,
     )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
@@ -1204,7 +1217,7 @@ async fn migrate(
         &current_validators_map,
         &current_thresholds_map,
         &owner,
-        crate::utils::cbor::IsmModuleType::MessageId,
+        ism_module_type(ctx)?,
     )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
