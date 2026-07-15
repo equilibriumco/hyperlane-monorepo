@@ -1950,6 +1950,27 @@ If you upgrade a contract and the script hash changes, that's expected. However,
 2. Update the relayer config with the new script hash and reference script UTXO
 3. The mailbox state UTXO is migrated to the new script address (if address changed)
 
+**Every inbound delivery fails with a bare Plutus `error` (`ValidationTagMismatch … PlutusFailure`)**
+
+The most common cause is a **stale `verifiedMessageNftScriptCbor` / `verifiedMessageNftPolicyId`** in the agent config. `verified_message_nft` is parameterized with the **mailbox state-NFT policy**, so a mailbox redeploy changes its applied CBOR *and* policy id. If the config still holds the old script, the relayer mints under the wrong policy and that policy — searching the tx inputs for a mailbox it no longer matches — throws a bare `error`. Fix: re-read both values from `deployments/<net>/verified_message_nft_applied.plutus`:
+
+```bash
+# CBOR: the applied script's cborHex
+python3 -c "import json;print(json.load(open('deployments/preview/verified_message_nft_applied.plutus'))['cborHex'])"
+# Policy id: blake2b-224 of (0x03 language tag || cbor bytes) for PlutusV3
+python3 -c "import json,hashlib;c=json.load(open('deployments/preview/verified_message_nft_applied.plutus'))['cborHex'];print(hashlib.blake2b(bytes([3])+bytes.fromhex(c),digest_size=28).hexdigest())"
+```
+
+**MerkleRoot ISM: inbound messages never leave `CouldNotFetchMetadata` / "Unable to reach quorum"**
+
+A MerkleRoot ISM needs a merkle **inclusion proof**, so the relayer must index the origin's tree from **leaf 0** (`highest_known_leaf_index()` is `None` until leaf 0 is stored — there is no snapshot import). For a **fresh** origin mailbox this is automatic. For a **busy shared** origin mailbox (e.g. the official Sepolia mailbox, ~870k leaves) you must backfill the whole tree once per fresh `relayer_db`:
+
+1. Set the origin chain's `index.from` to the origin **MerkleTreeHook deploy block**.
+2. Use an RPC with a large `eth_getLogs` range and set `index.chunk` near its cap. dRPC free tier caps at 10 000 blocks; **Tenderly allows ~500 000** — put it first in `rpcUrls` and set `"chunk": 99999`. The backfill then finishes in minutes.
+3. Optionally add a relayer `whitelist` (`{"origindomain": [<origin>]}` or a specific `messageid`) so the message cursor doesn't hammer the destination RPC for undeliverable historical messages while the tree builds.
+
+If the origin is a busy shared mailbox and you don't want a backfill, use a **MessageId** ISM there instead (no tree required).
+
 ---
 
 ## Appendix: Warp Route Architecture

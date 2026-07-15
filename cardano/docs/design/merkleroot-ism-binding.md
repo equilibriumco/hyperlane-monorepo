@@ -1,6 +1,6 @@
 # MerkleRoot ISM — mailbox↔ISM binding design
 
-**Status:** draft for security sanity-check (step 1 of the MerkleRoot migration)
+**Status:** implemented and **validated end-to-end on-chain, both directions** (Cardano preview ↔ Sepolia, Protocol v11 / Van Rossem). See §10.
 **Branch:** `feat/cardano-merkleroot-ism`
 **Scope:** the on-chain binding between the mailbox and a multisig ISM, and the module-type dispatch. Out of scope: the relayer leaf-indexer, metadata encoders, EVM side. Settle this first — if the binding isn't sound, nothing downstream matters.
 
@@ -140,10 +140,37 @@ The **relayer/validator** computes the root that gets signed for Cardano-origin 
 **Also done since:**
 - **B (relayer inbound) — done.** `parse_merkleroot_metadata` parses the Hyperlane MerkleRoot layout, recomputes the signed root via `branch_root`, and emits the `MerkleRootVerify` redeemer; dispatch is by metadata length. `branch_root` is unit-tested against the same vector as the on-chain `verify_proof`. Shared sig-recovery/encoding helpers added. `module_type()` is dynamic. Blueprint rebuilt (`plutus.json` now has `merkleroot_ism`).
 
-**Remaining (needs a live testnet/Blockfrost to exercise & verify):**
-- **A. CLI MerkleRoot deploy path** — deploy the `merkleroot_ism` script, set `module_type = MerkleRoot`, make the default ISM MerkleRoot, and preserve `module_type` on `set-validators`/`set-threshold` (see the TODO in `ism.rs`).
-- **B. Relayer MerkleRoot metadata → Plutus redeemer (Sepolia→Cardano).** `module_type()` is now dynamic, so the generic pipeline will select `MerkleRootMultisigMetadataBuilder` for a MerkleRoot ISM. Work: extend `parse_multisig_metadata` (`tx_builder/mod.rs:1098`) to parse the MerkleRoot metadata layout (merkleTreeHook | messageIndex | 32×32 proof | signedIndex | signatures); add a `MerkleRootVerify` redeemer to the relayer `types.rs` + `encode_ism_redeemer` (`tx_encoding.rs:268`); dispatch on `module_type` in the Process-build path.
-- **C. Cardano→Sepolia (the big lift).** NFT-following dispatch/leaf indexer + `IncrementalMerkle` of Cardano-origin leaves exposed via `MerkleTreeHook` so the generic builder can generate proofs; deploy `StaticMerkleRootMultisigIsm` on Sepolia and enroll.
-- **D. Deploy** — `aiken build` (new `plutus.json` + hashes), redeploy, regenerate `deployment_info.json`, reconfigure agents.
+**Done (validated live — see §10):**
+- **A. CLI MerkleRoot deploy path** — `deploy extract --ism-module-type merkleroot` fills the ISM slot with `merkleroot_ism`, `init` writes `module_type = MerkleRoot`, `reference-scripts-all` picks the ISM script by module_type, and `set-validators`/`set-threshold` preserve `module_type` (via `ism_module_type(ctx)`).
+- **B. Relayer MerkleRoot metadata → Plutus redeemer (Sepolia→Cardano).** `parse_merkleroot_metadata` decodes the Hyperlane layout (merkleTreeHook | messageIndex | signedMessageId | 32×32 proof | signedIndex | signatures), recomputes the signed root via `branch_root`, recovers sigs against the EIP-191 digest, and emits `MerkleRootVerify`. Dispatch is by metadata length (`>= MERKLEROOT_ISM_METADATA_MIN_LEN`).
+- **C. Cardano→Sepolia.** The Cardano `MerkleTreeHook` indexer already emits `MerkleTreeInsertion`, so the generic prover builds proofs over a **fresh** Cardano tree (index_from = mailbox deploy block). `StaticMerkleRootMultisigIsm` deployed on Sepolia (`DeployCardanoMerkleRootISM.s.sol`), recipient repointed at it.
+- **D. Deploy** — built, deployed to preview, agents reconfigured.
 
-Sequence for a first e2e: A + B → inbound MerkleRoot testable; then C → outbound.
+## 10. End-to-end validation (Cardano preview ↔ Sepolia, 2026-07-15)
+
+Both directions verified on-chain under **Protocol v11 (Van Rossem)**.
+
+**Inbound — Sepolia → Cardano (exercises the new Cardano Plutus MerkleRoot ISM):**
+- Message `0x278a71aa…` (nonce 871322, body "Alice") dispatched on the official Sepolia mailbox to the greeting recipient (default ISM = MerkleRoot).
+- Relayer read `module_type = MerkleRoot` from the ISM state datum, built a real inclusion proof (leaf 869960 under the signed root at index 869962), fetched a 1-of-3 quorum checkpoint from the Sepolia validators' S3, and submitted a `Process` tx with `MerkleRootVerify`.
+- On-chain: `verify_checkpoint` + `merkle.verify_proof` passed; the `verified_message_nft` (asset name = the message id) was minted and delivered to the recipient. **The Cardano MerkleRoot ISM verified a real Sepolia proof + validator signature on-chain.**
+
+**Outbound — Cardano → Sepolia (exercises the relayer's MerkleRoot metadata builder + Sepolia's audited ISM):**
+- Message `0x758c0c97…` (nonce 0) dispatched on the fresh Cardano mailbox to a Sepolia `TestRecipient` whose ISM is `StaticMerkleRootMultisigIsm` (trusts the Cardano validator `0x0A923108…`, 1-of-1).
+- Cardano validator signed checkpoint 0 (root `0x5c1e69e8…`); relayer built the MerkleRoot proof over the fresh Cardano tree and called `process()` on the Sepolia mailbox.
+- On-chain: `delivered(0x758c0c97…) == true`. **The Sepolia MerkleRoot ISM verified a real Cardano proof + Cardano validator signature on-chain.**
+
+## 11. Operational constraint — MerkleRoot needs the origin tree from leaf 0
+
+A MerkleRoot proof is a merkle **inclusion proof**, so the relayer must reconstruct the origin's incremental tree by replaying **every** `MerkleTreeInsertion` from leaf 0 (`highest_known_leaf_index()` returns `None` until leaf 0 is present — the prover has no snapshot to import). Consequences:
+
+- **Fresh / dedicated origin mailbox → trivial.** The Cardano mailbox here starts at leaf 0 (index_from = deploy block), so outbound proofs build in seconds.
+- **Busy shared origin mailbox → a full backfill.** The official Sepolia mailbox had ~869 963 leaves across ~6.76M blocks (deploy block 4 517 413). Inbound MerkleRoot requires backfilling the whole tree once (per fresh `relayer_db`).
+  - The relayer's message *and* merkle-tree cursors backfill from `index.from`; set it to the origin **MerkleTreeHook deploy block**.
+  - The RPC's `eth_getLogs` block-range cap dominates wall-clock: **dRPC free tier caps at 10 000 blocks; Tenderly allows ~500 000** — put a large-range RPC first and set `index.chunk` near the cap (e.g. 99 999). The full backfill then completes in minutes rather than hours.
+  - Cut the noise: the message cursor also re-indexes the whole origin history; a relayer `whitelist` (e.g. `{"origindomain": [<origin>]}` or a specific `messageid`) stops it from hammering the destination RPC for undeliverable historical messages while the tree finishes.
+- **MessageId ISM has none of this** (it fetches one signed checkpoint per message, no tree) — which is why production/prior runs used MessageId against the shared mailbox. Prefer MerkleRoot when the origin mailbox is dedicated, or accept a one-time backfill for a shared one.
+
+## 12. Deployment hygiene — `verified_message_nft` is mailbox-parameterized
+
+`verified_message_nft(mailbox_policy_id)` bakes in the mailbox state-NFT policy, and the mailbox bakes in the resulting `verified_message_nft_policy` — a mutual parameterization. **Whenever the mailbox is redeployed, the relayer/agent config's `verifiedMessageNftScriptCbor` + `verifiedMessageNftPolicyId` must be regenerated** from the new deployment; a stale value makes every inbound delivery fail with a bare Plutus `error` (the policy can't find "its" mailbox in the tx inputs). Take both from `deployments/preview/verified_message_nft_applied.plutus` (the applied CBOR); the policy id is `blake2b_224(0x03 ‖ <applied cbor bytes>)` for PlutusV3. This bit the first inbound e2e run.
