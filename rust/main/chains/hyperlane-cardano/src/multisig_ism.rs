@@ -10,7 +10,7 @@ use tokio::sync::OnceCell;
 
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract,
-    HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, MultisigIsm, H256,
+    HyperlaneDomain, HyperlaneMessage, HyperlaneProvider, ModuleType, MultisigIsm, H256,
 };
 
 /// MultisigIsm contract on Cardano
@@ -36,6 +36,19 @@ impl CardanoMultisigIsm {
             address: locator.address,
             cached_ism_datum: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Read the ISM's module type (MessageId vs MerkleRoot) from its state datum.
+    /// This is the on-chain query used to decide how to build the ISM redeemer.
+    pub async fn module_type(&self) -> ChainResult<ModuleType> {
+        let datum = self
+            .cached_ism_datum
+            .get_or_try_init(|| async {
+                let utxo = self.find_ism_utxo().await?;
+                self.parse_ism_datum(&utxo).await
+            })
+            .await?;
+        Ok(datum.module_type)
     }
 
     /// Find the ISM UTXO by its state NFT
@@ -184,17 +197,36 @@ impl CardanoMultisigIsm {
         // Parse owner (field 2): 28-byte pubkey hash
         let owner = self.parse_owner_from_plutus(fields[2])?;
 
+        // Parse module_type (field 3): Constr 0 = MessageId, Constr 1 = MerkleRoot.
+        // Default to MessageId if absent (datums predating the field).
+        let module_type = fields
+            .get(3)
+            .map(|f| Self::parse_module_type_from_plutus(f))
+            .unwrap_or(ModuleType::MessageIdMultisig);
+
         tracing::debug!(
-            "Parsed ISM datum: {} validator entries, {} threshold entries",
+            "Parsed ISM datum: {} validator entries, {} threshold entries, module_type {:?}",
             validators.len(),
-            thresholds.len()
+            thresholds.len(),
+            module_type,
         );
 
         Ok(MultisigIsmDatum {
             validators,
             thresholds,
             owner,
+            module_type,
         })
+    }
+
+    /// Constr 0 -> MessageIdMultisig, Constr 1 -> MerkleRootMultisig (pallas tags
+    /// 121 and 122). Anything else defaults to MessageId.
+    fn parse_module_type_from_plutus(data: &pallas_primitives::conway::PlutusData) -> ModuleType {
+        use pallas_primitives::conway::PlutusData;
+        match data {
+            PlutusData::Constr(c) if c.tag == 122 => ModuleType::MerkleRootMultisig,
+            _ => ModuleType::MessageIdMultisig,
+        }
     }
 
     fn parse_validators_from_plutus(
@@ -557,10 +589,25 @@ impl CardanoMultisigIsm {
             .try_into()
             .map_err(|_| ChainCommunicationError::from_other_str("Invalid owner length"))?;
 
+        // module_type (field 3): constructor 1 = MerkleRoot, else MessageId.
+        let module_type = fields
+            .get(3)
+            .and_then(|f| f.get("constructor"))
+            .and_then(|c| c.as_u64())
+            .map(|c| {
+                if c == 1 {
+                    ModuleType::MerkleRootMultisig
+                } else {
+                    ModuleType::MessageIdMultisig
+                }
+            })
+            .unwrap_or(ModuleType::MessageIdMultisig);
+
         Ok(MultisigIsmDatum {
             validators,
             thresholds,
             owner,
+            module_type,
         })
     }
 }

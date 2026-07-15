@@ -1,4 +1,5 @@
 use crate::provider::CardanoProvider;
+use crate::CardanoMultisigIsm;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 
@@ -47,8 +48,16 @@ impl HyperlaneContract for CardanoInterchainSecurityModule {
 #[async_trait]
 impl InterchainSecurityModule for CardanoInterchainSecurityModule {
     async fn module_type(&self) -> ChainResult<ModuleType> {
-        // The only supported ISM at the moment.
-        Ok(ModuleType::MessageIdMultisig)
+        // Query the ISM's own state datum on-chain (Cardano has no view calls) so
+        // per-recipient overrides and the default ISM each report their real type.
+        let ism = CardanoMultisigIsm::new(
+            &self.conf,
+            ContractLocator {
+                domain: &self.domain,
+                address: self.address,
+            },
+        );
+        ism.module_type().await
     }
 
     async fn dry_run_verify(

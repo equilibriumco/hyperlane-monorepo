@@ -761,7 +761,12 @@ async fn init_ism_internal(
     };
 
     // Build ISM datum
-    let datum_cbor = build_ism_datum(&validator_map, &threshold_map, &owner_pkh)?;
+    let datum_cbor = build_ism_datum(
+        &validator_map,
+        &threshold_map,
+        &owner_pkh,
+        crate::utils::cbor::IsmModuleType::MessageId,
+    )?;
     println!(
         "  Datum CBOR: {}...",
         hex::encode(&datum_cbor[..32.min(datum_cbor.len())])

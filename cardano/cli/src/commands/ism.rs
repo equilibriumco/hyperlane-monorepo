@@ -313,7 +313,14 @@ pub(crate) async fn set_validators(
     }
 
     // Build the new datum
-    let new_datum = build_ism_datum(&new_validators_list, &new_thresholds_list, &owner)?;
+    // TODO(merkleroot): preserve the ISM's existing module_type once MerkleRoot
+    // ISMs are deployable via the CLI; today all CLI-deployed ISMs are MessageId.
+    let new_datum = build_ism_datum(
+        &new_validators_list,
+        &new_thresholds_list,
+        &owner,
+        crate::utils::cbor::IsmModuleType::MessageId,
+    )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
 
@@ -648,7 +655,14 @@ pub(crate) async fn set_threshold(
     let new_thresholds_list = update_assoc(&current_thresholds_map, domain, threshold);
 
     // Build the new datum
-    let new_datum = build_ism_datum(&new_validators_list, &new_thresholds_list, &owner)?;
+    // TODO(merkleroot): preserve the ISM's existing module_type once MerkleRoot
+    // ISMs are deployable via the CLI; today all CLI-deployed ISMs are MessageId.
+    let new_datum = build_ism_datum(
+        &new_validators_list,
+        &new_thresholds_list,
+        &owner,
+        crate::utils::cbor::IsmModuleType::MessageId,
+    )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
 
@@ -1173,7 +1187,12 @@ async fn migrate(
         ));
     }
 
-    let new_datum = build_ism_datum(&current_validators_map, &current_thresholds_map, &owner)?;
+    let new_datum = build_ism_datum(
+        &current_validators_map,
+        &current_thresholds_map,
+        &owner,
+        crate::utils::cbor::IsmModuleType::MessageId,
+    )?;
     let new_datum_cbor = pallas_codec::minicbor::to_vec(&new_datum)
         .map_err(|e| anyhow!("Failed to encode datum: {:?}", e))?;
 
@@ -1667,6 +1686,7 @@ fn build_ism_datum(
     validators: &[(u32, Vec<Vec<u8>>)],
     thresholds: &[(u32, u32)],
     owner: &[u8],
+    module_type: crate::utils::cbor::IsmModuleType,
 ) -> Result<PlutusData> {
     // ISM Datum structure (Aiken type MultisigIsmDatum):
     // Constr 0 [
@@ -1707,6 +1727,17 @@ fn build_ism_datum(
         })
         .collect();
 
+    // module_type (Constr 0 = MessageId / tag 121, Constr 1 = MerkleRoot / tag 122)
+    let module_type_tag = match module_type {
+        crate::utils::cbor::IsmModuleType::MessageId => 121,
+        crate::utils::cbor::IsmModuleType::MerkleRoot => 122,
+    };
+    let module_type_data = PlutusData::Constr(Constr {
+        tag: module_type_tag,
+        any_constructor: None,
+        fields: MaybeIndefArray::Indef(vec![]),
+    });
+
     // Build the full datum using Indef encoding
     Ok(PlutusData::Constr(Constr {
         tag: 121, // Constr 0
@@ -1715,6 +1746,7 @@ fn build_ism_datum(
             PlutusData::Array(MaybeIndefArray::Indef(validators_list)),
             PlutusData::Array(MaybeIndefArray::Indef(thresholds_list)),
             PlutusData::BoundedBytes(BoundedBytes::from(owner.to_vec())),
+            module_type_data,
         ]),
     }))
 }

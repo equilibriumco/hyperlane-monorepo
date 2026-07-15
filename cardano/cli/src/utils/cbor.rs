@@ -236,10 +236,29 @@ pub fn build_mailbox_datum(
 }
 
 /// Build an ISM datum
+/// ISM flavour, encoded as the 4th field of the ISM datum (constructor 0 =
+/// MessageId, constructor 1 = MerkleRoot). Kept in sync with the Aiken
+/// `ModuleType` enum and the relayer's parser.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IsmModuleType {
+    MessageId,
+    MerkleRoot,
+}
+
+impl IsmModuleType {
+    fn constr_index(self) -> u32 {
+        match self {
+            IsmModuleType::MessageId => 0,
+            IsmModuleType::MerkleRoot => 1,
+        }
+    }
+}
+
 pub fn build_ism_datum(
     validators: &[(u32, Vec<String>)], // (domain, validator_addresses_hex)
     thresholds: &[(u32, u32)],         // (domain, threshold)
     owner_pkh: &str,
+    module_type: IsmModuleType,
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -272,6 +291,9 @@ pub fn build_ism_datum(
 
     // Owner
     builder.bytes_hex(owner_pkh)?;
+
+    // module_type (Constr 0 = MessageId, Constr 1 = MerkleRoot)
+    builder.start_constr(module_type.constr_index()).end_constr();
 
     builder.end_constr();
 

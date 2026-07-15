@@ -1,5 +1,5 @@
 use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
-use hyperlane_core::{HyperlaneMessage, H256};
+use hyperlane_core::{HyperlaneMessage, ModuleType, H256};
 use pallas_addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
 };
@@ -167,6 +167,7 @@ pub struct MultisigIsmDatum {
     pub validators: Vec<(Domain, Vec<[u8; 32]>)>, // Validator public keys per domain
     pub thresholds: Vec<(Domain, u32)>,           // Threshold per domain
     pub owner: [u8; 28],                          // VerificationKeyHash
+    pub module_type: ModuleType,                  // MessageIdMultisig or MerkleRootMultisig
 }
 
 /// ECDSA secp256k1 signature wrapper (65 bytes: r || s || v)
