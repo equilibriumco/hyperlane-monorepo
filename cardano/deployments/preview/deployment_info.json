@@ -128,6 +128,20 @@
         "outputIndex": 1,
         "lovelace": 29000000
       }
+    },
+    {
+      "warpType": "native",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "e6ee86718d557a9abcefbce1860e61f140c215c465691a58688b1085",
+      "address": "addr_test1wrnwapn3342h4x4ua77wrpswv8c5pss4c3jkjxjcdz93ppglv8h5j",
+      "nftPolicy": "0020d8223631406a4c0af745ff6b05db7d99e02dde38001ad84d31c5",
+      "initTxHash": "b9db516cb5cf610247b9708de779fe2a250c91678e05ddfde99a0770e9eb1af6",
+      "referenceScriptUtxo": {
+        "txHash": "b9db516cb5cf610247b9708de779fe2a250c91678e05ddfde99a0770e9eb1af6",
+        "outputIndex": 1,
+        "lovelace": 29000000
+      }
     }
   ],
   "recipients": [
