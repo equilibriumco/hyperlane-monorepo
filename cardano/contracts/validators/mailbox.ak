@@ -13,10 +13,12 @@ use merkle
 use smt
 use types.{
   Checkpoint, Dispatch, Domain, HyperlaneAddress, IsmConfig, MailboxDatum,
-  MailboxRedeemer, MerkleTreeState, Message, MigrateMailbox, MultisigIsmRedeemer,
-  Native, PolicyId, Process, ReceiveTransfer, ScriptHash, SetDefaultIsm,
-  TransferOwnership, VerifiedMessageDatum, Verify, WarpRouteConfig,
-  WarpRouteDatum, WarpRouteRedeemer, encode_message,
+  MailboxRedeemer, MerkleRootIsmRedeemer, MerkleRootMultisig, MerkleRootVerify,
+  MerkleTreeState, Message, MessageIdMultisig, MigrateMailbox, ModuleType,
+  MultisigIsmDatum, MultisigIsmRedeemer, Native, PolicyId, Process,
+  ReceiveTransfer, ScriptHash, SetDefaultIsm, TransferOwnership,
+  VerifiedMessageDatum, Verify, WarpRouteConfig, WarpRouteDatum,
+  WarpRouteRedeemer, encode_message,
 }
 use utils.{
   find_input, hyperlane_address_to_policy_id, hyperlane_address_to_script_hash,
@@ -173,7 +175,7 @@ fn validate_process(
   // 4. Verify ISM approves the message (with NFT authenticity check)
   let ism_config =
     get_recipient_ism(message.recipient, datum.default_ism, ism_nft_policy, tx)
-  expect verify_ism_for_message(ism_config, message_id, tx, metadata)
+  expect verify_ism_for_message(ism_config, message, message_id, tx, metadata)
 
   // 5. For script-hash recipients (0x02 prefix), verify verified message delivery.
   //    NFT-policy recipients (0x01 prefix, e.g. warp routes) handle their own
@@ -468,6 +470,7 @@ fn find_generic_recipient_ism(
 
 fn verify_ism_for_message(
   ism_config: IsmConfig,
+  message: Message,
   message_id: ByteArray,
   tx: Transaction,
   metadata: ByteArray,
@@ -486,11 +489,7 @@ fn verify_ism_for_message(
               input.output.value,
               ism_config.state_nft_policy,
               #"49534d205374617465",
-            ) == 1 && verify_ism_redeemer_message_id(
-              input.output_reference,
-              message_id,
-              tx,
-            )
+            ) == 1 && verify_ism_redeemer(input, message, message_id, tx)
           } else {
             False
           }
@@ -500,22 +499,50 @@ fn verify_ism_for_message(
   )
 }
 
-fn verify_ism_redeemer_message_id(
-  ism_output_ref: OutputReference,
+/// Read the ISM's flavour from its (state-NFT-authenticated) state datum.
+fn ism_module_type(ism_input: Input) -> ModuleType {
+  when ism_input.output.datum is {
+    InlineDatum(datum_data) -> {
+      expect ism_datum: MultisigIsmDatum = datum_data
+      ism_datum.module_type
+    }
+    _ -> fail
+  }
+}
+
+/// Bind the delivered message to the ISM's verification, dispatching on the
+/// ISM's declared module_type:
+/// - MessageId: the signed checkpoint names the message (checkpoint.message_id).
+/// - MerkleRoot: the redeemer carries the proven leaf (delivered_message_id), and
+///   the checkpoint's origin must be the message's origin (validator set binding).
+/// The ISM script itself enforces the crypto (signatures, and for MerkleRoot the
+/// inclusion proof); a wrong module_type only makes the ISM spend fail.
+fn verify_ism_redeemer(
+  ism_input: Input,
+  message: Message,
   expected_message_id: ByteArray,
   tx: Transaction,
 ) -> Bool {
-  let spend_purpose = Spend(ism_output_ref)
-
-  when pairs.get_first(tx.redeemers, spend_purpose) is {
-    Some(redeemer_data) -> {
-      expect ism_redeemer: MultisigIsmRedeemer = redeemer_data
-      when ism_redeemer is {
-        Verify { checkpoint, .. } ->
-          checkpoint.message_id == expected_message_id
-        _ -> False
+  when pairs.get_first(tx.redeemers, Spend(ism_input.output_reference)) is {
+    Some(redeemer_data) ->
+      when ism_module_type(ism_input) is {
+        MessageIdMultisig -> {
+          expect ism_redeemer: MultisigIsmRedeemer = redeemer_data
+          when ism_redeemer is {
+            Verify { checkpoint, .. } ->
+              checkpoint.message_id == expected_message_id
+            _ -> False
+          }
+        }
+        MerkleRootMultisig -> {
+          expect ism_redeemer: MerkleRootIsmRedeemer = redeemer_data
+          when ism_redeemer is {
+            MerkleRootVerify { delivered_message_id, checkpoint, .. } ->
+              delivered_message_id == expected_message_id && checkpoint.origin == message.origin
+            _ -> False
+          }
+        }
       }
-    }
     None -> False
   }
 }
@@ -804,7 +831,14 @@ fn make_ism_verify_tx_with_asset(state_asset_name: ByteArray) -> Transaction {
             stake_credential: None,
           },
           value,
-          datum: NoDatum,
+          datum: InlineDatum(
+            MultisigIsmDatum {
+              validators: [],
+              thresholds: [],
+              owner: #"00000000000000000000000000000000000000000000000000000000",
+              module_type: MessageIdMultisig,
+            },
+          ),
           reference_script: None,
         },
       },
@@ -827,9 +861,22 @@ fn make_ism_verify_tx_with_asset(state_asset_name: ByteArray) -> Transaction {
   }
 }
 
+fn test_ism_message() -> Message {
+  Message {
+    version: 3,
+    nonce: 0,
+    origin: 1,
+    sender: #"0000000000000000000000000000000000000000000000000000000000000000",
+    destination: 2003,
+    recipient: test_generic_recipient,
+    body: #"",
+  }
+}
+
 test override_ism_requires_canonical_state_nft() {
   !verify_ism_for_message(
     test_override_ism_config(),
+    test_ism_message(),
     test_message_id,
     make_ism_verify_tx(False),
     #"01",
@@ -839,6 +886,7 @@ test override_ism_requires_canonical_state_nft() {
 test authenticated_migrated_ism_state_is_accepted() {
   verify_ism_for_message(
     test_override_ism_config(),
+    test_ism_message(),
     test_message_id,
     make_ism_verify_tx(True),
     #"01",
@@ -848,8 +896,115 @@ test authenticated_migrated_ism_state_is_accepted() {
 test ism_reference_token_does_not_authenticate_state() {
   !verify_ism_for_message(
     test_override_ism_config(),
+    test_ism_message(),
     test_message_id,
     make_ism_verify_tx_with_asset(#"726566"),
+    #"01",
+  )
+}
+
+// Exercises the mailbox's MerkleRoot dispatch branch. The mailbox does NOT run
+// the crypto (the ISM script does); it binds delivery on the redeemer's
+// delivered_message_id and checkpoint.origin, which is what these test.
+fn make_merkleroot_ism_tx(
+  delivered_id: ByteArray,
+  checkpoint_origin: Domain,
+) -> Transaction {
+  let ism_ref =
+    OutputReference {
+      transaction_id: #"0000000000000000000000000000000000000000000000000000000000000004",
+      output_index: 0,
+    }
+  let checkpoint =
+    Checkpoint {
+      origin: checkpoint_origin,
+      merkle_root: #"0000000000000000000000000000000000000000000000000000000000000000",
+      origin_merkle_tree_hook: #"0000000000000000000000000000000000000000000000000000000000000000",
+      merkle_index: 0,
+      message_id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    }
+  let ism_redeemer =
+    MerkleRootVerify {
+      checkpoint,
+      validator_signatures: [],
+      delivered_message_id: delivered_id,
+      delivered_index: 0,
+      merkle_proof: [],
+    }
+  let raw_redeemer: Data = ism_redeemer
+  Transaction {
+    inputs: [
+      Input {
+        output_reference: ism_ref,
+        output: Output {
+          address: Address {
+            payment_credential: Script(test_override_ism),
+            stake_credential: None,
+          },
+          value: assets.from_asset(
+            test_ism_nft_policy,
+            #"49534d205374617465",
+            1,
+          ),
+          datum: InlineDatum(
+            MultisigIsmDatum {
+              validators: [],
+              thresholds: [],
+              owner: #"00000000000000000000000000000000000000000000000000000000",
+              module_type: MerkleRootMultisig,
+            },
+          ),
+          reference_script: None,
+        },
+      },
+    ],
+    reference_inputs: [],
+    outputs: [],
+    fee: 0,
+    mint: assets.zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: unbounded_validity_range(),
+    extra_signatories: [],
+    redeemers: [Pair(Spend(ism_ref), raw_redeemer)],
+    datums: dict.empty,
+    id: #"0000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+test merkleroot_binding_accepts_matching_delivered_id_and_origin() {
+  verify_ism_for_message(
+    test_override_ism_config(),
+    test_ism_message(),
+    test_message_id,
+    make_merkleroot_ism_tx(test_message_id, 1),
+    #"01",
+  )
+}
+
+test merkleroot_binding_rejects_wrong_delivered_id() {
+  !verify_ism_for_message(
+    test_override_ism_config(),
+    test_ism_message(),
+    test_message_id,
+    make_merkleroot_ism_tx(
+      #"1212121212121212121212121212121212121212121212121212121212121212",
+      1,
+    ),
+    #"01",
+  )
+}
+
+test merkleroot_binding_rejects_wrong_origin() {
+  !verify_ism_for_message(
+    test_override_ism_config(),
+    test_ism_message(),
+    test_message_id,
+    make_merkleroot_ism_tx(test_message_id, 999),
     #"01",
   )
 }

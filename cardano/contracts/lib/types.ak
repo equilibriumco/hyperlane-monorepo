@@ -205,7 +205,16 @@ pub type MailboxRedeemer {
 // ISM Types (Multisig ISM)
 // ============================================================================
 
-/// Multisig ISM configuration
+/// ISM module type. The on-chain discriminant, read from the ISM state datum by
+/// both the relayer (to build the right metadata) and the mailbox (to decode the
+/// right redeemer). Cardano has no view calls, so the ISM's own datum is the
+/// queryable source of truth for "which kind of ISM is this".
+pub type ModuleType {
+  MessageIdMultisig
+  MerkleRootMultisig
+}
+
+/// Multisig ISM configuration (shared by the MessageId and MerkleRoot ISMs)
 pub type MultisigIsmDatum {
   /// Validators per origin domain: List of (domain, validators)
   validators: List<(Domain, List<ByteArray>)>,
@@ -213,6 +222,8 @@ pub type MultisigIsmDatum {
   thresholds: List<(Domain, Int)>,
   /// Owner who can update configuration
   owner: VerificationKeyHash,
+  /// Which ISM flavour this state UTXO backs (MessageId vs MerkleRoot)
+  module_type: ModuleType,
 }
 
 /// Checkpoint data that validators sign

@@ -5,7 +5,7 @@ use cardano/assets.{from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{InlineDatum, Input, NoDatum, Output, OutputReference, Transaction}
 use types.{
   IgpDatum, GasOracleConfig,
-  MailboxDatum, MerkleTreeState,
+  MailboxDatum, MerkleTreeState, MessageIdMultisig,
   MultisigIsmDatum,
   WarpRouteDatum, WarpRouteConfig, Native,
 }
@@ -204,6 +204,7 @@ test migrate_works_with_ism_datum() {
     validators: [(43113, [#"aabbccdd00000000000000000000000000000000"])],
     thresholds: [(43113, 1)],
     owner: owner_key,
+    module_type: MessageIdMultisig,
   }
   let datum_as_data: Data = ism_datum
   let continuation = Output {

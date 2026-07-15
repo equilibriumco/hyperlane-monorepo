@@ -6,8 +6,8 @@ use multisig.{
   verify_checkpoint,
 }
 use types.{
-  Checkpoint, MerkleRootIsmRedeemer, MerkleRootVerify, MrMigrateIsm,
-  MrSetThreshold, MrSetValidators, MultisigIsmDatum,
+  Checkpoint, MerkleRootIsmRedeemer, MerkleRootMultisig, MerkleRootVerify,
+  MrMigrateIsm, MrSetThreshold, MrSetValidators, MultisigIsmDatum,
 }
 use utils.{validate_migrate}
 
@@ -89,6 +89,7 @@ test merkleroot_verify_rejects_zero_threshold() fail {
       validators: [(origin, [])],
       thresholds: [(origin, 0)],
       owner: #"00000000000000000000000000000000000000000000000000000000",
+      module_type: MerkleRootMultisig,
     }
   let checkpoint =
     Checkpoint {

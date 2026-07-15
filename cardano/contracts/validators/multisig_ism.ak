@@ -4,8 +4,8 @@ use multisig.{
   verify_checkpoint,
 }
 use types.{
-  Checkpoint, MigrateIsm, MultisigIsmDatum, MultisigIsmRedeemer, SetThreshold,
-  SetValidators, Verify,
+  Checkpoint, MessageIdMultisig, MigrateIsm, MultisigIsmDatum,
+  MultisigIsmRedeemer, SetThreshold, SetValidators, Verify,
 }
 use utils.{validate_migrate}
 
@@ -62,6 +62,7 @@ test verify_checkpoint_rejects_zero_threshold() fail {
       validators: [(origin, [])],
       thresholds: [(origin, 0)],
       owner: #"00000000000000000000000000000000000000000000000000000000",
+      module_type: MessageIdMultisig,
     }
   let checkpoint =
     Checkpoint {
