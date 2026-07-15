@@ -127,3 +127,20 @@ The **relayer/validator** computes the root that gets signed for Cardano-origin 
 - **O3 (proof length):** fixed 32 with `expect length == 32` in the MerkleRoot path (matches tree depth). *Recommend yes.*
 - **O4 (g):** keep `delivered_index <= checkpoint.merkle_index` as a cheap bound.
 - **O5 (proof convention):** RESOLVED by the spike — `verify_proof` is canonical, `root()` fixed to match. **Rust-parity check (§6) is the remaining prerequisite.**
+
+---
+
+## 9. Implementation progress
+
+**Done (committed, on branch `feat/cardano-merkleroot-ism`):**
+- On-chain: incremental `root()` fixed to match `verify_proof` (round-trip tests); `merkleroot_ism.ak` (shared logic in `lib/multisig.ak`); mailbox dispatches on `module_type` from the ISM datum (MessageId binds `checkpoint.message_id`; MerkleRoot binds `delivered_message_id` + `checkpoint.origin == message.origin`). Aiken suite 71/71.
+- Rust audit: the relayer's signed Cardano root already uses hyperlane-core `IncrementalMerkle` (standard) — no change needed.
+- Datum plumbing: relayer parses `module_type` (CBOR + JSON) and `module_type()` queries the ISM state UTXO on-chain; CLI datum builders emit the field. Relayer + CLI compile.
+
+**Remaining (not e2e-verifiable in a dev box — needs live Cardano/Sepolia/Blockfrost):**
+- **A. CLI MerkleRoot deploy path** — deploy the `merkleroot_ism` script, set `module_type = MerkleRoot`, make the default ISM MerkleRoot, and preserve `module_type` on `set-validators`/`set-threshold` (see the TODO in `ism.rs`).
+- **B. Relayer MerkleRoot metadata → Plutus redeemer (Sepolia→Cardano).** `module_type()` is now dynamic, so the generic pipeline will select `MerkleRootMultisigMetadataBuilder` for a MerkleRoot ISM. Work: extend `parse_multisig_metadata` (`tx_builder/mod.rs:1098`) to parse the MerkleRoot metadata layout (merkleTreeHook | messageIndex | 32×32 proof | signedIndex | signatures); add a `MerkleRootVerify` redeemer to the relayer `types.rs` + `encode_ism_redeemer` (`tx_encoding.rs:268`); dispatch on `module_type` in the Process-build path.
+- **C. Cardano→Sepolia (the big lift).** NFT-following dispatch/leaf indexer + `IncrementalMerkle` of Cardano-origin leaves exposed via `MerkleTreeHook` so the generic builder can generate proofs; deploy `StaticMerkleRootMultisigIsm` on Sepolia and enroll.
+- **D. Deploy** — `aiken build` (new `plutus.json` + hashes), redeploy, regenerate `deployment_info.json`, reconfigure agents.
+
+Sequence for a first e2e: A + B → inbound MerkleRoot testable; then C → outbound.
