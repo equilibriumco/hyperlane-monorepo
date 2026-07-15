@@ -35,7 +35,7 @@ use hyperlane_core::{
 };
 use serde::Deserialize;
 
-use crate::state_decode::{decode_dispatched_messages, decode_merkle_state};
+use crate::state_decode::decode_dispatched_messages;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,36 +72,31 @@ const METADATA_PREFIX_LEN: usize = 32 + 32 + 4; // merkleTreeHook || root || ind
 
 #[test]
 fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
-    let vector: MetadataVector =
-        serde_json::from_str(include_str!("../tests/fixtures/hyperlane-metadata-vector.json"))
-            .expect("vector json parses");
+    let vector: MetadataVector = serde_json::from_str(include_str!(
+        "../tests/fixtures/hyperlane-metadata-vector.json"
+    ))
+    .expect("vector json parses");
 
     // --- Drift guard: the committed fixture and this vector are one dispatch ---
-    let fixture =
-        hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
-            .expect("fixture is valid hex");
+    let fixture = hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
+        .expect("fixture is valid hex");
 
     let mut messages = decode_dispatched_messages(&fixture).expect("decode dispatched messages");
     messages.sort_by_key(|(nonce, _)| *nonce);
-    let merkle = decode_merkle_state(&fixture).expect("decode merkle state");
 
-    // A local replica rebuilt from the dispatch leaves reproduces the chain's
-    // cached root and the vector's root input.
+    // A local replica rebuilt from the dispatch leaves reproduces the vector's
+    // root input. The contract keeps no on-chain root, so this reconstruction
+    // is the sole source — exactly the root the validator signs.
     let mut tree = IncrementalMerkle::default();
     for (_nonce, message) in &messages {
         tree.ingest(message.id());
     }
     assert_eq!(
         tree.root(),
-        merkle.current_root,
-        "local replica root must match the chain's cached current_root"
-    );
-    assert_eq!(
-        merkle.current_root,
         h256(&vector.root),
-        "fixture root must match the vector's root (fixture/vector drift)"
+        "reconstructed root must match the vector's root (fixture/vector drift)"
     );
-    assert_eq!(merkle.count - 1, vector.index, "tip index is count - 1");
+    assert_eq!(tree.index(), vector.index, "tip index is count - 1");
 
     let tip = messages
         .iter()
@@ -126,7 +121,11 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
     let blob_mth = H256::from_slice(&blob[0..32]);
     let blob_root = H256::from_slice(&blob[32..64]);
     let blob_index = u32::from_be_bytes(blob[64..68].try_into().unwrap());
-    assert_eq!(blob_mth, h256(&vector.merkle_tree_hook), "merkleTreeHook prefix");
+    assert_eq!(
+        blob_mth,
+        h256(&vector.merkle_tree_hook),
+        "merkleTreeHook prefix"
+    );
     assert_eq!(blob_root, h256(&vector.root), "root");
     assert_eq!(blob_index, vector.index, "index is big-endian u32");
 

@@ -32,19 +32,27 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 # Native decode of the Midnight contract ledger state served by the
-# indexer (`contractAction.state`). EXACT-pinned with `=` to the devnet's
-# ledger 8.x / indexer-standalone 4.0.1 graph (the versions midnight-indexer
-# uses). These crates implement the tagged-serialization format the decoder
-# depends on, so a caret range could let `cargo update` drift them within a
-# minor and silently break decode; bump manually (and re-test decode) when
-# intentionally tracking a new ledger release. `onchain-state` defines
-# `state::{ContractState, StateValue}` (depending on it directly rather than
-# `onchain-runtime` drops the `midnight-onchain-vm` layer the decoder never
-# uses); `serialize` provides `tagged_deserialize`; `storage-core` provides the
-# `DefaultDB` backend (the `layout-v2` feature must match the indexer).
-midnight-onchain-state = "=3.0.0"
-midnight-serialize = "=1.1.0"
-midnight-storage-core = { version = "=1.2.0", features = ["layout-v2"] }
+# indexer (`contractAction.state`). Pinned to the devnet's ledger 9.1 /
+# indexer-standalone 4.4 graph (node 2.0.0-rc.3), which serialises contract
+# state with the `midnight:contract-state[v8]` tag — the earlier ledger 8.x
+# crates only understood `[v6]` and `tagged_deserialize` rejects the newer
+# blob outright. These crates implement the tagged-serialization format the
+# decoder depends on, so re-test decode when bumping the ledger release.
+# `onchain-state` defines `state::{ContractState, StateValue}` (depending on
+# it directly rather than `onchain-runtime` drops the `midnight-onchain-vm`
+# layer the decoder never uses); `serialize` provides `tagged_deserialize`;
+# `storage-core` provides the `DefaultDB` backend (the `layout-v2` feature
+# must match the indexer).
+#
+# The 9.1 graph is NOT published on crates.io (only 8.x is), so pin by git tag
+# instead of a `=` version. All five crates come from the SAME tag so Cargo
+# resolves one consistent graph; `onchain-state`'s siblings (base-crypto,
+# storage, ...) resolve via the git checkout's internal `path =` deps, which
+# unify with the direct git deps below. Bump the tag in lockstep with the
+# midnightntwrk/midnight-node image in docker/compose.yaml + the contracts repo.
+midnight-onchain-state = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-onchain-state" }
+midnight-serialize = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-serialize" }
+midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-storage-core", features = ["layout-v2"] }
 
 [dev-dependencies]
 # Enable hyperlane-core's `ethers` feature in tests only — it gates
@@ -59,9 +67,9 @@ tempfile = { workspace = true }
 # `StateValue` tree the deployed `night` Mailbox produces, then serialize it
 # with `tagged_serialize` and feed it through the decoders. `onchain-state` is
 # a normal dependency above (it defines `ContractState`/`StateValue`); these
-# two extra crates are only needed to *construct* the test blobs. EXACT-pinned
-# to the graph above (onchain-state 3.0.0 pulls base-crypto 1.0.0, storage
-# 2.0.1), so the test builds the byte-identical wire format the live indexer
-# serves. Not used by any non-test code.
-midnight-base-crypto = "=1.0.0"
-midnight-storage = "=2.0.1"
+# two extra crates are only needed to *construct* the test blobs. Pinned to
+# the same git tag as the graph above (the 9.1 versions are base-crypto 1.1.0,
+# storage 2.0.1) so the test builds the byte-identical wire format the live
+# indexer serves. Not used by any non-test code.
+midnight-base-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-base-crypto" }
+midnight-storage = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-storage" }

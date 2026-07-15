@@ -8,21 +8,24 @@
 //! a `TODO(#15)`).
 //!
 //! The WarpRoute (`night`) contract is monolithic, so there is no separate
-//! merkle-tree-hook contract: the Mailbox + MerkleTree modules live in the
-//! same contract as the ISM. We read their ledger fields from the deployed
-//! contract's on-chain state via the #14 indexer client, decoded by
-//! [`crate::state_decode`]. Sealevel reads its tree from the mailbox/outbox
-//! account the same way; we mirror that.
+//! merkle-tree-hook contract: the Mailbox module lives in the same contract as
+//! the ISM. The `night` contract does NOT maintain an on-chain merkle tree
+//! (Hyperlane's MessageId security model never reads an origin-chain root, and
+//! the in-circuit keccak walk that a replicated tree needs dominated the
+//! outbound proving key), so this hook reconstructs the tree entirely
+//! off-chain by ingesting the append-only `dispatched_messages` map read from
+//! the deployed contract's state via the #14 indexer client, decoded by
+//! [`crate::state_decode`]. Sealevel likewise rebuilds its tree from the
+//! mailbox/outbox account; we mirror that.
 //!
 //! How the validator uses this (`agents/validator/src/submit.rs`): it feeds
 //! the `MerkleTreeInsertion`s emitted by the indexer into its local RocksDB
-//! merkle replica, then compares the replica's root against the on-chain root
-//! returned by [`MerkleTreeHook::latest_checkpoint`] and panics on mismatch.
-//! `latest_checkpoint` therefore reads the chain's cached `current_root`
-//! directly (never recomputed), so the comparison is meaningful. The leaves
-//! match because the on-chain message id is `keccak256(message)` and the #2
-//! keccak mock computes real keccak values, so `HyperlaneMessage::id()` on the
-//! Rust side reproduces the exact on-chain leaf.
+//! merkle replica, then compares the replica's root against the root returned
+//! by [`MerkleTreeHook::latest_checkpoint`]. Both come from the same off-chain
+//! reconstruction (`tree()` -> `checkpoint_from_tree`), so the cross-check is
+//! self-consistent. The leaves match because the on-chain message id is
+//! `keccak256(message)` (real in-circuit keccak, #21), so `HyperlaneMessage::id()`
+//! on the Rust side reproduces the exact leaf the destination ISM re-derives.
 
 use std::ops::RangeInclusive;
 
@@ -35,7 +38,7 @@ use hyperlane_core::{
     MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512, U256,
 };
 
-use crate::state_decode::{decode_dispatched_messages, decode_merkle_state, MerkleState};
+use crate::state_decode::decode_dispatched_messages;
 use crate::MidnightProvider;
 
 /// Midnight reads only finalized contract state (BFT finality; the runtime API
@@ -51,27 +54,29 @@ fn note_reorg_ignored(reorg_period: &ReorgPeriod) {
     }
 }
 
-/// Build a checkpoint from decoded merkle state. Pure (no I/O) so it is unit-
-/// testable without a live indexer. Errors on an empty tree (nothing to sign
-/// yet), matching Sealevel/EVM; `index = count - 1`. Anchors on the chain's
-/// cached `current_root` — never recomputed — so the validator's
-/// local-replica-vs-chain comparison stays meaningful.
-fn checkpoint_from_merkle_state(
-    state: &MerkleState,
+/// Build a checkpoint from the off-chain reconstructed merkle tree. The
+/// WarpRoute does not maintain an on-chain merkle tree — Hyperlane's MessageId
+/// security model never reads an origin-chain root — so the validator's local
+/// replica is the sole source of the root. The checkpoint root is therefore
+/// `tree.root()`, exactly what the validator signs in `submit.rs`, so its
+/// local-vs-anchor cross-check is self-consistent. Errors on an empty tree
+/// (nothing to sign yet); `index = count - 1`.
+fn checkpoint_from_tree(
+    tree: &IncrementalMerkle,
     merkle_tree_hook_address: H256,
     mailbox_domain: u32,
 ) -> ChainResult<CheckpointAtBlock> {
-    let index = state.count.checked_sub(1).ok_or_else(|| {
-        ChainCommunicationError::from_contract_error_str(
+    if tree.count() == 0 {
+        return Err(ChainCommunicationError::from_contract_error_str(
             "Midnight merkle tree is empty, cannot compute checkpoint",
-        )
-    })?;
+        ));
+    }
     Ok(CheckpointAtBlock {
         checkpoint: Checkpoint {
             merkle_tree_hook_address,
             mailbox_domain,
-            root: state.current_root,
-            index,
+            root: tree.root(),
+            index: tree.index(),
         },
         block_height: None,
     })
@@ -109,8 +114,9 @@ fn insertions_in_range(
 }
 
 /// Chain-sourced `MerkleTreeHook` + indexer for Midnight's monolithic
-/// WarpRoute. Reads the merkle `count` / `current_root` and the append-only
-/// `dispatched_messages` map from the deployed contract's on-chain state.
+/// WarpRoute. Reads the append-only `dispatched_messages` map from the deployed
+/// contract's on-chain state and reconstructs the incremental merkle tree from
+/// it off-chain; the contract keeps no on-chain tree.
 #[derive(Debug, Clone)]
 pub struct MidnightMerkleTreeHook {
     address: H256,
@@ -136,17 +142,15 @@ impl MidnightMerkleTreeHook {
         format!("{:x}", self.address)
     }
 
-    /// Fetch + decode the merkle `count` and cached `current_root`.
-    async fn merkle_state(&self) -> ChainResult<crate::state_decode::MerkleState> {
-        let bytes = self.provider.indexer().contract_state(&self.address_hex()).await?;
-        decode_merkle_state(&bytes)
-    }
-
     /// Fetch + decode the dispatched messages, sorted by nonce.
     async fn dispatched_messages(
         &self,
     ) -> ChainResult<Vec<(u32, hyperlane_core::HyperlaneMessage)>> {
-        let bytes = self.provider.indexer().contract_state(&self.address_hex()).await?;
+        let bytes = self
+            .provider
+            .indexer()
+            .contract_state(&self.address_hex())
+            .await?;
         decode_dispatched_messages(&bytes)
     }
 
@@ -202,19 +206,22 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
 
     async fn count(&self, reorg_period: &ReorgPeriod) -> ChainResult<u32> {
         note_reorg_ignored(reorg_period);
-        Ok(self.merkle_state().await?.count)
+        // The contract keeps no on-chain leaf count; derive it from the
+        // off-chain reconstruction (same source as `tree()`).
+        Ok(self.tree(reorg_period).await?.tree.count() as u32)
     }
 
-    /// The latest checkpoint, anchored on the chain's cached `current_root`
-    /// (read directly, not recomputed) so the validator's local-vs-on-chain
-    /// comparison is meaningful. Errors on an empty tree, matching Sealevel.
+    /// The latest checkpoint, built from the off-chain reconstructed tree. The
+    /// contract keeps no on-chain root, and this root is exactly the one the
+    /// validator signs (`submit.rs` `tree.root()`), so the validator's
+    /// correctness cross-check is self-consistent. Errors on an empty tree.
     async fn latest_checkpoint(
         &self,
         reorg_period: &ReorgPeriod,
     ) -> ChainResult<CheckpointAtBlock> {
         note_reorg_ignored(reorg_period);
-        let state = self.merkle_state().await?;
-        checkpoint_from_merkle_state(&state, self.address, self.domain.id())
+        let tree = self.tree(reorg_period).await?.tree;
+        checkpoint_from_tree(&tree, self.address, self.domain.id())
     }
 
     /// Midnight cannot read point-in-time state yet (indexer `offset` is
@@ -258,7 +265,9 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
 #[async_trait]
 impl SequenceAwareIndexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        let count = self.merkle_state().await?.count;
+        // Count from the off-chain reconstruction; the contract keeps no
+        // on-chain leaf count.
+        let count = self.tree(&ReorgPeriod::None).await?.tree.count() as u32;
         let tip = self.latest_height_u32().await?;
         Ok((Some(count), tip))
     }
@@ -281,27 +290,26 @@ mod tests {
     // must surface "no checkpoint", not index-underflow.
     #[test]
     fn checkpoint_errors_on_empty_tree() {
-        let state = MerkleState {
-            count: 0,
-            current_root: H256::zero(),
-        };
+        let tree = IncrementalMerkle::default();
         assert!(
-            checkpoint_from_merkle_state(&state, test_addr(), TEST_DOMAIN).is_err(),
+            checkpoint_from_tree(&tree, test_addr(), TEST_DOMAIN).is_err(),
             "an empty tree has no checkpoint to sign"
         );
     }
 
     #[test]
-    fn checkpoint_from_nonempty_state() {
-        let root = H256::repeat_byte(0x99);
-        let state = MerkleState {
-            count: 2,
-            current_root: root,
-        };
-        let cp = checkpoint_from_merkle_state(&state, test_addr(), TEST_DOMAIN)
+    fn checkpoint_from_nonempty_tree() {
+        let mut tree = IncrementalMerkle::default();
+        tree.ingest(H256::repeat_byte(0x11));
+        tree.ingest(H256::repeat_byte(0x22));
+        let cp = checkpoint_from_tree(&tree, test_addr(), TEST_DOMAIN)
             .expect("non-empty tree yields a checkpoint");
         assert_eq!(cp.checkpoint.index, 1, "index == count - 1");
-        assert_eq!(cp.checkpoint.root, root, "anchored on the cached current_root");
+        assert_eq!(
+            cp.checkpoint.root,
+            tree.root(),
+            "root is the reconstructed tree root"
+        );
         assert_eq!(cp.checkpoint.mailbox_domain, TEST_DOMAIN);
         assert_eq!(cp.checkpoint.merkle_tree_hook_address, test_addr());
     }
@@ -341,10 +349,10 @@ mod tests {
     /// Live integration test against a running Midnight devnet with at least
     /// one dispatch. Exercises the full merkle path end to end: the leaf
     /// count, that `fetch_logs_in_range` yields one insertion per leaf, and
-    /// that a local `IncrementalMerkle` rebuilt from those insertions
-    /// reproduces the on-chain `current_root` returned by `latest_checkpoint`
-    /// — the same local-vs-on-chain comparison the validator performs. This is
-    /// the "roots match on synthetic traffic" acceptance check; the
+    /// that a local `IncrementalMerkle` rebuilt from those insertions matches
+    /// the root returned by `latest_checkpoint` (which reconstructs from the
+    /// same `dispatched_messages`) — the determinism the validator relies on.
+    /// This is the "roots match on synthetic traffic" acceptance check; the
     /// panic-on-mismatch half lives in the upstream validator submitter and is
     /// covered by the outbound E2E (#26). Ignored by default; run after a
     /// `transferRemote`:
@@ -372,7 +380,10 @@ mod tests {
             .await
             .expect("latest sequence count");
         let count = count_opt.expect("a leaf count");
-        assert!(count > 0, "dispatch at least one message before running this");
+        assert!(
+            count > 0,
+            "dispatch at least one message before running this"
+        );
 
         let logs = hook
             .fetch_logs_in_range(0..=count - 1)
@@ -392,7 +403,7 @@ mod tests {
         assert_eq!(
             tree.root(),
             checkpoint.checkpoint.root,
-            "local root rebuilt from indexer insertions must match on-chain current_root"
+            "local root rebuilt from indexer insertions must match the hook's reconstructed checkpoint root"
         );
         assert_eq!(
             checkpoint.checkpoint.index,
@@ -438,36 +449,32 @@ mod tests {
             H256::from_slice(&hex::decode(hex_str.trim_start_matches("0x")).expect("hex"))
         }
 
-        let vector: Vector =
-            serde_json::from_str(include_str!("../tests/fixtures/hyperlane-checkpoint-vector.json"))
-                .expect("vector json parses");
+        let vector: Vector = serde_json::from_str(include_str!(
+            "../tests/fixtures/hyperlane-checkpoint-vector.json"
+        ))
+        .expect("vector json parses");
 
         // --- Drift guard: the committed fixture and vector are one dispatch ---
-        let bytes = hex::decode(
-            include_str!("../tests/fixtures/night-state-dispatched.hex").trim(),
-        )
-        .expect("fixture is valid hex");
+        let bytes =
+            hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
+                .expect("fixture is valid hex");
         let mut messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
         messages.sort_by_key(|(nonce, _)| *nonce);
-        let merkle = decode_merkle_state(&bytes).expect("decode merkle state");
 
-        // Local tree rebuilt from the indexer's leaves reproduces both the
-        // chain's cached `current_root` and the EVM vector's `root` input.
+        // Local tree rebuilt from the indexer's leaves reproduces the EVM
+        // vector's `root` input. The contract keeps no on-chain root, so this
+        // off-chain reconstruction is the sole source — exactly the root the
+        // validator signs.
         let mut tree = IncrementalMerkle::default();
         for (_nonce, message) in &messages {
             tree.ingest(message.id());
         }
         assert_eq!(
             tree.root(),
-            merkle.current_root,
-            "local replica root must match the chain's cached current_root"
-        );
-        assert_eq!(
-            merkle.current_root,
             h256(&vector.root),
-            "fixture root must match the vector's root input (fixture/vector drift)"
+            "reconstructed root must match the vector's root input (fixture/vector drift)"
         );
-        assert_eq!(merkle.count - 1, vector.index, "tip index is count - 1");
+        assert_eq!(tree.index(), vector.index, "tip index is count - 1");
 
         let tip = messages
             .iter()
