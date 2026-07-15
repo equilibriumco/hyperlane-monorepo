@@ -415,7 +415,6 @@ mod tests {
     // are the fixture's decoded messages (same keccak ids the merkle indexer and
     // validator anchor on).
     #[tokio::test]
-    #[ignore = "night-state-dispatched fixture is ledger-8 (v6) + pre-#22 (32-byte pubkey) contract-state; regenerate for ledger-9.1 v8 / 64-byte registry via contracts/tests/utils/generate-dispatch-fixture.ts"]
     async fn dispatch_enumerates_committed_fixture_in_sequence() {
         let bytes =
             hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
