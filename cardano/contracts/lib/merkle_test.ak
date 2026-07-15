@@ -98,3 +98,85 @@ test hash_pair_order_dependent() {
 
   hash1 != hash2
 }
+
+// ============================================================================
+// Round-trip consistency: insert/root vs verify_proof
+//
+// A MerkleRoot ISM is only sound if a proof built for a leaf verifies against
+// the SAME root the tree produces. These tests exercise that invariant (O5).
+// ============================================================================
+
+/// zero-subtree hash at a given level (level 0 = the empty-leaf zero hash)
+fn zero_at(level: Int) -> ByteArray {
+  if level <= 0 {
+    merkle.zero_hash
+  } else {
+    let child = zero_at(level - 1)
+    merkle.hash_pair(child, child)
+  }
+}
+
+/// [zero_at(from), zero_at(from+1), ..., zero_at(max_depth-1)]
+fn zeros_from(from: Int) -> List<ByteArray> {
+  if from >= 32 {
+    []
+  } else {
+    [zero_at(from), ..zeros_from(from + 1)]
+  }
+}
+
+/// A single-leaf tree: the leaf's siblings are all zero subtrees.
+test proof_roundtrips_single_leaf() {
+  let leaf = keccak_256("only message")
+  let tree = merkle.insert(merkle.empty(), leaf)
+  // sibling at every level is the zero subtree of that level
+  let proof = zeros_from(0)
+  merkle.verify_proof(merkle.root(tree), leaf, 0, proof)
+}
+
+/// A two-leaf tree: leaf 0's level-0 sibling is leaf 1, everything above is zero.
+test proof_roundtrips_two_leaves_index0() {
+  let l0 = keccak_256("message 0")
+  let l1 = keccak_256("message 1")
+  let tree = merkle.insert(merkle.insert(merkle.empty(), l0), l1)
+  let proof = [l1, ..zeros_from(1)]
+  merkle.verify_proof(merkle.root(tree), l0, 0, proof)
+}
+
+/// Same two-leaf tree, proving leaf 1 (index bit 0 set → leaf is the right child).
+test proof_roundtrips_two_leaves_index1() {
+  let l0 = keccak_256("message 0")
+  let l1 = keccak_256("message 1")
+  let tree = merkle.insert(merkle.insert(merkle.empty(), l0), l1)
+  let proof = [l0, ..zeros_from(1)]
+  merkle.verify_proof(merkle.root(tree), l1, 1, proof)
+}
+
+/// A wrong sibling must NOT verify (guards against a trivially-passing verifier).
+test proof_rejects_wrong_sibling() {
+  let l0 = keccak_256("message 0")
+  let l1 = keccak_256("message 1")
+  let tree = merkle.insert(merkle.insert(merkle.empty(), l0), l1)
+  let bad_proof = [keccak_256("not the sibling"), ..zeros_from(1)]
+  !merkle.verify_proof(merkle.root(tree), l0, 0, bad_proof)
+}
+
+/// Fold a node up to the tree root hashing against zero subtrees (standard).
+fn fold_zeros_up(node: ByteArray, from: Int) -> ByteArray {
+  if from >= 32 {
+    node
+  } else {
+    fold_zeros_up(merkle.hash_pair(node, zero_at(from)), from + 1)
+  }
+}
+
+/// Independent check that verify_proof reproduces the *standard* Hyperlane root
+/// (computed here by hand, not via merkle.root). Establishes verify_proof as the
+/// canonical function, so the two-leaf round-trip failures are root()'s fault.
+test verify_proof_matches_standard_root() {
+  let l0 = keccak_256("message 0")
+  let l1 = keccak_256("message 1")
+  let std_root = fold_zeros_up(merkle.hash_pair(l0, l1), 1)
+  let proof = [l1, ..zeros_from(1)]
+  merkle.verify_proof(std_root, l0, 0, proof)
+}

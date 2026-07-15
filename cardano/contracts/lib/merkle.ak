@@ -91,14 +91,12 @@ fn compute_root(
       let bit = index / pow2(level) % 2
       let next =
         if bit == 0 {
-          // No right sibling yet, hash with zero
-          if level == 0 {
-            branch
-          } else {
-            hash_pair(current, zero_hashes_at_level(level))
-          }
+          // No right sibling at this level yet: hash with the empty (zero) subtree.
+          // Standard Hyperlane/eth2 frontier root — must stay consistent with
+          // verify_proof, otherwise a valid inclusion proof won't match the root.
+          hash_pair(current, zero_hashes_at_level(level))
         } else {
-          // Has left sibling in branch
+          // Has a pending left sibling stored in branch[level]
           hash_pair(branch, current)
         }
       compute_root(rest, index, level + 1, next)
