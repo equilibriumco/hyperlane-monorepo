@@ -21,6 +21,22 @@ pub const MULTISIG_ISM_METADATA_MIN_LEN: usize = 68;
 /// Format: r (32 bytes) || s (32 bytes) || v (1 byte, recovery ID + 27).
 pub const ECDSA_SIG_LEN: usize = 65;
 
+/// MerkleRoot multisig ISM metadata layout (mirrors the Solidity
+/// `MerkleRootMultisigIsmMetadata`):
+///   [   0:  32] origin merkle tree hook
+///   [  32:  36] message index (leaf index of the delivered message, u32 BE)
+///   [  36:  68] signed checkpoint message id
+///   [  68:1092] merkle proof (32 × 32 bytes)
+///   [1092:1096] signed checkpoint index (u32 BE)
+///   [1096:    ] validator signatures (ECDSA_SIG_LEN bytes each)
+pub const MERKLEROOT_MESSAGE_INDEX_OFFSET: usize = 32;
+pub const MERKLEROOT_SIGNED_MESSAGE_ID_OFFSET: usize = 36;
+pub const MERKLEROOT_PROOF_OFFSET: usize = 68;
+pub const MERKLEROOT_PROOF_LEN: usize = 32 * 32;
+pub const MERKLEROOT_SIGNED_INDEX_OFFSET: usize = 1092;
+/// Offset where signatures start; also the minimum length of MerkleRoot metadata.
+pub const MERKLEROOT_ISM_METADATA_MIN_LEN: usize = 1096;
+
 /// Byte length of a Hyperlane message ID (keccak256 hash).
 pub const MESSAGE_ID_SIZE: usize = 32;
 

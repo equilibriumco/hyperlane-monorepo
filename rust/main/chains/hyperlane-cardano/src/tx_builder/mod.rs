@@ -15,8 +15,9 @@ pub use tx_helpers::{parse_per_redeemer_ex_units, parse_utxo_ref};
 
 // Internal re-exports used by this module
 use tx_encoding::{
-    build_ism_datum, encode_constructor_0_redeemer, encode_ism_redeemer, encode_plutus_data,
-    extract_bytes, extract_int, extract_ism_owner, json_datum_to_cbor, json_to_plutus_data,
+    build_ism_datum, encode_constructor_0_redeemer, encode_ism_redeemer,
+    encode_merkleroot_ism_redeemer, encode_plutus_data, extract_bytes, extract_int,
+    extract_ism_owner, json_datum_to_cbor, json_to_plutus_data,
 };
 use tx_helpers::{
     compute_output_indices, convert_wire_to_local_amount, credential_to_address,
@@ -28,7 +29,11 @@ use crate::blockfrost_provider::{
     BlockfrostProvider, BlockfrostProviderError, CardanoNetwork, Utxo, UtxoValue,
 };
 use crate::cardano::Keypair;
-use crate::consts::{ECDSA_SIG_LEN, MULTISIG_ISM_METADATA_MIN_LEN};
+use crate::consts::{
+    ECDSA_SIG_LEN, MERKLEROOT_ISM_METADATA_MIN_LEN, MERKLEROOT_MESSAGE_INDEX_OFFSET,
+    MERKLEROOT_PROOF_OFFSET, MERKLEROOT_SIGNED_INDEX_OFFSET, MERKLEROOT_SIGNED_MESSAGE_ID_OFFSET,
+    MULTISIG_ISM_METADATA_MIN_LEN,
+};
 use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
 use crate::redeemers::plutus_constr_tag;
 use crate::types::{
@@ -1095,47 +1100,48 @@ impl HyperlaneTxBuilder {
         // Note: We recover public keys off-chain and pass both the pubkey and signature to ISM.
         // The on-chain ISM verifies each signature, computes address from verified pubkey,
         // and checks the address is in the trusted validators list.
-        let parsed_metadata = parse_multisig_metadata(metadata, message.origin, &message_id)?;
-        debug!(
-            "Recovered {} validator signatures",
-            parsed_metadata.validator_signatures.len()
-        );
-        debug!(
-            "Checkpoint: origin={}, merkle_root={}, merkle_index={}",
-            message.origin,
-            hex::encode(parsed_metadata.merkle_root),
-            parsed_metadata.root_index
-        );
-
-        // Build checkpoint from parsed metadata
-        let checkpoint = crate::types::Checkpoint {
-            origin: message.origin,
-            merkle_root: parsed_metadata.merkle_root,
-            origin_merkle_tree_hook: parsed_metadata.origin_mailbox,
-            merkle_index: parsed_metadata.root_index,
-            message_id,
+        // Dispatch on metadata shape: MerkleRoot metadata carries a 1024-byte
+        // proof (>= 1096 bytes total), MessageId metadata does not.
+        // ponytail: length discriminant, correct for realistic validator sets;
+        // a MessageId ISM with >=16 validators (68 + 16*65 >= 1096) would collide
+        // — switch to reading module_type on-chain if such sets are ever used.
+        let ism_redeemer_cbor = if metadata.len() >= MERKLEROOT_ISM_METADATA_MIN_LEN {
+            let mr = parse_merkleroot_metadata(metadata, message.origin, &message_id)?;
+            debug!(
+                "MerkleRoot metadata: {} sigs, delivered_index={}, signed_index={}",
+                mr.validator_signatures.len(),
+                mr.delivered_index,
+                mr.checkpoint.merkle_index,
+            );
+            let redeemer = crate::types::MerkleRootIsmRedeemer::MerkleRootVerify {
+                checkpoint: mr.checkpoint,
+                validator_signatures: mr.validator_signatures,
+                delivered_message_id: message_id,
+                delivered_index: mr.delivered_index,
+                merkle_proof: mr.merkle_proof,
+            };
+            encode_merkleroot_ism_redeemer(&redeemer)?
+        } else {
+            let parsed_metadata = parse_multisig_metadata(metadata, message.origin, &message_id)?;
+            debug!(
+                "MessageId metadata: {} validator signatures, merkle_index={}",
+                parsed_metadata.validator_signatures.len(),
+                parsed_metadata.root_index,
+            );
+            let checkpoint = crate::types::Checkpoint {
+                origin: message.origin,
+                merkle_root: parsed_metadata.merkle_root,
+                origin_merkle_tree_hook: parsed_metadata.origin_mailbox,
+                merkle_index: parsed_metadata.root_index,
+                message_id,
+            };
+            let ism_redeemer = crate::types::MultisigIsmRedeemer::Verify {
+                checkpoint,
+                validator_signatures: parsed_metadata.validator_signatures,
+            };
+            encode_ism_redeemer(&ism_redeemer)?
         };
-
-        // Log checkpoint details
-        info!(
-            "Checkpoint details:\n  origin: {}\n  merkle_root: {}\n  origin_merkle_tree_hook: {}\n  merkle_index: {}\n  message_id: {}",
-            message.origin,
-            hex::encode(parsed_metadata.merkle_root),
-            hex::encode(parsed_metadata.origin_mailbox),
-            parsed_metadata.root_index,
-            hex::encode(message_id)
-        );
-
-        // Build ISM redeemer with validator signatures and recovered public keys
-        let ism_redeemer = crate::types::MultisigIsmRedeemer::Verify {
-            checkpoint,
-            validator_signatures: parsed_metadata.validator_signatures,
-        };
-        let ism_redeemer_cbor = encode_ism_redeemer(&ism_redeemer)?;
-        debug!(
-            "Encoded ISM Verify redeemer ({} bytes)",
-            ism_redeemer_cbor.len()
-        );
+        debug!("Encoded ISM redeemer ({} bytes)", ism_redeemer_cbor.len());
 
         // 11. Handle WarpRoute - extract release amount, recipient, and token type
         // Funds are released directly to the recipient address
@@ -4839,6 +4845,167 @@ pub fn parse_multisig_metadata(
     })
 }
 
+/// Recover validator signatures (compressed + uncompressed pubkey + normalized
+/// low-s signature) from packed 65-byte ECDSA signatures over `eth_signed_message`.
+/// Shared by the MessageId and MerkleRoot metadata parsers.
+fn recover_validator_signatures(
+    signatures_data: &[u8],
+    eth_signed_message: &[u8; 32],
+) -> Vec<crate::types::ValidatorSignature> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    let mut validator_signatures = Vec::new();
+    let mut offset = 0;
+    while offset + ECDSA_SIG_LEN <= signatures_data.len() {
+        let sig_bytes = &signatures_data[offset..offset + ECDSA_SIG_LEN];
+        let v = sig_bytes[64];
+        let recovery_id = if v >= 27 { v - 27 } else { v };
+        if let Ok(sig) = Signature::from_slice(&sig_bytes[..64]) {
+            if let Ok(rec_id) = RecoveryId::try_from(recovery_id) {
+                if let Ok(recovered_key) =
+                    VerifyingKey::recover_from_prehash(eth_signed_message, &sig, rec_id)
+                {
+                    let compressed = recovered_key.to_encoded_point(true);
+                    let mut compressed_pubkey = [0u8; 33];
+                    compressed_pubkey.copy_from_slice(compressed.as_bytes());
+
+                    let uncompressed = recovered_key.to_encoded_point(false);
+                    let uncompressed_bytes = &uncompressed.as_bytes()[1..]; // skip 0x04
+                    let mut uncompressed_pubkey = [0u8; 64];
+                    uncompressed_pubkey.copy_from_slice(uncompressed_bytes);
+
+                    // CIP-49 requires low-s; the same pubkey verifies both forms.
+                    let normalized_sig = sig.normalize_s().unwrap_or(sig);
+                    let signature: [u8; 64] = normalized_sig.to_bytes().into();
+
+                    validator_signatures.push(crate::types::ValidatorSignature {
+                        compressed_pubkey,
+                        uncompressed_pubkey,
+                        signature,
+                    });
+                }
+            }
+        }
+        offset += ECDSA_SIG_LEN;
+    }
+    validator_signatures
+}
+
+/// Compute a merkle root from an inclusion proof — the Hyperlane
+/// `MerkleLib.branchRoot` / Aiken `verify_proof` convention: bit `level` of
+/// `index` decides whether the running node is the right (1) or left (0) child.
+fn branch_root(leaf: [u8; 32], proof: &[[u8; 32]], index: u32) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut node = leaf;
+    for (level, sibling) in proof.iter().enumerate() {
+        let bit = (index >> level) & 1;
+        let mut hasher = Keccak256::new();
+        if bit == 1 {
+            hasher.update(sibling);
+            hasher.update(node);
+        } else {
+            hasher.update(node);
+            hasher.update(sibling);
+        }
+        node = hasher.finalize().into();
+    }
+    node
+}
+
+/// Parsed MerkleRoot ISM metadata: the checkpoint validators signed (root
+/// computed from the proof) plus the delivered leaf and its inclusion proof.
+#[derive(Debug, Clone)]
+pub struct MerkleRootMetadata {
+    pub checkpoint: crate::types::Checkpoint,
+    pub validator_signatures: Vec<crate::types::ValidatorSignature>,
+    pub delivered_index: u32,
+    pub merkle_proof: Vec<[u8; 32]>,
+}
+
+/// Parse Hyperlane MerkleRoot multisig ISM metadata (see the Solidity
+/// `MerkleRootMultisigIsmMetadata` layout). `delivered_message_id` is the id of
+/// the message being processed (the proven leaf).
+pub fn parse_merkleroot_metadata(
+    metadata: &[u8],
+    origin: u32,
+    delivered_message_id: &[u8; 32],
+) -> Result<MerkleRootMetadata, TxBuilderError> {
+    use sha3::{Digest, Keccak256};
+
+    if metadata.len() < MERKLEROOT_ISM_METADATA_MIN_LEN {
+        return Err(TxBuilderError::Encoding(
+            "Metadata too short for MerkleRoot ISM".to_string(),
+        ));
+    }
+
+    let mut origin_hook = [0u8; 32];
+    origin_hook.copy_from_slice(&metadata[0..32]);
+
+    let message_index = u32::from_be_bytes(
+        metadata[MERKLEROOT_MESSAGE_INDEX_OFFSET..MERKLEROOT_MESSAGE_INDEX_OFFSET + 4]
+            .try_into()
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid message index: {e}")))?,
+    );
+
+    let mut signed_message_id = [0u8; 32];
+    signed_message_id.copy_from_slice(
+        &metadata[MERKLEROOT_SIGNED_MESSAGE_ID_OFFSET..MERKLEROOT_SIGNED_MESSAGE_ID_OFFSET + 32],
+    );
+
+    let mut merkle_proof = Vec::with_capacity(32);
+    for i in 0..32 {
+        let start = MERKLEROOT_PROOF_OFFSET + i * 32;
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&metadata[start..start + 32]);
+        merkle_proof.push(h);
+    }
+
+    let signed_index = u32::from_be_bytes(
+        metadata[MERKLEROOT_SIGNED_INDEX_OFFSET..MERKLEROOT_SIGNED_INDEX_OFFSET + 4]
+            .try_into()
+            .map_err(|e| TxBuilderError::Encoding(format!("Invalid signed index: {e}")))?,
+    );
+
+    // signedRoot = branchRoot(deliveredId, proof, messageIndex)
+    let signed_root = branch_root(*delivered_message_id, &merkle_proof, message_index);
+
+    // digest = EIP191(keccak(domain_hash || signed_root || signed_index || signed_message_id))
+    let mut domain_hasher = Keccak256::new();
+    domain_hasher.update(origin.to_be_bytes());
+    domain_hasher.update(origin_hook);
+    domain_hasher.update(b"HYPERLANE");
+    let domain_hash: [u8; 32] = domain_hasher.finalize().into();
+
+    let mut cp_hasher = Keccak256::new();
+    cp_hasher.update(domain_hash);
+    cp_hasher.update(signed_root);
+    cp_hasher.update(signed_index.to_be_bytes());
+    cp_hasher.update(signed_message_id);
+    let checkpoint_digest: [u8; 32] = cp_hasher.finalize().into();
+
+    let mut eth_hasher = Keccak256::new();
+    eth_hasher.update(b"\x19Ethereum Signed Message:\n32");
+    eth_hasher.update(checkpoint_digest);
+    let eth_signed_message: [u8; 32] = eth_hasher.finalize().into();
+
+    let signatures_data = &metadata[MERKLEROOT_ISM_METADATA_MIN_LEN..];
+    let validator_signatures = recover_validator_signatures(signatures_data, &eth_signed_message);
+
+    let checkpoint = crate::types::Checkpoint {
+        origin,
+        merkle_root: signed_root,
+        origin_merkle_tree_hook: origin_hook,
+        merkle_index: signed_index,
+        message_id: signed_message_id,
+    };
+
+    Ok(MerkleRootMetadata {
+        checkpoint,
+        validator_signatures,
+        delivered_index: message_index,
+        merkle_proof,
+    })
+}
+
 /// Parsed multisig ISM metadata with recovered public keys and signatures
 #[derive(Debug, Clone)]
 pub struct MultisigMetadata {
@@ -4853,6 +5020,50 @@ pub struct MultisigMetadata {
 mod tests {
     use super::*;
     use crate::tx_builder::tx_encoding::encode_message_as_plutus_data;
+
+    // branch_root must reproduce the tree root a MerkleRoot proof was built
+    // against — the same convention the Aiken merkleroot_ism verifies. This
+    // mirrors the Aiken round-trip test (a two-leaf tree) so the relayer's
+    // computed signed-root matches what the on-chain ISM will accept.
+    #[test]
+    fn branch_root_matches_two_leaf_tree() {
+        use sha3::{Digest, Keccak256};
+        fn k(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+            let mut h = Keccak256::new();
+            h.update(a);
+            h.update(b);
+            h.finalize().into()
+        }
+        let l0: [u8; 32] = Keccak256::digest(b"m0").into();
+        let l1: [u8; 32] = Keccak256::digest(b"m1").into();
+
+        // zero-subtree hash per level
+        let mut zeros = [[0u8; 32]; 32];
+        for i in 1..32 {
+            zeros[i] = k(&zeros[i - 1], &zeros[i - 1]);
+        }
+
+        // expected 2-leaf root: hash(l0,l1) then folded up against zero subtrees
+        let mut expected = k(&l0, &l1);
+        for z in zeros.iter().take(32).skip(1) {
+            expected = k(&expected, z);
+        }
+
+        // proof for leaf 0: [l1, zeros[1..32]]
+        let mut proof0 = vec![l1];
+        proof0.extend_from_slice(&zeros[1..32]);
+        assert_eq!(branch_root(l0, &proof0, 0), expected);
+
+        // proof for leaf 1 (index bit 0 set → leaf is the right child)
+        let mut proof1 = vec![l0];
+        proof1.extend_from_slice(&zeros[1..32]);
+        assert_eq!(branch_root(l1, &proof1, 1), expected);
+
+        // a wrong sibling must not reproduce the root
+        let mut bad = vec![Keccak256::digest(b"not-sibling").into()];
+        bad.extend_from_slice(&zeros[1..32]);
+        assert_ne!(branch_root(l0, &bad, 0), expected);
+    }
 
     #[test]
     fn test_encode_message() {

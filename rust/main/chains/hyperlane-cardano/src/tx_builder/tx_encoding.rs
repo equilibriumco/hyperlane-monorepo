@@ -265,6 +265,73 @@ pub fn encode_verified_message_datum(
 }
 
 /// Encode ISM redeemer to CBOR.
+/// Encode a Checkpoint as `Constr 0 [origin, merkle_root, hook, merkle_index, message_id]`.
+fn checkpoint_to_plutus(checkpoint: &crate::types::Checkpoint) -> PlutusData {
+    PlutusData::Constr(Constr {
+        tag: plutus_constr_tag(0),
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            PlutusData::BigInt(BigInt::Int((checkpoint.origin as i64).into())),
+            PlutusData::BoundedBytes(checkpoint.merkle_root.to_vec().into()),
+            PlutusData::BoundedBytes(checkpoint.origin_merkle_tree_hook.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((checkpoint.merkle_index as i64).into())),
+            PlutusData::BoundedBytes(checkpoint.message_id.to_vec().into()),
+        ]),
+    })
+}
+
+/// Encode validator signatures as a list of `Constr 0 [compressed, uncompressed, sig]`.
+fn signatures_to_plutus(validator_signatures: &[crate::types::ValidatorSignature]) -> PlutusData {
+    let sig_list: Vec<PlutusData> = validator_signatures
+        .iter()
+        .map(|val_sig| {
+            PlutusData::Constr(Constr {
+                tag: plutus_constr_tag(0),
+                any_constructor: None,
+                fields: MaybeIndefArray::Def(vec![
+                    PlutusData::BoundedBytes(val_sig.compressed_pubkey.to_vec().into()),
+                    PlutusData::BoundedBytes(val_sig.uncompressed_pubkey.to_vec().into()),
+                    PlutusData::BoundedBytes(val_sig.signature.to_vec().into()),
+                ]),
+            })
+        })
+        .collect();
+    PlutusData::Array(MaybeIndefArray::Def(sig_list))
+}
+
+/// Encode the MerkleRoot ISM redeemer `MerkleRootVerify` as
+/// `Constr 0 [checkpoint, sigs, delivered_message_id, delivered_index, proof]`.
+pub(crate) fn encode_merkleroot_ism_redeemer(
+    redeemer: &crate::types::MerkleRootIsmRedeemer,
+) -> Result<Vec<u8>, TxBuilderError> {
+    let crate::types::MerkleRootIsmRedeemer::MerkleRootVerify {
+        checkpoint,
+        validator_signatures,
+        delivered_message_id,
+        delivered_index,
+        merkle_proof,
+    } = redeemer;
+
+    let proof_list: Vec<PlutusData> = merkle_proof
+        .iter()
+        .map(|h| PlutusData::BoundedBytes(h.to_vec().into()))
+        .collect();
+
+    let plutus_data = PlutusData::Constr(Constr {
+        tag: plutus_constr_tag(0),
+        any_constructor: None,
+        fields: MaybeIndefArray::Def(vec![
+            checkpoint_to_plutus(checkpoint),
+            signatures_to_plutus(validator_signatures),
+            PlutusData::BoundedBytes(delivered_message_id.to_vec().into()),
+            PlutusData::BigInt(BigInt::Int((*delivered_index as i64).into())),
+            PlutusData::Array(MaybeIndefArray::Def(proof_list)),
+        ]),
+    });
+
+    encode_plutus_data(&plutus_data)
+}
+
 pub(crate) fn encode_ism_redeemer(
     redeemer: &crate::types::MultisigIsmRedeemer,
 ) -> Result<Vec<u8>, TxBuilderError> {
@@ -272,43 +339,14 @@ pub(crate) fn encode_ism_redeemer(
         crate::types::MultisigIsmRedeemer::Verify {
             checkpoint,
             validator_signatures,
-        } => {
-            let checkpoint_data = PlutusData::Constr(Constr {
-                tag: plutus_constr_tag(0),
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![
-                    PlutusData::BigInt(BigInt::Int((checkpoint.origin as i64).into())),
-                    PlutusData::BoundedBytes(checkpoint.merkle_root.to_vec().into()),
-                    PlutusData::BoundedBytes(checkpoint.origin_merkle_tree_hook.to_vec().into()),
-                    PlutusData::BigInt(BigInt::Int((checkpoint.merkle_index as i64).into())),
-                    PlutusData::BoundedBytes(checkpoint.message_id.to_vec().into()),
-                ]),
-            });
-
-            let sig_list: Vec<PlutusData> = validator_signatures
-                .iter()
-                .map(|val_sig| {
-                    PlutusData::Constr(Constr {
-                        tag: plutus_constr_tag(0),
-                        any_constructor: None,
-                        fields: MaybeIndefArray::Def(vec![
-                            PlutusData::BoundedBytes(val_sig.compressed_pubkey.to_vec().into()),
-                            PlutusData::BoundedBytes(val_sig.uncompressed_pubkey.to_vec().into()),
-                            PlutusData::BoundedBytes(val_sig.signature.to_vec().into()),
-                        ]),
-                    })
-                })
-                .collect();
-
-            PlutusData::Constr(Constr {
-                tag: MultisigIsmRedeemerTag::Verify.plutus_tag(),
-                any_constructor: None,
-                fields: MaybeIndefArray::Def(vec![
-                    checkpoint_data,
-                    PlutusData::Array(MaybeIndefArray::Def(sig_list)),
-                ]),
-            })
-        }
+        } => PlutusData::Constr(Constr {
+            tag: MultisigIsmRedeemerTag::Verify.plutus_tag(),
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![
+                checkpoint_to_plutus(checkpoint),
+                signatures_to_plutus(validator_signatures),
+            ]),
+        }),
         crate::types::MultisigIsmRedeemer::SetValidators { domain, validators } => {
             let validator_bytes: Vec<PlutusData> = validators
                 .iter()

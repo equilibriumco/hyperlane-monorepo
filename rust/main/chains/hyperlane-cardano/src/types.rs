@@ -284,6 +284,25 @@ pub enum MultisigIsmRedeemer {
     },
 }
 
+/// MerkleRoot multisig ISM redeemer (matches Aiken `MerkleRootIsmRedeemer`).
+/// The relayer only ever builds the `MerkleRootVerify` variant. The delivered
+/// message is bound by a merkle inclusion proof against the signed root, so the
+/// checkpoint carries the *signed* message id/index/root while the redeemer also
+/// carries the delivered leaf and its proof.
+#[derive(Debug, Clone)]
+pub enum MerkleRootIsmRedeemer {
+    MerkleRootVerify {
+        checkpoint: Checkpoint,
+        validator_signatures: Vec<ValidatorSignature>,
+        /// keccak256 of the delivered message (the proven leaf).
+        delivered_message_id: [u8; 32],
+        /// Leaf index of the delivered message in the origin tree.
+        delivered_index: u32,
+        /// 32 sibling hashes, leaf→root.
+        merkle_proof: Vec<[u8; 32]>,
+    },
+}
+
 /// Hyperlane recipient datum wrapper (matches Aiken HyperlaneRecipientDatum)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HyperlaneRecipientDatum<T> {
