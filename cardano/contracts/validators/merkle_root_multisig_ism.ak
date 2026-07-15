@@ -26,7 +26,7 @@ use utils.{validate_migrate}
 /// message being processed (and that the proof depth / index are well-formed).
 /// This lets an older message be validated by any later signed root, which is
 /// the whole point of MerkleRoot: resilience to per-index checkpoint gaps.
-validator merkleroot_ism {
+validator merkle_root_multisig_ism {
   spend(
     datum: Option<MultisigIsmDatum>,
     redeemer: MerkleRootIsmRedeemer,

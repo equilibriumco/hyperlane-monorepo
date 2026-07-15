@@ -15,14 +15,14 @@ use utils.{validate_migrate}
 /// This is the "MessageId" flavour: the delivered message is the one named
 /// directly by the signed checkpoint (`checkpoint.message_id`). The mailbox
 /// binds delivery by checking that field against the message being processed.
-/// (The MerkleRoot flavour lives in `merkleroot_ism.ak` and binds via a proof.)
+/// (The MerkleRoot flavour lives in `merkle_root_multisig_ism.ak` and binds via a proof.)
 ///
 /// Signature verification (shared, see lib/multisig.ak):
 /// 1. Relayer recovers public keys off-chain and passes compressed + uncompressed
 /// 2. ISM checks the two formats share an x-coordinate, then verifies the sig
 /// 3. ISM derives the Ethereum address and checks it is a trusted validator
 /// 4. Unique valid signatures must meet the per-origin threshold (> 0)
-validator multisig_ism {
+validator message_id_multisig_ism {
   spend(
     datum: Option<MultisigIsmDatum>,
     redeemer: MultisigIsmRedeemer,

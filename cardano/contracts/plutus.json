@@ -162,7 +162,7 @@
       "hash": "b541307907341dacff17393d7f3011c4299c0969024f30efd4288a25"
     },
     {
-      "title": "merkleroot_ism.merkleroot_ism.spend",
+      "title": "merkle_root_multisig_ism.merkle_root_multisig_ism.spend",
       "datum": {
         "title": "datum",
         "schema": {
@@ -179,7 +179,7 @@
       "hash": "5c7f0f46906b141cb40443535e41e2958f63e7ef830ab4a2e3b0aaaf"
     },
     {
-      "title": "merkleroot_ism.merkleroot_ism.else",
+      "title": "merkle_root_multisig_ism.merkle_root_multisig_ism.else",
       "redeemer": {
         "schema": {}
       },
@@ -187,7 +187,7 @@
       "hash": "5c7f0f46906b141cb40443535e41e2958f63e7ef830ab4a2e3b0aaaf"
     },
     {
-      "title": "multisig_ism.multisig_ism.spend",
+      "title": "message_id_multisig_ism.message_id_multisig_ism.spend",
       "datum": {
         "title": "datum",
         "schema": {
@@ -204,7 +204,7 @@
       "hash": "673158fa70bf8097685a52443e94e6f9dc96c4f99f2607da1975f7b8"
     },
     {
-      "title": "multisig_ism.multisig_ism.else",
+      "title": "message_id_multisig_ism.message_id_multisig_ism.else",
       "redeemer": {
         "schema": {}
       },
