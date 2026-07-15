@@ -119,6 +119,9 @@ pub struct ScriptInfo {
     /// Parameters that were applied to derive the final hash
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub applied_parameters: Vec<AppliedParameter>,
+    /// ISM module type ("messageid" or "merkleroot"); only meaningful for the ism entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_type: Option<String>,
     /// State NFT information (set after initialization)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_nft: Option<StateNftInfo>,
@@ -150,6 +153,7 @@ impl ScriptInfo {
             hash,
             address,
             applied_parameters: Vec::new(),
+            module_type: None,
             state_nft: None,
             state_utxo: None,
             reference_script_utxo: None,

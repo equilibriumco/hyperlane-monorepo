@@ -744,6 +744,16 @@ async fn init_ism_internal(
         .as_ref()
         .map(|m| m.address.clone())
         .ok_or_else(|| anyhow!("ISM address not found in deployment info"))?;
+
+    // The ism flavour is chosen at `deploy extract` time and recorded in the datum.
+    let ism_module_type = match deployment
+        .ism
+        .as_ref()
+        .and_then(|m| m.module_type.as_deref())
+    {
+        Some("merkleroot") => crate::utils::cbor::IsmModuleType::MerkleRoot,
+        _ => crate::utils::cbor::IsmModuleType::MessageId,
+    };
     println!("  ISM Address: {}", ism_addr);
 
     // Parse validators if provided, otherwise use empty lists
@@ -765,7 +775,7 @@ async fn init_ism_internal(
         &validator_map,
         &threshold_map,
         &owner_pkh,
-        crate::utils::cbor::IsmModuleType::MessageId,
+        ism_module_type,
     )?;
     println!(
         "  Datum CBOR: {}...",

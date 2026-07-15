@@ -27,6 +27,11 @@ enum DeployCommands {
         /// Only extract specific validators (comma-separated)
         #[arg(long)]
         only: Option<String>,
+
+        /// Default ISM flavour to deploy: "messageid" (default) or "merkleroot".
+        /// Selects which validator fills the `ism` slot and records its module_type.
+        #[arg(long, default_value = "messageid")]
+        ism_module_type: String,
     },
 
     /// Show validator information without extracting
@@ -69,7 +74,11 @@ enum DeployCommands {
 
 pub async fn execute(ctx: &CliContext, args: DeployArgs) -> Result<()> {
     match args.command {
-        DeployCommands::Extract { output, only } => extract(ctx, output, only).await,
+        DeployCommands::Extract {
+            output,
+            only,
+            ism_module_type,
+        } => extract(ctx, output, only, ism_module_type).await,
         DeployCommands::Info => info(ctx).await,
         DeployCommands::GenerateConfig { output } => generate_config(ctx, output).await,
         DeployCommands::ReferenceScript {
@@ -99,7 +108,12 @@ pub(crate) fn calculate_min_lovelace_for_ref_script(
     ((with_buffer + 999_999) / 1_000_000) * 1_000_000
 }
 
-async fn extract(ctx: &CliContext, output: Option<String>, only: Option<String>) -> Result<()> {
+async fn extract(
+    ctx: &CliContext,
+    output: Option<String>,
+    only: Option<String>,
+    ism_module_type: String,
+) -> Result<()> {
     println!("{}", "Extracting Hyperlane validators...".cyan());
 
     // Load blueprint
@@ -128,7 +142,22 @@ async fn extract(ctx: &CliContext, output: Option<String>, only: Option<String>)
 
     // Extract validators
     let network = ctx.pallas_network();
-    let validators = HyperlaneValidators::extract(&blueprint, network)?;
+    let mut validators = HyperlaneValidators::extract(&blueprint, network)?;
+
+    // Select which validator fills the default `ism` slot.
+    let ism_mt = ism_module_type.to_lowercase();
+    if ism_mt == "merkleroot" {
+        let title = "merkleroot_ism.merkleroot_ism.spend";
+        let def = blueprint
+            .find_validator(title)
+            .ok_or_else(|| anyhow!("Validator {title} not found in blueprint"))?;
+        validators.ism = ExtractedValidator::from_def(def, network)?;
+        println!("  Default ISM: MerkleRoot ({})", validators.ism.hash);
+    } else if ism_mt != "messageid" {
+        return Err(anyhow!(
+            "--ism-module-type must be 'messageid' or 'merkleroot', got '{ism_module_type}'"
+        ));
+    }
 
     let all_validators = vec![
         ("mailbox", Some(&validators.mailbox)),
@@ -197,6 +226,7 @@ async fn extract(ctx: &CliContext, output: Option<String>, only: Option<String>)
                 hash: v.hash.clone(), // Placeholder, will be updated during init
                 address: v.address.clone(), // Placeholder, will be updated during init
                 applied_parameters: Vec::new(), // Will be filled during init
+                module_type: None,
                 state_nft: None,
                 state_utxo: None,
                 reference_script_utxo: None,
@@ -227,7 +257,9 @@ async fn extract(ctx: &CliContext, output: Option<String>, only: Option<String>)
         deployment_info.mailbox = Some(to_script_info(&validators.mailbox));
     }
     if should_update("multisig_ism") || should_update("ism") {
-        deployment_info.ism = Some(to_script_info(&validators.ism));
+        let mut ism_info = to_script_info(&validators.ism);
+        ism_info.module_type = Some(ism_mt.clone());
+        deployment_info.ism = Some(ism_info);
     }
     if should_update("igp") {
         if let Some(igp) = &validators.igp {
@@ -324,6 +356,7 @@ async fn generate_config(ctx: &CliContext, output: Option<String>) -> Result<()>
                 hash: v.hash.clone(),
                 address: v.address.clone(),
                 applied_parameters: Vec::new(),
+                module_type: None,
                 state_nft: None,
                 state_utxo: None,
                 reference_script_utxo: None,
