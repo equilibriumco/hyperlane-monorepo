@@ -201,8 +201,8 @@ test migrate_works_with_igp_datum() {
 
 test migrate_works_with_ism_datum() {
   let ism_datum = MultisigIsmDatum {
-    validators: [(43113, [#"aabbccdd00000000000000000000000000000000"])],
-    thresholds: [(43113, 1)],
+    validators: [(11155111, [#"aabbccdd00000000000000000000000000000000"])],
+    thresholds: [(11155111, 1)],
     owner: owner_key,
     module_type: MessageIdMultisig,
   }

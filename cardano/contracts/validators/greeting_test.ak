@@ -31,7 +31,7 @@ fn sample_message() -> Message {
   Message {
     version: 3,
     nonce: 4442,
-    origin: 43113,
+    origin: 11155111,
     sender: #"0000000000000000000000001f26bfc6f52cbfad5c3fa8dabb71007b28bf4749",
     destination: 2003,
     recipient: #"020000003545709297747cd0e2812a3ab4f49778786e289bc47daac38ea38918",
@@ -60,7 +60,7 @@ test greeting_datum_cast_initial() {
 /// VerifiedMessageDatum does NOT cast as GreetingDatum (different structure)
 test verified_message_datum_is_not_greeting_datum() fail {
   let datum: Data = VerifiedMessageDatum {
-    origin: 43113,
+    origin: 11155111,
     sender: #"0000000000000000000000001f26bfc6f52cbfad5c3fa8dabb71007b28bf4749",
     body: #"4775696c6865726d65",
     message_id: #"322de963a35c687edf5aa21ba908e8ee295c49008b70432fb6709365ff7b9d1f",
@@ -136,7 +136,7 @@ test message_utxo_spent_detection() {
       value: merge(from_lovelace(1_700_000), from_asset(verified_message_nft_policy, msg_id, 1)),
       datum: InlineDatum(
         VerifiedMessageDatum {
-          origin: 43113,
+          origin: 11155111,
           sender: sample_message().sender,
           body: sample_message().body,
           message_id: msg_id,
