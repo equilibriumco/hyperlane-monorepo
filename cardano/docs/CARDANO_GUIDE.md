@@ -12,7 +12,7 @@ This document is the consolidated reference for the Hyperlane-Cardano integratio
 6. [Warp Routes](#6-warp-routes)
 7. [Interchain Gas Paymaster (IGP)](#7-interchain-gas-paymaster-igp)
 8. [Validator Operations](#8-validator-operations)
-9. [Fuji E2E Testing](#9-fuji-e2e-testing)
+9. [Sepolia E2E Testing](#9-sepolia-e2e-testing)
 10. [Known Limitations](#10-known-limitations)
 11. [Integration Status](#11-integration-status)
 12. [Future Optimizations](#12-future-optimizations)
@@ -139,7 +139,7 @@ The mailbox's `verified_message_nft` minting/delivery is **conditional on the pr
 | Cardano Preview  | 2003      |
 | Cardano Preprod  | 2002      |
 | Cardano Mainnet  | 2001      |
-| Fuji (Avalanche) | 43113     |
+| Sepolia (Ethereum) | 11155111     |
 | Ethereum Mainnet | 1         |
 | Ethereum Sepolia | 11155111  |
 
@@ -152,7 +152,7 @@ The mailbox's `verified_message_nft` minting/delivery is **conditional on the pr
 ```mermaid
 sequenceDiagram
     participant User as User/App
-    participant SrcMailbox as Source Mailbox<br/>(e.g., Fuji)
+    participant SrcMailbox as Source Mailbox<br/>(e.g., Sepolia)
     participant Validators as Hyperlane Validators
     participant Storage as Checkpoint Storage<br/>(S3/GCS)
     participant Relayer as Hyperlane Relayer
@@ -326,7 +326,7 @@ sequenceDiagram
     participant Validators as Hyperlane Validators<br/>(for Cardano)
     participant Storage as Checkpoint Storage<br/>(S3/GCS)
     participant Relayer as Hyperlane Relayer
-    participant DestMailbox as Destination Mailbox<br/>(e.g., Fuji)
+    participant DestMailbox as Destination Mailbox<br/>(e.g., Sepolia)
     participant DestISM as Destination ISM
     participant Recipient as Recipient Contract
 
@@ -908,7 +908,7 @@ hyperlane-cardano warp deploy --token-type synthetic --decimals 6 \
 ```bash
 hyperlane-cardano warp enroll-router \
   --warp-policy <WARP_NFT_POLICY> \
-  --domain 43113 \
+  --domain 11155111 \
   --router 0x<REMOTE_ROUTER_PADDED_TO_32_BYTES> \
   --signing-key /path/to/payment.skey --contracts-dir ./contracts
 ```
@@ -918,7 +918,7 @@ hyperlane-cardano warp enroll-router \
 ```bash
 hyperlane-cardano warp transfer \
   --warp-policy <WARP_NFT_POLICY> \
-  --domain 43113 \
+  --domain 11155111 \
   --recipient 0x<REMOTE_RECIPIENT> \
   --amount 1000000 \
   --signing-key /path/to/payment.skey --contracts-dir ./contracts
@@ -1101,7 +1101,7 @@ cast send $IGP \
 
 ```bash
 hyperlane-cardano igp set-oracle \
-  --domain 43113 \
+  --domain 11155111 \
   --gas-price 1000000000 \
   --exchange-rate 34 \
   --gas-overhead 100000
@@ -1114,7 +1114,7 @@ Exchange rates must account for decimal differences between chains.
 **Cardano -> EVM** (Cardano IGP):
 
 ```
-exchange_rate = market_rate_ada_per_avax * (1e18 / 1e6) / 1e12
+exchange_rate = market_rate_ada_per_eth * (1e18 / 1e6) / 1e12
              = market_rate (approximately)
 ```
 
@@ -1364,36 +1364,36 @@ Prometheus metrics on configured port (default 9091):
 
 ---
 
-## 9. Fuji E2E Testing
+## 9. Sepolia E2E Testing
 
-This section provides step-by-step instructions for deploying Hyperlane warp route infrastructure on Avalanche Fuji testnet for E2E testing with Cardano.
+This section provides step-by-step instructions for deploying Hyperlane warp route infrastructure on Ethereum Sepolia testnet for E2E testing with Cardano.
 
 ### Prerequisites
 
 1. **Foundry** installed: `curl -L https://foundry.paradigm.xyz | bash && foundryup`
-2. **Test AVAX** from [Avalanche Fuji Faucet](https://faucet.avax.network/) (at least 1 AVAX)
+2. **Test ETH** from [Ethereum Sepolia Faucet](https://sepoliafaucet.com) (at least 1 ETH)
 3. **Base environment variables**:
 
 ```bash
-export FUJI_RPC_URL="https://api.avax-test.network/ext/bc/C/rpc"
-export FUJI_SIGNER_KEY="0x..."
-export FUJI_MAILBOX="0x5b6CFf85442B851A8e6eaBd2A4E4507B5135B3B0"
+export EVM_RPC_URL="https://sepolia.drpc.org"
+export EVM_SIGNER_KEY="0x..."
+export EVM_MAILBOX="0xfFAEF09B3cd11D9b20d1a19bECca54EEC2884766"
 export CARDANO_DOMAIN=2003
-export FUJI_DOMAIN=43113
+export EVM_DOMAIN=11155111
 ```
 
 ### Deployment Flow
 
 ```
-Step 1: Deploy ISM ----------------> FUJI_CARDANO_ISM
-Step 2: Deploy Warp Routes --------> FUJI_SYNTHETIC_*, FUJI_COLLATERAL_*, etc.
+Step 1: Deploy ISM ----------------> EVM_CARDANO_ISM
+Step 2: Deploy Warp Routes --------> EVM_SYNTHETIC_*, EVM_COLLATERAL_*, etc.
 Step 3: Set ISM on Routes
 Step 4: Mint Test Tokens
 Step 5: Pre-deposit Collateral
 Step 6: Enroll Cardano Routers <---- CARDANO_NATIVE_ADA, CARDANO_COLLATERAL_*, etc.
 ```
 
-### Step 1: Deploy Cardano MultisigISM on Fuji
+### Step 1: Deploy Cardano MultisigISM on Sepolia
 
 The ISM validates messages from Cardano. Get the Cardano validator's EVM address:
 
@@ -1404,20 +1404,20 @@ export CARDANO_VALIDATOR=$(cast wallet address --private-key $CARDANO_VALIDATOR_
 # Deploy
 cd solidity
 forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 
-export FUJI_CARDANO_ISM="0x..."  # from output
+export EVM_CARDANO_ISM="0x..."  # from output
 ```
 
-### Step 2: Deploy Fuji Warp Routes
+### Step 2: Deploy Sepolia Warp Routes
 
 ```bash
 cd solidity
-forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 ```
 
-Deploys: TestERC20s (FTEST, WADA, TOKA), HypERC20 synthetics (wCTEST, wADA), HypERC20Collateral (FTEST, WADA), HypNative (AVAX).
+Deploys: TestERC20s (FTEST, WADA, TOKA), HypERC20 synthetics (wCTEST, wADA), HypERC20Collateral (FTEST, WADA), HypNative (ETH).
 
 Save all output addresses as environment variables.
 
@@ -1427,16 +1427,16 @@ Save all output addresses as environment variables.
 cd solidity
 forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
   --sig "setISMOnWarpRoutes()" \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 ```
 
 ### Step 4: Mint Test Tokens
 
 ```bash
 cd solidity
-forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
   --sig "mintTestTokens()" \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 ```
 
 ### Step 5: Pre-deposit Collateral
@@ -1445,12 +1445,12 @@ For collateral routes that release tokens (e.g., WADA when receiving ADA from Ca
 
 ```bash
 cd solidity
-forge script script/warp-e2e/DeployFujiWarp.s.sol:DeployFujiWarp \
+forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
   --sig "preDepositCollateral()" \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 ```
 
-### Step 6: Enroll Cardano Routers on Fuji
+### Step 6: Enroll Cardano Routers on Sepolia
 
 Get Cardano warp route addresses from deployment (format: `0x01000000{nft_policy_id}`):
 
@@ -1461,43 +1461,43 @@ export CARDANO_SYNTHETIC_FTEST="0x01000000..."
 
 cd solidity
 forge script script/warp-e2e/EnrollCardanoRouters.s.sol:EnrollCardanoRouters \
-  --rpc-url $FUJI_RPC_URL --broadcast --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 ```
 
 ### Test Scenarios
 
-| Scenario | Cardano Route    | Fuji Route       | Direction      | Token Flow               |
+| Scenario | Cardano Route    | Sepolia Route       | Direction      | Token Flow               |
 |----------|------------------|------------------|----------------|--------------------------|
-| 1        | Collateral CTEST | Synthetic wCTEST | Cardano -> Fuji | Lock CTEST -> Mint wCTEST |
-| 2        | Synthetic wFTEST | Collateral FTEST | Fuji -> Cardano | Lock FTEST -> Mint wFTEST |
-| 3        | Native ADA       | Synthetic wADA   | Cardano -> Fuji | Lock ADA -> Mint wADA     |
-| 4        | Synthetic wAVAX  | Native AVAX      | Fuji -> Cardano | Lock AVAX -> Mint wAVAX   |
-| 5        | Native ADA       | Collateral WADA  | Cardano -> Fuji | Lock ADA -> Release WADA  |
+| 1        | Collateral CTEST | Synthetic wCTEST | Cardano -> Sepolia | Lock CTEST -> Mint wCTEST |
+| 2        | Synthetic wFTEST | Collateral FTEST | Sepolia -> Cardano | Lock FTEST -> Mint wFTEST |
+| 3        | Native ADA       | Synthetic wADA   | Cardano -> Sepolia | Lock ADA -> Mint wADA     |
+| 4        | Synthetic wETH  | Native ETH      | Sepolia -> Cardano | Lock ETH -> Mint wETH   |
+| 5        | Native ADA       | Collateral WADA  | Cardano -> Sepolia | Lock ADA -> Release WADA  |
 
-### Test Transfer (Fuji -> Cardano)
+### Test Transfer (Sepolia -> Cardano)
 
 ```bash
 # Approve
-cast send $FUJI_FTEST "approve(address,uint256)" $FUJI_COLLATERAL_FTEST "1000000000000000000000" \
-  --rpc-url $FUJI_RPC_URL --private-key $FUJI_SIGNER_KEY
+cast send $EVM_FTEST "approve(address,uint256)" $EVM_COLLATERAL_FTEST "1000000000000000000000" \
+  --rpc-url $EVM_RPC_URL --private-key $EVM_SIGNER_KEY
 
 # Transfer
-cast send $FUJI_COLLATERAL_FTEST "transferRemote(uint32,bytes32,uint256)" \
+cast send $EVM_COLLATERAL_FTEST "transferRemote(uint32,bytes32,uint256)" \
   $CARDANO_DOMAIN $CARDANO_RECIPIENT "5000000000000000000" \
-  --rpc-url $FUJI_RPC_URL --private-key $FUJI_SIGNER_KEY
+  --rpc-url $EVM_RPC_URL --private-key $EVM_SIGNER_KEY
 ```
 
 ### Verification
 
 ```bash
 # Check ISM on warp route
-cast call $FUJI_SYNTHETIC_WCTEST "interchainSecurityModule()(address)" --rpc-url $FUJI_RPC_URL
+cast call $EVM_SYNTHETIC_WCTEST "interchainSecurityModule()(address)" --rpc-url $EVM_RPC_URL
 
 # Check enrolled router
-cast call $FUJI_SYNTHETIC_WCTEST "routers(uint32)(bytes32)" $CARDANO_DOMAIN --rpc-url $FUJI_RPC_URL
+cast call $EVM_SYNTHETIC_WCTEST "routers(uint32)(bytes32)" $CARDANO_DOMAIN --rpc-url $EVM_RPC_URL
 
 # Check token balance
-cast call $FUJI_FTEST "balanceOf(address)(uint256)" $WALLET --rpc-url $FUJI_RPC_URL
+cast call $EVM_FTEST "balanceOf(address)(uint256)" $WALLET --rpc-url $EVM_RPC_URL
 ```
 
 ### Troubleshooting
