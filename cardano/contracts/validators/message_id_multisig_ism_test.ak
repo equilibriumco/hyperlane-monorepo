@@ -8,8 +8,8 @@ fn sample_message() -> Message {
   Message {
     version: 3,
     nonce: 1,
-    origin: 43114,
-    // Fuji Avalanche
+    origin: 11155111,
+    // Sepolia
     sender: #"0000000000000000000000001234567890abcdef1234567890abcdef12345678",
     destination: 2002,
     // Cardano preview
@@ -181,59 +181,61 @@ test message_body_affects_hash() {
 }
 
 // ============================================================================
-// REAL FUJI TESTNET DATA TESTS
-// These tests use actual data from the Hyperlane Fuji testnet to verify
+// REAL SEPOLIA TESTNET DATA TESTS
+// These tests use actual data from the Hyperlane Sepolia testnet to verify
 // our checkpoint and signature verification matches Hyperlane's format.
+// Checkpoint index 869976 signed by the official Hyperlane Sepolia validators
+// (fetched from their announced S3 checkpoint syncers); signatures verified to
+// recover the exact validator addresses below.
 // ============================================================================
 
-/// Real Fuji checkpoint data from the relayer logs
-/// Data extracted from actual Fuji -> Cardano message relay
-fn fuji_checkpoint() -> Checkpoint {
+/// Real Sepolia checkpoint (index 869976) from the official validator syncers.
+fn sepolia_checkpoint() -> Checkpoint {
   Checkpoint {
-    origin: 43113,  // Fuji
-    merkle_root: #"08c2d666efa004d027c79c3d7faf7821111493144243a32f8616af99ceff8238",
-    // Fuji's merkle tree hook address, left-padded to 32 bytes
-    origin_merkle_tree_hook: #"0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612",
-    merkle_index: 4332,  // 0x10ec
-    message_id: #"0ce4b05a9d25d2556f74ddaa1ac84841341623376c9e5cd073f52b1b54dcddbf",
+    origin: 11155111,  // Sepolia
+    merkle_root: #"2d652e6c03ec3c97d0a20896a7c0ea274c6abc3370dc0c3b3ca3e558503dd118",
+    // Sepolia's merkle tree hook address (0x4917a974...), left-padded to 32 bytes
+    origin_merkle_tree_hook: #"0000000000000000000000004917a9746a7b6e0a57159ccb7f5a6744247f2d0d",
+    merkle_index: 869976,  // 0xd4658
+    message_id: #"424b25342a401ee2029bfe8241e61e3e4ff5209913d03c7dafe46e3f0faa0096",
   }
 }
 
-/// Real Fuji validator Ethereum addresses (20 bytes each)
-/// These addresses were computed from recovered public keys using keccak256
-fn fuji_validator_addresses() -> List<ByteArray> {
+/// Real Sepolia validator Ethereum addresses (20 bytes each)
+/// Recovered from the signatures below over the checkpoint's EIP-191 digest.
+fn sepolia_validator_addresses() -> List<ByteArray> {
   [
-    // Validator 0: 0xd8154f73d04cc7f7f0c332793692e6e6f6b2402e (official Hyperlane Fuji validator)
-    #"d8154f73d04cc7f7f0c332793692e6e6f6b2402e",
-    // Validator 1: 0x7095c11126faf3d61b7d1144815720fb09bb8b20 (recovered from actual signature)
-    #"7095c11126faf3d61b7d1144815720fb09bb8b20",
+    // Validator 0: 0xb22b65f202558adf86a8bb2847b76ae1036686a5 (hyperlane-testnet4-sepolia-validator-0)
+    #"b22b65f202558adf86a8bb2847b76ae1036686a5",
+    // Validator 1: 0x469f0940684d147defc44f3647146cb90dd0bc8e (hyperlane-testnet4-sepolia-validator-1)
+    #"469f0940684d147defc44f3647146cb90dd0bc8e",
   ]
 }
 
-/// Real Fuji validator uncompressed public keys (64 bytes each, no 0x04 prefix)
+/// Real Sepolia validator uncompressed public keys (64 bytes each, no 0x04 prefix)
 /// These are used by the relayer in the ISM redeemer
-fn fuji_validator_pubkeys_uncompressed() -> List<ByteArray> {
+fn sepolia_validator_pubkeys_uncompressed() -> List<ByteArray> {
   [
-    // Validator 0 uncompressed (64 bytes) - address 0xd8154f73d04cc7f7f0c332793692e6e6f6b2402e
-    #"225f0eceb966fca4afec433f93cb38d3b0cbb44b066a4a83618fc23d2ccd5c1727d85b0a30fa3607960b5b81d5c4687f5938e5925fd41cebaec73af76971f035",
-    // Validator 1 uncompressed (64 bytes) - address 0x7095c11126faf3d61b7d1144815720fb09bb8b20
-    #"d55421e166d27cbf76fc924b42c3833604a528b7dd00e0e831c678bd3be76b4f4a989bdd496c5808f1b3de30676246e7a63b9e70c8e80dc3bccb0704ccd13c4b",
+    // Validator 0 uncompressed (64 bytes) - address 0xb22b65f202558adf86a8bb2847b76ae1036686a5
+    #"311a5187d352df97ffd84cade83c4ff6aafeb0331fb97f2e9f4e246390b8b480022fd19bbc35dc50b48c3b6c1fbb989623eacc0ee112c190543cfd5924d37d50",
+    // Validator 1 uncompressed (64 bytes) - address 0x469f0940684d147defc44f3647146cb90dd0bc8e
+    #"dca5184a4d3e318d02f7737b36a145b1d44a93612696332e7d97c36bdd2739a4282fd562f1fdc7945d31d90fc8c10d762674a011de4c7a1d470c1d3c1b500a5c",
   ]
 }
 
-/// Real signatures from Fuji validators (65 bytes each: r || s || v)
-fn fuji_signatures() -> List<ByteArray> {
+/// Real signatures from Sepolia validators (65 bytes each: r || s || v)
+fn sepolia_signatures() -> List<ByteArray> {
   [
     // Signature from validator 0 (v=0x1b=27)
-    #"d88d35b30b437c9d069dc3e97263d8b06367ae53840fdb1d0f8009e61ded9cad1ca7cb64f16f21a08634065f7de2cc92d651fa5bd04603e675ad72fffe39b4761b",
-    // Signature from validator 1 (v=0x1c=28)
-    #"5f2d5eceb1dc4c9a6ce96af2c9d20a4b622a86224535035337fe3c3fdfb71f5e2e195aa0eca28e609a0d2b6550d97d8228d91e976040cf94f8e7124581dfe8261c",
+    #"d9b5bf1d42616ef18e870f74dc7e151e0ac04ba5878ec354bd5c96cdf89df3011e4deab26a33ff112e942632c54f8389bf23d7325e48bf39a02ca48d920fc67d1b",
+    // Signature from validator 1 (v=0x1b=27)
+    #"a2e7062eaee63dadb0b78120b81eddafcd4c7ad939047cf57e791cc399c65317773b522e365f4c2a68c489e29b2ce54e8d6053e9bae112fae24e6a8db8b59d251b",
   ]
 }
 
 /// Test domain hash encoding length
-test fuji_domain_hash_encoding_length() {
-  let checkpoint = fuji_checkpoint()
+test sepolia_domain_hash_encoding_length() {
+  let checkpoint = sepolia_checkpoint()
   let encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
 
   // Should be: origin(4) + merkle_tree_hook(32) + "HYPERLANE"(9) = 45 bytes
@@ -241,8 +243,8 @@ test fuji_domain_hash_encoding_length() {
 }
 
 /// Test checkpoint encoding length
-test fuji_checkpoint_encoding_length() {
-  let checkpoint = fuji_checkpoint()
+test sepolia_checkpoint_encoding_length() {
+  let checkpoint = sepolia_checkpoint()
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
   let domain_hash = keccak_256(domain_hash_encoded)
 
@@ -253,8 +255,8 @@ test fuji_checkpoint_encoding_length() {
 }
 
 /// Test that domain hash produces 32 bytes
-test fuji_domain_hash_is_32_bytes() {
-  let checkpoint = fuji_checkpoint()
+test sepolia_domain_hash_is_32_bytes() {
+  let checkpoint = sepolia_checkpoint()
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
   let domain_hash = keccak_256(domain_hash_encoded)
 
@@ -262,8 +264,8 @@ test fuji_domain_hash_is_32_bytes() {
 }
 
 /// Test that checkpoint digest produces 32 bytes
-test fuji_checkpoint_digest_is_32_bytes() {
-  let checkpoint = fuji_checkpoint()
+test sepolia_checkpoint_digest_is_32_bytes() {
+  let checkpoint = sepolia_checkpoint()
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
   let domain_hash = keccak_256(domain_hash_encoded)
 
@@ -274,8 +276,8 @@ test fuji_checkpoint_digest_is_32_bytes() {
 }
 
 /// Test that EIP-191 message hash produces 32 bytes
-test fuji_eip191_hash_is_32_bytes() {
-  let checkpoint = fuji_checkpoint()
+test sepolia_eip191_hash_is_32_bytes() {
+  let checkpoint = sepolia_checkpoint()
 
   // Step 1: domain_hash
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
@@ -294,8 +296,8 @@ test fuji_eip191_hash_is_32_bytes() {
 }
 
 /// Test validator address lengths
-test fuji_validator_addresses_are_20_bytes() {
-  let addresses = fuji_validator_addresses()
+test sepolia_validator_addresses_are_20_bytes() {
+  let addresses = sepolia_validator_addresses()
 
   // All should be 20 bytes (Ethereum addresses)
   expect Some(v0) = addresses |> at(0)
@@ -308,8 +310,8 @@ test fuji_validator_addresses_are_20_bytes() {
 }
 
 /// Test uncompressed public key lengths
-test fuji_validator_pubkeys_are_64_bytes() {
-  let pubkeys = fuji_validator_pubkeys_uncompressed()
+test sepolia_validator_pubkeys_are_64_bytes() {
+  let pubkeys = sepolia_validator_pubkeys_uncompressed()
 
   // All should be 64 bytes (uncompressed secp256k1 without 0x04 prefix)
   expect Some(v0) = pubkeys |> at(0)
@@ -322,8 +324,8 @@ test fuji_validator_pubkeys_are_64_bytes() {
 }
 
 /// Test signature lengths
-test fuji_signatures_are_65_bytes() {
-  let sigs = fuji_signatures()
+test sepolia_signatures_are_65_bytes() {
+  let sigs = sepolia_signatures()
 
   expect Some(s0) = sigs |> at(0)
   expect Some(s1) = sigs |> at(1)
@@ -335,8 +337,8 @@ test fuji_signatures_are_65_bytes() {
 }
 
 /// Test extracting 64-byte signature from 65-byte
-test fuji_signature_extraction() {
-  let sigs = fuji_signatures()
+test sepolia_signature_extraction() {
+  let sigs = sepolia_signatures()
   expect Some(sig_65) = sigs |> at(0)
 
   // Extract first 64 bytes
@@ -347,9 +349,9 @@ test fuji_signature_extraction() {
 
 /// Test pubkey_to_eth_address for validator 0
 /// This verifies our address derivation matches Ethereum's keccak256 method
-test fuji_pubkey_to_address_0() {
-  let pubkeys = fuji_validator_pubkeys_uncompressed()
-  let addresses = fuji_validator_addresses()
+test sepolia_pubkey_to_address_0() {
+  let pubkeys = sepolia_validator_pubkeys_uncompressed()
+  let addresses = sepolia_validator_addresses()
 
   expect Some(pubkey) = pubkeys |> at(0)
   expect Some(expected_address) = addresses |> at(0)
@@ -363,9 +365,9 @@ test fuji_pubkey_to_address_0() {
 }
 
 /// Test pubkey_to_eth_address for validator 1
-test fuji_pubkey_to_address_1() {
-  let pubkeys = fuji_validator_pubkeys_uncompressed()
-  let addresses = fuji_validator_addresses()
+test sepolia_pubkey_to_address_1() {
+  let pubkeys = sepolia_validator_pubkeys_uncompressed()
+  let addresses = sepolia_validator_addresses()
 
   expect Some(pubkey) = pubkeys |> at(1)
   expect Some(expected_address) = addresses |> at(1)
@@ -380,9 +382,9 @@ test fuji_pubkey_to_address_1() {
 
 /// Test full address-based verification flow
 /// This simulates what the ISM does when verifying validators
-test fuji_address_based_verification() {
-  let addresses = fuji_validator_addresses()
-  let pubkeys = fuji_validator_pubkeys_uncompressed()
+test sepolia_address_based_verification() {
+  let addresses = sepolia_validator_addresses()
+  let pubkeys = sepolia_validator_pubkeys_uncompressed()
 
   // For each public key, compute address and check it's in trusted list
   let valid_count = list.foldl(
@@ -427,36 +429,37 @@ fn at_helper(items: List<a>, target_idx: Int, current_idx: Int) -> Option<a> {
 // which should match what the Hyperlane validators signed.
 // ============================================================================
 
-/// Actual checkpoint from relayer logs (message_id 7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51)
+/// Actual checkpoint from the Sepolia validator syncers (index 869976,
+/// message_id 424b25342a401ee2029bfe8241e61e3e4ff5209913d03c7dafe46e3f0faa0096)
 fn actual_checkpoint() -> Checkpoint {
   Checkpoint {
-    origin: 43113,  // Fuji
-    merkle_root: #"78943434b7600830cf53756b5da5d7bdbed2761edfc997b0e75c9ec95f4f30fb",
-    origin_merkle_tree_hook: #"0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612",
-    merkle_index: 4336,
-    message_id: #"7e2c2f9ef220e8190803eb47033257b562d9104aaa578115aa27601548048d51",
+    origin: 11155111,  // Sepolia
+    merkle_root: #"2d652e6c03ec3c97d0a20896a7c0ea274c6abc3370dc0c3b3ca3e558503dd118",
+    origin_merkle_tree_hook: #"0000000000000000000000004917a9746a7b6e0a57159ccb7f5a6744247f2d0d",
+    merkle_index: 869976,
+    message_id: #"424b25342a401ee2029bfe8241e61e3e4ff5209913d03c7dafe46e3f0faa0096",
   }
 }
 
 /// Debug: Test that origin encodes correctly to big-endian
-/// 43113 = 0x0000A869
+/// 11155111 = 0x00AA36A7
 test origin_encodes_correctly() {
-  let origin = 43113
+  let origin = 11155111
   let origin_bytes = types.int_to_bytes(origin, 4)
-  // Should be 0x0000a869 in big-endian
-  let expected = #"0000a869"
+  // Should be 0x00aa36a7 in big-endian
+  let expected = #"00aa36a7"
   origin_bytes == expected
 }
 
 /// Debug: Test complete domain_hash_encoded bytes match Rust
-/// Rust produces: 0000a869 || 0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612 || 48595045524c414e45
+/// Rust produces: 00aa36a7 || 0000000000000000000000004917a9746a7b6e0a57159ccb7f5a6744247f2d0d || 48595045524c414e45
 test domain_hash_encoded_matches_rust() {
   let checkpoint = actual_checkpoint()
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
 
   // Expected: origin(4) + address(32) + "HYPERLANE"(9) = 45 bytes
-  // 0000a869 + 0000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f612 + 48595045524c414e45 (HYPERLANE)
-  let expected = #"0000a8690000000000000000000000009ff6ac3daf63103620bbf76136ea1aff43c2f61248595045524c414e45"
+  // 00aa36a7 + 0000000000000000000000004917a9746a7b6e0a57159ccb7f5a6744247f2d0d + 48595045524c414e45 (HYPERLANE)
+  let expected = #"00aa36a70000000000000000000000004917a9746a7b6e0a57159ccb7f5a6744247f2d0d48595045524c414e45"
 
   domain_hash_encoded == expected
 }
@@ -470,18 +473,18 @@ test domain_hash_encoding_correct_length() {
 }
 
 /// Test that domain_hash matches the Rust computation
-/// Expected from logs: ce5a1b0dc59cf532dedcf7d71539053b467227b7aaf31e9c5f638de4f3cbcb39
+/// Expected from logs: ddc29846dd691ab7d8d8ec0f3008a8bf66116a65c6ef3a859820a7568f42dfd2
 test actual_domain_hash_matches() {
   let checkpoint = actual_checkpoint()
   let domain_hash_encoded = encode_domain_hash(checkpoint.origin, checkpoint.origin_merkle_tree_hook)
   let domain_hash = keccak_256(domain_hash_encoded)
 
-  let expected = #"ce5a1b0dc59cf532dedcf7d71539053b467227b7aaf31e9c5f638de4f3cbcb39"
+  let expected = #"ddc29846dd691ab7d8d8ec0f3008a8bf66116a65c6ef3a859820a7568f42dfd2"
   domain_hash == expected
 }
 
 /// Test that checkpoint_digest matches the Rust computation
-/// Expected from logs: ea4d554b7c4b18db749d3ea7db16743763eac877068364b65a53ee1899f7763c
+/// Expected from logs: e78803dcb5f4df980d0e1ac8e0d89ff87ec4bff4be568053056f68a288047b6f
 test actual_checkpoint_digest_matches() {
   let checkpoint = actual_checkpoint()
 
@@ -493,12 +496,12 @@ test actual_checkpoint_digest_matches() {
   let checkpoint_encoded = encode_checkpoint(checkpoint, domain_hash)
   let checkpoint_digest = keccak_256(checkpoint_encoded)
 
-  let expected = #"ea4d554b7c4b18db749d3ea7db16743763eac877068364b65a53ee1899f7763c"
+  let expected = #"e78803dcb5f4df980d0e1ac8e0d89ff87ec4bff4be568053056f68a288047b6f"
   checkpoint_digest == expected
 }
 
 /// Test that eth_signed_message (EIP-191) matches the Rust computation
-/// Expected from logs: 8839216521a0c303cd1d651a5e957b5b770725802f08590aec6c911e9545231f
+/// Expected from logs: e5bc3d2efa932ef4b864c340fd6775d9b6e7c541feddb0762594c9a596fea2a1
 test actual_eth_signed_message_matches() {
   let checkpoint = actual_checkpoint()
 
@@ -515,6 +518,6 @@ test actual_eth_signed_message_matches() {
   let prefixed = bytearray.concat(eip191_prefix, checkpoint_digest)
   let eth_signed_message = keccak_256(prefixed)
 
-  let expected = #"8839216521a0c303cd1d651a5e957b5b770725802f08590aec6c911e9545231f"
+  let expected = #"e5bc3d2efa932ef4b864c340fd6775d9b6e7c541feddb0762594c9a596fea2a1"
   eth_signed_message == expected
 }
