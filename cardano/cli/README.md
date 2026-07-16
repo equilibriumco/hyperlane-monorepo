@@ -66,10 +66,10 @@ hyperlane-cardano init generate-datums --domain 2003 --ism-hash <hash>
 hyperlane-cardano init mailbox --domain 2003 --ism-hash <hash> --dry-run
 
 # Initialize ISM
-hyperlane-cardano init ism --domains "43113,421614" --dry-run
+hyperlane-cardano init ism --domains "11155111,421614" --dry-run
 
 # Initialize all core contracts
-hyperlane-cardano init all --domain 2003 --origin-domains "43113,421614" --dry-run
+hyperlane-cardano init all --domain 2003 --origin-domains "11155111,421614" --dry-run
 ```
 
 ### ISM (Interchain Security Module)
@@ -82,22 +82,22 @@ hyperlane-cardano ism show --ism-policy <policy_id>
 
 # Set validators for a domain
 hyperlane-cardano ism set-validators \
-  --domain 43113 \
+  --domain 11155111 \
   --validators 0xd8154f73d04cc7f7f0c332793692e6e6f6b2402e \
   --ism-policy <policy_id> \
   --signing-key payment.skey
 
 # Set threshold for a domain
-hyperlane-cardano ism set-threshold --domain 43113 --threshold 1
+hyperlane-cardano ism set-threshold --domain 11155111 --threshold 1
 
 # Add a single validator
 hyperlane-cardano ism add-validator \
-  --domain 43113 \
+  --domain 11155111 \
   --validator 0x1234...
 
 # Remove a validator
 hyperlane-cardano ism remove-validator \
-  --domain 43113 \
+  --domain 11155111 \
   --validator 0x1234...
 ```
 
@@ -114,13 +114,13 @@ hyperlane-cardano warp routers
 
 # Enroll a remote router
 hyperlane-cardano warp enroll-router \
-  --domain 43113 \
+  --domain 11155111 \
   --router 0x1234...5678 \
   --dry-run
 
 # Initiate a transfer (dry run)
 hyperlane-cardano warp transfer \
-  --domain 43113 \
+  --domain 11155111 \
   --recipient 0x1234...5678 \
   --amount 1000000 \
   --dry-run
@@ -246,9 +246,9 @@ hyperlane-cardano init generate-datums \
 ### 3. Configure ISM
 
 ```bash
-# Set validators for Fuji (domain 43113)
+# Set validators for Sepolia (domain 11155111)
 hyperlane-cardano ism set-validators \
-  --domain 43113 \
+  --domain 11155111 \
   --validators 0xd8154f73d04cc7f7f0c332793692e6e6f6b2402e \
   --threshold 1 \
   --ism-policy <ism_policy_id> \

@@ -1,12 +1,12 @@
 # Cardano E2E Docker Setup
 
-Docker Compose configuration for end-to-end testing of Hyperlane message relay between Cardano Preview testnet and Avalanche Fuji testnet.
+Docker Compose configuration for end-to-end testing of Hyperlane message relay between Cardano Preview testnet and Ethereum Sepolia testnet.
 
 ## Overview
 
 This setup runs two Hyperlane agents:
 1. **Validator** - Signs checkpoints for messages dispatched from Cardano, stores them in AWS S3
-2. **Relayer** - Bidirectional relay between Cardano Preview and Avalanche Fuji
+2. **Relayer** - Bidirectional relay between Cardano Preview and Ethereum Sepolia
 
 ## Prerequisites
 
@@ -35,9 +35,9 @@ Follow the [Hyperlane AWS Validator Signatures guide](https://docs.hyperlane.xyz
 2. Fill in your configuration values in `.env`:
    - AWS credentials and bucket name
    - `CARDANO_VALIDATOR_KEY` - ECDSA secp256k1 private key for validator signing
-   - `CARDANO_SIGNER_KEY` - Ed25519 private key for Cardano transactions (Fuji->Cardano relay)
+   - `CARDANO_SIGNER_KEY` - Ed25519 private key for Cardano transactions (Sepolia->Cardano relay)
    - `BLOCKFROST_API_KEY` - Your Blockfrost Preview API key
-   - `FUJI_SIGNER_KEY` - Private key for Fuji transaction signing
+   - `SEPOLIA_SIGNER_KEY` - Private key for Sepolia transaction signing
    - Contract addresses from your deployment
 
 3. Build and start the services:
@@ -65,11 +65,11 @@ See `.env.example` for all required variables. Key configurations:
 | `AWS_REGION` | AWS region (e.g., us-east-1) |
 | `AWS_S3_BUCKET` | S3 bucket name for checkpoints |
 | `CARDANO_VALIDATOR_KEY` | Validator signing key (ECDSA secp256k1) |
-| `CARDANO_SIGNER_KEY` | Cardano transaction signer (for Fuji->Cardano relay) |
+| `CARDANO_SIGNER_KEY` | Cardano transaction signer (for Sepolia->Cardano relay) |
 | `BLOCKFROST_API_KEY` | Blockfrost API key for Cardano |
-| `FUJI_SIGNER_KEY` | Key for signing Fuji transactions |
+| `SEPOLIA_SIGNER_KEY` | Key for signing Sepolia transactions |
 | `CARDANO_INDEX_FROM` | Starting block for Cardano indexing |
-| `FUJI_INDEX_FROM` | Starting block for Fuji indexing |
+| `SEPOLIA_INDEX_FROM` | Starting block for Sepolia indexing |
 
 ### Contract Addresses
 
@@ -95,7 +95,7 @@ Hyperlane Address: 0x01000000789ca889... (32 bytes)
 
 - Port: 9091 (metrics)
 - Data: `relayer-data` volume
-- Bidirectional: Cardano <-> Fuji
+- Bidirectional: Cardano <-> Sepolia
 
 ## Monitoring
 
@@ -107,16 +107,16 @@ Access Prometheus metrics:
 
 Once the services are running, you can dispatch messages from your terminal:
 
-### Cardano -> Fuji
+### Cardano -> Sepolia
 Use the Cardano CLI dispatch command:
 ```bash
-cardano-cli dispatch --destination 43113 --recipient <fuji-recipient> --body "Hello Fuji"
+cardano-cli dispatch --destination 11155111 --recipient <sepolia-recipient> --body "Hello Sepolia"
 ```
 
-### Fuji -> Cardano
-Use Foundry cast or ethers to call the Fuji mailbox:
+### Sepolia -> Cardano
+Use Foundry cast or ethers to call the Sepolia mailbox:
 ```bash
-cast send $FUJI_MAILBOX "dispatch(uint32,bytes32,bytes)" 2003 <cardano-recipient> <message-body> --rpc-url $FUJI_RPC_URL --private-key $FUJI_SIGNER_KEY
+cast send $SEPOLIA_MAILBOX "dispatch(uint32,bytes32,bytes)" 2003 <cardano-recipient> <message-body> --rpc-url $SEPOLIA_RPC_URL --private-key $SEPOLIA_SIGNER_KEY
 ```
 
 ## Troubleshooting
@@ -146,7 +146,7 @@ docker compose up -d
 
 ## E2E Test Flow
 
-1. **Deploy contracts** on Cardano Preview and Fuji
+1. **Deploy contracts** on Cardano Preview and Sepolia
 2. **Configure AWS S3** bucket for checkpoint storage
 3. **Announce validator** on Cardano with S3 bucket URL
 4. **Start services** with docker compose

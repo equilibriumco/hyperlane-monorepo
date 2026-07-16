@@ -1,9 +1,9 @@
 #!/bin/bash
-# Send a test message from Cardano to Fuji via Hyperlane
+# Send a test message from Cardano to Sepolia via Hyperlane
 #
 # Usage:
 #   cd cardano/e2e-docker
-#   ./send-cardano-to-fuji.sh [message]
+#   ./send-cardano-to-sepolia.sh [message]
 
 set -e
 
@@ -21,10 +21,10 @@ else
     exit 1
 fi
 
-# Fuji configuration
-FUJI_DOMAIN="43113"
+# Sepolia configuration
+SEPOLIA_DOMAIN="11155111"
 # The CLI automatically pads shorter addresses (20-byte ETH) to 32-byte Hyperlane format
-TEST_RECIPIENT="${FUJI_TEST_RECIPIENT:-0x5738088244a020f9B875D8d22D425F3082c66C1C}"
+TEST_RECIPIENT="${SEPOLIA_TEST_RECIPIENT:-0x5738088244a020f9B875D8d22D425F3082c66C1C}"
 
 # Colors
 RED='\033[0;31m'
@@ -59,9 +59,9 @@ fi
 TIMESTAMP=$(date +%s)
 MESSAGE="${1:-Hello from Cardano at $TIMESTAMP}"
 
-log_info "=== Cardano -> Fuji E2E Test ==="
+log_info "=== Cardano -> Sepolia E2E Test ==="
 log_info ""
-log_info "Destination: Fuji (Domain: $FUJI_DOMAIN)"
+log_info "Destination: Sepolia (Domain: $SEPOLIA_DOMAIN)"
 log_info "Recipient: $TEST_RECIPIENT"
 log_info "Message: \"$MESSAGE\""
 log_info ""
@@ -70,7 +70,7 @@ log_info ""
 log_info "Dispatching message via Cardano Mailbox..."
 
 DISPATCH_OUTPUT=$($CLI mailbox dispatch \
-    --destination "$FUJI_DOMAIN" \
+    --destination "$SEPOLIA_DOMAIN" \
     --recipient "$TEST_RECIPIENT" \
     --body "$MESSAGE" \
     --api-key "$BLOCKFROST_API_KEY" \
@@ -90,10 +90,10 @@ log_success "=== Dispatch Complete ==="
 log_info ""
 log_info "Next steps:"
 log_info "1. Validator signs checkpoint for this message"
-log_info "2. Relayer picks up message and submits to Fuji"
-log_info "3. Verify on Fuji with:"
+log_info "2. Relayer picks up message and submits to Sepolia"
+log_info "3. Verify on Sepolia with:"
 log_info ""
 log_info "   cast call $TEST_RECIPIENT 'getLastMessage()(uint32,bytes32,bytes)' \\"
-log_info "       --rpc-url $FUJI_RPC_URL"
+log_info "       --rpc-url $SEPOLIA_RPC_URL"
 log_info ""
-log_info "Or check Snowtrace: https://testnet.snowtrace.io/address/$TEST_RECIPIENT"
+log_info "Or check Etherscan: https://sepolia.etherscan.io/address/$TEST_RECIPIENT"
