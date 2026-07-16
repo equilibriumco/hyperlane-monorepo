@@ -20,24 +20,28 @@ import {IGasOracle} from "contracts/interfaces/IGasOracle.sol";
  *
  * Optional environment variables:
  *   - CARDANO_DOMAIN: Cardano domain ID (default: 2003)
- *   - CARDANO_GAS_PRICE: Cardano gas price in lovelace per byte (default: 44)
+ *   - CARDANO_GAS_PRICE: gas price; 1 means "1 gas unit = 1 lovelace" (default: 1)
  *   - CARDANO_TOKEN_EXCHANGE_RATE: tokenExchangeRate for IGP formula (default: 1.395e18)
- *   - CARDANO_GAS_OVERHEAD: gasOverhead for destination (default: 86000)
+ *   - CARDANO_GAS_OVERHEAD: gasOverhead in lovelace, ~1.5x base fee (default: 2062550)
  */
 contract DeploySepoliaIGP is Script {
     uint32 constant DEFAULT_CARDANO_DOMAIN = 2003;
 
-    // Cardano min_fee_a (lovelace per byte)
-    uint128 constant DEFAULT_GAS_PRICE = 44;
+    // Cardano gas is denominated 1 gas unit = 1 lovelace, so gasPrice = 1.
+    // A gasLimit then reads directly as lovelace of Cardano delivery cost.
+    uint128 constant DEFAULT_GAS_PRICE = 1;
 
-    // Derived from: 1 ETH = 7170.79 ADA
-    // lovelace_cost = gasOverhead * gasPrice = 86000 * 44 = 3,784,000 lovelace = 3.784 ADA
-    // ETH equiv = 3.784 / 7170.79 = 5.278e14 wei
-    // tokenExchangeRate = 5.278e14 * 1e10 / (86000 * 44) = 1.395e18
+    // Converts lovelace -> wei at ~7171 ADA/ETH:
+    //   1 lovelace = 1e-6 ADA = (1e-6 / 7171) ETH = 1.394e-10 ETH = 1.394e8 wei
+    //   payment = gas(lovelace) * gasPrice(1) * tokenExchangeRate / 1e10
+    //   => tokenExchangeRate = 1.394e8 * 1e10 = 1.395e18
     uint128 constant DEFAULT_TOKEN_EXCHANGE_RATE = 1_395_000_000_000_000_000;
 
-    // Base cost in Cardano gas units (fee + verified_msg overhead)
-    uint96 constant DEFAULT_GAS_OVERHEAD = 86_000;
+    // Recipient-INDEPENDENT base delivery fee (~1.375M lovelace) x 1.5 margin.
+    // Per-route recipient cost (e.g. a synthetic mint's ~1.2M-lovelace minUTxO) is
+    // added via the warp route's destinationGas, not here.
+    // See cardano/docs/design/igp-gas-model.md.
+    uint96 constant DEFAULT_GAS_OVERHEAD = 2_062_550;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
