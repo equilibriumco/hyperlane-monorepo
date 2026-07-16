@@ -182,6 +182,34 @@ enum OutputType {
     },
 }
 
+/// Lovelace the relayer must front from its own funds to build a delivery TX
+/// and cannot recover, broken out so the delivery builder and the cost
+/// estimator agree on the exact number. `total()` is what must be added to the
+/// ledger fee to get the true relayer delivery cost.
+#[derive(Debug, Clone, Copy, Default)]
+struct PayerExtraLovelace {
+    /// minUTxO for a plain ADA output (baseline).
+    min_lovelace: u64,
+    /// minUTxO for the warp-route continuation output (NFT + datum).
+    continuation_min_lovelace: u64,
+    /// minUTxO for the recipient token output (mint/release).
+    recipient_output_cost: u64,
+    /// ADA already sitting in the warp-route state UTxO, reusable for outputs.
+    warp_route_lovelace: u64,
+    /// Recipient-output minUTxO the relayer funds beyond what the warp route
+    /// already carries (0 for warp routes whose state UTxO covers it).
+    payer_extra: u64,
+    /// minUTxO for the verified-message UTXO (script recipients only; 0 for warp).
+    verified_message_min_lovelace: u64,
+}
+
+impl PayerExtraLovelace {
+    /// Unrecoverable lovelace the relayer fronts on top of the ledger fee.
+    fn total(&self) -> u64 {
+        self.payer_extra + self.verified_message_min_lovelace
+    }
+}
+
 /// Estimated fee for a complex script transaction (~2-3 ADA)
 const ESTIMATED_FEE_LOVELACE: u64 = 3_000_000;
 const EX_UNITS_MARGIN_FACTOR: f64 = 1.2;
@@ -743,6 +771,142 @@ impl HyperlaneTxBuilder {
 
         let min_lovelace = coins_per_byte * (UTXO_BASE_OVERHEAD + output_size);
         min_lovelace.div_ceil(100_000) * 100_000
+    }
+
+    /// Recipient-output minUTxO the relayer must fund from its own ADA beyond what
+    /// the warp-route state UTxO already carries. Pure branch arithmetic, split out
+    /// so it is unit-testable without a full `ProcessTxComponents`.
+    ///
+    /// - Synthetic: a mint creates a brand-new recipient token output; the relayer
+    ///   funds its minUTxO minus whatever the state UTxO frees up.
+    /// - Native: releasing ADA covers the recipient minUTxO up to `release_amount`;
+    ///   any shortfall (small releases, continuation minUTxO) is fronted.
+    /// - Collateral: recipient token output + continuation both need minUTxO; the
+    ///   relayer covers the part the state UTxO does not.
+    fn warp_payer_extra(
+        warp_type: &WarpTokenTypeInfo,
+        release_amount: u64,
+        warp_route_lovelace: u64,
+        continuation_min_lovelace: u64,
+        recipient_output_cost: u64,
+        min_lovelace: u64,
+    ) -> u64 {
+        let original = warp_route_lovelace;
+        match warp_type {
+            WarpTokenTypeInfo::Synthetic { .. } => {
+                if original > continuation_min_lovelace + recipient_output_cost {
+                    0
+                } else if original > continuation_min_lovelace {
+                    recipient_output_cost
+                        .saturating_sub(original.saturating_sub(continuation_min_lovelace))
+                } else {
+                    recipient_output_cost + continuation_min_lovelace.saturating_sub(original)
+                }
+            }
+            WarpTokenTypeInfo::Native => {
+                let recipient_actual = release_amount.max(min_lovelace);
+                let continuation_actual = original
+                    .saturating_sub(release_amount)
+                    .max(continuation_min_lovelace);
+                (continuation_actual + recipient_actual).saturating_sub(original)
+            }
+            WarpTokenTypeInfo::Collateral { .. } => {
+                (continuation_min_lovelace + recipient_output_cost).saturating_sub(original)
+            }
+        }
+    }
+
+    /// Compute the lovelace the relayer fronts (and cannot recover) to build the
+    /// delivery TX: the recipient-output minUTxO for warp mints/releases plus the
+    /// verified-message UTXO for script recipients. Pure function of
+    /// `(components, coins_per_byte)` so [`Self::build_complete_process_tx`] (which
+    /// actually funds these outputs) and [`Self::estimate_process_cost`] (which
+    /// must charge for them via the gas estimate) never diverge.
+    fn compute_payer_extra_lovelace(
+        components: &ProcessTxComponents,
+        coins_per_byte: u64,
+    ) -> PayerExtraLovelace {
+        let min_lovelace = Self::calculate_min_lovelace_sync(coins_per_byte, OutputType::SimpleAda);
+
+        let continuation_min_lovelace =
+            if let Some(ref cont_datum) = components.recipient_continuation_datum_cbor {
+                if components.warp_token_type.is_some() {
+                    let nft_asset_name_len = 13;
+                    Self::calculate_min_lovelace_sync(
+                        coins_per_byte,
+                        OutputType::WithTokenAndDatum {
+                            asset_name_len: nft_asset_name_len,
+                            datum_size: cont_datum.len(),
+                        },
+                    )
+                } else {
+                    min_lovelace
+                }
+            } else {
+                min_lovelace
+            };
+
+        let recipient_output_cost = match &components.warp_token_type {
+            Some(WarpTokenTypeInfo::Collateral { asset_name, .. })
+                if components.token_release_amount.is_some() =>
+            {
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithNativeToken {
+                        asset_name_len: asset_name.len() / 2,
+                    },
+                )
+            }
+            Some(WarpTokenTypeInfo::Synthetic { .. })
+                if components.token_release_amount.is_some() =>
+            {
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithNativeToken { asset_name_len: 0 },
+                )
+            }
+            _ => min_lovelace,
+        };
+
+        let warp_route_lovelace = components
+            .recipient_utxo
+            .as_ref()
+            .map(|u| u.lovelace())
+            .unwrap_or(0);
+
+        let payer_extra = match (&components.warp_token_type, components.token_release_amount) {
+            (Some(warp_type), Some(release_amount)) => Self::warp_payer_extra(
+                warp_type,
+                release_amount,
+                warp_route_lovelace,
+                continuation_min_lovelace,
+                recipient_output_cost,
+                min_lovelace,
+            ),
+            _ => 0,
+        };
+
+        let verified_message_min_lovelace =
+            if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
+                Self::calculate_min_lovelace_sync(
+                    coins_per_byte,
+                    OutputType::WithTokenAndDatum {
+                        asset_name_len: 32,
+                        datum_size: datum_cbor.len(),
+                    },
+                )
+            } else {
+                0
+            };
+
+        PayerExtraLovelace {
+            min_lovelace,
+            continuation_min_lovelace,
+            recipient_output_cost,
+            warp_route_lovelace,
+            payer_extra,
+            verified_message_min_lovelace,
+        }
     }
 
     /// Calculate minimum lovelace for a simple ADA-only output.
@@ -2196,149 +2360,31 @@ impl HyperlaneTxBuilder {
         // passes fee-only overrides with an empty ExUnits map).
         let cached_ex = self.cached_process_ex_units.lock().await.clone();
 
-        // Pre-fetch coins_per_utxo_byte once, then compute all min_lovelace values synchronously
+        // Pre-fetch coins_per_utxo_byte once, then compute every payer-funded
+        // minUTxO through the shared helper so the estimator
+        // (`estimate_process_cost`) charges for exactly what this builder funds.
         let coins_per_byte = self.get_coins_per_utxo_byte().await;
-        let min_lovelace = Self::calculate_min_lovelace_sync(coins_per_byte, OutputType::SimpleAda);
-
-        // Calculate the actual minUTxO for the warp route continuation output
-        let continuation_min_lovelace =
-            if let Some(ref cont_datum) = components.recipient_continuation_datum_cbor {
-                if components.warp_token_type.is_some() {
-                    let nft_asset_name_len = 13;
-                    Self::calculate_min_lovelace_sync(
-                        coins_per_byte,
-                        OutputType::WithTokenAndDatum {
-                            asset_name_len: nft_asset_name_len,
-                            datum_size: cont_datum.len(),
-                        },
-                    )
-                } else {
-                    min_lovelace
-                }
-            } else {
-                min_lovelace
-            };
-        info!(
-            "Continuation minUTxO: {} lovelace (datum_size={})",
-            continuation_min_lovelace,
-            components
-                .recipient_continuation_datum_cbor
-                .as_ref()
-                .map(|d| d.len())
-                .unwrap_or(0)
-        );
+        let extra = Self::compute_payer_extra_lovelace(components, coins_per_byte);
+        let min_lovelace = extra.min_lovelace;
+        let continuation_min_lovelace = extra.continuation_min_lovelace;
+        let recipient_output_cost = extra.recipient_output_cost;
+        let warp_route_lovelace = extra.warp_route_lovelace;
+        let payer_extra = extra.payer_extra;
+        let verified_message_min_lovelace = extra.verified_message_min_lovelace;
+        let total_payer_extra = extra.total();
 
         // Get payer address and UTXOs for fee payment
         let payer_address = payer.address_bech32(self.network_to_pallas());
         debug!("Payer address: {}", payer_address);
 
-        // Calculate min lovelace for the recipient output, accounting for native tokens
-        // when the warp route is collateral or synthetic (outputs include tokens).
-        let recipient_output_cost = match &components.warp_token_type {
-            Some(WarpTokenTypeInfo::Collateral { asset_name, .. })
-                if components.token_release_amount.is_some() =>
-            {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithNativeToken {
-                        asset_name_len: asset_name.len() / 2,
-                    },
-                )
-            }
-            Some(WarpTokenTypeInfo::Synthetic { .. })
-                if components.token_release_amount.is_some() =>
-            {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithNativeToken { asset_name_len: 0 },
-                )
-            }
-            _ => min_lovelace,
-        };
-
-        // warp_route_lovelace() helper - only called for WarpRoute where state_utxo is always Some
-        let warp_route_lovelace = components
-            .recipient_utxo
-            .as_ref()
-            .map(|u| u.lovelace())
-            .unwrap_or(0);
-
-        let payer_extra = match &components.warp_token_type {
-            Some(WarpTokenTypeInfo::Synthetic { .. })
-                if components.token_release_amount.is_some() =>
-            {
-                let original_lovelace = warp_route_lovelace;
-                let extra = if original_lovelace > continuation_min_lovelace + recipient_output_cost
-                {
-                    0
-                } else if original_lovelace > continuation_min_lovelace {
-                    recipient_output_cost
-                        .saturating_sub(original_lovelace.saturating_sub(continuation_min_lovelace))
-                } else {
-                    recipient_output_cost
-                        + continuation_min_lovelace.saturating_sub(original_lovelace)
-                };
-                info!(
-                    "Synthetic route: warp_route_lovelace={}, recipient_output_cost={}, payer covers extra={} lovelace",
-                    original_lovelace, recipient_output_cost, extra
-                );
-                extra
-            }
-            Some(WarpTokenTypeInfo::Native) if components.token_release_amount.is_some() => {
-                let original_lovelace = warp_route_lovelace;
-                let release_amount = components
-                    .token_release_amount
-                    .expect("guarded by is_some()");
-                // Recipient output must be at least min_lovelace
-                let recipient_actual = release_amount.max(min_lovelace);
-                let continuation_actual = original_lovelace
-                    .saturating_sub(release_amount)
-                    .max(continuation_min_lovelace);
-                let total_outputs = continuation_actual + recipient_actual;
-                let extra = total_outputs.saturating_sub(original_lovelace);
-                if extra > 0 {
-                    info!(
-                        "Native route shortfall: warp_lovelace={}, continuation_actual={}, recipient_actual={} (release={}), payer covers extra={} lovelace",
-                        original_lovelace, continuation_actual, recipient_actual, release_amount, extra
-                    );
-                }
-                extra
-            }
-            Some(WarpTokenTypeInfo::Collateral { .. })
-                if components.token_release_amount.is_some() =>
-            {
-                let original_lovelace = warp_route_lovelace;
-                let total_needed = continuation_min_lovelace + recipient_output_cost;
-                let extra = total_needed.saturating_sub(original_lovelace);
-                if extra > 0 {
-                    info!(
-                        "Collateral route shortfall: warp_route_lovelace={}, recipient_output_cost={}, payer covers extra={} lovelace",
-                        original_lovelace, recipient_output_cost, extra
-                    );
-                }
-                extra
-            }
-            _ => 0,
-        };
-
-        // Calculate verified message UTXO cost if applicable
-        let verified_message_min_lovelace =
-            if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithTokenAndDatum {
-                        asset_name_len: 32,
-                        datum_size: datum_cbor.len(),
-                    },
-                )
-            } else {
-                0
-            };
-
-        // Total extra the payer needs to cover:
-        // - payer_extra: shortfall from warp route for recipient output
-        // - verified_message: the verified message UTXO (GenericRecipient only)
-        let total_payer_extra = payer_extra + verified_message_min_lovelace;
+        info!(
+            "Payer-funded lovelace: continuation_minUTxO={}, recipient_output_cost={}, payer_extra={} (recipient minUTxO shortfall), verified_msg={}, total_extra={}",
+            continuation_min_lovelace,
+            recipient_output_cost,
+            payer_extra,
+            verified_message_min_lovelace,
+            total_payer_extra
+        );
 
         // Find payer UTXOs for fee payment (coin selection).
         // When chaining, use the change UTXO(s) from the previous TX.
@@ -3751,27 +3797,18 @@ impl HyperlaneTxBuilder {
             .evaluate_and_compute_fee(&signed_tx, components.total_ref_script_size, None)
             .await?;
 
-        // Add minUTxO costs for outputs the relayer creates (mirrors build_complete_process_tx)
+        // Charge for ALL lovelace the relayer fronts and cannot recover — the
+        // recipient-output minUTxO for warp mints/releases AND the verified-message
+        // UTXO for script recipients — not just the ledger fee. Uses the same
+        // helper as `build_complete_process_tx` so the estimate matches what the
+        // delivery TX actually spends.
         let coins_per_byte = self.get_coins_per_utxo_byte().await;
-
-        let verified_message_min =
-            if let Some(ref datum_cbor) = components.verified_message_datum_cbor {
-                Self::calculate_min_lovelace_sync(
-                    coins_per_byte,
-                    OutputType::WithTokenAndDatum {
-                        asset_name_len: 32,
-                        datum_size: datum_cbor.len(),
-                    },
-                )
-            } else {
-                0
-            };
-
-        let total = fee + verified_message_min;
+        let extra = Self::compute_payer_extra_lovelace(&components, coins_per_byte);
+        let total = fee + extra.total();
 
         info!(
-            "Estimated cost: fee={}, verified_msg={}, total={}",
-            fee, verified_message_min, total
+            "Estimated cost: fee={}, payer_extra={}, verified_msg={}, total={}",
+            fee, extra.payer_extra, extra.verified_message_min_lovelace, total
         );
 
         Ok(total)
@@ -5020,6 +5057,63 @@ pub struct MultisigMetadata {
 mod tests {
     use super::*;
     use crate::tx_builder::tx_encoding::encode_message_as_plutus_data;
+
+    // The recipient-output minUTxO the relayer fronts must be reflected in the gas
+    // estimate, else onChainFeeQuoting under-charges synthetic mints. This locks in
+    // the branch arithmetic that estimate_process_cost now depends on.
+    #[test]
+    fn warp_payer_extra_covers_unrecovered_min_utxo() {
+        let synth = WarpTokenTypeInfo::Synthetic {
+            minting_policy: "aa".into(),
+        };
+        let collat = WarpTokenTypeInfo::Collateral {
+            policy_id: "bb".into(),
+            asset_name: "cc".into(),
+        };
+        let (cont, recip, min) = (1_200_000u64, 1_300_000u64, 1_000_000u64);
+
+        // Synthetic MINT to a fresh recipient: the state UTxO carries no spare ADA,
+        // so the relayer fronts the full recipient minUTxO plus the continuation.
+        // This is exactly the cost the old estimator dropped (regression guard).
+        assert_eq!(
+            HyperlaneTxBuilder::warp_payer_extra(&synth, 0, 0, cont, recip, min),
+            recip + cont
+        );
+
+        // Synthetic mint whose state UTxO already covers continuation + recipient:
+        // nothing to front.
+        assert_eq!(
+            HyperlaneTxBuilder::warp_payer_extra(&synth, 0, cont + recip + 1, cont, recip, min),
+            0
+        );
+
+        // Synthetic mint whose state UTxO covers continuation but not the recipient
+        // output: front only the shortfall.
+        assert_eq!(
+            HyperlaneTxBuilder::warp_payer_extra(&synth, 0, cont + 300_000, cont, recip, min),
+            recip - 300_000
+        );
+
+        // Native release fully funded by the locked route ADA: no extra.
+        assert_eq!(
+            HyperlaneTxBuilder::warp_payer_extra(
+                &WarpTokenTypeInfo::Native,
+                5_000_000,
+                10_000_000,
+                cont,
+                recip,
+                min
+            ),
+            0
+        );
+
+        // Collateral release whose state UTxO cannot cover continuation + recipient:
+        // front the difference.
+        assert_eq!(
+            HyperlaneTxBuilder::warp_payer_extra(&collat, 1, 2_000_000, cont, recip, min),
+            (cont + recip) - 2_000_000
+        );
+    }
 
     // branch_root must reproduce the tree root a MerkleRoot proof was built
     // against — the same convention the Aiken merkleroot_ism verifies. This
