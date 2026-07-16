@@ -237,11 +237,11 @@ fn parse_optional_ism_config_cbor(data: &PlutusData) -> Option<IsmConfig> {
             };
             let script_hash = parse_28_byte_field(config.fields.first()?)?;
             let state_nft_policy = parse_28_byte_field(config.fields.get(1)?)?;
-            return Some(IsmConfig {
+            // None = Constr 1 (tag 122)
+            Some(IsmConfig {
                 script_hash,
                 state_nft_policy,
-            });
-            // None = Constr 1 (tag 122)
+            })
         }
         _ => None,
     }
