@@ -570,11 +570,15 @@ impl Mailbox for CardanoMailbox {
         message: &HyperlaneMessage,
         metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
-        // Cardano's min_fee_a protocol parameter: 44 lovelace per TX byte.
-        // The IGP oracle uses gasPrice=44 so that 1 gas unit = 1 byte = 44 lovelace.
-        // We return gas_limit in these units so the relayer's onChainFeeQuoting
-        // policy can compare it against the gas_amount from payForGas.
-        const LOVELACE_PER_GAS_UNIT: u64 = 44;
+        // Cardano gas is denominated 1:1 in lovelace: gas_price = 1, so a Hyperlane
+        // `gasLimit` reads directly as "lovelace of estimated Cardano delivery cost"
+        // (no opaque bytes/44 scaling). The origin IGP converts lovelace -> origin
+        // token via the ADA/origin-token exchange rate. The relayer's
+        // onChainFeeQuoting policy compares this gas_limit against the gas_amount
+        // from payForGas — both are lovelace, so they are directly commensurable.
+        let one_lovelace_price = FixedPointNumber::try_from(U256::from(1u64)).map_err(|e| {
+            ChainCommunicationError::from_other_str(&format!("Failed to convert gas price: {e}"))
+        })?;
 
         // Try dynamic estimation via Blockfrost TX evaluation
         if let Some(payer) = self.payer.as_ref() {
@@ -584,19 +588,13 @@ impl Mailbox for CardanoMailbox {
                 .await
             {
                 Ok(estimated_lovelace) => {
-                    let gas_units = estimated_lovelace / LOVELACE_PER_GAS_UNIT + 1;
                     info!(
-                        "Dynamic cost estimate for nonce {}: {} lovelace ({} gas units)",
-                        message.nonce, estimated_lovelace, gas_units
+                        "Dynamic cost estimate for nonce {}: {} lovelace",
+                        message.nonce, estimated_lovelace
                     );
                     return Ok(TxCostEstimate {
-                        gas_limit: U256::from(gas_units),
-                        gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT))
-                            .map_err(|e| {
-                                ChainCommunicationError::from_other_str(&format!(
-                                    "Failed to convert gas price: {e}"
-                                ))
-                            })?,
+                        gas_limit: U256::from(estimated_lovelace),
+                        gas_price: one_lovelace_price,
                         l2_gas_limit: None,
                     });
                 }
@@ -616,10 +614,12 @@ impl Mailbox for CardanoMailbox {
             }
         }
 
-        // Fallback: static estimate based on recipient type
+        // Fallback (Blockfrost evaluate unavailable): conservative static estimate,
+        // in lovelace, by recipient type.
         let recipient_bytes = message.recipient.as_bytes();
-        let estimated_fee_lovelace = if recipient_bytes.first() == Some(&0x01) {
-            // Warp routes: fee only (no verified_message UTXO)
+        let estimated_lovelace = if recipient_bytes.first() == Some(&0x01) {
+            // Warp routes: ledger fee + recipient token-output minUTxO the relayer
+            // fronts on a mint/release. 3 ADA conservatively covers both.
             3_000_000u64
         } else {
             // Script recipients: fee + verified_message UTXO.
@@ -629,16 +629,9 @@ impl Mailbox for CardanoMailbox {
             4_000_000 + 4_400 * body_len
         };
 
-        let gas_units = estimated_fee_lovelace / LOVELACE_PER_GAS_UNIT + 1;
         Ok(TxCostEstimate {
-            gas_limit: U256::from(gas_units),
-            gas_price: FixedPointNumber::try_from(U256::from(LOVELACE_PER_GAS_UNIT)).map_err(
-                |e| {
-                    ChainCommunicationError::from_other_str(&format!(
-                        "Failed to convert gas price: {e}"
-                    ))
-                },
-            )?,
+            gas_limit: U256::from(estimated_lovelace),
+            gas_price: one_lovelace_price,
             l2_gas_limit: None,
         })
     }
