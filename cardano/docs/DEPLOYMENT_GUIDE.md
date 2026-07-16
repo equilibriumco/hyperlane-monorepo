@@ -16,8 +16,14 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 10. [Verification & Troubleshooting](#verification--troubleshooting)
 11. [Complete Deployment Script](#complete-deployment-script)
 12. [Appendix: Script Parameterization](#appendix-script-parameterization)
-13. [Appendix: Warp Route Architecture](#appendix-warp-route-architecture)
-14. [Appendix: EVM-Side Hook Configuration (AggregationHook)](#appendix-evm-side-hook-configuration-aggregationhook)
+13. [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements)
+14. [Appendix: Warp Route Architecture](#appendix-warp-route-architecture)
+15. [Appendix: Sepolia (Ethereum Testnet) Deployment Guide](#appendix-sepolia-ethereum-testnet-deployment-guide)
+16. [Appendix: Gas Payment (IGP) Configuration & Enforcement](#appendix-gas-payment-igp-configuration--enforcement)
+17. [Appendix: EVM-Side Hook Configuration (AggregationHook)](#appendix-evm-side-hook-configuration-aggregationhook)
+
+> The design rationale for the gas model lives in
+> [`cardano/docs/design/igp-gas-model.md`](design/igp-gas-model.md).
 
 ---
 
@@ -361,11 +367,15 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --signing-key $CARDANO_SIGNING_KEY \
   --network $NETWORK \
   init igp \
-  --oracle "11155111:1000000000:7171:150000"
+  --oracle "11155111:1000000000:7171:211000"
 ```
 
-- `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`.
+- `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`. The `211000` overhead here targets a ~1.5× relayer margin for Sepolia delivery — see the **Gas Payment (IGP) Configuration & Enforcement** appendix for how the values are derived, the matching Sepolia-side oracle setup, and enabling relayer enforcement.
 - `--beneficiary`: address that can claim collected fees (defaults to the signing key's public key hash).
+
+> This only sets the **Cardano → Sepolia** oracle. The **Sepolia → Cardano**
+> oracle, per-route `destinationGas`, and relayer `onChainFeeQuoting` enforcement
+> are configured after warp routes exist — see the Gas Payment appendix.
 
 ---
 
@@ -611,6 +621,53 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 - **Security requirement**: only enable an override for a recipient whose constructor-0 `Init` is owner-gated (see above). Because the canonical config NFT is minted purely on a constructor-0 spend of the recipient script, a recipient that does not owner-gate `Init` lets an attacker install their own `IsmConfig` and bypass verification. Do not enable overrides for external recipients until this is audited.
 
 > **Note**: Warp routes use a different co-spending pattern internally (parameterized by `mailbox_policy_id`), but this is handled by the built-in warp route contracts. Custom recipients should always use the verified message NFT pattern above.
+
+### 6.3 Test the Greeting End-to-End
+
+This exercises the full inbound path for a **generic (non-warp) recipient**:
+Sepolia dispatch → relayer delivers a `verified_message_nft` to the greeting
+address → you consume it with `greeting receive` → the datum updates. Requires
+the Sepolia infrastructure (see the Sepolia appendix) and gas configured/enforced
+(see the Gas Payment appendix).
+
+```bash
+export ETH_RPC_URL=$SEPOLIA_RPC_URL
+
+# 1) Greeting script hash from deployment (recipients[].script_hash)
+GREETING_HASH=$(jq -r '.recipients[0].script_hash' deployments/$NETWORK/deployment_info.json)
+# Script recipients use the 0x02 prefix + 28-byte script hash:
+RECIPIENT="0x02000000$GREETING_HASH"
+
+# 2) Dispatch from Sepolia. The mailbox's required hook is a StaticProtocolFee
+#    needing --value 1; interchain gas is paid separately (next step).
+#    Body is arbitrary bytes; the greeting prepends "Hello, " to it. "Alice" = 0x416c696365
+MSG=$(cast send $SEPOLIA_MAILBOX "dispatch(uint32,bytes32,bytes)(bytes32)" \
+  2003 $RECIPIENT 0x416c696365 --value 1 --private-key $EVM_SIGNER_KEY --json \
+  | jq -r '.logs[] | select(.topics[0]=="0x788dbc1b7152732178210e7f4d9d010ef016f9eafbe66786bd7169f56e0c353a") | .topics[1]')
+echo "Message: $MSG"
+
+# 3) Pay the Sepolia IGP for delivery. Script recipients cost more than warp
+#    (they carry the whole message body in a verified-message UTXO):
+#    gasAmount ≈ 1.5 × (1_720_800 + 4_400 × body_bytes) lovelace. 200000 covers a short body.
+cast send $IGP "payForGas(bytes32,uint32,uint256,address)" \
+  $MSG 2003 200000 $EVM_SIGNER_ADDRESS --value <wei ≥ quote> --private-key $EVM_SIGNER_KEY
+
+# 4) Wait for the relayer to mint the verified_message_nft at the greeting address
+$CLI --network $NETWORK greeting list        # shows the pending message
+
+# 5) Consume it. MUST be signed by the greeting OWNER key (the --owner from
+#    init recipient; defaults to the init signer). Auto-discovers the message UTXO.
+$CLI --signing-key $GREETING_OWNER_KEY --network $NETWORK greeting receive
+
+# 6) Verify the datum updated
+$CLI --network $NETWORK greeting show
+# Expected: last_greeting = "Hello, Alice", greeting_count incremented
+```
+
+If `greeting receive` fails the on-chain owner check, you signed with the wrong
+key — see Troubleshooting. If it never appears in `greeting list`, the message
+was rejected for insufficient gas (check the relayer for
+`GasPaymentRequirementNotMet`) — top it up per the Gas Payment appendix.
 
 ---
 
@@ -917,8 +974,14 @@ $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   --warp-policy $WARP_POLICY \
   --domain $EVM_DOMAIN \
   --recipient "0x000000000000000000000000$EVM_SIGNER_ADDRESS" \
-  --amount 10000000
+  --amount 10000000 \
+  --gas-limit 0
 ```
+
+> **Gas:** `--gas-limit` bundles the IGP payment; with the Cardano overhead
+> configured (Gas Payment appendix), `--gas-limit 0` pays `0 + overhead` ≈ 1.5×
+> the delivery cost. **Without a gas payment the relayer rejects the message**
+> (`GasPaymentRequirementNotMet`) once `onChainFeeQuoting` enforcement is on.
 
 **Expected output:**
 
@@ -1116,8 +1179,12 @@ $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   --warp-policy $WARP_POLICY \
   --domain $EVM_DOMAIN \
   --recipient "0x000000000000000000000000$EVM_SIGNER_ADDRESS" \
-  --amount 5000000
+  --amount 5000000 \
+  --gas-limit 0
 ```
+
+> **Gas:** as above — `--gas-limit` bundles the IGP payment; omit it and the
+> relayer rejects the message under gas enforcement. See the Gas Payment appendix.
 
 **Expected output:**
 
@@ -3137,6 +3204,134 @@ cast send $EVM_WADA "transfer(address,uint256)" $EVM_COLLATERAL_WADA "5000000000
 2. Verify Cardano relayer is running and configured for Sepolia (domain 11155111) as origin
 3. Check relayer logs: `docker logs -f hyperlane-relayer 2>&1 | grep -E "(message|error)"`
 4. Verify Cardano ISM has the correct Sepolia validators configured
+
+---
+
+## Appendix: Gas Payment (IGP) Configuration & Enforcement
+
+This section covers pricing and enforcing interchain gas — configuring the IGP
+oracles on both chains, requiring senders to pay for delivery, and paying for a
+transfer. Full design rationale: **`cardano/docs/design/igp-gas-model.md`**.
+
+### The model in one paragraph
+
+The sender prepays, in the origin token, the cost the relayer spends delivering
+on the destination. Two knobs: **`gasOverhead`** (a per-destination constant =
+the recipient-*independent* base cost) and **`destinationGas` / `gasLimit`** (the
+recipient-*specific* cost — warp routes set `destinationGas`, other senders pass
+`gasLimit`). The relayer re-estimates the real cost at delivery and, under the
+`onChainFeeQuoting` policy, refuses to deliver unless the payment covers it —
+so a lowballed gas limit cannot slip through. Size overhead + destinationGas to
+~1.5× the real cost for a positive relayer margin, and keep `gasFraction = 1/1`
+(cover cost, never deliver at a loss).
+
+### Cardano → Sepolia (Cardano IGP charges ADA for EVM delivery)
+
+Destination is EVM, so gas is real. Set the oracle at `init igp` (Phase 3.5) or
+recalibrate later:
+
+```bash
+# gas_price = 1 gwei, exchange_rate = 7171 ADA/ETH, gas_overhead = 211000
+# (211000 ≈ 1.5 × the ~141k gas a Sepolia warp release costs)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  igp set-oracle \
+  --domain 11155111 \
+  --gas-price 1000000000 \
+  --exchange-rate 7171 \
+  --gas-overhead 211000
+
+# verify
+$CLI --network $NETWORK igp show
+```
+
+### Sepolia → Cardano (Sepolia IGP charges ETH for Cardano delivery)
+
+Cardano has no gas metering, so gas is denominated **1 lovelace = 1 gas unit**
+(`gasPrice = 1`); a `gasLimit` reads directly as lovelace of Cardano cost. The
+IGP + StorageGasOracle come from `DeploySepoliaIGP.s.sol` or the AggregationHook
+(see the next appendix). Configure them with `cast` (authoritative — the forge
+script's defaults are the older `gasPrice = 44` model):
+
+```bash
+export ETH_RPC_URL=$SEPOLIA_RPC_URL
+ORACLE=<StorageGasOracle address>     # from the IGP/AggregationHook deploy
+IGP=<InterchainGasPaymaster address>  # the IGP the warp aggregation hook pays
+
+# 1) Oracle for Cardano (domain 2003): gasPrice=1, exchangeRate=1.395e18
+#    (1.395e18 converts lovelace -> wei at ~7171 ADA/ETH; unchanged if the rate holds)
+cast send $ORACLE "setRemoteGasData((uint32,uint128,uint128))" \
+  "(2003,1395000000000000000,1)" --private-key $EVM_SIGNER_KEY
+
+# 2) IGP overhead for domain 2003 = 1.5 × the ~1.375M-lovelace base delivery fee
+cast send $IGP "setDestinationGasConfigs((uint32,(address,uint96))[])" \
+  "[(2003,($ORACLE,2062550))]" --private-key $EVM_SIGNER_KEY
+
+# 3) Per warp route: recipient-specific cost via destinationGas.
+#    A route paired with a Cardano SYNTHETIC route mints a fresh token UTXO
+#    (~1.2M lovelace minUTxO the relayer fronts) -> set 1.5 × that:
+cast send $SEPOLIA_WARP_ROUTE "setDestinationGas(uint32,uint256)" 2003 1800000 \
+  --private-key $EVM_SIGNER_KEY
+#    Routes paired with a Cardano NATIVE or COLLATERAL route: leave destinationGas
+#    at 0 — the released ADA / locked UTXO already funds the recipient minUTxO,
+#    so the overhead alone covers them.
+
+# verify the quote the sender will pay (wei)
+cast call $SEPOLIA_WARP_ROUTE "quoteGasPayment(uint32)(uint256)" 2003
+```
+
+> **Which IGP?** The warp routes pay the IGP inside their aggregation hook, which
+> may differ from a standalone `SEPOLIA_IGP`. The relayer must index the IGP that
+> is actually paid. Find it with
+> `cast call $ROUTE_HOOK "hooks(bytes)(address[])" 0x` (the non-MerkleTreeHook
+> entry) and point the relayer's `interchainGasPaymaster` at it.
+
+### Enforce payment in the relayer
+
+Add a single catch-all policy to the relayer config (`gasPaymentEnforcement`).
+It gates delivery on both directions, each estimating cost with its own
+estimator (Blockfrost TX-evaluation for Cardano, `eth_estimateGas` for Sepolia):
+
+```json
+"gasPaymentEnforcement": [
+  { "type": "onChainFeeQuoting", "gasFraction": "1/1" }
+]
+```
+
+`1/1` requires the payment to cover the full estimate. Restart the relayer
+(`docker compose up -d --force-recreate relayer`) after changing it.
+
+### Paying for gas when you transfer
+
+- **Cardano → Sepolia** (`warp transfer`): pass `--gas-limit` so the transfer
+  bundles the IGP payment. With the Cardano overhead at 211000, `--gas-limit 0`
+  already pays `0 + 211000` gas (≈1.5×). `mailbox dispatch` has **no** gas option
+  — pay separately (below).
+  ```bash
+  $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+    warp transfer --warp-policy $WARP_POLICY --domain 11155111 \
+    --recipient "0x000000000000000000000000$EVM_SIGNER_ADDRESS" \
+    --amount 5000000 --gas-limit 0
+  ```
+- **Sepolia → Cardano** (`transferRemote`): send `--value` ≥ the route's
+  `quoteGasPayment(2003)`; the route's aggregation hook forwards it to the IGP.
+  Undershooting reverts with `StaticAggregationHook: insufficient value`, and the
+  quote fluctuates, so pass a small margin.
+- **Top up / pay for an already-dispatched message:**
+  - Cardano-origin: `igp pay-for-gas --message-id <id> --destination 11155111 --gas-limit <n>`
+  - Sepolia-origin: `cast send $IGP "payForGas(bytes32,uint32,uint256,address)" <id> 2003 <gasAmount> $EVM_SIGNER_ADDRESS --value <wei> --private-key $EVM_SIGNER_KEY`
+
+### Test that enforcement works
+
+1. **Underpay → rejected.** Dispatch with too little gas (e.g. a Cardano→Sepolia
+   `mailbox dispatch` with no payment, or lower the overhead temporarily). The
+   relayer logs the message as `Retry(GasPaymentRequirementNotMet)` and does
+   **not** deliver.
+2. **Pay enough → delivered.** A normal `warp transfer --gas-limit …` (or a
+   `transferRemote` with sufficient `--value`) is delivered. Relayer logs show
+   `paid gas_amount ≥ estimate → ReadyToSubmit`.
+3. **Top up → delivered.** Take the rejected message from (1), top it up with
+   `pay-for-gas` / `payForGas`, and confirm the relayer now delivers it.
 
 ---
 
