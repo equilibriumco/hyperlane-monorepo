@@ -14,13 +14,13 @@ interface ITokenRouter {
 
 /**
  * @title DeployCardanoMerkleRootISM
- * @notice Deploys a MerkleRoot MultisigISM on Fuji for validating messages from
+ * @notice Deploys a MerkleRoot MultisigISM on Sepolia for validating messages from
  *         Cardano. Unlike the MessageId variant, the relayer supplies a merkle
  *         inclusion proof of the message against a validator-signed root, which
  *         is resilient to per-index checkpoint gaps.
  *
  * Required env:
- *   - EVM_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SIGNER_KEY: Private key for Sepolia transactions
  *   - CARDANO_VALIDATOR: Cardano validator address (20-byte EVM address)
  * Optional:
  *   - CARDANO_ISM_THRESHOLD (default 1)
@@ -36,7 +36,7 @@ contract DeployCardanoMerkleRootISM is Script {
             vm.envOr("CARDANO_ISM_THRESHOLD", uint256(DEFAULT_THRESHOLD))
         );
 
-        console.log("Deploying Cardano MerkleRoot MultisigISM on Fuji");
+        console.log("Deploying Cardano MerkleRoot MultisigISM on Sepolia");
         console.log("Deployer:", deployer);
         console.log("Cardano Validator:", cardanoValidator);
         console.log("Threshold:", threshold);
@@ -72,7 +72,7 @@ contract DeployCardanoMerkleRootISM is Script {
         console.log("ISM:", cardanoIsm);
     }
 
-    /// @notice Point the Fuji warp routes at the MerkleRoot ISM.
+    /// @notice Point the Sepolia warp routes at the MerkleRoot ISM.
     function setISMOnWarpRoutes() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");

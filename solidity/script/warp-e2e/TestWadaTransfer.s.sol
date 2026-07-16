@@ -10,7 +10,7 @@ import "./TestERC20.sol";
 
 /**
  * @title TestWadaTransfer
- * @notice Sends a test WADA transfer from Fuji to Cardano using the fixed collateral (scale=1)
+ * @notice Sends a test WADA transfer from Sepolia to Cardano using the fixed collateral (scale=1)
  */
 contract TestWadaTransfer is Script {
     // Cardano domain ID
@@ -22,7 +22,9 @@ contract TestWadaTransfer is Script {
         address wadaToken = vm.envAddress("EVM_WADA");
         address collateral = vm.envAddress("EVM_COLLATERAL_WADA");
 
-        console.log("=== Testing WADA Transfer (Fixed Scale=1) ===");
+        console.log(
+            "=== Testing WADA Transfer Sepolia -> Cardano (Fixed Scale=1) ==="
+        );
         console.log("Deployer:", deployer);
         console.log("WADA Token:", wadaToken);
         console.log("Collateral (scale=1):", collateral);

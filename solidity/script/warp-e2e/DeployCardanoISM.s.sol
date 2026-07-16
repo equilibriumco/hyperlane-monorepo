@@ -14,11 +14,11 @@ interface ITokenRouter {
 
 /**
  * @title DeployCardanoISM
- * @notice Deploys a MultisigISM on Fuji for validating messages from Cardano
+ * @notice Deploys a MultisigISM on Sepolia for validating messages from Cardano
  * @dev Creates a simple 1-of-1 multisig with the Cardano validator
  *
  * Required environment variables:
- *   - EVM_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SIGNER_KEY: Private key for Sepolia transactions
  *   - CARDANO_VALIDATOR: Cardano validator address (20-byte EVM address)
  *
  * Optional environment variables:
@@ -44,7 +44,7 @@ contract DeployCardanoISM is Script {
             vm.envOr("CARDANO_ISM_THRESHOLD", uint256(DEFAULT_THRESHOLD))
         );
 
-        console.log("Deploying Cardano MultisigISM on Fuji");
+        console.log("Deploying Cardano MultisigISM on Sepolia");
         console.log("Deployer:", deployer);
         console.log("Cardano Validator:", cardanoValidator);
         console.log("Threshold:", threshold);
@@ -74,7 +74,7 @@ contract DeployCardanoISM is Script {
     }
 
     /**
-     * @notice Set the new ISM on all Fuji warp routes
+     * @notice Set the new ISM on all Sepolia warp routes
      */
     function setISMOnWarpRoutes() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
@@ -87,7 +87,7 @@ contract DeployCardanoISM is Script {
         address syntheticWAda = vm.envAddress("EVM_SYNTHETIC_WADA");
         address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
 
-        console.log("Setting Cardano ISM on Fuji warp routes");
+        console.log("Setting Cardano ISM on Sepolia warp routes");
         console.log("ISM:", cardanoIsm);
 
         vm.startBroadcast(deployerPrivateKey);
@@ -114,7 +114,7 @@ contract DeployCardanoISM is Script {
     }
 
     /**
-     * @notice Deploy a TestRecipient on Fuji and set the Cardano ISM
+     * @notice Deploy a TestRecipient on Sepolia and set the Cardano ISM
      */
     function deployTestRecipient() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
@@ -122,7 +122,7 @@ contract DeployCardanoISM is Script {
 
         address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
 
-        console.log("Deploying TestRecipient on Fuji");
+        console.log("Deploying TestRecipient on Sepolia");
         console.log("Deployer:", deployer);
         console.log("Cardano ISM:", cardanoIsm);
 

@@ -11,23 +11,23 @@ import {TestERC20} from "./TestERC20.sol";
 import {TypeCasts} from "contracts/libs/TypeCasts.sol";
 
 /**
- * @title DeployFujiWarp
- * @notice Deploys all warp route contracts on Fuji for E2E testing with Cardano
+ * @title DeploySepoliaWarp
+ * @notice Deploys all warp route contracts on Sepolia for E2E testing with Cardano
  * @dev Deploys contracts for all 7 test scenarios:
- *      1. Cardano Collateral <-> Fuji Synthetic (CTEST -> wCTEST)
- *      2. Fuji Collateral <-> Cardano Synthetic (FTEST -> wFTEST)
- *      3. Cardano Native <-> Fuji Synthetic (ADA -> wADA)
- *      4. Fuji Native <-> Cardano Synthetic (AVAX -> wAVAX)
- *      5. Cardano Native <-> Fuji Collateral (ADA -> WADA ERC20)
- *      6. Fuji Native <-> Cardano Collateral (AVAX -> WAVAX token)
+ *      1. Cardano Collateral <-> Sepolia Synthetic (CTEST -> wCTEST)
+ *      2. Sepolia Collateral <-> Cardano Synthetic (FTEST -> wFTEST)
+ *      3. Cardano Native <-> Sepolia Synthetic (ADA -> wADA)
+ *      4. Sepolia Native <-> Cardano Synthetic (ETH -> wETH)
+ *      5. Cardano Native <-> Sepolia Collateral (ADA -> WADA ERC20)
+ *      6. Sepolia Native <-> Cardano Collateral (ETH -> WETH token)
  *      7. Collateral <-> Collateral (TokenA <-> TokenB)
  *
  * Required environment variables:
- *   - EVM_SIGNER_KEY: Private key for Fuji transactions
+ *   - EVM_SIGNER_KEY: Private key for Sepolia transactions
  *
  * Optional environment variables for token customization:
  *   Test ERC20 Tokens:
- *   - FTEST_NAME: Name for FTEST token (default: "Fuji Test Token")
+ *   - FTEST_NAME: Name for FTEST token (default: "Sepolia Test Token")
  *   - FTEST_SYMBOL: Symbol for FTEST token (default: "FTEST")
  *   - FTEST_DECIMALS: Decimals for FTEST token (default: 18)
  *   - WADA_NAME: Name for WADA token (default: "Wrapped ADA")
@@ -45,7 +45,7 @@ import {TypeCasts} from "contracts/libs/TypeCasts.sol";
  *   - SYNTHETIC_WADA_SYMBOL: Symbol for wADA synthetic (default: "wADA")
  *   - SYNTHETIC_WADA_DECIMALS: Decimals for wADA synthetic (default: 6)
  */
-contract DeployFujiWarp is Script {
+contract DeploySepoliaWarp is Script {
     using TypeCasts for address;
 
     // EVM Hyperlane infrastructure (read from environment)
@@ -69,20 +69,20 @@ contract DeployFujiWarp is Script {
 
     struct DeployedContracts {
         // Test tokens
-        address ftest; // Fuji test token (for scenario 2 collateral)
+        address ftest; // Sepolia test token (for scenario 2 collateral)
         address wada; // Wrapped ADA ERC20 (for scenario 5 collateral)
         address tokenA; // Token A for collateral-collateral test
         // Synthetic warp routes
         address syntheticWCtest; // Scenario 1: receives CTEST, mints wCTEST
         address syntheticWAda; // Scenario 3: receives ADA, mints wADA
-        address syntheticWAvax; // Scenario 4: for Cardano to receive wAVAX
+        address syntheticWEth; // Scenario 4: for Cardano to receive wETH
         address syntheticWGuitkn; // Test 2: receives GUITKN from Cardano collateral, mints wGUITKN
         // Collateral warp routes
         address collateralFtest; // Scenario 2: locks FTEST
         address collateralWada; // Scenario 5: releases pre-deposited WADA
         address collateralTokenA; // Scenario 7: collateral-collateral TokenA side
         // Native warp route
-        address nativeAvax; // Scenario 4 & 6: locks AVAX
+        address nativeEth; // Scenario 4 & 6: locks ETH
     }
 
     // Token configuration struct
@@ -96,14 +96,14 @@ contract DeployFujiWarp is Script {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        console.log("Deploying Fuji Warp Routes");
+        console.log("Deploying Sepolia Warp Routes");
         console.log("Deployer:", deployer);
         console.log("Mailbox:", EVM_MAILBOX);
         console.log("ISM:", EVM_ISM);
 
         // Read token configurations from environment (with defaults)
         TokenConfig memory ftestConfig = TokenConfig({
-            name: vm.envOr("FTEST_NAME", string("Fuji Test Token")),
+            name: vm.envOr("FTEST_NAME", string("Sepolia Test Token")),
             symbol: vm.envOr("FTEST_SYMBOL", string("FTEST")),
             decimals: uint8(vm.envOr("FTEST_DECIMALS", uint256(18)))
         });
@@ -161,7 +161,7 @@ contract DeployFujiWarp is Script {
         // ========== Deploy Test ERC20 Tokens ==========
         console.log("\n=== Deploying Test ERC20 Tokens ===");
 
-        // FTEST - Fuji test token for collateral scenario 2
+        // FTEST - Sepolia test token for collateral scenario 2
         contracts.ftest = address(
             new TestERC20(
                 ftestConfig.name,
@@ -236,9 +236,9 @@ contract DeployFujiWarp is Script {
         );
         console.log("Synthetic wGUITKN deployed:", contracts.syntheticWGuitkn);
 
-        // Scenario 4: Synthetic wAVAX (for Cardano to receive)
+        // Scenario 4: Synthetic wETH (for Cardano to receive)
         // This is deployed on Cardano side, but we track it here for router enrollment
-        // Actually this should be a native route on Fuji that locks AVAX
+        // Actually this should be a native route on Sepolia that locks ETH
         // The synthetic is on Cardano
 
         // ========== Deploy Collateral Warp Routes ==========
@@ -271,12 +271,12 @@ contract DeployFujiWarp is Script {
         // ========== Deploy Native Warp Route ==========
         console.log("\n=== Deploying Native Warp Route ===");
 
-        // Scenarios 4 & 6: Native AVAX (locks AVAX)
-        contracts.nativeAvax = _deployNative(
-            SCALE_18_TO_18, // AVAX has 18 decimals
+        // Scenarios 4 & 6: Native ETH (locks ETH)
+        contracts.nativeEth = _deployNative(
+            SCALE_18_TO_18, // ETH has 18 decimals
             deployer
         );
-        console.log("Native AVAX deployed:", contracts.nativeAvax);
+        console.log("Native ETH deployed:", contracts.nativeEth);
 
         vm.stopBroadcast();
 
@@ -295,7 +295,7 @@ contract DeployFujiWarp is Script {
         console.log("  WADA (scenario 5):", contracts.collateralWada);
         console.log("  TokenA (scenario 7):", contracts.collateralTokenA);
         console.log("\nNative Warp Route:");
-        console.log("  AVAX (scenarios 4,6):", contracts.nativeAvax);
+        console.log("  ETH (scenarios 4,6):", contracts.nativeEth);
 
         // Output in a format easy to parse for scripts
         console.log("\n=== Environment Variables ===");
@@ -341,7 +341,7 @@ contract DeployFujiWarp is Script {
             )
         );
         console.log(
-            string.concat("EVM_NATIVE_AVAX=", vm.toString(contracts.nativeAvax))
+            string.concat("EVM_NATIVE_ETH=", vm.toString(contracts.nativeEth))
         );
     }
 
@@ -408,7 +408,7 @@ contract DeployFujiWarp is Script {
         address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
         address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
         address collateralTokenA = vm.envAddress("EVM_COLLATERAL_TOKENA");
-        address nativeAvax = vm.envAddress("EVM_NATIVE_AVAX");
+        address nativeEth = vm.envAddress("EVM_NATIVE_ETH");
 
         // Read Cardano router addresses (as bytes32 with 0x00000000 prefix)
         bytes32 cardanoCollateralCtest = vm.envBytes32(
@@ -418,9 +418,9 @@ contract DeployFujiWarp is Script {
             "CARDANO_SYNTHETIC_FTEST"
         );
         bytes32 cardanoNativeAda = vm.envBytes32("CARDANO_NATIVE_ADA");
-        bytes32 cardanoSyntheticAvax = vm.envBytes32("CARDANO_SYNTHETIC_AVAX");
-        bytes32 cardanoCollateralWavax = vm.envBytes32(
-            "CARDANO_COLLATERAL_WAVAX"
+        bytes32 cardanoSyntheticEth = vm.envBytes32("CARDANO_SYNTHETIC_ETH");
+        bytes32 cardanoCollateralWeth = vm.envBytes32(
+            "CARDANO_COLLATERAL_WETH"
         );
         bytes32 cardanoCollateralTokenB = vm.envBytes32(
             "CARDANO_COLLATERAL_TOKENB"
@@ -428,7 +428,7 @@ contract DeployFujiWarp is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        console.log("Enrolling remote routers on Fuji warp routes...");
+        console.log("Enrolling remote routers on Sepolia warp routes...");
 
         // Scenario 1: wCTEST synthetic -> Cardano collateral CTEST
         HypERC20(syntheticWCtest).enrollRemoteRouter(
@@ -455,14 +455,12 @@ contract DeployFujiWarp is Script {
         );
         console.log("Enrolled Cardano native ADA as router for wADA synthetic");
 
-        // Scenario 4: AVAX native -> Cardano synthetic AVAX
-        HypNative(payable(nativeAvax)).enrollRemoteRouter(
+        // Scenario 4: ETH native -> Cardano synthetic ETH
+        HypNative(payable(nativeEth)).enrollRemoteRouter(
             CARDANO_DOMAIN,
-            cardanoSyntheticAvax
+            cardanoSyntheticEth
         );
-        console.log(
-            "Enrolled Cardano synthetic AVAX as router for AVAX native"
-        );
+        console.log("Enrolled Cardano synthetic ETH as router for ETH native");
 
         // Scenario 5: WADA collateral -> Cardano native ADA
         HypERC20Collateral(collateralWada).enrollRemoteRouter(
@@ -473,9 +471,9 @@ contract DeployFujiWarp is Script {
             "Enrolled Cardano native ADA as router for WADA collateral"
         );
 
-        // Scenario 6: AVAX native -> Cardano collateral WAVAX
-        // Note: Native AVAX is already enrolled for scenario 4, we need separate deployment
-        // For now, reuse the same native contract (both scenarios use same AVAX lock mechanism)
+        // Scenario 6: ETH native -> Cardano collateral WETH
+        // Note: Native ETH is already enrolled for scenario 4, we need separate deployment
+        // For now, reuse the same native contract (both scenarios use same ETH lock mechanism)
 
         // Scenario 7: TokenA collateral -> Cardano collateral TokenB
         HypERC20Collateral(collateralTokenA).enrollRemoteRouter(
@@ -593,9 +591,9 @@ contract DeployFujiWarp is Script {
     }
 
     /**
-     * @notice Enroll routers for Test 2: Cardano Collateral <-> Fuji Synthetic wGUITKN
+     * @notice Enroll routers for Test 2: Cardano Collateral <-> Sepolia Synthetic wGUITKN
      * @dev Requires env vars:
-     *      - FUJI_SYNTHETIC_WGUITKN: Fuji wGUITKN synthetic address
+     *      - EVM_SYNTHETIC_WGUITKN: Sepolia wGUITKN synthetic address
      *      - CARDANO_COLLATERAL_GUITKN: Cardano collateral address (H256 format)
      */
     function enrollTest2Router() external {
@@ -607,7 +605,7 @@ contract DeployFujiWarp is Script {
         );
 
         console.log("Enrolling Test 2 routers:");
-        console.log("  Fuji wGUITKN Synthetic:", syntheticWGuitkn);
+        console.log("  Sepolia wGUITKN Synthetic:", syntheticWGuitkn);
         console.log("  Cardano Collateral GUITKN:");
         console.logBytes32(cardanoCollateralGuitkn);
 
@@ -626,9 +624,9 @@ contract DeployFujiWarp is Script {
     }
 
     /**
-     * @notice Enroll routers for Test 3: Cardano Synthetic <-> Fuji Collateral GUITKN
+     * @notice Enroll routers for Test 3: Cardano Synthetic <-> Sepolia Collateral GUITKN
      * @dev Requires env vars:
-     *      - FUJI_COLLATERAL_FTEST: Fuji GUITKN collateral address
+     *      - EVM_COLLATERAL_FTEST: Sepolia GUITKN collateral address
      *      - CARDANO_SYNTHETIC: Cardano synthetic address (H256 format)
      */
     function enrollTest3Router() external {
@@ -638,7 +636,7 @@ contract DeployFujiWarp is Script {
         bytes32 cardanoSynthetic = vm.envBytes32("CARDANO_SYNTHETIC");
 
         console.log("Enrolling Test 3 routers:");
-        console.log("  Fuji GUITKN Collateral:", collateralFtest);
+        console.log("  Sepolia GUITKN Collateral:", collateralFtest);
         console.log("  Cardano Synthetic:");
         console.logBytes32(cardanoSynthetic);
 
