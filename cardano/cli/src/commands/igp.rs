@@ -1592,7 +1592,7 @@ mod tests {
                     "list": [
                         {
                             "list": [
-                                {"int": 43113},
+                                {"int": 11155111},
                                 {
                                     "constructor": 0,
                                     "fields": [
@@ -1613,7 +1613,7 @@ mod tests {
         assert_eq!(hex::encode(&owner), "aabbccdd");
         assert_eq!(hex::encode(&beneficiary), "11223344");
         assert_eq!(gas_oracles.len(), 1);
-        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000, 500000));
+        assert_eq!(gas_oracles[0], (11155111, 25000000000, 1000000, 500000));
     }
 
     #[test]
@@ -1627,7 +1627,7 @@ mod tests {
                     "list": [
                         {
                             "list": [
-                                {"int": 43113},
+                                {"int": 11155111},
                                 {
                                     "constructor": 0,
                                     "fields": [
@@ -1659,7 +1659,7 @@ mod tests {
         let (_, _, gas_oracles) = parse_igp_datum(&datum).unwrap();
 
         assert_eq!(gas_oracles.len(), 2);
-        assert_eq!(gas_oracles[0], (43113, 25000000000, 1000000, 0));
+        assert_eq!(gas_oracles[0], (11155111, 25000000000, 1000000, 0));
         assert_eq!(gas_oracles[1], (11155111, 30000000000, 1200000, 100000));
     }
 
@@ -1827,7 +1827,7 @@ mod tests {
     // Tests for build_set_gas_oracle_redeemer
     #[test]
     fn test_build_set_gas_oracle_redeemer() {
-        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000, 500_000);
+        let redeemer = build_set_gas_oracle_redeemer(11155111, 25_000_000_000, 1_000_000, 500_000);
 
         match &redeemer {
             PlutusData::Constr(c) => {
@@ -1858,7 +1858,7 @@ mod tests {
 
     #[test]
     fn test_build_set_gas_oracle_redeemer_encodes_correctly() {
-        let redeemer = build_set_gas_oracle_redeemer(43113, 25_000_000_000, 1_000_000, 0);
+        let redeemer = build_set_gas_oracle_redeemer(11155111, 25_000_000_000, 1_000_000, 0);
         let cbor = pallas_codec::minicbor::to_vec(&redeemer).unwrap();
 
         assert!(!cbor.is_empty());
@@ -1870,7 +1870,7 @@ mod tests {
     #[test]
     fn test_build_pay_for_gas_redeemer() {
         let message_id = [0u8; 32];
-        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000);
+        let redeemer = build_pay_for_gas_redeemer(&message_id, 11155111, 200_000);
 
         // Verify it's a Constr 0 (tag 121)
         match &redeemer {
@@ -1893,7 +1893,7 @@ mod tests {
         let message_id =
             hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
                 .unwrap();
-        let redeemer = build_pay_for_gas_redeemer(&message_id, 43113, 200_000);
+        let redeemer = build_pay_for_gas_redeemer(&message_id, 11155111, 200_000);
         let cbor = pallas_codec::minicbor::to_vec(&redeemer).unwrap();
 
         assert!(!cbor.is_empty());

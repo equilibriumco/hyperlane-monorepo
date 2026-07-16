@@ -46,7 +46,7 @@ pub struct IsmArgs {
 enum IsmCommands {
     /// Set validators for a domain
     SetValidators {
-        /// Origin domain ID (e.g., 43113 for Fuji)
+        /// Origin domain ID (e.g., 11155111 for Sepolia)
         #[arg(long)]
         domain: u32,
 

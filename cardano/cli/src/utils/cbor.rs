@@ -1258,7 +1258,7 @@ mod tests {
     fn test_build_igp_datum_with_one_oracle() {
         let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
         let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
-        let oracles = vec![(43113u32, 25000000000u64, 1000000u64, 500000u64)];
+        let oracles = vec![(11155111u32, 25000000000u64, 1000000u64, 500000u64)];
 
         let result = build_igp_datum(owner, beneficiary, &oracles).unwrap();
 
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(oracles_list.len(), 1);
 
         let oracle_tuple = oracles_list[0]["list"].as_array().unwrap();
-        assert_eq!(oracle_tuple[0]["int"], 43113);
+        assert_eq!(oracle_tuple[0]["int"], 11155111);
 
         // GasOracleConfig is Constr 0 [gas_price, exchange_rate, gas_overhead]
         let config = &oracle_tuple[1];
@@ -1286,7 +1286,7 @@ mod tests {
         let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
         let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
         let oracles = vec![
-            (43113u32, 25000000000u64, 1000000u64, 0u64),
+            (11155111u32, 25000000000u64, 1000000u64, 0u64),
             (11155111u32, 30000000000u64, 1200000u64, 100000u64),
         ];
 
@@ -1298,8 +1298,8 @@ mod tests {
         let oracles_list = fields[2]["list"].as_array().unwrap();
         assert_eq!(oracles_list.len(), 2);
 
-        let fuji = oracles_list[0]["list"].as_array().unwrap();
-        assert_eq!(fuji[0]["int"], 43113);
+        let sepolia = oracles_list[0]["list"].as_array().unwrap();
+        assert_eq!(sepolia[0]["int"], 11155111);
 
         let sepolia = oracles_list[1]["list"].as_array().unwrap();
         assert_eq!(sepolia[0]["int"], 11155111);

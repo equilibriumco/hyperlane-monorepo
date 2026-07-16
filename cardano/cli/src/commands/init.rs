@@ -51,7 +51,7 @@ enum InitCommands {
     /// ISM instance of that flavour and records it under `alt_isms` in
     /// deployment_info.json, so both ISM flavours can be live at once.
     Ism {
-        /// Origin domain IDs (comma-separated, e.g., "43113,421614")
+        /// Origin domain IDs (comma-separated, e.g., "11155111,421614")
         #[arg(long)]
         domains: String,
 
@@ -1892,14 +1892,14 @@ mod tests {
 
     #[test]
     fn test_parse_oracle_config_valid() {
-        let result = parse_oracle_config("43113:25000000000:1000000:500000").unwrap();
-        assert_eq!(result, (43113, 25000000000, 1000000, 500000));
+        let result = parse_oracle_config("11155111:25000000000:1000000:500000").unwrap();
+        assert_eq!(result, (11155111, 25000000000, 1000000, 500000));
     }
 
     #[test]
     fn test_parse_oracle_config_with_whitespace() {
-        let result = parse_oracle_config(" 43113 : 25000000000 : 1000000 : 0 ").unwrap();
-        assert_eq!(result, (43113, 25000000000, 1000000, 0));
+        let result = parse_oracle_config(" 11155111 : 25000000000 : 1000000 : 0 ").unwrap();
+        assert_eq!(result, (11155111, 25000000000, 1000000, 0));
     }
 
     #[test]
@@ -1910,7 +1910,7 @@ mod tests {
 
     #[test]
     fn test_parse_oracle_config_too_few_parts() {
-        let result = parse_oracle_config("43113:25000000000:1000000");
+        let result = parse_oracle_config("11155111:25000000000:1000000");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1920,20 +1920,20 @@ mod tests {
 
     #[test]
     fn test_parse_oracle_config_too_many_parts() {
-        let result = parse_oracle_config("43113:25000000000:1000000:500000:extra");
+        let result = parse_oracle_config("11155111:25000000000:1000000:500000:extra");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_oracle_config_invalid_domain() {
-        let result = parse_oracle_config("fuji:25000000000:1000000:0");
+        let result = parse_oracle_config("sepolia:25000000000:1000000:0");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid domain"));
     }
 
     #[test]
     fn test_parse_oracle_config_invalid_gas_price() {
-        let result = parse_oracle_config("43113:not_a_number:1000000:0");
+        let result = parse_oracle_config("11155111:not_a_number:1000000:0");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1944,7 +1944,7 @@ mod tests {
     #[test]
     fn test_parse_oracle_config_negative_value() {
         // Negative values can't parse as u64
-        let result = parse_oracle_config("43113:-100:1000000:0");
+        let result = parse_oracle_config("11155111:-100:1000000:0");
         assert!(result.is_err());
     }
 

@@ -24,7 +24,7 @@ pub struct MailboxArgs {
 enum MailboxCommands {
     /// Dispatch a message to a remote chain
     Dispatch {
-        /// Destination domain ID (e.g., 43113 for Avalanche Fuji)
+        /// Destination domain ID (e.g., 11155111 for Ethereum Sepolia)
         #[arg(long)]
         destination: u32,
 
