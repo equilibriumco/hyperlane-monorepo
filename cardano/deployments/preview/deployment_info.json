@@ -190,6 +190,26 @@
       },
       "tokenPolicy": "4485fc4c31c80e7449dab7464bdcd19247ce29d74e1fe28de1044650",
       "tokenAsset": "4354455354"
+    },
+    {
+      "warpType": "synthetic",
+      "decimals": 6,
+      "owner": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89",
+      "scriptHash": "e6ee86718d557a9abcefbce1860e61f140c215c465691a58688b1085",
+      "address": "addr_test1wrnwapn3342h4x4ua77wrpswv8c5pss4c3jkjxjcdz93ppglv8h5j",
+      "nftPolicy": "aca3ac1d348f06223b5e19104879f14d5f181e9f814c4a4ebbc74642",
+      "initTxHash": "756203b121bc522866fc3517e3237e35f66d8fb77e397655a6b2f2d464c89366",
+      "referenceScriptUtxo": {
+        "txHash": "756203b121bc522866fc3517e3237e35f66d8fb77e397655a6b2f2d464c89366",
+        "outputIndex": 1,
+        "lovelace": 29000000
+      },
+      "mintingPolicy": "a714c3268e1daef0b19039f68b49579bddd7f9002986ba9db339b4f3",
+      "mintingRefScriptUtxo": {
+        "txHash": "ac3b4976fe43766d2217744ee916c0a723ed7a71115a3d7c0ceba2472d3a3469",
+        "outputIndex": 0,
+        "lovelace": 12000000
+      }
     }
   ],
   "recipients": [
