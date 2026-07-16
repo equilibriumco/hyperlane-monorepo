@@ -88,17 +88,8 @@
   "log": { "level": "debug", "format": "pretty" },
   "gasPaymentEnforcement": [
     {
-      "type": "minimum",
-      "payment": "1000000",
-      "matchingList": [{ "origindomain": [2003] }]
-    },
-    {
       "type": "onChainFeeQuoting",
-      "gasFraction": "1/2",
-      "matchingList": [{ "origindomain": [11155111] }]
-    },
-    {
-      "type": "none"
+      "gasFraction": "1/2"
     }
   ],
   "metrics": {
