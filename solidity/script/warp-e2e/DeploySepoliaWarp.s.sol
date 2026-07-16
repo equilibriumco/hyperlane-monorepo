@@ -352,7 +352,8 @@ contract DeploySepoliaWarp is Script {
         string memory symbol,
         address owner
     ) internal returns (address) {
-        HypERC20 synthetic = new HypERC20(decimals, scale, EVM_MAILBOX);
+        // scale is the old single multiplier -> scaleNumerator = scale, scaleDenominator = 1
+        HypERC20 synthetic = new HypERC20(decimals, scale, 1, EVM_MAILBOX);
         synthetic.initialize(
             0, // no initial supply (minted on receive)
             name,
@@ -371,7 +372,8 @@ contract DeploySepoliaWarp is Script {
     ) internal returns (address) {
         HypERC20Collateral collateral = new HypERC20Collateral(
             token,
-            scale,
+            scale, // scaleNumerator
+            1, // scaleDenominator
             EVM_MAILBOX
         );
         collateral.initialize(
@@ -386,7 +388,7 @@ contract DeploySepoliaWarp is Script {
         uint256 scale,
         address owner
     ) internal returns (address) {
-        HypNative native = new HypNative(scale, EVM_MAILBOX);
+        HypNative native = new HypNative(scale, 1, EVM_MAILBOX);
         native.initialize(
             address(0), // no hook
             EVM_ISM, // ISM
