@@ -4,6 +4,7 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 
 ## Table of Contents
 
+0. **[Deployment Roadmap (read this first)](#deployment-roadmap-read-this-first)** — the phases below are **not** in dependency order
 1. [Prerequisites](#prerequisites)
 2. [Contract Overview & Dependencies](#contract-overview--dependencies)
 3. [Phase 1: Build Contracts](#phase-1-build-contracts)
@@ -13,17 +14,46 @@ This comprehensive guide explains how to deploy all Hyperlane contracts on Carda
 7. [Phase 5: Configure Contracts](#phase-5-configure-contracts)
 8. [Phase 6: Deploy Recipients (Optional)](#phase-6-deploy-recipients-optional)
 9. [Phase 7: Deploy Warp Routes](#phase-7-deploy-warp-routes)
-10. [Verification & Troubleshooting](#verification--troubleshooting)
-11. [Complete Deployment Script](#complete-deployment-script)
-12. [Appendix: Script Parameterization](#appendix-script-parameterization)
-13. [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements)
-14. [Appendix: Warp Route Architecture](#appendix-warp-route-architecture)
-15. [Appendix: Sepolia (Ethereum Testnet) Deployment Guide](#appendix-sepolia-ethereum-testnet-deployment-guide)
-16. [Appendix: Gas Payment (IGP) Configuration & Enforcement](#appendix-gas-payment-igp-configuration--enforcement)
-17. [Appendix: EVM-Side Hook Configuration (AggregationHook)](#appendix-evm-side-hook-configuration-aggregationhook)
+10. [Phase 8: Start the Agents](#phase-8-start-the-agents)
+11. [Verification & Troubleshooting](#verification--troubleshooting)
+12. [Complete Deployment Script](#complete-deployment-script)
+13. [Appendix: Script Parameterization](#appendix-script-parameterization)
+14. [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements)
+15. [Appendix: Warp Route Architecture](#appendix-warp-route-architecture)
+16. [Appendix: Sepolia (Ethereum Testnet) Deployment Guide](#appendix-sepolia-ethereum-testnet-deployment-guide)
+17. [Appendix: Gas Payment (IGP) Configuration & Enforcement](#appendix-gas-payment-igp-configuration--enforcement)
+18. [Appendix: EVM-Side Hook Configuration (AggregationHook)](#appendix-evm-side-hook-configuration-aggregationhook)
 
 > The design rationale for the gas model lives in
 > [`cardano/docs/design/igp-gas-model.md`](design/igp-gas-model.md).
+
+---
+
+## Deployment Roadmap (read this first)
+
+**The phases below are not in dependency order — do not just read top-to-bottom.**
+A working deployment spans two chains plus the off-chain agents, so the Sepolia
+and gas sections (kept in appendices to avoid interleaving two chains) have to be
+done *in the middle*, not at the end. Follow **this** order:
+
+| # | Step | Where |
+|---|------|-------|
+| 1 | Install tools, build contracts + CLI | [Prerequisites](#prerequisites), [Phase 1](#phase-1-build-contracts) |
+| 2 | Extract validators | [Phase 2](#phase-2-extract-validators) |
+| 3 | Init Cardano core (mailbox, ISM, VA) + IGP | [Phase 3](#phase-3-initialize-core-contracts) |
+| 4 | Deploy reference scripts | [Phase 4](#phase-4-deploy-reference-scripts) |
+| 5 | Configure mailbox ISM + validators/threshold | [Phase 5](#phase-5-configure-contracts) |
+| 6 | **Deploy the Sepolia side** (ISM, IGP/hook, test ERC20, warp routes) — you need its addresses for steps 8–9 | [Sepolia appendix](#appendix-sepolia-ethereum-testnet-deployment-guide) |
+| 7 | Deploy Cardano recipients (greeting) + warp routes | [Phase 6](#phase-6-deploy-recipients-optional), [Phase 7](#phase-7-deploy-warp-routes) |
+| 8 | **Enroll routers on BOTH sides** (Cardano→Sepolia *and* Sepolia→Cardano) | [7.5](#75-enroll-remote-routers) + Sepolia appendix Step 6 |
+| 9 | **Configure gas** (both oracles, per-route destinationGas, relayer enforcement) | [Gas Payment appendix](#appendix-gas-payment-igp-configuration--enforcement) |
+| 10 | **Start the agents** (relayer + validator) — nothing is delivered without them | [Phase 8](#phase-8-start-the-agents) |
+| 11 | Test warp transfers both directions | [7.7](#77-test-warp-route-transfer-e2e-testing) |
+| 12 | Test the greeting end-to-end | [6.3](#63-test-the-greeting-end-to-end) |
+
+Steps 6 and 9–10 are the ones most easily missed: without the Sepolia deploy you
+have no router address to enroll, and without gas config + running agents no
+message is ever delivered.
 
 ---
 
@@ -140,6 +170,10 @@ By default, the CLI waits for transaction confirmation before returning. This pr
 ```
 
 ### Deployment Order
+
+> This covers only the **Cardano contract** dependencies. For the full
+> cross-chain sequence (Sepolia deploy, gas config, starting the agents, tests)
+> follow the [Deployment Roadmap](#deployment-roadmap-read-this-first).
 
 The contracts must be deployed in this order due to dependencies:
 
@@ -626,9 +660,12 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 This exercises the full inbound path for a **generic (non-warp) recipient**:
 Sepolia dispatch → relayer delivers a `verified_message_nft` to the greeting
-address → you consume it with `greeting receive` → the datum updates. Requires
-the Sepolia infrastructure (see the Sepolia appendix) and gas configured/enforced
-(see the Gas Payment appendix).
+address → you consume it with `greeting receive` → the datum updates.
+
+> **Prerequisites** (per the [roadmap](#deployment-roadmap-read-this-first)) — this
+> is a *test*, run it last: the [Sepolia side](#appendix-sepolia-ethereum-testnet-deployment-guide)
+> deployed, [gas configured](#appendix-gas-payment-igp-configuration--enforcement),
+> and the [agents running](#phase-8-start-the-agents). Nothing is delivered otherwise.
 
 ```bash
 export ETH_RPC_URL=$SEPOLIA_RPC_URL
@@ -837,13 +874,24 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ### 7.5 Enroll Remote Routers
 
-For bidirectional transfers, you must enroll the remote chain's warp route address on the Cardano side.
+Enrollment is **bidirectional** — each side must know the other's router. Both
+halves are required; a transfer fails if either is missing.
+
+> **Prerequisite:** the Sepolia warp route must already be deployed — do
+> [the Sepolia appendix](#appendix-sepolia-ethereum-testnet-deployment-guide)
+> first and use **your own** deploy output below. The address in the example is
+> only a placeholder shape, not a value to copy.
+
+**Half 1 — enroll the Sepolia route on Cardano:**
 
 ```bash
 # Enroll Sepolia warp route on Cardano
 REMOTE_DOMAIN=11155111  # Sepolia domain ID
-REMOTE_ROUTER="0x000000000000000000000000d74122654d6be10ac086ff6764bd9edc651d36e0"  # Sepolia warp route address (H256)
-WARP_POLICY="7c90fa689949238c5cb56c20caa92d50ae05074837e5006314e8a849"  # Cardano warp route NFT policy
+# YOUR Sepolia warp route address, left-padded to 32 bytes (H256):
+#   REMOTE_ROUTER="0x000000000000000000000000<your 20-byte Sepolia route address>"
+REMOTE_ROUTER="0x000000000000000000000000<sepolia-warp-route-address>"
+# YOUR Cardano warp route NFT policy (from `warp show` / deployment_info.json):
+WARP_POLICY="<cardano-warp-route-nft-policy>"
 
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
@@ -861,7 +909,18 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 - `--router`: The remote warp route contract address in H256 format (32 bytes, padded)
 - `--warp-policy`: The local Cardano warp route's NFT policy ID
 
-> **Important**: You must also enroll the Cardano warp route on the remote chain. Use the Hyperlane address from the deployment output (e.g., `0x010000007c90fa68...` — the `0x01000000` prefix + the NFT policy ID, **not** the script hash).
+**Half 2 — enroll the Cardano route on Sepolia (do not skip):** see
+[Sepolia appendix, Step 6](#appendix-sepolia-ethereum-testnet-deployment-guide).
+The Cardano route's Hyperlane address is `0x01000000` + the 28-byte **NFT policy
+ID** (e.g. `0x010000007c90fa68…`) — **not** the script hash.
+
+```bash
+# on Sepolia
+cast send $SEPOLIA_WARP_ROUTE "enrollRemoteRouter(uint32,bytes32)" \
+  2003 0x01000000<cardano-warp-route-nft-policy> --private-key $EVM_SIGNER_KEY
+# verify (must return non-zero):
+cast call $SEPOLIA_WARP_ROUTE "routers(uint32)(bytes32)" 2003
+```
 
 ### 7.6 Verify Warp Route Deployment
 
@@ -881,7 +940,11 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ### 7.7 Test Warp Route Transfer (E2E Testing)
 
-> **Prerequisites**: Before testing transfers, ensure the Hyperlane validator and relayer agents are running and properly configured. See [Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements) for setup instructions, including how to extract required addresses from your deployment files.
+> **Prerequisites** (per the [roadmap](#deployment-roadmap-read-this-first)) — all four, or transfers will not land:
+> 1. The [Sepolia side](#appendix-sepolia-ethereum-testnet-deployment-guide) deployed.
+> 2. Routers enrolled on **both** sides ([7.5](#75-enroll-remote-routers)).
+> 3. [Gas configured](#appendix-gas-payment-igp-configuration--enforcement) — without a gas payment the relayer rejects the message.
+> 4. The [agents running](#phase-8-start-the-agents) (config details: [Agent Configuration Requirements](#appendix-agent-configuration-requirements)).
 
 This section provides comprehensive end-to-end testing procedures for all warp route types. We cover three main test scenarios:
 
@@ -1298,6 +1361,58 @@ echo "1. Enroll the Cardano warp route on Sepolia using the address above"
 echo "2. Start the relayer with the updated configuration"
 echo "3. Test a transfer using: warp transfer --domain $EVM_DOMAIN ..."
 ```
+
+---
+
+## Phase 8: Start the Agents
+
+**Nothing is delivered until the relayer and validator are running.** The relayer
+indexes both chains and submits deliveries; the Cardano validator signs
+checkpoints so Sepolia can verify Cardano-origin messages. Do this *after* the
+gas configuration (Gas Payment appendix) — the relayer reads its enforcement
+policy at startup.
+
+### 8.1 Configure the agents
+
+Generate/reconcile the relayer + validator config and `.env` — see
+[Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements)
+for every variable and the parameterized values you must refresh after a redeploy
+(especially `CARDANO_VERIFIED_MSG_NFT_*`, which changes with every mailbox
+redeploy, and `CARDANO_INDEX_FROM`, which must be a **block height** at or before
+the mailbox init block).
+
+### 8.2 Start them
+
+```bash
+cd cardano/e2e-docker
+docker compose up -d relayer validator-cardano
+docker compose ps                       # both should be healthy
+docker compose logs -f relayer          # watch it sync both chains
+```
+
+- After changing `.env` or the relayer config, a plain `restart` is **not** enough
+  — the container keeps its startup environment. Use:
+  `docker compose up -d --force-recreate relayer`
+- **After a Cardano mailbox redeploy**, clear the validator's S3 folder + its data
+  volume and **restart the validator** — it ingests the first leaf but will not
+  publish `checkpoint_0` until restarted (the on-startup signer captures and signs
+  the tip). Without this, Cardano→Sepolia messages never get a checkpoint.
+
+### 8.3 Verify they are working
+
+```bash
+# relayer: should show both chains reaching "synced"
+docker compose logs relayer | grep -iE "estimated_time_to_sync|Found log"
+
+# validator: should be producing checkpoints (not stuck at 0)
+docker compose logs validator-cardano | grep -iE "checkpoint|latest_index"
+```
+
+Only once both are healthy do the transfer ([7.7](#77-test-warp-route-transfer-e2e-testing))
+and greeting ([6.3](#63-test-the-greeting-end-to-end)) tests.
+
+> **Blockfrost quota:** the agents poll continuously and burn credits even when
+> idle. `docker compose stop relayer validator-cardano` when you are not testing.
 
 ---
 
