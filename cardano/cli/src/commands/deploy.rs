@@ -48,7 +48,8 @@ enum DeployCommands {
     /// This allows the script to be referenced by other transactions without including it in the witness set
     ReferenceScript {
         /// Name of the script to deploy (mailbox, message_id_multisig_ism,
-        /// merkle_root_multisig_ism, ism, or path to .plutus file)
+        /// merkle_root_multisig_ism, ism, igp, validator_announce, warp_route,
+        /// or path to .plutus file)
         #[arg(long)]
         script: String,
 
@@ -61,7 +62,7 @@ enum DeployCommands {
         dry_run: bool,
     },
 
-    /// Deploy all core reference scripts (mailbox, ism)
+    /// Deploy all core reference scripts (mailbox, ism, igp)
     ReferenceScriptsAll {
         /// Output lovelace per script (if not specified, calculates minimum for each script)
         #[arg(long)]
@@ -653,7 +654,7 @@ async fn deploy_reference_script_internal(
     )))
 }
 
-/// Deploy all core reference scripts (mailbox, ism)
+/// Deploy all core reference scripts (mailbox, ism, igp)
 async fn deploy_all_reference_scripts(
     ctx: &CliContext,
     lovelace: Option<u64>,
@@ -672,7 +673,10 @@ async fn deploy_all_reference_scripts(
         }
     };
 
-    let mut scripts: Vec<&'static str> = vec!["mailbox"];
+    // The IGP reference script matters for third parties: without it, every gas
+    // payer must ship a local copy of the compiled IGP script (and carry it in
+    // each payment's witness set) just to call `pay-for-gas`.
+    let mut scripts: Vec<&'static str> = vec!["mailbox", "igp"];
     if let Ok(deployment) = ctx.load_deployment_info() {
         let mut flavours: Vec<String> = Vec::new();
         let default_mt = deployment

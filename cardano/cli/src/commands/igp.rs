@@ -144,12 +144,26 @@ impl IgpTxContext {
         collateral_utxo: &Utxo,
         signer_pkh: &[u8],
     ) -> Result<String> {
-        // Load IGP script from blueprint
-        let blueprint = ctx.load_blueprint()?;
-        let igp_validator = blueprint
-            .find_validator("igp.igp.spend")
-            .ok_or_else(|| anyhow!("IGP validator not found in blueprint"))?;
-        let igp_script_bytes = hex::decode(&igp_validator.compiled_code)?;
+        // Prefer the on-chain reference script: gas payers then need only the
+        // deployment info, not a local copy of the compiled IGP script, and the
+        // script does not ride in every transaction's witness set. Fall back to
+        // embedding it from the blueprint when no reference script is deployed.
+        let igp_ref_script = ctx
+            .load_deployment_info()
+            .ok()
+            .and_then(|d| d.igp)
+            .and_then(|igp| igp.reference_script_utxo);
+
+        let igp_script_bytes = match &igp_ref_script {
+            Some(_) => None,
+            None => {
+                let blueprint = ctx.load_blueprint()?;
+                let igp_validator = blueprint
+                    .find_validator("igp.igp.spend")
+                    .ok_or_else(|| anyhow!("IGP validator not found in blueprint"))?;
+                Some(hex::decode(&igp_validator.compiled_code)?)
+            }
+        };
 
         // Get PlutusV3 cost model
         let cost_model = self.client.get_plutusv3_cost_model().await?;
@@ -223,8 +237,6 @@ impl IgpTxContext {
                     steps: 2_000_000_000,
                 }),
             )
-            // IGP script
-            .script(ScriptKind::PlutusV3, igp_script_bytes)
             // Cost model for script data hash
             .language_view(ScriptKind::PlutusV3, cost_model)
             // Required signer
@@ -233,6 +245,21 @@ impl IgpTxContext {
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
             .network_id(ctx.network_id());
+
+        // Reference the on-chain IGP script, or embed it when none is deployed.
+        if let Some(rs) = &igp_ref_script {
+            let ref_tx_hash: [u8; 32] = hex::decode(&rs.tx_hash)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid IGP reference script tx hash"))?;
+            staging =
+                staging.reference_input(Input::new(Hash::new(ref_tx_hash), rs.output_index as u64));
+        } else if let Some(script_bytes) = igp_script_bytes {
+            staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+        } else {
+            return Err(anyhow!(
+                "No IGP reference script deployed and no local script available"
+            ));
+        }
 
         // Add fee input if separate from IGP
         if fee_is_separate {
