@@ -53,13 +53,13 @@ contract DeployCardanoMerkleRootISM is Script {
 
         console.log("Factory:", address(factory));
         console.log("MerkleRoot MultisigISM:", ism);
-        console.log(string.concat("EVM_CARDANO_ISM=", vm.toString(ism)));
+        console.log(string.concat("EVM_ISM=", vm.toString(ism)));
     }
 
     /// @notice Point an existing TestRecipient at the MerkleRoot ISM.
     function setISMOnTestRecipient() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
-        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_ISM");
         address payable testRecipient = payable(
             vm.envAddress("EVM_TEST_RECIPIENT")
         );
@@ -75,7 +75,7 @@ contract DeployCardanoMerkleRootISM is Script {
     /// @notice Point the Sepolia warp routes at the MerkleRoot ISM.
     function setISMOnWarpRoutes() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
-        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_ISM");
 
         address[4] memory routes = [
             vm.envAddress("EVM_SYNTHETIC_WCTEST"),

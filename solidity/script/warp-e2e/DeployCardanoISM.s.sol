@@ -70,7 +70,7 @@ contract DeployCardanoISM is Script {
         vm.stopBroadcast();
 
         console.log("\n=== Environment Variable ===");
-        console.log(string.concat("EVM_CARDANO_ISM=", vm.toString(ism)));
+        console.log(string.concat("EVM_ISM=", vm.toString(ism)));
     }
 
     /**
@@ -79,7 +79,7 @@ contract DeployCardanoISM is Script {
     function setISMOnWarpRoutes() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_ISM");
 
         // Read warp route addresses
         address syntheticWCtest = vm.envAddress("EVM_SYNTHETIC_WCTEST");
@@ -120,7 +120,7 @@ contract DeployCardanoISM is Script {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
         address deployer = vm.addr(deployerPrivateKey);
 
-        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_ISM");
 
         console.log("Deploying TestRecipient on Sepolia");
         console.log("Deployer:", deployer);
@@ -162,7 +162,7 @@ contract DeployCardanoISM is Script {
     function setISMOnTestRecipient() external {
         uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
 
-        address cardanoIsm = vm.envAddress("EVM_CARDANO_ISM");
+        address cardanoIsm = vm.envAddress("EVM_ISM");
         address payable testRecipient = payable(
             vm.envAddress("EVM_TEST_RECIPIENT")
         );
