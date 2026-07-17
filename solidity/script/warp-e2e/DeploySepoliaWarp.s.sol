@@ -9,6 +9,7 @@ import {HypERC20Collateral} from "contracts/token/HypERC20Collateral.sol";
 import {HypNative} from "contracts/token/HypNative.sol";
 import {TestERC20} from "./TestERC20.sol";
 import {TypeCasts} from "contracts/libs/TypeCasts.sol";
+import {MailboxClient} from "contracts/client/MailboxClient.sol";
 
 /**
  * @title DeploySepoliaWarp
@@ -420,12 +421,16 @@ contract DeploySepoliaWarp is Script {
             "CARDANO_SYNTHETIC_FTEST"
         );
         bytes32 cardanoNativeAda = vm.envBytes32("CARDANO_NATIVE_ADA");
-        bytes32 cardanoSyntheticEth = vm.envBytes32("CARDANO_SYNTHETIC_ETH");
-        bytes32 cardanoCollateralWeth = vm.envBytes32(
-            "CARDANO_COLLATERAL_WETH"
+
+        // Optional: only enrolled if the matching Cardano route was deployed.
+        // Left unset, the scenario is skipped rather than enrolling address(0).
+        bytes32 cardanoSyntheticEth = vm.envOr(
+            "CARDANO_SYNTHETIC_ETH",
+            bytes32(0)
         );
-        bytes32 cardanoCollateralTokenB = vm.envBytes32(
-            "CARDANO_COLLATERAL_TOKENB"
+        bytes32 cardanoCollateralTokenB = vm.envOr(
+            "CARDANO_COLLATERAL_TOKENB",
+            bytes32(0)
         );
 
         vm.startBroadcast(deployerPrivateKey);
@@ -458,11 +463,17 @@ contract DeploySepoliaWarp is Script {
         console.log("Enrolled Cardano native ADA as router for wADA synthetic");
 
         // Scenario 4: ETH native -> Cardano synthetic ETH
-        HypNative(payable(nativeEth)).enrollRemoteRouter(
-            CARDANO_DOMAIN,
-            cardanoSyntheticEth
-        );
-        console.log("Enrolled Cardano synthetic ETH as router for ETH native");
+        if (cardanoSyntheticEth != bytes32(0)) {
+            HypNative(payable(nativeEth)).enrollRemoteRouter(
+                CARDANO_DOMAIN,
+                cardanoSyntheticEth
+            );
+            console.log(
+                "Enrolled Cardano synthetic ETH as router for ETH native"
+            );
+        } else {
+            console.log("Skipped ETH native: CARDANO_SYNTHETIC_ETH unset");
+        }
 
         // Scenario 5: WADA collateral -> Cardano native ADA
         HypERC20Collateral(collateralWada).enrollRemoteRouter(
@@ -478,15 +489,50 @@ contract DeploySepoliaWarp is Script {
         // For now, reuse the same native contract (both scenarios use same ETH lock mechanism)
 
         // Scenario 7: TokenA collateral -> Cardano collateral TokenB
-        HypERC20Collateral(collateralTokenA).enrollRemoteRouter(
-            CARDANO_DOMAIN,
-            cardanoCollateralTokenB
-        );
-        console.log(
-            "Enrolled Cardano collateral TokenB as router for TokenA collateral"
-        );
+        if (cardanoCollateralTokenB != bytes32(0)) {
+            HypERC20Collateral(collateralTokenA).enrollRemoteRouter(
+                CARDANO_DOMAIN,
+                cardanoCollateralTokenB
+            );
+            console.log(
+                "Enrolled Cardano collateral TokenB as router for TokenA collateral"
+            );
+        } else {
+            console.log(
+                "Skipped TokenA collateral: CARDANO_COLLATERAL_TOKENB unset"
+            );
+        }
 
         vm.stopBroadcast();
+    }
+
+    /**
+     * @notice Point each route at the aggregation hook (MerkleTreeHook + our IGP).
+     * @dev Required. A route's hook defaults to address(0), and Mailbox.dispatch
+     *      then falls back to its own defaultHook, which pays the IGP of whoever
+     *      owns the mailbox rather than ours. Our relayer only indexes our IGP,
+     *      so it would observe no gas payment and never deliver the message.
+     *      EVM_AGGREGATION_HOOK must wrap the same IGP the relayer indexes.
+     */
+    function setRouteHooks() external {
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
+        address aggregationHook = vm.envAddress("EVM_AGGREGATION_HOOK");
+
+        address[4] memory routes = [
+            vm.envAddress("EVM_SYNTHETIC_WCTEST"),
+            vm.envAddress("EVM_SYNTHETIC_WADA"),
+            vm.envAddress("EVM_COLLATERAL_FTEST"),
+            vm.envAddress("EVM_COLLATERAL_WADA")
+        ];
+
+        vm.startBroadcast(deployerPrivateKey);
+        for (uint256 i = 0; i < routes.length; i++) {
+            MailboxClient(routes[i]).setHook(aggregationHook);
+            console.log("Set hook on route:", routes[i]);
+        }
+        vm.stopBroadcast();
+
+        console.log("Aggregation hook set to:", aggregationHook);
     }
 
     /**
