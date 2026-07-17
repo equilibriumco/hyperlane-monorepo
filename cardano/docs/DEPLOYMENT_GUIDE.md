@@ -2618,6 +2618,30 @@ export CARDANO_DOMAIN=2003  # Cardano Preview testnet
 export EVM_DOMAIN=11155111    # Ethereum Sepolia testnet
 ```
 
+Those are the only values you set by hand. **Every address a step produces is
+captured automatically** — do not copy addresses out of the output.
+
+#### How addresses flow between steps (`sepolia.env`)
+
+Unlike the Cardano side, which persists everything to `deployment_info.json`,
+the Sepolia scripts communicate through environment variables. Each deploy
+script prints its results in `EVM_NAME=0x…` form, so every step below ends with:
+
+```bash
+  ... 2>&1 | tee /tmp/step.out
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
+```
+
+which appends that step's addresses to **`sepolia.env`** and loads them into your
+shell, so the next step already has what it needs. `sepolia.env` accumulates the
+whole deployment.
+
+- **New shell?** `source sepolia.env` to get every address back.
+- **Starting a fresh deployment?** `rm sepolia.env` first, or you will `source`
+  stale addresses from the previous one — a nasty way to enroll the wrong router.
+- Keep it out of git (it is deployment state, not config).
+
 ### Deployment Flow Overview
 
 The deployment follows this order, with each step producing outputs needed by subsequent steps:
@@ -2681,10 +2705,14 @@ echo "Deploying ISM with validator: $CARDANO_VALIDATOR"
 forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
   --rpc-url $EVM_RPC_URL \
   --broadcast \
-  --private-key $EVM_SIGNER_KEY
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
 
-# ⚠️ IMPORTANT: Save the ISM address from the output
-export EVM_ISM="0x..."  # Copy from "MultisigISM deployed:" line
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
+
+# EVM_ISM is now exported (and saved in sepolia.env) - no copying needed
+echo $EVM_ISM
 ```
 
 ---
@@ -2771,7 +2799,11 @@ cd solidity
 forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
   --rpc-url $EVM_RPC_URL \
   --broadcast \
-  --private-key $EVM_SIGNER_KEY
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
+
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
 ```
 
 #### 2.1b Deploy Warp Routes (Custom Token Names)
@@ -2790,33 +2822,32 @@ export WCTEST_SYMBOL="wMTT"
 forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
   --rpc-url $EVM_RPC_URL \
   --broadcast \
-  --private-key $EVM_SIGNER_KEY
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
+
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
 ```
 
-#### 2.2 Save Output Addresses
+#### 2.2 Addresses Are Saved For You
 
-The script outputs environment variables at the end. **Copy and export all of them**:
+The previous step already appended every address to `sepolia.env` and sourced it,
+so **there is nothing to copy**. Confirm what you got:
 
 ```bash
-# ⚠️ IMPORTANT: Export ALL addresses from the deployment output
-
-# Test ERC20 Tokens
-export EVM_FTEST="0x..."           # Sepolia Test Token
-export EVM_WADA="0x..."            # Wrapped ADA ERC20
-export EVM_TOKENA="0x..."          # Token A
-
-# Synthetic Warp Routes (mint tokens when receiving from Cardano)
-export EVM_SYNTHETIC_WCTEST="0x..."   # Receives CTEST from Cardano, mints wCTEST
-export EVM_SYNTHETIC_WADA="0x..."     # Receives ADA from Cardano, mints wADA
-
-# Collateral Warp Routes (lock/release tokens)
-export EVM_COLLATERAL_FTEST="0x..."   # Locks FTEST, Cardano receives synthetic wFTEST
-export EVM_COLLATERAL_WADA="0x..."    # Releases WADA when Cardano sends ADA
-export EVM_COLLATERAL_TOKENA="0x..."  # For collateral-collateral tests
-
-# Native Warp Route
-export EVM_NATIVE_ETH="0x..."        # Locks native ETH
+cat sepolia.env
+echo "$EVM_SYNTHETIC_WADA  $EVM_COLLATERAL_FTEST  $EVM_NATIVE_ETH"
 ```
+
+You should have the test ERC20s (`EVM_FTEST`, `EVM_WADA`, `EVM_TOKENA`), the
+synthetic routes (`EVM_SYNTHETIC_WCTEST`, `EVM_SYNTHETIC_WADA`,
+`EVM_SYNTHETIC_WGUITKN`), the collateral routes (`EVM_COLLATERAL_FTEST`,
+`EVM_COLLATERAL_WADA`, `EVM_COLLATERAL_TOKENA`) and the native route
+(`EVM_NATIVE_ETH`) — exactly the variables the later `--sig` steps
+(`enrollRouters`, `mintTestTokens`, `preDepositCollateral`) require.
+
+If any is empty, the deploy did not get that far — re-read the step output rather
+than exporting a guess.
 
 ---
 
@@ -3258,7 +3289,11 @@ export SYNTHETIC_WADA_SYMBOL="sADA"
 forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
   --rpc-url $EVM_RPC_URL \
   --broadcast \
-  --private-key $EVM_SIGNER_KEY
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
+
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
 ```
 
 See [Step 2](#step-2-deploy-sepolia-warp-routes) for the full list of customizable environment variables.
@@ -3535,10 +3570,12 @@ export EVM_IGP="0xb9655C900Ef6104a776E533E93dC1D32BEe8cd93"              # Your 
 # Deploy
 forge script script/warp-e2e/DeployAggregationHook.s.sol:DeployAggregationHook \
   --rpc-url $EVM_RPC_URL \
-  --broadcast
+  --broadcast 2>&1 | tee /tmp/step.out
 
-# Save the output address
-export EVM_AGGREGATION_HOOK="0x..."  # Copy from "AggregationHook deployed:" line
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
+echo $EVM_AGGREGATION_HOOK
 ```
 
 The AggregationHook is reusable — you only need to redeploy if the IGP or
