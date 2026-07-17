@@ -3561,8 +3561,11 @@ Cardano has no gas metering, so gas is denominated **1 lovelace = 1 gas unit**
 (`gasPrice = 1`); a `gasLimit` reads directly as lovelace of Cardano cost. The
 IGP + StorageGasOracle are deployed in [Step 1a](#step-1a-deploy-the-igp-and-storagegasoracle)
 and wrapped by the AggregationHook in [Step 1b](#step-1b-deploy-the-aggregationhook).
-Configure their gas values with `cast` (authoritative — the forge script's
-defaults are the older `gasPrice = 44` model):
+`DeploySepoliaIGP.s.sol` already applies these values as its defaults
+(`gasPrice = 1`, `tokenExchangeRate = 1.395e18`, `gasOverhead = 2062550`), so a
+fresh deploy needs no override. Use the `cast` calls below only to recalibrate
+later, or to migrate an oracle deployed before the 1-gas-1-lovelace switch (older
+oracles read `gasPrice = 44`):
 
 ```bash
 export ETH_RPC_URL=$SEPOLIA_RPC_URL
