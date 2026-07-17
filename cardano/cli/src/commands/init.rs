@@ -185,6 +185,15 @@ enum InitCommands {
         #[arg(long)]
         validator_key: Option<String>,
 
+        /// Gas oracle config: "domain:gas_price:exchange_rate:gas_overhead" (repeatable).
+        /// When given, the IGP is initialized as part of `init all`; omit to skip it.
+        #[arg(long = "oracle")]
+        oracles: Vec<String>,
+
+        /// IGP beneficiary public key hash (28-byte hex); defaults to the signing key
+        #[arg(long)]
+        beneficiary: Option<String>,
+
         /// Dry run
         #[arg(long)]
         dry_run: bool,
@@ -273,6 +282,8 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             thresholds,
             storage_location,
             validator_key,
+            oracles,
+            beneficiary,
             dry_run,
         } => {
             init_all(
@@ -283,6 +294,8 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
                 thresholds,
                 storage_location,
                 validator_key,
+                oracles,
+                beneficiary,
                 dry_run,
             )
             .await
@@ -947,6 +960,21 @@ async fn init_igp(
     utxo: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
+    init_igp_internal(ctx, beneficiary, oracles, utxo, dry_run, &[]).await?;
+    Ok(())
+}
+
+/// Returns the UTXO reference spent by the init, so callers chaining several
+/// inits (e.g. `init all`) can exclude it from later selections — Blockfrost
+/// still reports it as unspent for a while.
+async fn init_igp_internal(
+    ctx: &CliContext,
+    beneficiary: Option<String>,
+    oracles: Vec<String>,
+    utxo: Option<String>,
+    dry_run: bool,
+    exclude_utxos: &[String],
+) -> Result<Option<String>> {
     println!("{}", "Initializing IGP contract...".cyan());
 
     let api_key = ctx.require_api_key()?;
@@ -990,9 +1018,20 @@ async fn init_igp(
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
     let address = keypair.address_bech32(ctx.pallas_network());
 
-    // Get UTXOs
-    let utxos = client.get_utxos(&address).await?;
-    println!("  Found {} UTXOs at wallet", utxos.len());
+    // Get UTXOs and filter out already-spent ones
+    let all_utxos = client.get_utxos(&address).await?;
+    let utxos: Vec<_> = all_utxos
+        .into_iter()
+        .filter(|u| {
+            let utxo_ref = format!("{}#{}", u.tx_hash, u.output_index);
+            !exclude_utxos.contains(&utxo_ref)
+        })
+        .collect();
+    println!(
+        "  Found {} UTXOs at wallet (excluding {} spent)",
+        utxos.len(),
+        exclude_utxos.len()
+    );
 
     // Find input UTXO
     let input_utxo = match &utxo {
@@ -1080,7 +1119,8 @@ async fn init_igp(
         );
         println!("  - Mint state NFT with policy {}", applied.policy_id);
         println!("  - Create output at {} with 5 ADA + NFT + datum", igp_addr);
-        return Ok(());
+        // Nothing spent on a dry run.
+        return Ok(None);
     }
 
     // Build and submit transaction
@@ -1149,7 +1189,10 @@ async fn init_igp(
     println!("  IGP State UTXO: {}#0", tx_hash);
     println!("  IGP Initialized: true");
 
-    Ok(())
+    Ok(Some(format!(
+        "{}#{}",
+        input_utxo.tx_hash, input_utxo.output_index
+    )))
 }
 
 /// Parse oracle config string "domain:gas_price:exchange_rate:gas_overhead"
@@ -1538,6 +1581,7 @@ async fn init_recipient(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn init_all(
     ctx: &CliContext,
     domain: u32,
@@ -1546,6 +1590,8 @@ async fn init_all(
     thresholds: Option<String>,
     storage_location: Option<String>,
     validator_key: Option<String>,
+    oracles: Vec<String>,
+    beneficiary: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
     println!("{}", "Initializing all core contracts...".cyan());
@@ -1666,7 +1712,26 @@ async fn init_all(
         }
     }
 
-    // Optional: validator announce
+    // Optional: IGP (only when gas oracles are supplied).
+    // Runs before the announce because `announce_validator` does not report the
+    // UTXO it spends, so nothing that selects UTXOs may follow it.
+    if oracles.is_empty() {
+        println!(
+            "\n{}",
+            "Note: IGP not initialized (no --oracle given). Run 'init igp' separately if you need gas payments."
+                .yellow()
+        );
+    } else {
+        println!("\n{}", format!("{}. Initializing IGP...", step).cyan());
+        if let Some(spent) =
+            init_igp_internal(ctx, beneficiary, oracles, None, dry_run, &spent_utxos).await?
+        {
+            spent_utxos.push(spent);
+        }
+        step += 1;
+    }
+
+    // Optional: validator announce (kept last - see note above)
     if let (Some(ref location), Some(ref key)) = (&storage_location, &validator_key) {
         println!("\n{}", format!("{}. Announcing validator...", step).cyan());
         super::validator::announce_validator(ctx, location, key, None, dry_run, &spent_utxos)
@@ -1676,10 +1741,6 @@ async fn init_all(
     println!(
         "\n{}",
         "✓ All contracts initialized successfully!".green().bold()
-    );
-    println!(
-        "{}",
-        "Note: IGP not initialized by 'init all'. Run 'init igp' separately.".yellow()
     );
 
     Ok(())
