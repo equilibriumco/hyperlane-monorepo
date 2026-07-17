@@ -183,7 +183,7 @@ The contracts must be deployed in this order due to dependencies:
 4. **Configure Mailbox** - set default ISM using its **script hash** (`ism.hash`, not the state NFT policy)
 5. **Configure ISM** - set validators and thresholds for each origin domain
 6. **Deploy Recipients/Warp Routes** - recipients parameterized with verified_message_nft_policy; warp routes with mailbox_policy_id
-7. **(Optional) Initialize IGP** - `init all` does not do this; run `init igp` separately if gas payments are needed
+7. **Initialize IGP** - pass `--oracle` to `init all`, or run `init igp` separately
 
 > **Important**: Reference scripts can only be deployed AFTER initialization because the core contracts (mailbox, ISM) are parameterized. The initialization step applies the required parameters and produces the final script bytecode.
 
@@ -305,7 +305,7 @@ Parameters:
 
 Each step waits for on-chain confirmation before proceeding to the next.
 
-> **Note**: `init all` does **not** initialize the IGP (Interchain Gas Paymaster). Run `init igp` separately — see [3.5](#35-initialize-the-igp).
+> **Note**: `init all` initializes the IGP only when you pass `--oracle`. Omit it and the IGP is skipped — run `init igp` separately. See [3.5](#35-initialize-the-igp).
 
 ### 3.2 Initialize Individually (Alternative)
 
@@ -393,7 +393,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 ### 3.5 Initialize the IGP
 
-`init all` does **not** set up the Interchain Gas Paymaster — it only covers the mailbox, default ISM, and (optionally) the validator announcement. Run `init igp` separately if you need gas payments:
+`init all` initializes the IGP when you pass it `--oracle` (repeatable), alongside the mailbox, default ISM and validator announcement. You can also run it separately:
 
 ```bash
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
@@ -404,8 +404,22 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --oracle "11155111:1000000000:7171:211000"
 ```
 
+Or fold it into `init all` (same flags), so the whole core comes up in one command:
+
+```bash
+  init all \
+  --domain 2003 \
+  --origin-domains 11155111 \
+  --validators "11155111:0xb22b65f2...,0x469f0940...,0xd3c75dcf..." \
+  --thresholds "11155111:2" \
+  --oracle "11155111:1000000000:7171:211000" \
+  --storage-location "s3://<bucket>/<region>/<folder>" \
+  --validator-key $CARDANO_VALIDATOR_KEY
+```
+
 - `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`. The `211000` overhead here targets a ~1.5× relayer margin for Sepolia delivery — see the **Gas Payment (IGP) Configuration & Enforcement** appendix for how the values are derived, the matching Sepolia-side oracle setup, and enabling relayer enforcement.
 - `--beneficiary`: address that can claim collected fees (defaults to the signing key's public key hash).
+- Omit `--oracle` from `init all` and the IGP is simply skipped.
 
 > This only sets the **Cardano → Sepolia** oracle. The **Sepolia → Cardano**
 > oracle, per-route `destinationGas`, and relayer `onChainFeeQuoting` enforcement
@@ -418,6 +432,14 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 Reference scripts are deployed on-chain to reduce transaction costs. Each script is stored in a UTXO that can be referenced by future transactions.
 
 > **Note**: This step must be done AFTER initialization because the contracts are parameterized. The `init` commands apply the required parameters and save the parameterized scripts to the deployments directory.
+
+> **Why the IGP reference script matters (do not skip it).** It is not just a
+> fee optimization. Without an on-chain IGP reference script, **every gas payer
+> must hold a local copy of the compiled IGP script** and carry it in each
+> payment's witness set — so any third-party app paying for gas would need your
+> `plutus.json` blueprint and would have to trust it matches the on-chain hash.
+> `reference-scripts-all` deploys it, and the `igp` commands then reference it
+> automatically (falling back to embedding the script only if none is deployed).
 
 ### 4.1 Deploy All Core Reference Scripts
 
@@ -1575,7 +1597,7 @@ $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   --storage-location "$STORAGE_LOCATION" \
   --validator-key "$VALIDATOR_KEY"
 
-# Step 3b: Initialize the IGP (init all does NOT do this)
+# Step 3b: Initialize the IGP (or pass --oracle to `init all` above)
 echo "Step 3b: Initializing IGP..."
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
