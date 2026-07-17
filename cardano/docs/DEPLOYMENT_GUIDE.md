@@ -1398,14 +1398,107 @@ checkpoints so Sepolia can verify Cardano-origin messages. Do this *after* the
 gas configuration (Gas Payment appendix) — the relayer reads its enforcement
 policy at startup.
 
-### 8.1 Configure the agents
+### 8.1 Refresh `.env` from the deployment
 
-Generate/reconcile the relayer + validator config and `.env` — see
-[Appendix: Agent Configuration Requirements](#appendix-agent-configuration-requirements)
-for every variable and the parameterized values you must refresh after a redeploy
-(especially `CARDANO_VERIFIED_MSG_NFT_*`, which changes with every mailbox
-redeploy, and `CARDANO_INDEX_FROM`, which must be a **block height** at or before
-the mailbox init block).
+**Every redeploy changes the mailbox and all downstream state-NFT policies, so
+the agents' `.env` is stale until you refresh it.** The `e2e-docker` relayer and
+validator configs are `${VAR}` templates resolved from `cardano/e2e-docker/.env`
+at container start — get `.env` right and both configs follow. Start the agents
+against a stale `.env` and the relayer indexes a mailbox that no longer exists
+and delivers nothing, with no error pointing at the cause.
+
+The block below reads the fresh values straight out of `deployment_info.json`
+and the applied-CBOR file and upserts them into `.env`, so there is nothing to
+transcribe by hand. Run it after any redeploy:
+
+```bash
+cd cardano/deployments/preview
+export BLOCKFROST_API_KEY=<your-key>
+ENV=../../e2e-docker/.env
+
+# Block height of the mailbox init tx — CARDANO_INDEX_FROM must be at or before it.
+INIT_TX=$(jq -r '.mailbox.initTxHash' deployment_info.json)
+INDEX_FROM=$(curl -s -H "project_id: $BLOCKFROST_API_KEY" \
+  "https://cardano-preview.blockfrost.io/api/v0/txs/$INIT_TX" | jq '.block_height')
+
+python3 - "$ENV" "$INDEX_FROM" <<'PY'
+import json, sys, hashlib
+env_path, index_from = sys.argv[1], sys.argv[2]
+d = json.load(open("deployment_info.json"))
+cbor = json.load(open("verified_message_nft_applied.plutus"))["cborHex"]
+# The verified_message_nft policy id is the PlutusV3 script hash of the applied
+# CBOR: blake2b-224 over (0x03 language tag || script bytes). Not stored in
+# deployment_info.json, so derive it here.
+vmn_policy = hashlib.blake2b(b"\x03" + bytes.fromhex(cbor), digest_size=28).hexdigest()
+mb, ism, igp, va = d["mailbox"], d["ism"], d["igp"], d["validator_announce"]
+ref = lambda o: f'{o["referenceScriptUtxo"]["txHash"]}#{o["referenceScriptUtxo"]["outputIndex"]}'
+# The native warp route's ref UTXO is what the relayer needs for inbound warp.
+warp = next((w for w in d.get("warp_routes", []) if w["warpType"] == "native"), None)
+vals = {
+    "CARDANO_MAILBOX":                 "0x00000000" + mb["hash"],
+    "CARDANO_MERKLE_TREE_HOOK":        "0x00000000" + mb["hash"],
+    "CARDANO_ISM":                     "0x00000000" + ism["hash"],
+    "CARDANO_IGP":                     "0x00000000" + igp["hash"],
+    "CARDANO_VALIDATOR_ANNOUNCE":      "0x00000000" + va["hash"],
+    "CARDANO_MAILBOX_SCRIPT_HASH":     mb["hash"],
+    "CARDANO_MAILBOX_POLICY_ID":       mb["stateNftPolicy"],
+    "CARDANO_MAILBOX_REF_UTXO":        ref(mb),
+    "CARDANO_ISM_SCRIPT_HASH":         ism["hash"],
+    "CARDANO_ISM_STATE_NFT_POLICY_ID": ism["stateNft"]["policyId"],
+    "CARDANO_ISM_REF_UTXO":            ref(ism),
+    "CARDANO_IGP_SCRIPT_HASH":         igp["hash"],
+    "CARDANO_IGP_STATE_NFT_POLICY_ID": igp["stateNft"]["policyId"],
+    "CARDANO_VA_POLICY_ID":            va["hash"],
+    "CARDANO_VERIFIED_MSG_NFT_POLICY_ID":   vmn_policy,
+    "CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR": cbor,
+    "CARDANO_INDEX_FROM":              index_from,
+}
+if warp:
+    vals["CARDANO_WARP_ROUTE_REF_UTXO"] = ref(warp)
+lines = open(env_path).read().splitlines()
+seen = set()
+for i, line in enumerate(lines):
+    k = line.split("=", 1)[0] if "=" in line else None
+    if k in vals:
+        lines[i] = f"{k}={vals[k]}"; seen.add(k)
+for k, v in vals.items():
+    if k not in seen:
+        lines.append(f"{k}={v}")
+open(env_path, "w").write("\n".join(lines) + "\n")
+print(f"Updated {len(vals)} keys in {env_path}")
+PY
+```
+
+> `CARDANO_VERIFIED_MSG_NFT_*` is parameterized by the mailbox and **must** be
+> refreshed on every mailbox redeploy — a stale CBOR makes inbound delivery fail
+> silently. `CARDANO_VA_REF_UTXO` stays empty (validator-announce is a
+> mint-only policy with no reference script).
+
+Sanity-check the result before starting:
+
+```bash
+grep -E 'CARDANO_(MAILBOX|ISM|IGP)_SCRIPT_HASH|CARDANO_INDEX_FROM' ../../e2e-docker/.env
+# hashes must match `jq -r '.mailbox.hash,.ism.hash,.igp.hash' deployment_info.json`
+```
+
+### 8.1b Clear agent state (required after a mailbox redeploy)
+
+The relayer and validator persist per-mailbox state. A new mailbox means the old
+state is wrong, so clear it or the agents replay against the dead deployment:
+
+```bash
+cd cardano/e2e-docker
+docker compose down                          # stop if running
+docker volume rm e2e-docker_relayer-db 2>/dev/null || true   # relayer message DB
+docker volume rm e2e-docker_validator-db 2>/dev/null || true # validator checkpoint DB
+# Clear the validator's S3 checkpoint folder (matches AWS_S3_BUCKET_FOLDER):
+aws s3 rm "s3://$AWS_S3_BUCKET/$AWS_REGION/$AWS_S3_BUCKET_FOLDER" --recursive 2>/dev/null || true
+```
+
+> After a mailbox redeploy the validator ingests the first leaf but will not
+> publish `checkpoint_0` until it is **restarted** (it captures and signs the tip
+> on startup). Always `docker compose restart validator-cardano` once, after the
+> validator is up, following a fresh mailbox.
 
 ### 8.2 Start them
 
@@ -1646,7 +1739,8 @@ $CLI --network $NETWORK ism show
 echo ""
 echo "=== Deployment Complete ==="
 echo "Deployment info saved to: $DEPLOY_DIR/deployment_info.json"
-echo "Environment file: $DEPLOY_DIR/.env.generated (reconcile by hand, see caveat above)"
+echo "Next: refresh e2e-docker/.env from this deployment with the block in"
+echo "  'Phase 8.1: Refresh .env from the deployment', then start the agents."
 ```
 
 ---
@@ -1969,8 +2063,10 @@ If you need to manually apply parameters (e.g., for custom contracts):
 
 ```bash
 # 1. Get the verified_message_nft_policy (recipients are parameterized by this,
-#    NOT by the mailbox state NFT policy) and your owner key hash
-VERIFIED_MSG_NFT_POLICY=$(jq -r '.verified_message_nft.policy_id' deployments/preview/deployment_info.json)
+#    NOT by the mailbox state NFT policy) and your owner key hash. The policy id
+#    is the PlutusV3 script hash of the applied CBOR (not stored in
+#    deployment_info.json), so derive it:
+VERIFIED_MSG_NFT_POLICY=$(python3 -c "import json,hashlib;print(hashlib.blake2b(b'\x03'+bytes.fromhex(json.load(open('deployments/preview/verified_message_nft_applied.plutus'))['cborHex']),digest_size=28).hexdigest())")
 OWNER_PKH=$(cat deployments/preview/owner.pkh)   # 28-byte hex of the recipient owner
 
 # 2. Apply both parameters to your custom recipient (order matters)
@@ -2052,7 +2148,7 @@ If you need to extract values manually, see the sections below.
 | `CARDANO_IGP_SCRIPT_HASH`         | IGP validator script hash             | `.igp.hash`                               |
 | `CARDANO_IGP_STATE_NFT_POLICY_ID` | IGP state NFT policy                  | `.igp.stateNftPolicy`                     |
 | `CARDANO_VA_POLICY_ID`            | Validator announce policy ID          | `.validator_announce.hash`                |
-| `CARDANO_VERIFIED_MSG_NFT_POLICY_ID`   | Verified message NFT policy      | `.verified_message_nft.policy_id`         |
+| `CARDANO_VERIFIED_MSG_NFT_POLICY_ID`   | Verified message NFT policy      | PlutusV3 script hash of `verified_message_nft_applied.plutus` (`blake2b-224` of `0x03` ‖ cborHex — see 8.1) |
 | `CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR` | Verified message NFT applied CBOR (mailbox-parameterized — see [critical gotcha](#troubleshooting-parameterization-issues) below) | `deployments/<net>/verified_message_nft_applied.plutus` `.cborHex` |
 | `CARDANO_INDEX_FROM`              | Block height to start indexing        | See note below                            |
 
@@ -2104,9 +2200,10 @@ export CARDANO_VA_POLICY_ID=$(jq -r '.validator_announce.hash' deployment_info.j
 export CARDANO_MAILBOX_REF_UTXO=$(jq -r '.mailbox.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
 export CARDANO_ISM_REF_UTXO=$(jq -r '.ism.referenceScriptUtxo | "\(.txHash)#\(.outputIndex)"' deployment_info.json)
 
-# Verified Message NFT (mailbox-parameterized - regenerate after every mailbox redeploy)
-export CARDANO_VERIFIED_MSG_NFT_POLICY_ID=$(jq -r '.verified_message_nft.policy_id' deployment_info.json)
+# Verified Message NFT (mailbox-parameterized - regenerate after every mailbox redeploy).
+# The policy id is the PlutusV3 script hash of the applied CBOR, derived below.
 export CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR=$(python3 -c "import json;print(json.load(open('verified_message_nft_applied.plutus'))['cborHex'])")
+export CARDANO_VERIFIED_MSG_NFT_POLICY_ID=$(python3 -c "import hashlib;print(hashlib.blake2b(b'\x03'+bytes.fromhex('$CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR'),digest_size=28).hexdigest())")
 ```
 
 #### One-liner Export Script
