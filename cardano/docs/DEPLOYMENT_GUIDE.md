@@ -801,7 +801,11 @@ The collateral warp route locks existing Cardano tokens for cross-chain transfer
 ```bash
 # Replace with your token's policy ID and asset name
 TOKEN_POLICY="908d51752e4c76fe1404a92b1276b1c1093dae0c7f302c5442f0177e"
-TOKEN_ASSET="WARPTEST"  # ASCII or hex-encoded
+
+# Asset name must be HEX-encoded, not ASCII. An ASCII name fails with
+# "Invalid hex: Odd number of digits" (odd length) or is silently misread
+# (e.g. "CAFE" is valid hex). Encode it first:
+TOKEN_ASSET=$(printf 'WARPTEST' | xxd -p)  # -> 5741525054455354
 
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
@@ -2717,6 +2721,76 @@ echo $EVM_ISM
 
 ---
 
+### Step 1a: Deploy the IGP and StorageGasOracle
+
+The IGP is where senders pay for delivery on Cardano, and it is what the relayer
+reads to decide whether a message was paid enough to deliver. **The relayer only
+ever looks at the one IGP address in its config** (`SEPOLIA_IGP`), so this IGP
+and the relayer config must name the same contract. A payment made to any other
+IGP is invisible to the relayer and the message is never delivered.
+
+Skip this step only if you are reusing an existing IGP whose address already
+matches the relayer's `SEPOLIA_IGP`.
+
+```bash
+cd solidity
+
+forge script script/warp-e2e/DeploySepoliaIGP.s.sol:DeploySepoliaIGP \
+  --rpc-url $EVM_RPC_URL \
+  --broadcast \
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
+
+# Capture every address the script printed into sepolia.env, and load them
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
+echo "IGP=$EVM_IGP oracle=$EVM_STORAGE_GAS_ORACLE"
+```
+
+Gas values (`gasPrice`, `tokenExchangeRate`, `gasOverhead`) are covered in the
+[Gas Payment (IGP) Configuration & Enforcement](#appendix-gas-payment-igp-configuration--enforcement)
+appendix.
+
+---
+
+### Step 1b: Deploy the AggregationHook
+
+Routes need a hook that does **both** jobs: insert the message into the
+MerkleTreeHook (so validators sign a checkpoint covering it) *and* take the gas
+payment into the IGP. A hook that does only one of those silently breaks
+delivery. The AggregationHook combines them.
+
+`EVM_IGP` **must** be the IGP from Step 1a — the one the relayer indexes. Wrapping
+any other IGP produces a hook that looks fine, accepts payment, and whose messages
+are never delivered.
+
+```bash
+cd solidity
+source sepolia.env   # provides EVM_IGP from Step 1a
+
+export EVM_MERKLE_TREE_HOOK="0x4917a9746A7B6E0A57159cCb7F5a6744247f2d0d"  # Sepolia
+
+forge script script/warp-e2e/DeployAggregationHook.s.sol:DeployAggregationHook \
+  --rpc-url $EVM_RPC_URL \
+  --broadcast \
+  --private-key $EVM_SIGNER_KEY 2>&1 | tee /tmp/step.out
+
+grep -oE 'EVM_[A-Z_]+=0x[0-9a-fA-F]{40}' /tmp/step.out | sed 's/^/export /' >> sepolia.env
+source sepolia.env
+echo $EVM_AGGREGATION_HOOK
+```
+
+Verify it wraps the MerkleTreeHook and the IGP the relayer indexes:
+
+```bash
+cast call $EVM_AGGREGATION_HOOK 'hooks(bytes)(address[])' 0x --rpc-url $EVM_RPC_URL
+# Expect: [<EVM_MERKLE_TREE_HOOK>, <EVM_IGP>]  -- and EVM_IGP == relayer's SEPOLIA_IGP
+```
+
+The AggregationHook is reusable — redeploy only if the IGP or MerkleTreeHook
+address changes.
+
+---
+
 ### Step 2: Deploy Sepolia Warp Routes
 
 This deploys all the test ERC20 tokens and warp routes needed for E2E testing.
@@ -2898,6 +2972,50 @@ cast send $EVM_SYNTHETIC_WCTEST \
   $EVM_ISM \
   --rpc-url $EVM_RPC_URL \
   --private-key $EVM_SIGNER_KEY
+```
+
+---
+
+### Step 3a: Set the AggregationHook on the Warp Routes
+
+**Do not skip this.** A freshly deployed route has `hook() == address(0)`, and
+`Mailbox.dispatch` then falls back to its *own* `defaultHook`. On a shared
+Mailbox (like Sepolia's official one) that default pays somebody else's IGP.
+The transfer will succeed on Sepolia and then never be delivered on Cardano —
+the relayer sees an unpaid message and `onChainFeeQuoting` rejects it forever.
+There is no error message pointing at the hook; it just silently never arrives.
+
+Deploying a route does **not** configure its hook. This step is what configures it.
+
+#### Required Environment Variables
+
+| Variable                 | Description                          | Set In        |
+| ------------------------ | ------------------------------------ | ------------- |
+| `EVM_SIGNER_KEY`         | Private key for Sepolia transactions | Prerequisites |
+| `EVM_AGGREGATION_HOOK`   | MerkleTreeHook + IGP hook            | Step 1b       |
+| `EVM_SYNTHETIC_WCTEST`   | wCTEST synthetic route               | Step 2        |
+| `EVM_SYNTHETIC_WADA`     | wADA synthetic route                 | Step 2        |
+| `EVM_COLLATERAL_FTEST`   | FTEST collateral route               | Step 2        |
+| `EVM_COLLATERAL_WADA`    | WADA collateral route                | Step 2        |
+
+```bash
+cd solidity
+source sepolia.env
+
+forge script script/warp-e2e/DeploySepoliaWarp.s.sol:DeploySepoliaWarp \
+  --sig "setRouteHooks()" \
+  --rpc-url $EVM_RPC_URL \
+  --broadcast \
+  --private-key $EVM_SIGNER_KEY
+```
+
+Verify every route now points at the hook (`address(0)` means it is still broken):
+
+```bash
+for r in $EVM_SYNTHETIC_WCTEST $EVM_SYNTHETIC_WADA $EVM_COLLATERAL_FTEST $EVM_COLLATERAL_WADA; do
+  echo "$r hook=$(cast call $r 'hook()(address)' --rpc-url $EVM_RPC_URL)"
+done
+# All four must equal $EVM_AGGREGATION_HOOK
 ```
 
 ---
@@ -3441,9 +3559,10 @@ $CLI --network $NETWORK igp show
 
 Cardano has no gas metering, so gas is denominated **1 lovelace = 1 gas unit**
 (`gasPrice = 1`); a `gasLimit` reads directly as lovelace of Cardano cost. The
-IGP + StorageGasOracle come from `DeploySepoliaIGP.s.sol` or the AggregationHook
-(see the next appendix). Configure them with `cast` (authoritative — the forge
-script's defaults are the older `gasPrice = 44` model):
+IGP + StorageGasOracle are deployed in [Step 1a](#step-1a-deploy-the-igp-and-storagegasoracle)
+and wrapped by the AggregationHook in [Step 1b](#step-1b-deploy-the-aggregationhook).
+Configure their gas values with `cast` (authoritative — the forge script's
+defaults are the older `gasPrice = 44` model):
 
 ```bash
 export ETH_RPC_URL=$SEPOLIA_RPC_URL
@@ -3546,7 +3665,7 @@ see it.
 
 | Scenario | Hook Needed? | Why |
 | --- | --- | --- |
-| Warp route `transferRemote()` | Automatic | Warp routes have their own hook configured at deploy time |
+| Warp route `transferRemote()` | **Yes — must be set explicitly** | Deploying a route does **not** set its hook. It stays `address(0)`, and the Mailbox falls back to its own `defaultHook`, which on a shared Mailbox pays an IGP your relayer does not index. See [Step 3a](#step-3a-set-the-aggregationhook-on-the-warp-routes) |
 | `Mailbox.dispatch()` (3-arg) | Default hook only | Uses the Mailbox's default hook (usually MerkleTreeHook) — **cannot accept ETH for gas** |
 | `Mailbox.dispatch()` (5-arg) with custom hook | **Yes — must include MerkleTreeHook** | If your custom hook is only an IGP, messages won't be in the merkle tree |
 
@@ -3565,7 +3684,12 @@ cd solidity
 # Set environment variables
 export EVM_SIGNER_KEY="0x..."                                    # Your deployer key
 export EVM_MERKLE_TREE_HOOK="0x4917a9746A7B6E0A57159cCb7F5a6744247f2d0d"  # Sepolia example
-export EVM_IGP="0xb9655C900Ef6104a776E533E93dC1D32BEe8cd93"              # Your IGP address
+
+# EVM_IGP MUST be the IGP the relayer indexes (its SEPOLIA_IGP). Do not paste an
+# arbitrary IGP here: wrapping the wrong one yields a hook that accepts payment
+# and whose messages are never delivered. Take it from Step 1a:
+source sepolia.env   # provides EVM_IGP
+echo $EVM_IGP
 
 # Deploy
 forge script script/warp-e2e/DeployAggregationHook.s.sol:DeployAggregationHook \
