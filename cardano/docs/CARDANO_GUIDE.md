@@ -1385,7 +1385,7 @@ export EVM_DOMAIN=11155111
 ### Deployment Flow
 
 ```
-Step 1: Deploy ISM ----------------> EVM_CARDANO_ISM
+Step 1: Deploy ISM ----------------> EVM_ISM
 Step 2: Deploy Warp Routes --------> EVM_SYNTHETIC_*, EVM_COLLATERAL_*, etc.
 Step 3: Set ISM on Routes
 Step 4: Mint Test Tokens
@@ -1406,7 +1406,7 @@ cd solidity
 forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
   --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_SIGNER_KEY
 
-export EVM_CARDANO_ISM="0x..."  # from output
+export EVM_ISM="0x..."  # from output
 ```
 
 ### Step 2: Deploy Sepolia Warp Routes

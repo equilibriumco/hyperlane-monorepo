@@ -2623,7 +2623,7 @@ export EVM_DOMAIN=11155111    # Ethereum Sepolia testnet
 The deployment follows this order, with each step producing outputs needed by subsequent steps:
 
 ```
-Step 1: Deploy ISM ──────────────────► EVM_CARDANO_ISM
+Step 1: Deploy ISM ──────────────────► EVM_ISM
                                               │
 Step 2: Deploy Warp Routes ──────────► EVM_SYNTHETIC_*, EVM_COLLATERAL_*, EVM_*
                                               │
@@ -2684,7 +2684,7 @@ forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
   --private-key $EVM_SIGNER_KEY
 
 # ⚠️ IMPORTANT: Save the ISM address from the output
-export EVM_CARDANO_ISM="0x..."  # Copy from "MultisigISM deployed:" line
+export EVM_ISM="0x..."  # Copy from "MultisigISM deployed:" line
 ```
 
 ---
@@ -2695,9 +2695,29 @@ This deploys all the test ERC20 tokens and warp routes needed for E2E testing.
 
 #### Required Environment Variables
 
-| Variable          | Description                       | Example |
-| ----------------- | --------------------------------- | ------- |
-| `EVM_SIGNER_KEY` | Private key for Sepolia transactions | `0x...` |
+| Variable         | Description                          | Where it comes from |
+| ---------------- | ------------------------------------ | ------------------- |
+| `EVM_SIGNER_KEY` | Private key for Sepolia transactions | your wallet |
+| `EVM_MAILBOX`    | Sepolia Mailbox address              | pre-deployed: `0xfFAEF09B3cd11D9b20d1a19bECca54EEC2884766` |
+| `EVM_ISM`        | The Cardano ISM on Sepolia           | **Step 1** output |
+
+> **All three are mandatory** — `EVM_MAILBOX` and `EVM_ISM` are read in the
+> script's **constructor**, so they are required to instantiate it at all, for
+> *every* function in this script (`run`, `enrollRouters`, `mintTestTokens`, …),
+> not just the deploy. Missing either fails before your function runs with:
+> `Failed to deploy script: execution reverted: vm.envAddress: environment variable "EVM_ISM" not found`
+
+```bash
+export EVM_MAILBOX="0xfFAEF09B3cd11D9b20d1a19bECca54EEC2884766"
+export EVM_ISM="0x..."          # from Step 1
+```
+
+> **Reusing an existing ISM:** static multisig ISMs are deployed deterministically
+> from `(validators, threshold)`, and the ISM only verifies validator signatures —
+> it does not bake in the Cardano mailbox. So if your validator set is unchanged,
+> the ISM address from a previous deployment is still valid and Step 1 would just
+> return the same address. Verify with:
+> `cast call $EVM_ISM "validatorsAndThreshold(bytes)(address[],uint8)" 0x`
 
 #### Optional Environment Variables for Token Customization
 
@@ -2809,7 +2829,7 @@ Configure the warp routes to use the Cardano ISM for validating inbound messages
 | Variable                | Description                       | Set In        |
 | ----------------------- | --------------------------------- | ------------- |
 | `EVM_SIGNER_KEY`       | Private key for Sepolia transactions | Prerequisites |
-| `EVM_CARDANO_ISM`      | Cardano MultisigISM address       | Step 1        |
+| `EVM_ISM`      | Cardano MultisigISM address       | Step 1        |
 | `EVM_SYNTHETIC_WCTEST` | wCTEST synthetic route            | Step 2        |
 | `EVM_SYNTHETIC_WADA`   | wADA synthetic route              | Step 2        |
 | `EVM_COLLATERAL_FTEST` | FTEST collateral route            | Step 2        |
@@ -2819,7 +2839,7 @@ Configure the warp routes to use the Cardano ISM for validating inbound messages
 
 ```bash
 # Check all required variables are set
-echo "ISM: $EVM_CARDANO_ISM"
+echo "ISM: $EVM_ISM"
 echo "Synthetic wCTEST: $EVM_SYNTHETIC_WCTEST"
 echo "Synthetic wADA: $EVM_SYNTHETIC_WADA"
 echo "Collateral FTEST: $EVM_COLLATERAL_FTEST"
@@ -2844,7 +2864,7 @@ forge script script/warp-e2e/DeployCardanoISM.s.sol:DeployCardanoISM \
 # Set ISM on a specific warp route manually
 cast send $EVM_SYNTHETIC_WCTEST \
   "setInterchainSecurityModule(address)" \
-  $EVM_CARDANO_ISM \
+  $EVM_ISM \
   --rpc-url $EVM_RPC_URL \
   --private-key $EVM_SIGNER_KEY
 ```
@@ -3033,7 +3053,7 @@ cast send $EVM_SYNTHETIC_WADA \
 #### Check ISM Configuration
 
 ```bash
-# Check ISM on a warp route (should return EVM_CARDANO_ISM address)
+# Check ISM on a warp route (should return EVM_ISM address)
 cast call $EVM_SYNTHETIC_WCTEST \
   "interchainSecurityModule()(address)" \
   --rpc-url $EVM_RPC_URL
@@ -3168,7 +3188,7 @@ export CARDANO_ISM_THRESHOLD=1
 # ============================================================
 # STEP 1: ISM Deployment Outputs (set after deployment)
 # ============================================================
-export EVM_CARDANO_ISM="0x..."
+export EVM_ISM="0x..."
 
 # ============================================================
 # STEP 2: Warp Route Deployment Outputs (set after deployment)
@@ -3264,7 +3284,7 @@ forge create contracts/token/HypERC20.sol:HypERC20 \
 WALLET=$(cast wallet address --private-key $EVM_SIGNER_KEY)
 cast send $DEPLOYED_ADDRESS \
   "initialize(uint256,string,string,address,address,address)" \
-  0 "Wrapped Token" "wTKN" "0x0000000000000000000000000000000000000000" $EVM_CARDANO_ISM $WALLET \
+  0 "Wrapped Token" "wTKN" "0x0000000000000000000000000000000000000000" $EVM_ISM $WALLET \
   --rpc-url $EVM_RPC_URL \
   --private-key $EVM_SIGNER_KEY
 ```
@@ -3280,8 +3300,8 @@ cast send $DEPLOYED_ADDRESS \
 env | grep -E "^EVM_|^CARDANO_"
 
 # Make sure to export (not just set) variables
-export EVM_CARDANO_ISM="0x..."  # ✓ Correct
-EVM_CARDANO_ISM="0x..."         # ✗ Won't be available to forge
+export EVM_ISM="0x..."  # ✓ Correct
+EVM_ISM="0x..."         # ✗ Won't be available to forge
 ```
 
 #### "Execution reverted" on Transfer
@@ -3290,7 +3310,7 @@ EVM_CARDANO_ISM="0x..."         # ✗ Won't be available to forge
 
    ```bash
    cast call $EVM_SYNTHETIC_WCTEST "interchainSecurityModule()(address)" --rpc-url $EVM_RPC_URL
-   # Should return $EVM_CARDANO_ISM
+   # Should return $EVM_ISM
    ```
 
 2. **Verify router enrollment:**
