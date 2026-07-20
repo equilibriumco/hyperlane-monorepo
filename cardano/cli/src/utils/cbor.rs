@@ -293,7 +293,9 @@ pub fn build_ism_datum(
     builder.bytes_hex(owner_pkh)?;
 
     // module_type (Constr 0 = MessageId, Constr 1 = MerkleRoot)
-    builder.start_constr(module_type.constr_index()).end_constr();
+    builder
+        .start_constr(module_type.constr_index())
+        .end_constr();
 
     builder.end_constr();
 
@@ -500,6 +502,29 @@ impl<'a> CborDecoder<'a> {
         }
     }
 
+    /// Read an indefinite-length string as the concatenation of its definite-length
+    /// chunks, up to the break byte. Cardano emits this form for byte strings longer
+    /// than 64 bytes, so any datum carrying a message body over that size hits it.
+    fn read_indefinite_chunks(&mut self, expected_major: u8) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            if self.peek()? == 0xff {
+                self.read_byte()?; // consume break
+                return Ok(out);
+            }
+            let initial = self.read_byte()?;
+            let major = initial >> 5;
+            let additional = initial & 0x1f;
+            if major != expected_major || additional == 31 {
+                return Err(anyhow!(
+                    "Invalid chunk in indefinite-length string: major {major}, additional {additional}"
+                ));
+            }
+            let len = self.read_uint(additional)? as usize;
+            out.extend_from_slice(self.read_bytes(len)?);
+        }
+    }
+
     fn decode_value(&mut self) -> Result<Value> {
         let initial = self.read_byte()?;
         let major = initial >> 5;
@@ -519,16 +544,26 @@ impl<'a> CborDecoder<'a> {
             }
             2 => {
                 // Byte string
-                let len = self.read_uint(additional)? as usize;
-                let bytes = self.read_bytes(len)?;
-                Ok(json!({"bytes": hex::encode(bytes)}))
+                if additional == 31 {
+                    let bytes = self.read_indefinite_chunks(2)?;
+                    Ok(json!({"bytes": hex::encode(bytes)}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let bytes = self.read_bytes(len)?;
+                    Ok(json!({"bytes": hex::encode(bytes)}))
+                }
             }
             3 => {
                 // Text string
-                let len = self.read_uint(additional)? as usize;
-                let bytes = self.read_bytes(len)?;
-                let text = String::from_utf8_lossy(bytes);
-                Ok(json!({"string": text}))
+                if additional == 31 {
+                    let bytes = self.read_indefinite_chunks(3)?;
+                    Ok(json!({"string": String::from_utf8_lossy(&bytes)}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let bytes = self.read_bytes(len)?;
+                    let text = String::from_utf8_lossy(bytes);
+                    Ok(json!({"string": text}))
+                }
             }
             4 => {
                 // Array
@@ -1358,5 +1393,27 @@ mod tests {
         let result = build_migrate_redeemer(3, hash).unwrap();
         let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
         assert_eq!(decoded["constructor"], 3);
+    }
+
+    /// Cardano serializes byte strings longer than 64 bytes as an indefinite-length
+    /// sequence of 64-byte chunks. Decoding used to fail on those with
+    /// "Invalid CBOR additional info: 31", so any greeting body over 64 bytes was
+    /// unreadable (`greeting receive` could not consume it).
+    #[test]
+    fn test_decode_indefinite_length_byte_string() {
+        let body: Vec<u8> = (0..100u32).map(|i| (i % 251) as u8).collect();
+        // Constr 0 [ bytes ] with the bytes chunked the way Cardano emits them.
+        let mut cbor = vec![0xd8, 0x79, 0x9f]; // tag 121, indefinite array
+        cbor.push(0x5f); // indefinite-length byte string
+        for chunk in body.chunks(64) {
+            cbor.push(0x58); // definite byte string, 1-byte length
+            cbor.push(chunk.len() as u8);
+            cbor.extend_from_slice(chunk);
+        }
+        cbor.push(0xff); // break (end of chunks)
+        cbor.push(0xff); // break (end of array)
+
+        let decoded = decode_plutus_datum(&hex::encode(&cbor)).unwrap();
+        assert_eq!(decoded["fields"][0]["bytes"], hex::encode(&body));
     }
 }
