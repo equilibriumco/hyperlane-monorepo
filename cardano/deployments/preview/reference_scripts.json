@@ -1,51 +1,23 @@
 [
   {
-    "script_name": "multisig_ism",
-    "script_hash": "122a3211a2f1d3c8b2bee3400f1b239a6e2f516f7f4bf6c7dc32c4d9",
-    "tx_hash": "dbaa91687e67b04e6a7939117d1df22647e7a251b7f3b43c9641009d0000f5a8",
-    "output_index": 0,
-    "lovelace": 16000000
-  },
-  {
     "script_name": "mailbox",
-    "script_hash": "57735b8ac9d251cd93c6b703cb533b8512cacaf398091c46ba9a3c2c",
-    "tx_hash": "933e8d78621d28213aa025bf05a92b3adc0dce7775e553a530c94eeb44b5dc61",
-    "output_index": 0,
-    "lovelace": 30000000
-  },
-  {
-    "script_name": "igp",
-    "script_hash": "cc50de58512bc599f8cf693677473e8c8d5c124733b592a66f0e871c",
-    "tx_hash": "1a245db90c18086fc9146559d97c2db1acd3ab4a9976233414f1a0606a2009da",
-    "output_index": 0,
-    "lovelace": 15000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "3723efab656d11788752d3ca6c03ded9162b9fbc7f7b749445259abb",
-    "tx_hash": "b0a22158b690a71517223748e229dd1090da099598f8fb4c1656c0dd1cfce4ae",
-    "output_index": 0,
-    "lovelace": 35000000
-  },
-  {
-    "script_name": "merkle_root_multisig_ism",
-    "script_hash": "5c7f0f46906b141cb40443535e41e2958f63e7ef830ab4a2e3b0aaaf",
-    "tx_hash": "ea868d22ac34f04b3a430a0a90b044473ddb6a9271402054feaa10ee357b87ad",
-    "output_index": 0,
-    "lovelace": 18000000
-  },
-  {
-    "script_name": "mailbox",
-    "script_hash": "b72d210705a1b971e7893db487fa24fe30a7caf604d74fb6b0f8b393",
-    "tx_hash": "b45d0ef1cec2305515583630091dae99d52be55b5606992f6245b78904c99bbc",
+    "script_hash": "8f7d65f8dd4380d1ce58883d9d98f85cdf09d7b2321a6f9cef2b9af8",
+    "tx_hash": "22da1eb40af536ce3ec15b06a92fa418cfcbfc37a75a0502c63950d017759df4",
     "output_index": 0,
     "lovelace": 35000000
   },
   {
     "script_name": "message_id_multisig_ism",
     "script_hash": "673158fa70bf8097685a52443e94e6f9dc96c4f99f2607da1975f7b8",
-    "tx_hash": "00c0845dc6344f75b861c196c41eaa94fb26d513d7f2f71183c6b0fceef595e2",
+    "tx_hash": "632b0b12d4a2efde43540a6c9eedf749b22ba2854050eb794d549b539cedf7c9",
     "output_index": 0,
     "lovelace": 17000000
+  },
+  {
+    "script_name": "igp",
+    "script_hash": "cc50de58512bc599f8cf693677473e8c8d5c124733b592a66f0e871c",
+    "tx_hash": "826de210040c85012589b6a1c6f33fe6e06fdd1d6e1c2e1d6b7bf9da765628a8",
+    "output_index": 0,
+    "lovelace": 15000000
   }
 ]
