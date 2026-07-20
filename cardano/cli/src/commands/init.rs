@@ -237,7 +237,18 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             utxo,
             module_type,
             dry_run,
-        } => init_ism(ctx, &domains, validators, thresholds, utxo, module_type, dry_run).await,
+        } => {
+            init_ism(
+                ctx,
+                &domains,
+                validators,
+                thresholds,
+                utxo,
+                module_type,
+                dry_run,
+            )
+            .await
+        }
         InitCommands::Recipient {
             mailbox_hash,
             custom_ism,
@@ -850,12 +861,7 @@ async fn init_ism_internal(
     };
 
     // Build ISM datum
-    let datum_cbor = build_ism_datum(
-        &validator_map,
-        &threshold_map,
-        &owner_pkh,
-        ism_module_type,
-    )?;
+    let datum_cbor = build_ism_datum(&validator_map, &threshold_map, &owner_pkh, ism_module_type)?;
     println!(
         "  Datum CBOR: {}...",
         hex::encode(&datum_cbor[..32.min(datum_cbor.len())])

@@ -173,7 +173,10 @@ async fn extract(
     let all_validators = vec![
         ("mailbox", Some(&validators.mailbox)),
         ("message_id_multisig_ism", Some(&validators.message_id_ism)),
-        ("merkle_root_multisig_ism", Some(&validators.merkle_root_ism)),
+        (
+            "merkle_root_multisig_ism",
+            Some(&validators.merkle_root_ism),
+        ),
         ("igp", validators.igp.as_ref()),
         ("validator_announce", validators.validator_announce.as_ref()),
         ("warp_route", validators.warp_route.as_ref()),
