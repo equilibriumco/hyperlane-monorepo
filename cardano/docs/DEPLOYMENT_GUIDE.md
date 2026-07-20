@@ -55,6 +55,14 @@ Steps 6 and 9–10 are the ones most easily missed: without the Sepolia deploy y
 have no router address to enroll, and without gas config + running agents no
 message is ever delivered.
 
+**Already deployed?** This guide is for standing the system up the first time.
+For day-to-day work use the runbooks instead:
+
+- [runbook.md](runbook.md) — start/stop the agents, run greeting and warp
+  transfers in both directions, read gas margins, troubleshoot.
+- [runbook-warp-routes.md](runbook-warp-routes.md) — add a token or a warp route
+  pair to a live deployment, both sides, with an end-of-page checklist.
+
 ---
 
 ## Prerequisites
