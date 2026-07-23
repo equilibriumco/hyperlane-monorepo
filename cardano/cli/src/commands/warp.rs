@@ -2129,6 +2129,9 @@ async fn transfer(
                      or omit --gas-limit to dispatch without paying interchain gas."
                 )
             })?;
+        // The contract adds the overhead itself, so the redeemer carries only
+        // the application gas. `total_gas` mirrors the on-chain price and is
+        // shown so the caller can see what they are paying for.
         let total_gas = gas_lim + gas_overhead;
         let igp_payment = calculate_gas_payment(total_gas, gas_price, exchange_rate);
 
@@ -2143,9 +2146,10 @@ async fn transfer(
             igp_payment as f64 / 1_000_000.0
         );
 
-        // Build IGP redeemer (gas_amount = total gas including overhead)
+        // Build IGP redeemer (gas_amount = application gas; the contract adds
+        // the destination's overhead on top)
         let igp_redeemer =
-            build_pay_for_gas_redeemer(&hex::decode(&message_id)?, domain, total_gas);
+            build_pay_for_gas_redeemer(&hex::decode(&message_id)?, domain, gas_lim);
         let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
             .map_err(|e| anyhow!("Failed to encode IGP redeemer: {:?}", e))?;
 

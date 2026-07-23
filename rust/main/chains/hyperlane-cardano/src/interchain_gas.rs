@@ -1,5 +1,6 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider, TransactionUtxos};
 use crate::provider::CardanoProvider;
+use crate::tx_builder::tx_encoding::extract_int;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use futures::stream::{self, FuturesUnordered, StreamExt};
@@ -12,7 +13,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Cardano implementation of the InterchainGasPaymaster trait.
 ///
@@ -149,20 +150,36 @@ impl CardanoInterchainGasPaymasterIndexer {
             };
 
             if let Some(redeemer_data) = parse_pay_for_gas_redeemer(&redeemer_datum) {
-                let payment_lovelace =
+                let (payment_lovelace, gas_overhead) =
                     match self.provider.get_transaction_utxos(&tx_info.tx_hash).await {
-                        Ok(tx_utxos) => calculate_igp_payment(&tx_utxos, igp_address),
+                        Ok(tx_utxos) => (
+                            calculate_igp_payment(&tx_utxos, igp_address),
+                            gas_overhead_for(&tx_utxos, igp_address, redeemer_data.destination),
+                        ),
                         Err(e) => {
                             debug!("Could not get UTxOs for tx {}: {}", tx_info.tx_hash, e);
-                            0
+                            (0, None)
                         }
                     };
+
+                // The redeemer declares application gas; the contract charged
+                // for that plus the destination's overhead. Enforcement compares
+                // against the full delivery estimate, so credit the total.
+                let Some(gas_overhead) = gas_overhead else {
+                    warn!(
+                        "Could not read gas overhead for destination {} in tx {}; \
+                         skipping this payment rather than crediting it short",
+                        redeemer_data.destination, tx_info.tx_hash
+                    );
+                    continue;
+                };
+                let total_gas = redeemer_data.gas_amount.saturating_add(gas_overhead);
 
                 let payment = InterchainGasPayment {
                     message_id: redeemer_data.message_id,
                     destination: redeemer_data.destination,
                     payment: U256::from(payment_lovelace),
-                    gas_amount: U256::from(redeemer_data.gas_amount),
+                    gas_amount: U256::from(total_gas),
                 };
 
                 let indexed = Indexed::new(payment);
@@ -189,11 +206,14 @@ impl CardanoInterchainGasPaymasterIndexer {
                 };
 
                 info!(
-                    "Found gas payment in tx {} for message {}: {} lovelace for {} gas",
+                    "Found gas payment in tx {} for message {}: {} lovelace for {} gas \
+                     ({} application + {} overhead)",
                     tx_info.tx_hash,
                     hex::encode(payment.message_id.as_bytes()),
                     payment_lovelace,
-                    redeemer_data.gas_amount
+                    total_gas,
+                    redeemer_data.gas_amount,
+                    gas_overhead
                 );
                 results.push((indexed, log_meta));
             }
@@ -246,6 +266,64 @@ fn parse_pay_for_gas_redeemer(json: &Value) -> Option<PayForGasRedeemerData> {
 ///
 /// The payment is the difference in lovelace value between the IGP output
 /// and the IGP input (output_value - input_value = payment added to IGP).
+/// Read the destination's `gas_overhead` out of the IGP datum being spent.
+///
+/// The redeemer carries application gas only; the contract adds this overhead
+/// when it prices the payment, so the relayer has to add it too or every
+/// message reads as underpaid against the full delivery estimate. Taking it
+/// from the spent input rather than current chain state means a payment is
+/// always credited at the rate that applied when it was made.
+fn gas_overhead_for(
+    tx_utxos: &TransactionUtxos,
+    igp_address: &str,
+    destination: u32,
+) -> Option<u64> {
+    use pallas_codec::minicbor;
+    use pallas_primitives::conway::PlutusData;
+
+    let datum_hex = tx_utxos
+        .inputs
+        .iter()
+        .find(|utxo| utxo.address == igp_address)
+        .and_then(|utxo| utxo.inline_datum.as_ref())?;
+
+    let decoded: PlutusData = minicbor::decode(&hex::decode(datum_hex).ok()?).ok()?;
+
+    // IgpDatum: Constr 0 [owner, beneficiary, gas_oracles]
+    let PlutusData::Constr(datum) = decoded else {
+        return None;
+    };
+    let oracles = datum.fields.to_vec().into_iter().nth(2)?;
+    let PlutusData::Array(entries) = oracles else {
+        return None;
+    };
+
+    for entry in entries.to_vec() {
+        // Tuples encode as a two-element array: [domain, GasOracleConfig]
+        let PlutusData::Array(pair) = entry else {
+            continue;
+        };
+        let pair = pair.to_vec();
+        let Some(domain) = pair.first().and_then(extract_int) else {
+            continue;
+        };
+        if domain as u32 != destination {
+            continue;
+        }
+        // GasOracleConfig: Constr 0 [gas_price, token_exchange_rate, gas_overhead]
+        let Some(PlutusData::Constr(config)) = pair.get(1).cloned() else {
+            return None;
+        };
+        return config
+            .fields
+            .to_vec()
+            .get(2)
+            .and_then(extract_int)
+            .map(|overhead| overhead.max(0) as u64);
+    }
+    None
+}
+
 fn calculate_igp_payment(tx_utxos: &TransactionUtxos, igp_address: &str) -> u64 {
     // Sum lovelace in IGP inputs
     let input_lovelace: u64 = tx_utxos
@@ -621,5 +699,103 @@ mod tests {
 
         let payment = calculate_igp_payment(&tx_utxos, igp_address);
         assert_eq!(payment, 0); // No net payment
+    }
+}
+
+#[cfg(test)]
+mod gas_overhead_tests {
+    use super::*;
+    use crate::blockfrost_provider::{TransactionUtxos, Utxo};
+    use pallas_codec::minicbor;
+    use pallas_codec::utils::MaybeIndefArray;
+    use pallas_primitives::conway::{BigInt, Constr, PlutusData};
+
+    const IGP_ADDRESS: &str = "addr_test1igp";
+
+    fn int(v: i64) -> PlutusData {
+        PlutusData::BigInt(BigInt::Int(v.into()))
+    }
+
+    fn constr(fields: Vec<PlutusData>) -> PlutusData {
+        PlutusData::Constr(Constr {
+            tag: 121,
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(fields),
+        })
+    }
+
+    /// IgpDatum: Constr 0 [owner, beneficiary, gas_oracles]
+    /// where each oracle is [domain, Constr 0 [gas_price, rate, overhead]]
+    fn igp_datum_hex(oracles: Vec<(i64, i64)>) -> String {
+        let entries: Vec<PlutusData> = oracles
+            .into_iter()
+            .map(|(domain, overhead)| {
+                PlutusData::Array(MaybeIndefArray::Def(vec![
+                    int(domain),
+                    constr(vec![int(1_000_000_000), int(7171), int(overhead)]),
+                ]))
+            })
+            .collect();
+        let datum = constr(vec![
+            PlutusData::BoundedBytes(vec![0u8; 28].into()),
+            PlutusData::BoundedBytes(vec![1u8; 28].into()),
+            PlutusData::Array(MaybeIndefArray::Def(entries)),
+        ]);
+        let mut buf = Vec::new();
+        minicbor::encode(&datum, &mut buf).unwrap();
+        hex::encode(buf)
+    }
+
+    fn utxos(datum_hex: Option<String>) -> TransactionUtxos {
+        TransactionUtxos {
+            hash: "aa".repeat(32),
+            inputs: vec![Utxo {
+                tx_hash: "bb".repeat(32),
+                output_index: 0,
+                address: IGP_ADDRESS.to_string(),
+                value: vec![],
+                inline_datum: datum_hex,
+                data_hash: None,
+                reference_script_hash: None,
+                collateral: false,
+                reference: false,
+            }],
+            outputs: vec![],
+        }
+    }
+
+    #[test]
+    fn reads_the_overhead_for_the_requested_destination() {
+        let tx = utxos(Some(igp_datum_hex(vec![(11155111, 211000), (2003, 42)])));
+        assert_eq!(gas_overhead_for(&tx, IGP_ADDRESS, 11155111), Some(211000));
+        assert_eq!(gas_overhead_for(&tx, IGP_ADDRESS, 2003), Some(42));
+    }
+
+    /// A destination with no oracle has no overhead to add. Returning None makes
+    /// the caller skip the payment rather than credit it short, which would look
+    /// like an underpayment forever.
+    #[test]
+    fn returns_none_for_an_unconfigured_destination() {
+        let tx = utxos(Some(igp_datum_hex(vec![(11155111, 211000)])));
+        assert_eq!(gas_overhead_for(&tx, IGP_ADDRESS, 99999), None);
+    }
+
+    #[test]
+    fn returns_none_when_the_igp_input_has_no_datum() {
+        assert_eq!(gas_overhead_for(&utxos(None), IGP_ADDRESS, 11155111), None);
+    }
+
+    #[test]
+    fn returns_none_when_no_input_is_at_the_igp_address() {
+        let tx = utxos(Some(igp_datum_hex(vec![(11155111, 211000)])));
+        assert_eq!(gas_overhead_for(&tx, "addr_test1other", 11155111), None);
+    }
+
+    #[test]
+    fn returns_none_on_a_datum_that_is_not_an_igp_datum() {
+        let mut buf = Vec::new();
+        minicbor::encode(&int(7), &mut buf).unwrap();
+        let tx = utxos(Some(hex::encode(buf)));
+        assert_eq!(gas_overhead_for(&tx, IGP_ADDRESS, 11155111), None);
     }
 }

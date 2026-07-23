@@ -590,30 +590,17 @@ async fn quote_gas(
     );
     println!("  Gas limit (app): {}", format_number(gas_limit));
 
-    let (gas_price, exchange_rate, gas_overhead, total_gas, required_lovelace) = match oracle {
-        Some((_, gp, er, overhead)) => {
-            let total = gas_limit + overhead;
-            let lovelace = calculate_gas_payment(total, *gp, *er);
-            (*gp, *er, *overhead, total, lovelace)
-        }
-        None => {
-            let default_gas_price = 1u64;
-            let default_exchange_rate = 1_000_000u64;
-            let lovelace =
-                calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
-            println!(
-                "  {}",
-                "Warning: No oracle configured for this destination, using defaults".yellow()
-            );
-            (
-                default_gas_price,
-                default_exchange_rate,
-                0,
-                gas_limit,
-                lovelace,
-            )
-        }
+    // The contract adds the overhead itself, so the redeemer carries only the
+    // application gas. `total_gas` is here to show the caller what they are
+    // paying for and to mirror the on-chain price.
+    let Some((_, gas_price, exchange_rate, gas_overhead)) = oracle.copied() else {
+        return Err(anyhow!(
+            "No gas oracle configured for domain {destination}. \
+             Set one with `igp set-oracle --domain {destination} ...` first."
+        ));
     };
+    let total_gas = gas_limit + gas_overhead;
+    let required_lovelace = calculate_gas_payment(total_gas, gas_price, exchange_rate);
 
     println!("  Gas overhead: {}", format_number(gas_overhead));
     println!("  Total gas: {}", format_number(total_gas));
@@ -809,30 +796,17 @@ async fn pay_for_gas(
         .gas_oracles
         .iter()
         .find(|(d, _, _, _)| *d == destination);
-    let (gas_price, exchange_rate, gas_overhead, total_gas, required_lovelace) = match oracle {
-        Some((_, gp, er, overhead)) => {
-            let total = gas_limit + overhead;
-            let lovelace = calculate_gas_payment(total, *gp, *er);
-            (*gp, *er, *overhead, total, lovelace)
-        }
-        None => {
-            let default_gas_price = 1u64;
-            let default_exchange_rate = 1_000_000u64;
-            let lovelace =
-                calculate_gas_payment(gas_limit, default_gas_price, default_exchange_rate);
-            println!(
-                "  {}",
-                "Warning: No oracle configured for this destination, using defaults".yellow()
-            );
-            (
-                default_gas_price,
-                default_exchange_rate,
-                0,
-                gas_limit,
-                lovelace,
-            )
-        }
+    // The contract adds the overhead itself, so the redeemer carries only the
+    // application gas. `total_gas` is here to show the caller what they are
+    // paying for and to mirror the on-chain price.
+    let Some((_, gas_price, exchange_rate, gas_overhead)) = oracle.copied() else {
+        return Err(anyhow!(
+            "No gas oracle configured for domain {destination}. \
+             Set one with `igp set-oracle --domain {destination} ...` first."
+        ));
     };
+    let total_gas = gas_limit + gas_overhead;
+    let required_lovelace = calculate_gas_payment(total_gas, gas_price, exchange_rate);
 
     println!("\n{}", "Payment Calculation:".green());
     println!("  Gas Limit (app): {}", format_number(gas_limit));
@@ -850,7 +824,7 @@ async fn pay_for_gas(
     let new_datum_cbor = igp_ctx.build_new_datum(None)?;
 
     // Build PayForGas redeemer (gas_amount = total gas including overhead)
-    let redeemer = build_pay_for_gas_redeemer(&message_id_bytes, destination, total_gas);
+    let redeemer = build_pay_for_gas_redeemer(&message_id_bytes, destination, gas_limit);
     let redeemer_cbor = pallas_codec::minicbor::to_vec(&redeemer)
         .map_err(|e| anyhow!("Failed to encode redeemer: {:?}", e))?;
     println!("\n{}", "PayForGas Redeemer:".green());

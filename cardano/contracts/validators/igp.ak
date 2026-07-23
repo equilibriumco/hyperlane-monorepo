@@ -187,18 +187,20 @@ fn calculate_gas_payment(
   // delivered, and nothing failed anywhere near the missing config.
   expect Some(config) = find_gas_oracle(datum.gas_oracles, destination)
 
-  expect gas_amount > 0
+  // `gas_amount` is the caller's application-level gas: what the recipient
+  // costs to run, and nothing else. The destination's recipient-independent
+  // overhead is added here rather than trusted to the caller, so omitting it
+  // is not a way to pay less.
+  expect gas_amount >= 0
+  let total_gas = gas_amount + config.gas_overhead
+  expect total_gas > 0
 
-  // gas_amount * gas_price * token_exchange_rate / scale_factor.
-  //
-  // `gas_amount` already includes the destination's `gas_overhead`, added by
-  // the caller, which is why `config.gas_overhead` is not applied again here.
-  // The field is published in the datum so clients know what to add.
+  // total_gas * gas_price * token_exchange_rate / scale_factor.
   //
   // The scale factor is 1e12, not the 1e10 Hyperlane uses elsewhere. Exchange
   // rates configured here must be scaled to match; a rate copied from tooling
   // that assumes 1e10 will be off by a factor of 100.
-  gas_amount * config.gas_price * config.token_exchange_rate / 1000000000000
+  total_gas * config.gas_price * config.token_exchange_rate / 1000000000000
 }
 
 /// Find gas oracle config for a domain
@@ -317,7 +319,7 @@ fn test_igp_datum() -> IgpDatum {
         GasOracleConfig {
           gas_price: 1000000000,
           token_exchange_rate: 7171,
-          gas_overhead: 0,
+          gas_overhead: 11000,
         },
       ),
     ],
@@ -378,8 +380,9 @@ fn pay_tx(held: Int, continuation_lovelace: Int) -> Transaction {
   }
 }
 
-/// 211000 * 1e9 * 7171 / 1e12 = 1513081 lovelace
-const test_gas_amount = 211000
+/// The redeemer carries application gas only; the oracle's 11000 overhead is
+/// added on-chain. (200000 + 11000) * 1e9 * 7171 / 1e12 = 1513081 lovelace.
+const test_gas_amount = 200000
 
 const test_required = 1513081
 
@@ -439,6 +442,38 @@ test draining_the_igp_while_paying_is_rejected() fail {
     test_domain,
     test_gas_amount,
     pay_tx(test_held, test_required),
+    test_own_ref,
+  )
+}
+
+/// Omitting the overhead is not a way to pay less: it is added on-chain, so
+/// the price for a given application gas is the same however the caller
+/// prepares the redeemer.
+test overhead_is_charged_on_top_of_application_gas() {
+  // Priced as if the caller had declared the full 211000 themselves.
+  let without_overhead =
+    test_gas_amount * 1000000000 * 7171 / 1000000000000
+  expect without_overhead < test_required
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_held + test_required),
+    test_own_ref,
+  )
+}
+
+/// A route whose delivery cost is fully covered by the overhead pays for zero
+/// application gas, which is the ordinary case for native and collateral.
+test zero_application_gas_still_pays_the_overhead() {
+  let overhead_only = 11000 * 1000000000 * 7171 / 1000000000000
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    0,
+    pay_tx(test_held, test_held + overhead_only),
     test_own_ref,
   )
 }

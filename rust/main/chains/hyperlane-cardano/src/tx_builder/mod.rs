@@ -4,7 +4,7 @@
 //! Hyperlane messages on Cardano using pallas primitives for CBOR encoding
 //! and pallas-txbuilder for transaction construction.
 
-mod tx_encoding;
+pub(crate) mod tx_encoding;
 mod tx_helpers;
 
 // Re-export public API from sub-modules
