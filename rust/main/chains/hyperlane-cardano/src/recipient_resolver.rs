@@ -203,7 +203,7 @@ fn detect_from_plutus_data(
     };
 
     // Constr 0 (tag 121) with 4 fields = WarpRouteDatum
-    if tag != 121 || fields.len() < 4 {
+    if tag != 121 || fields.len() < 5 {
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
@@ -217,8 +217,8 @@ fn detect_from_plutus_data(
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
-    // Extract ISM from field 3 (Option<IsmConfig>)
-    let ism = parse_optional_ism_config_cbor(fields[3]);
+    // Field 0 is the datum version, so the Option<IsmConfig> sits at field 4.
+    let ism = parse_optional_ism_config_cbor(fields[4]);
 
     Ok((RecipientKind::WarpRoute, ism))
 }
@@ -265,7 +265,7 @@ fn detect_from_json(
     };
 
     // WarpRouteDatum has 4 fields
-    if fields.len() < 4 {
+    if fields.len() < 5 {
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
@@ -280,8 +280,8 @@ fn detect_from_json(
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
-    // Extract ISM from field 3
-    let ism = parse_optional_ism_config_json(&fields[3]);
+    // Field 0 is the datum version, so the Option<IsmConfig> sits at field 4.
+    let ism = parse_optional_ism_config_json(&fields[4]);
 
     Ok((RecipientKind::WarpRoute, ism))
 }

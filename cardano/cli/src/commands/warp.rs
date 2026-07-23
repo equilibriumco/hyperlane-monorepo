@@ -1714,10 +1714,11 @@ async fn list_routers(ctx: &CliContext, warp_policy: Option<String>) -> Result<(
 
         // Parse remote_routes from datum
         if let Some(fields) = parsed_datum.get("fields").and_then(|f| f.as_array()) {
-            // config is first field, remote_routes is inside config at index 3
+            // field 0 is the datum version; config is field 1, and remote_routes
+            // sits at index 3 inside it.
             // Config: [token_type, decimals, remote_decimals, remote_routes]
             if let Some(config_fields) = fields
-                .get(0)
+                .get(1)
                 .and_then(|c| c.get("fields"))
                 .and_then(|f| f.as_array())
             {
@@ -3273,15 +3274,19 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
         .map_err(|e| anyhow!("Failed to decode warp route datum: {}", e))?;
 
     // Extract token_type from datum.config.token_type
-    // Datum structure: Constr 0 [config, owner, total_bridged]
+    // Datum structure: Constr 0 [version, config, owner, total_bridged, ism, destination_gas]
     // Config structure: Constr (tag) [token_type, decimals, remote_decimals, remote_routes]
     // Token type: Constr 121 (Collateral), Constr 122 (Synthetic), Constr 123 (Native)
     let (token_type_tag, minting_policy) = if let PlutusData::Constr(datum_constr) = &datum {
         let fields = datum_constr.fields.clone().to_vec();
-        if fields.is_empty() {
-            return Err(anyhow!("Invalid warp route datum: no fields"));
+        if fields.len() < 2 {
+            return Err(anyhow!(
+                "Invalid warp route datum: expected at least 2 fields, got {}",
+                fields.len()
+            ));
         }
-        if let PlutusData::Constr(config_constr) = &fields[0] {
+        // field 0 is the datum version; config is field 1
+        if let PlutusData::Constr(config_constr) = &fields[1] {
             let config_fields = config_constr.fields.clone().to_vec();
             if config_fields.is_empty() {
                 return Err(anyhow!("Invalid warp route config: no fields"));

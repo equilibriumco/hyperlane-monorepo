@@ -4449,13 +4449,13 @@ fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimal
     let decoded: PlutusData = minicbor::decode(&datum_cbor)
         .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
-    // Extract config from datum fields[0]
+    // Field 0 is the datum version, so config is at index 1.
     let config = if let PlutusData::Constr(constr) = decoded {
         constr
             .fields
             .clone()
             .to_vec()
-            .first()
+            .get(1)
             .cloned()
             .ok_or_else(|| {
                 TxBuilderError::Encoding("Warp route datum has no config field".to_string())
@@ -4530,13 +4530,13 @@ fn extract_warp_route_token_type(
     let decoded: PlutusData = minicbor::decode(&datum_cbor)
         .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
-    // Extract config from datum fields[0]
+    // Field 0 is the datum version, so config is at index 1.
     let config = if let PlutusData::Constr(constr) = decoded {
         constr
             .fields
             .clone()
             .to_vec()
-            .first()
+            .get(1)
             .cloned()
             .ok_or_else(|| {
                 TxBuilderError::Encoding("Warp route datum has no config field".to_string())

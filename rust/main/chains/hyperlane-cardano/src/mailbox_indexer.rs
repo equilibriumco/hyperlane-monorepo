@@ -229,14 +229,14 @@ impl CardanoMailboxIndexer {
     /// Parse the nonce from a mailbox datum (JSON format)
     fn parse_mailbox_nonce_json(&self, datum_json: &JsonValue) -> Option<u32> {
         // MailboxDatum format:
-        // { "constructor": 0, "fields": [local_domain, default_ism, owner, outbound_nonce, merkle_root, merkle_count] }
+        // { "constructor": 0, "fields": [version, local_domain, default_ism, owner, outbound_nonce, merkle_tree, processed_tree_root] }
         let fields = datum_json.get("fields")?.as_array()?;
-        if fields.len() < 4 {
+        if fields.len() < 5 {
             return None;
         }
 
-        // outbound_nonce is at index 3
-        let nonce_u64 = fields.get(3)?.get("int")?.as_u64()?;
+        // field 0 is the datum version, so outbound_nonce is at index 4
+        let nonce_u64 = fields.get(4)?.get("int")?.as_u64()?;
         let nonce = u32::try_from(nonce_u64).ok()?;
         Some(nonce)
     }
@@ -256,12 +256,12 @@ impl CardanoMailboxIndexer {
             _ => return None,
         };
 
-        if fields.len() < 4 {
+        if fields.len() < 5 {
             return None;
         }
 
-        // outbound_nonce is at index 3
-        match &fields[3] {
+        // field 0 is the datum version, so outbound_nonce is at index 4
+        match &fields[4] {
             CborValue::Integer(n) => {
                 let nonce: i128 = (*n).into();
                 u32::try_from(nonce).ok()
