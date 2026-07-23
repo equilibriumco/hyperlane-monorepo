@@ -406,6 +406,11 @@ pub type WarpRouteDatum {
   total_bridged: Int,
   /// Override default ISM for this warp route
   ism: Option<IsmConfig>,
+  /// Destination gas per remote domain, covering what delivering to THIS
+  /// route's counterpart costs beyond the IGP's recipient-independent
+  /// overhead. Set by the owner so senders do not each have to work the
+  /// number out; mirrors `GasRouter.destinationGas` upstream.
+  destination_gas: List<(Domain, Int)>,
 }
 
 /// Warp route redeemer
@@ -425,6 +430,8 @@ pub type WarpRouteRedeemer {
   EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
   /// Admin: migrate state to a new script address (code upgrade)
   MigrateWarp { new_address: Address }
+  /// Admin: set the destination gas for a remote domain
+  SetDestinationGas { domain: Domain, gas: Int }
 }
 
 /// Message body for warp transfers

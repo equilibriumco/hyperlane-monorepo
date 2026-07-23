@@ -242,6 +242,7 @@ test migrate_works_with_warp_datum() {
     owner: owner_key,
     total_bridged: 0,
     ism: None,
+    destination_gas: [],
   }
   let datum_as_data: Data = warp_datum
   let continuation = Output {

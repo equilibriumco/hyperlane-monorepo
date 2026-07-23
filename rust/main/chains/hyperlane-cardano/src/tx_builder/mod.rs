@@ -4644,35 +4644,43 @@ fn build_warp_route_continuation_datum(
         .map_err(|e| TxBuilderError::Encoding(format!("Failed to decode warp route datum: {e}")))?;
 
     // Extract fields from the existing datum
-    // Structure: Constr 0 [config, owner, total_bridged, ism]
-    let (config_field, owner, old_total_bridged, ism_field) = if let PlutusData::Constr(constr) =
-        decoded
-    {
-        let fields: Vec<_> = constr.fields.clone().to_vec();
-        if fields.len() < 4 {
+    // Structure: Constr 0 [config, owner, total_bridged, ism, destination_gas]
+    let (config_field, owner, old_total_bridged, ism_field, destination_gas_field) =
+        if let PlutusData::Constr(constr) = decoded {
+            let fields: Vec<_> = constr.fields.clone().to_vec();
+            if fields.len() < 5 {
+                return Err(TxBuilderError::Encoding(format!(
+                    "Warp route datum has {} fields, expected 5. A route deployed \
+                 before destination_gas was added must be redeployed.",
+                    fields.len()
+                )));
+            }
+
+            // Config is a complex nested structure - preserve it as-is
+            let config = fields[0].clone();
+
+            let owner_bytes = extract_bytes(&fields[1]).ok_or_else(|| {
+                TxBuilderError::Encoding(
+                    "Failed to extract owner from warp route datum".to_string(),
+                )
+            })?;
+
+            let total_bridged = extract_int(&fields[2]).unwrap_or(0);
+
+            // Preserve ism field as-is (Option<IsmConfig>)
+            let ism = fields[3].clone();
+
+            // Preserve destination_gas as-is; only the owner ever changes it, and
+            // dropping it here would silently reset the route's gas config on
+            // every inbound delivery.
+            let destination_gas = fields[4].clone();
+
+            (config, owner_bytes, total_bridged, ism, destination_gas)
+        } else {
             return Err(TxBuilderError::Encoding(
-                "Warp route datum has insufficient fields (need 4)".to_string(),
+                "Warp route datum is not a Constr".to_string(),
             ));
-        }
-
-        // Config is a complex nested structure - preserve it as-is
-        let config = fields[0].clone();
-
-        let owner_bytes = extract_bytes(&fields[1]).ok_or_else(|| {
-            TxBuilderError::Encoding("Failed to extract owner from warp route datum".to_string())
-        })?;
-
-        let total_bridged = extract_int(&fields[2]).unwrap_or(0);
-
-        // Preserve ism field as-is (Option<IsmConfig>)
-        let ism = fields[3].clone();
-
-        (config, owner_bytes, total_bridged, ism)
-    } else {
-        return Err(TxBuilderError::Encoding(
-            "Warp route datum is not a Constr".to_string(),
-        ));
-    };
+        };
 
     // Calculate new total_bridged (subtract transfer amount for receive)
     let new_total_bridged = old_total_bridged - (transfer_amount as i64);
@@ -4689,7 +4697,8 @@ fn build_warp_route_continuation_datum(
             config_field, // Preserve config as-is
             PlutusData::BoundedBytes(owner.into()),
             PlutusData::BigInt(BigInt::Int(new_total_bridged.into())),
-            ism_field, // Preserve ism as-is
+            ism_field,             // Preserve ism as-is
+            destination_gas_field, // Preserve destination_gas as-is
         ]),
     });
 

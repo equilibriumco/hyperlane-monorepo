@@ -885,6 +885,10 @@ fn build_warp_route_datum(
     builder.start_constr(1); // None = Constr 1
     builder.end_constr();
 
+    // destination_gas: List<(Domain, Int)> - empty until the owner sets one
+    builder.start_list();
+    builder.end_list();
+
     builder.end_constr(); // end WarpRouteDatum
 
     Ok(builder.build())
@@ -960,6 +964,19 @@ pub fn build_enroll_remote_route_redeemer(
     Ok(builder.build())
 }
 
+/// Build a WarpRoute SetDestinationGas redeemer
+///
+/// Constructor 4, matching the variant's position in `WarpRouteRedeemer`.
+pub fn build_set_destination_gas_redeemer(domain: u32, gas: i64) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr_definite(4, 2);
+    builder.uint(domain as u64);
+    builder.int(gas);
+
+    Ok(builder.build())
+}
+
 /// Build a WarpRoute TransferRemote redeemer
 ///
 /// Structure:
@@ -1014,6 +1031,7 @@ pub fn build_warp_route_collateral_datum_with_routes(
     remote_routes: &[RemoteRoute],
     owner_pkh: &str,
     total_bridged: i64,
+    destination_gas: &[(u32, i64)],
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -1059,6 +1077,16 @@ pub fn build_warp_route_collateral_datum_with_routes(
     builder.start_constr(1); // None = Constr 1
     builder.end_constr();
 
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
+
     builder.end_constr(); // end WarpRouteDatum
 
     Ok(builder.build())
@@ -1072,6 +1100,7 @@ pub fn build_warp_route_synthetic_datum_with_routes(
     remote_routes: &[RemoteRoute],
     owner_pkh: &str,
     total_bridged: i64,
+    destination_gas: &[(u32, i64)],
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -1116,6 +1145,16 @@ pub fn build_warp_route_synthetic_datum_with_routes(
     builder.start_constr(1); // None = Constr 1
     builder.end_constr();
 
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
+
     builder.end_constr();
 
     Ok(builder.build())
@@ -1130,6 +1169,7 @@ pub fn build_warp_route_native_datum_with_routes(
     remote_routes: &[RemoteRoute],
     owner_pkh: &str,
     total_bridged: i64,
+    destination_gas: &[(u32, i64)],
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
@@ -1173,6 +1213,16 @@ pub fn build_warp_route_native_datum_with_routes(
     // ism: Option<ScriptHash> - None by default
     builder.start_constr(1); // None = Constr 1
     builder.end_constr();
+
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
 
     builder.end_constr(); // end WarpRouteDatum
 

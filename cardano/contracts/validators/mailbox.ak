@@ -606,6 +606,7 @@ fn make_warp_input(ism_override: Option<IsmConfig>) -> Input {
       owner: #"00000000000000000000000000000000000000000000000000000000",
       total_bridged: 0,
       ism: ism_override,
+      destination_gas: [],
     }
 
   Input {

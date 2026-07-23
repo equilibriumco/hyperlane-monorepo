@@ -12,6 +12,7 @@ use crate::commands::igp::{
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
     build_enroll_remote_route_redeemer, build_igp_datum, build_mailbox_datum,
+    build_set_destination_gas_redeemer,
     build_mailbox_dispatch_redeemer, build_migrate_redeemer, build_mint_redeemer,
     build_transfer_remote_redeemer, build_warp_route_collateral_datum,
     build_warp_route_collateral_datum_with_routes, build_warp_route_native_datum,
@@ -59,6 +60,28 @@ enum WarpCommands {
         remote_decimals: u8,
 
         /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Set the destination gas for a remote domain (owner only)
+    ///
+    /// Covers what delivering to the counterpart route costs beyond the IGP's
+    /// recipient-independent overhead, so senders can omit --gas-limit.
+    SetDestinationGas {
+        /// Remote domain ID
+        #[arg(long)]
+        domain: u32,
+
+        /// Destination gas for this domain
+        #[arg(long)]
+        gas: i64,
+
+        /// Warp route NFT policy ID (defaults to deployment info)
+        #[arg(long)]
+        warp_policy: Option<String>,
+
+        /// Print the transaction without submitting it
         #[arg(long)]
         dry_run: bool,
     },
@@ -188,6 +211,12 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
             warp_policy,
             dry_run,
         } => enroll_router(ctx, domain, &router, warp_policy, dry_run).await,
+        WarpCommands::SetDestinationGas {
+            domain,
+            gas,
+            warp_policy,
+            dry_run,
+        } => set_destination_gas(ctx, domain, gas, warp_policy, dry_run).await,
         WarpCommands::Show { warp_policy } => show(ctx, warp_policy).await,
         WarpCommands::Routers { warp_policy } => list_routers(ctx, warp_policy).await,
         WarpCommands::Transfer {
@@ -957,6 +986,7 @@ async fn enroll_router(
     // Extract current configuration from datum
     let (token_type, decimals, remote_decimals, current_routes, current_owner, total_bridged) =
         parse_warp_datum(datum)?;
+    let destination_gas = parse_destination_gas(datum)?;
     println!("  Token Type: {:?}", token_type);
     println!("  Decimals: {}", decimals);
     println!("  Remote Decimals: {}", remote_decimals);
@@ -1006,6 +1036,7 @@ async fn enroll_router(
             &new_routes,
             &owner_pkh,
             total_bridged,
+            &destination_gas,
         )?,
         WarpTokenTypeInfo::Synthetic { minting_policy } => {
             build_warp_route_synthetic_datum_with_routes(
@@ -1015,6 +1046,7 @@ async fn enroll_router(
                 &new_routes,
                 &owner_pkh,
                 total_bridged,
+                &destination_gas,
             )?
         }
         WarpTokenTypeInfo::Native => build_warp_route_native_datum_with_routes(
@@ -1023,6 +1055,7 @@ async fn enroll_router(
             &new_routes,
             &owner_pkh,
             total_bridged,
+            &destination_gas,
         )?,
     };
     println!("  New Datum CBOR: {} bytes", new_datum.len());
@@ -1138,6 +1171,254 @@ async fn enroll_router(
     println!();
     println!("  Domain: {}", domain);
     println!("  Router: 0x{}", router);
+    println!();
+
+    Ok(())
+}
+
+async fn set_destination_gas(
+    ctx: &CliContext,
+    domain: u32,
+    gas: i64,
+    warp_policy: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!("{}", "Setting Destination Gas".cyan().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+
+    if gas < 0 {
+        return Err(anyhow!("Destination gas must not be negative"));
+    }
+
+    println!("\n{}", "Configuration:".green());
+    println!("  Domain: {}", domain);
+    println!("  Destination Gas: {}", gas);
+
+    let policy_id = get_warp_policy(ctx, warp_policy)?;
+    println!("  Warp Policy: {}", policy_id);
+
+    // Load API key and signing key
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let owner_pkh = keypair.verification_key_hash_hex();
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Find warp route UTXO
+    println!("\n{}", "Step 1: Finding warp route UTXO...".cyan());
+    let warp_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Warp route UTXO not found with policy {}", policy_id))?;
+
+    println!("  TX: {}#{}", warp_utxo.tx_hash, warp_utxo.output_index);
+    println!("  Address: {}", warp_utxo.address);
+    println!("  Lovelace: {}", warp_utxo.lovelace);
+
+    // Parse existing datum to extract current state
+    println!("\n{}", "Step 2: Parsing current datum...".cyan());
+    let datum = warp_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
+
+    // Extract current configuration from datum
+    let (token_type, decimals, remote_decimals, current_routes, current_owner, total_bridged) =
+        parse_warp_datum(datum)?;
+    let destination_gas = parse_destination_gas(datum)?;
+    println!("  Token Type: {:?}", token_type);
+    println!("  Decimals: {}", decimals);
+    println!("  Remote Decimals: {}", remote_decimals);
+    println!("  Current Routes: {}", current_routes.len());
+    println!("  Total Bridged: {}", total_bridged);
+
+    // Verify owner matches signer
+    println!("  Current Owner: {}", current_owner);
+    println!("  Signer PKH: {}", owner_pkh);
+    if current_owner != owner_pkh {
+        return Err(anyhow!(
+            "Signing key does not match owner. Expected: {}, Got: {}",
+            current_owner,
+            owner_pkh
+        ));
+    }
+
+    // The validator rejects gas for a domain with no route, since nothing
+    // would ever quote against it. Fail here with a clearer message.
+    if !current_routes.iter().any(|r| r.domain == domain) {
+        return Err(anyhow!(
+            "No route enrolled for domain {domain}. Run `warp enroll-router --domain {domain} ...` first."
+        ));
+    }
+
+    if let Some((_, existing)) = destination_gas.iter().find(|(d, _)| *d == domain) {
+        println!("  Replacing existing destination gas: {}", existing);
+    }
+
+    let new_routes = current_routes;
+    let mut destination_gas: Vec<(u32, i64)> = destination_gas
+        .into_iter()
+        .filter(|(d, _)| *d != domain)
+        .collect();
+    destination_gas.push((domain, gas));
+
+    // Build updated datum based on token type
+    println!("\n{}", "Step 3: Building updated datum...".cyan());
+    let new_datum = match &token_type {
+        WarpTokenTypeInfo::Collateral {
+            policy_id: tp,
+            asset_name,
+        } => build_warp_route_collateral_datum_with_routes(
+            tp,
+            asset_name,
+            decimals,
+            remote_decimals,
+            &new_routes,
+            &owner_pkh,
+            total_bridged,
+            &destination_gas,
+        )?,
+        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+            build_warp_route_synthetic_datum_with_routes(
+                minting_policy,
+                decimals,
+                remote_decimals,
+                &new_routes,
+                &owner_pkh,
+                total_bridged,
+                &destination_gas,
+            )?
+        }
+        WarpTokenTypeInfo::Native => build_warp_route_native_datum_with_routes(
+            decimals,
+            remote_decimals,
+            &new_routes,
+            &owner_pkh,
+            total_bridged,
+            &destination_gas,
+        )?,
+    };
+    println!("  New Datum CBOR: {} bytes", new_datum.len());
+    println!("  New Datum Hex: {}", hex::encode(&new_datum));
+
+    // Build redeemer
+    let redeemer = build_set_destination_gas_redeemer(domain, gas)?;
+    println!("  Redeemer CBOR: {} bytes", redeemer.len());
+    println!("  Redeemer Hex: {}", hex::encode(&redeemer));
+
+    if dry_run {
+        println!(
+            "\n{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("{}", "[Dry run - not submitting transaction]".yellow());
+        println!(
+            "{}",
+            "═══════════════════════════════════════════════════════════════".yellow()
+        );
+        println!("\nWould enroll route:");
+        println!("  Domain {} -> gas {}", domain, gas);
+        return Ok(());
+    }
+
+    // Find fee/collateral UTXOs
+    println!("\n{}", "Step 4: Finding fee UTXOs...".cyan());
+    let utxos = client.get_utxos(&payer_address).await?;
+    let suitable_utxos: Vec<_> = utxos
+        .iter()
+        .filter(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.inline_datum.is_none()
+        })
+        .filter(|u| !(u.tx_hash == warp_utxo.tx_hash && u.output_index == warp_utxo.output_index))
+        .collect();
+
+    if suitable_utxos.len() < 2 {
+        return Err(anyhow!(
+            "Need at least 2 UTXOs with >= 5 ADA each (excluding warp UTXO). Found {}.",
+            suitable_utxos.len()
+        ));
+    }
+
+    let fee_input = suitable_utxos[0];
+    let collateral = suitable_utxos[1];
+    println!(
+        "  Fee Input: {}#{}",
+        fee_input.tx_hash, fee_input.output_index
+    );
+    println!(
+        "  Collateral: {}#{}",
+        collateral.tx_hash, collateral.output_index
+    );
+
+    // Build and submit transaction
+    println!("\n{}", "Step 5: Building transaction...".cyan());
+
+    // Look up reference script UTXO from deployment info
+    // The reference script stays at the original init tx, not the current warp UTXO tx
+    let deployment = ctx
+        .load_deployment_info()
+        .with_context(|| "Failed to load deployment info for reference script lookup")?;
+    let warp_ref_script = deployment
+        .warp_routes
+        .iter()
+        .find(|wr| wr.nft_policy == policy_id)
+        .and_then(|wr| wr.reference_script_utxo.as_ref())
+        .map(|rs| format!("{}#{}", rs.tx_hash, rs.output_index))
+        .unwrap_or_else(|| {
+            // Fallback: assume reference script is at output #1 of init tx
+            let init_tx = deployment
+                .warp_routes
+                .iter()
+                .find(|wr| wr.nft_policy == policy_id)
+                .and_then(|wr| wr.init_tx_hash.as_ref())
+                .cloned()
+                .unwrap_or_else(|| warp_utxo.tx_hash.clone());
+            format!("{}#1", init_tx)
+        });
+    println!("  Reference Script: {}", warp_ref_script);
+
+    let tx_builder = HyperlaneTxBuilder::new(&client, ctx.pallas_network());
+    let tx = tx_builder
+        .build_enroll_route_tx(
+            &keypair,
+            fee_input,
+            collateral,
+            &warp_utxo,
+            Some(&warp_ref_script),
+            &new_datum,
+            &redeemer,
+        )
+        .await?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    let signed_tx = tx_builder.sign_tx(tx, &keypair)?;
+    println!("  Submitting transaction...");
+    client.submit_and_confirm(&signed_tx, ctx.no_wait).await?;
+
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!("{}", "Remote Router Enrolled Successfully!".green().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".green()
+    );
+    println!();
+    println!("  Domain: {}", domain);
+    println!("  Destination Gas: {}", gas);
     println!();
 
     Ok(())
@@ -1334,6 +1615,50 @@ fn parse_warp_datum(
     ))
 }
 
+/// Read `destination_gas` out of a warp route datum.
+///
+/// Kept separate from `parse_warp_datum` so callers that only rebuild the datum
+/// do not have to thread another element through an already wide tuple. A route
+/// deployed before the field existed, or one whose owner never set a value,
+/// parses as empty.
+fn parse_destination_gas(datum: &serde_json::Value) -> Result<Vec<(u32, i64)>> {
+    let parsed_datum = if let Some(cbor_hex) = datum.as_str() {
+        decode_plutus_datum(cbor_hex)?
+    } else {
+        datum.clone()
+    };
+
+    let Some(entries) = parsed_datum
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .and_then(|f| f.get(4))
+        .and_then(|f| f.get("list"))
+        .and_then(|l| l.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let pair = entry
+            .get("list")
+            .and_then(|l| l.as_array())
+            .ok_or_else(|| anyhow!("Invalid destination_gas entry: expected a tuple"))?;
+        let domain = pair
+            .first()
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| anyhow!("Invalid destination_gas entry: bad domain"))?;
+        let gas = pair
+            .get(1)
+            .and_then(|f| f.get("int"))
+            .and_then(|i| i.as_i64())
+            .ok_or_else(|| anyhow!("Invalid destination_gas entry: bad gas"))?;
+        out.push((domain as u32, gas));
+    }
+    Ok(out)
+}
+
 async fn show(ctx: &CliContext, warp_policy: Option<String>) -> Result<()> {
     println!("{}", "Warp Route Configuration".cyan());
 
@@ -1506,6 +1831,7 @@ async fn transfer(
         .ok_or_else(|| anyhow!("Warp route UTXO has no inline datum"))?;
     let (token_type, decimals, remote_decimals, remote_routes, warp_owner, total_bridged) =
         parse_warp_datum(warp_datum)?;
+    let destination_gas = parse_destination_gas(warp_datum)?;
 
     println!("  Token Type: {:?}", token_type);
     println!("  Decimals: {}", decimals);
@@ -1674,6 +2000,7 @@ async fn transfer(
             &remote_routes,
             &warp_owner,
             new_total_bridged,
+            &destination_gas,
         )?,
         WarpTokenTypeInfo::Synthetic { minting_policy } => {
             build_warp_route_synthetic_datum_with_routes(
@@ -1683,6 +2010,7 @@ async fn transfer(
                 &remote_routes,
                 &warp_owner,
                 new_total_bridged,
+                &destination_gas,
             )?
         }
         WarpTokenTypeInfo::Native => build_warp_route_native_datum_with_routes(
@@ -1691,6 +2019,7 @@ async fn transfer(
             &remote_routes,
             &warp_owner,
             new_total_bridged,
+            &destination_gas,
         )?,
     };
     println!("  Warp Datum: {} bytes", new_warp_datum.len());
@@ -1761,7 +2090,21 @@ async fn transfer(
     }
 
     // Step 8: Prepare IGP (if --gas-limit provided)
-    let igp_data = if let Some(gas_lim) = gas_limit {
+    // An explicit --gas-limit wins. Otherwise fall back to the gas the owner
+    // configured on the route for this domain, so a sender quotes from the
+    // domain alone rather than having to know the number. With neither set,
+    // the transfer dispatches without paying interchain gas, as before.
+    let effective_gas_limit = gas_limit.or_else(|| {
+        destination_gas
+            .iter()
+            .find(|(d, _)| *d == domain)
+            .map(|(_, g)| {
+                println!("  Using route destination gas for domain {domain}: {g}");
+                *g as u64
+            })
+    });
+
+    let igp_data = if let Some(gas_lim) = effective_gas_limit {
         println!("\n{}", "Step 8: Preparing Atomic IGP Payment...".cyan());
         let igp_policy_id = get_igp_policy(ctx, None)?;
         let igp_utxo = client

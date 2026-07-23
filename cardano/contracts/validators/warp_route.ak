@@ -12,7 +12,8 @@ use cardano/transaction.{
 use types.{
   AssetName, Collateral, Dispatch, Domain, EnrollRemoteRoute, HyperlaneAddress,
   MailboxRedeemer, Message, MigrateWarp, Native, PolicyId, Process,
-  ReceiveTransfer, ScriptHash, Synthetic, TransferRemote, WarpRouteDatum,
+  ReceiveTransfer, ScriptHash, SetDestinationGas, Synthetic, TransferRemote,
+  WarpRouteDatum,
   WarpRouteRedeemer, WarpTransferBody, encode_message,
 }
 use utils.{
@@ -62,6 +63,9 @@ validator warp_route(mailbox_policy_id: PolicyId) {
 
       EnrollRemoteRoute { domain, route } ->
         validate_enroll_remote_route(warp_datum, domain, route, tx, own_ref)
+
+      SetDestinationGas { domain, gas } ->
+        validate_set_destination_gas(warp_datum, domain, gas, tx, own_ref)
 
       MigrateWarp { new_address } -> {
         let datum_as_data: Data = warp_datum
@@ -146,6 +150,7 @@ fn validate_transfer_remote(
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged + amount
   expect cont_datum.ism == datum.ism
+  expect cont_datum.destination_gas == datum.destination_gas
 
   // All native tokens (including state NFT) must be preserved.
   // For Native/Collateral lock, token quantities only increase so this always holds.
@@ -239,6 +244,7 @@ fn validate_receive_transfer(
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged - local_amount
   expect cont_datum.ism == datum.ism
+  expect cont_datum.destination_gas == datum.destination_gas
 
   // 9. Ensure state NFT is preserved in continuation.
   //    For collateral release, the collateral token quantity decreases — exclude it.
@@ -291,8 +297,71 @@ fn validate_enroll_remote_route(
   expect cont_datum.owner == datum.owner
   expect cont_datum.total_bridged == datum.total_bridged
   expect cont_datum.ism == datum.ism
+  expect cont_datum.destination_gas == datum.destination_gas
 
   True
+}
+
+/// Owner-gated update of the destination gas for one remote domain.
+///
+/// This is the recipient-specific half of a gas quote: what delivering to the
+/// counterpart route costs beyond the IGP's recipient-independent overhead.
+/// Holding it on the route means a sender quotes from the domain alone rather
+/// than having to know the number, and one operator decision covers everyone.
+fn validate_set_destination_gas(
+  datum: WarpRouteDatum,
+  domain: Domain,
+  gas: Int,
+  tx: Transaction,
+  own_ref: OutputReference,
+) -> Bool {
+  expect is_signed_by(tx, datum.owner)
+  expect gas >= 0
+
+  // Gas for a domain with no enrolled route could never be quoted against,
+  // so it is rejected rather than stored where nothing would read it.
+  expect list.any(datum.config.remote_routes, fn(entry) { entry.1st == domain })
+
+  expect Some(own_input) = find_input(tx, own_ref)
+  let own_address = own_input.output.address
+  let own_value = own_input.output.value
+
+  expect Some(continuation) =
+    list.find(tx.outputs, fn(output) { output.address == own_address })
+
+  expect value_preserved(own_value, continuation.value)
+
+  expect InlineDatum(cont_datum_data) = continuation.datum
+  expect cont_datum: WarpRouteDatum = cont_datum_data
+
+  expect cont_datum.config == datum.config
+  expect cont_datum.owner == datum.owner
+  expect cont_datum.total_bridged == datum.total_bridged
+  expect cont_datum.ism == datum.ism
+  expect cont_datum.destination_gas == upsert_destination_gas(
+    datum.destination_gas,
+    domain,
+    gas,
+  )
+
+  True
+}
+
+/// Insert or replace the gas for `domain`, preserving the order of the rest.
+fn upsert_destination_gas(
+  entries: List<(Domain, Int)>,
+  domain: Domain,
+  gas: Int,
+) -> List<(Domain, Int)> {
+  when entries is {
+    [] -> [(domain, gas)]
+    [(d, g), ..rest] ->
+      if d == domain {
+        [(domain, gas), ..rest]
+      } else {
+        [(d, g), ..upsert_destination_gas(rest, domain, gas)]
+      }
+  }
 }
 
 // ============================================================================
@@ -787,5 +856,160 @@ test dispatch_binding_rejects_inflated_wire_amount() {
     8,
     test_warp_ref(),
     test_tx(redeemer),
+  )
+}
+
+// ============================================================================
+// Destination gas tests
+// ============================================================================
+
+const test_owner = #"00000000000000000000000000000000000000000000000000000007"
+
+const test_gas_domain: Domain = 1
+
+fn gas_datum(destination_gas: List<(Domain, Int)>) -> WarpRouteDatum {
+  WarpRouteDatum {
+    config: types.WarpRouteConfig {
+      token_type: Native,
+      decimals: 6,
+      remote_decimals: 18,
+      remote_routes: [(test_gas_domain, test_remote_route)],
+    },
+    owner: test_owner,
+    total_bridged: 0,
+    ism: None,
+    destination_gas,
+  }
+}
+
+fn gas_route_address() -> Address {
+  Address {
+    payment_credential: Script(
+      #"00000000000000000000000000000000000000000000000000000008",
+    ),
+    stake_credential: None,
+  }
+}
+
+fn set_gas_tx(
+  datum: WarpRouteDatum,
+  cont_datum: WarpRouteDatum,
+  signed: Bool,
+) -> Transaction {
+  let value = assets.from_lovelace(5000000)
+  Transaction {
+    inputs: [
+      Input {
+        output_reference: test_warp_ref(),
+        output: Output {
+          address: gas_route_address(),
+          value,
+          datum: InlineDatum(datum),
+          reference_script: None,
+        },
+      },
+    ],
+    reference_inputs: [],
+    outputs: [
+      Output {
+        address: gas_route_address(),
+        value,
+        datum: InlineDatum(cont_datum),
+        reference_script: None,
+      },
+    ],
+    fee: 0,
+    mint: assets.zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: interval.everything,
+    extra_signatories: if signed {
+      [test_owner]
+    } else {
+      []
+    },
+    redeemers: [],
+    datums: dict.empty,
+    id: #"0000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+test owner_sets_destination_gas_on_an_empty_route() {
+  validate_set_destination_gas(
+    gas_datum([]),
+    test_gas_domain,
+    1800000,
+    set_gas_tx(gas_datum([]), gas_datum([(test_gas_domain, 1800000)]), True),
+    test_warp_ref(),
+  )
+}
+
+test owner_replaces_an_existing_destination_gas() {
+  validate_set_destination_gas(
+    gas_datum([(test_gas_domain, 1)]),
+    test_gas_domain,
+    1800000,
+    set_gas_tx(
+      gas_datum([(test_gas_domain, 1)]),
+      gas_datum([(test_gas_domain, 1800000)]),
+      True,
+    ),
+    test_warp_ref(),
+  )
+}
+
+test non_owner_cannot_set_destination_gas() fail {
+  validate_set_destination_gas(
+    gas_datum([]),
+    test_gas_domain,
+    1800000,
+    set_gas_tx(gas_datum([]), gas_datum([(test_gas_domain, 1800000)]), False),
+    test_warp_ref(),
+  )
+}
+
+/// The continuation must carry the value the redeemer declared, so a signed
+/// transaction cannot quietly store something else.
+test declared_gas_must_match_the_continuation() fail {
+  validate_set_destination_gas(
+    gas_datum([]),
+    test_gas_domain,
+    1800000,
+    set_gas_tx(gas_datum([]), gas_datum([(test_gas_domain, 1)]), True),
+    test_warp_ref(),
+  )
+}
+
+/// Gas for a domain with no enrolled route could never be quoted against.
+test cannot_set_gas_for_an_unenrolled_domain() fail {
+  validate_set_destination_gas(
+    gas_datum([]),
+    test_gas_domain + 99,
+    1800000,
+    set_gas_tx(
+      gas_datum([]),
+      gas_datum([(test_gas_domain + 99, 1800000)]),
+      True,
+    ),
+    test_warp_ref(),
+  )
+}
+
+test setting_gas_cannot_change_the_owner() fail {
+  let cont =
+    WarpRouteDatum {
+      ..gas_datum([(test_gas_domain, 1800000)]),
+      owner: #"00000000000000000000000000000000000000000000000000000099",
+    }
+  validate_set_destination_gas(
+    gas_datum([]),
+    test_gas_domain,
+    1800000,
+    set_gas_tx(gas_datum([]), cont, True),
+    test_warp_ref(),
   )
 }
