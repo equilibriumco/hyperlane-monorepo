@@ -18,6 +18,7 @@
 pub mod application;
 mod config;
 mod error;
+mod events;
 mod indexer;
 mod indexer_client;
 mod interchain_gas;

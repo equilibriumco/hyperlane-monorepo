@@ -21,9 +21,7 @@
 //! `decode_ism_state` below fails loudly if the decoded fields are mutually
 //! inconsistent.
 
-use std::collections::HashMap;
-
-use hyperlane_core::{ChainResult, Decode as _, HyperlaneMessage, H256};
+use hyperlane_core::{ChainResult, HyperlaneMessage};
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
 use midnight_storage_core::DefaultDB;
@@ -60,32 +58,17 @@ const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 4];
 // reordering a field shifts them (removing the merkle module is exactly what
 // moved these from their pre-removal `[1, 2..4]` slots). The contracts-repo
 // layout guard re-checks the `queryLedgerState` paths on every compile.
-const MAILBOX_DELIVERIES_PATH: [usize; 2] = [1, 8];
+// (The `deliveries` set at `[1, 8]` is no longer decoded: deliveries are
+// indexed from `HYP_PROCESS` events since #95, and the Mailbox `delivered`
+// read goes through the toolkit.)
 const MAILBOX_NONCE_PATH: [usize; 2] = [1, 9];
-const MAILBOX_DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 10];
-// `DISPATCHED_MESSAGES_PATH` is the merkle indexer's reader for the same
-// `[1, 10]` slot as `MAILBOX_DISPATCHED_MESSAGES_PATH` above.
 const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 10];
 
-// Positional paths into the IGP contract's ledger state (#19). Unlike `night`
-// (whose fields nest under the [0]/[1] module groups), the IGP contract's
-// fields are FLAT top-level slots, in field-declaration order after the
-// ZOwnablePK + Initializable access-control fields (slots 0..3):
-// remote_gas_data(4), gas_payments(5), gas_payment_count(6), beneficiary(7).
-// Verified against the compiled `igp` readers in
-// `managed/igp/contract/index.js`: `_gasPaymentCount_0` reads idx 6,
-// `_gasPaymentAt_0` reads idx 5 (then a key lookup), `_isRegistered_0` idx 4,
-// `_beneficiaryValue_0` idx 7. These follow the declaration order in
-// `igp.compact`; a reorder/insert above or between them shifts the decoder.
-// The contracts-repo layout guard (`scripts/check-ledger-layout.mjs`) pins
-// these slots on every compile, same as it does for the `night` slots above.
-const IGP_GAS_PAYMENTS_PATH: [usize; 1] = [5];
-const IGP_GAS_PAYMENT_COUNT_PATH: [usize; 1] = [6];
-
 /// Length in bytes of an encoded `HyperlaneMessage` stored in the
-/// `dispatched_messages` map (`Bytes<141>`): version(1) + nonce(4) +
-/// origin(4) + sender(32) + destination(4) + recipient(32) + body(64).
-const ENCODED_MESSAGE_LEN: usize = 141;
+/// `dispatched_messages` map (`Bytes<141>`) and carried in `HYP_DISPATCH`
+/// event payloads: version(1) + nonce(4) + origin(4) + sender(32) +
+/// destination(4) + recipient(32) + body(64).
+pub(crate) const ENCODED_MESSAGE_LEN: usize = 141;
 
 /// The MessageIdMultisigIsm configuration read from on-chain state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,180 +272,6 @@ pub fn decode_nonce_count(bytes: &[u8]) -> ChainResult<u32> {
     })
 }
 
-/// Decode a single `dispatched_messages` map value (a `Bytes<141>` leaf) back
-/// into a `HyperlaneMessage`. The runtime trims trailing zero bytes from a
-/// `Bytes<141>` leaf, so a message whose body ends in zeros is stored as fewer
-/// than 141 bytes; right-pad back to the full fixed width before decoding.
-fn decode_message_value(node: &StateValue<DefaultDB>) -> ChainResult<HyperlaneMessage> {
-    let encoded = cell_atom(node)?;
-    if encoded.len() > ENCODED_MESSAGE_LEN {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "dispatched message is {} bytes, expected at most {ENCODED_MESSAGE_LEN}",
-            encoded.len()
-        ))
-        .into());
-    }
-    let mut full = [0u8; ENCODED_MESSAGE_LEN];
-    full[..encoded.len()].copy_from_slice(encoded);
-    HyperlaneMessage::read_from(&mut &full[..])
-        .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()).into())
-}
-
-/// Parse a `Uint<32>` map key's raw bytes (stored little-endian with trailing
-/// zeros trimmed) as a `u32`. Returns `None` if the key is wider than 4 bytes
-/// (not a valid nonce key).
-fn parse_nonce_key(key_bytes: &[u8]) -> Option<u32> {
-    if key_bytes.len() > 4 {
-        return None;
-    }
-    let mut le = [0u8; 4];
-    le[..key_bytes.len()].copy_from_slice(key_bytes);
-    Some(u32::from_le_bytes(le))
-}
-
-/// A single-read snapshot of the Mailbox dispatch state: every dispatched
-/// `HyperlaneMessage` keyed by nonce, plus the `nonce` counter, decoded from
-/// ONE serialized state blob.
-///
-/// The dispatch indexer uses this to serve a whole nonce range from one
-/// network fetch instead of re-fetching and re-scanning the full state per
-/// nonce. Decoding the count and the messages from the same blob also keeps
-/// them mutually consistent within a scan.
-#[derive(Debug, Clone)]
-pub struct DispatchSnapshot {
-    /// Every dispatched message, keyed by its nonce.
-    pub messages: HashMap<u32, HyperlaneMessage>,
-    /// The `nonce` counter: the number of messages dispatched so far.
-    pub nonce_count: u32,
-}
-
-/// Decode the dispatched message stored at the given nonce key in the
-/// `dispatched_messages: Map<Uint<32>, Bytes<141>>` ledger field back into a
-/// `HyperlaneMessage`. Returns `None` if no message is stored at that key.
-pub fn decode_dispatched_message(
-    bytes: &[u8],
-    nonce: u32,
-) -> ChainResult<Option<HyperlaneMessage>> {
-    let cs = decode_contract_state(bytes)?;
-    let root = cs.data.get_ref();
-    let map = match nav(root, &MAILBOX_DISPATCHED_MESSAGES_PATH)? {
-        StateValue::Map(m) => m,
-        other => {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for dispatched_messages, got {other:?}"
-            ))
-            .into())
-        }
-    };
-
-    for entry in map.iter() {
-        let pair = &*entry;
-        let key_av = &*pair.0;
-        // The Uint<32> key is stored little-endian (trailing zeros trimmed).
-        let key_bytes = key_av
-            .value
-            .0
-            .first()
-            .map(|atom| atom.0.as_ref())
-            .unwrap_or(&[][..]);
-        if parse_nonce_key(key_bytes) != Some(nonce) {
-            continue;
-        }
-        return Ok(Some(decode_message_value(&pair.1)?));
-    }
-    Ok(None)
-}
-
-/// Decode the whole dispatch state (every dispatched message keyed by nonce,
-/// plus the nonce counter) from a single serialized state blob. The dispatch
-/// indexer reads this once per scan and serves the requested nonce range from
-/// the returned in-memory map, avoiding a network fetch + full-state scan per
-/// nonce.
-pub fn decode_dispatch_snapshot(bytes: &[u8]) -> ChainResult<DispatchSnapshot> {
-    let cs = decode_contract_state(bytes)?;
-    let root = cs.data.get_ref();
-
-    let n = read_counter_u64(nav(root, &MAILBOX_NONCE_PATH)?)?;
-    let nonce_count = u32::try_from(n).map_err(|_| {
-        HyperlaneMidnightError::StateDecode(format!("nonce counter {n} exceeds u32"))
-    })?;
-
-    let map = match nav(root, &MAILBOX_DISPATCHED_MESSAGES_PATH)? {
-        StateValue::Map(m) => m,
-        other => {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for dispatched_messages, got {other:?}"
-            ))
-            .into())
-        }
-    };
-
-    let mut messages = HashMap::with_capacity(map.size());
-    for entry in map.iter() {
-        let pair = &*entry;
-        let key_av = &*pair.0;
-        // The Uint<32> key is stored little-endian (trailing zeros trimmed).
-        let key_bytes = key_av
-            .value
-            .0
-            .first()
-            .map(|atom| atom.0.as_ref())
-            .unwrap_or(&[][..]);
-        // A key wider than 4 bytes is not a valid nonce key; skip it rather
-        // than fail the whole snapshot.
-        let Some(nonce) = parse_nonce_key(key_bytes) else {
-            continue;
-        };
-        messages.insert(nonce, decode_message_value(&pair.1)?);
-    }
-
-    Ok(DispatchSnapshot {
-        messages,
-        nonce_count,
-    })
-}
-
-/// Decode the `deliveries: Set<Bytes<32>>` ledger field into the set of
-/// delivered message ids. The set is unordered; callers must not rely on the
-/// returned order.
-pub fn decode_deliveries(bytes: &[u8]) -> ChainResult<Vec<H256>> {
-    let cs = decode_contract_state(bytes)?;
-    let root = cs.data.get_ref();
-    let map = match nav(root, &MAILBOX_DELIVERIES_PATH)? {
-        StateValue::Map(m) => m,
-        other => {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for deliveries, got {other:?}"
-            ))
-            .into())
-        }
-    };
-
-    let mut ids = Vec::with_capacity(map.size());
-    for entry in map.iter() {
-        let pair = &*entry;
-        // A `Set<Bytes<32>>` stores the 32-byte member as the map KEY.
-        let key_av = &*pair.0;
-        let key_bytes = key_av
-            .value
-            .0
-            .first()
-            .map(|atom| atom.0.as_ref())
-            .unwrap_or(&[][..]);
-        // The runtime trims trailing zero bytes; right-pad back to 32.
-        if key_bytes.len() > 32 {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "delivery id is {} bytes, expected at most 32",
-                key_bytes.len()
-            ))
-            .into());
-        }
-        let mut id = [0u8; 32];
-        id[..key_bytes.len()].copy_from_slice(key_bytes);
-        ids.push(H256::from(id));
-    }
-    Ok(ids)
-}
 /// Decode the append-only `dispatched_messages: Map<Uint<32>, Bytes<141>>`
 /// ledger field into `(nonce, message)` pairs sorted by nonce. Each map value
 /// is the wire-format encoded `HyperlaneMessage`; the decoder re-parses it and
@@ -530,203 +339,11 @@ pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, Hyperla
     Ok(out)
 }
 
-/// A decoded row from the IGP `gas_payments: Map<Uint<32>, GasPayment>`
-/// ledger field. Mirrors the on-chain `GasPayment` struct field-for-field;
-/// the IGP indexer (#19) maps it to `hyperlane_core::InterchainGasPayment`.
-/// Integer widths match the contract (`gasAmount` is the `Uint<64>` gas
-/// limit; `payment` is the `Uint<128>` NIGHT attached).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IgpGasPayment {
-    /// The message this payment funds. Prover-supplied keccak id until the
-    /// keccak MIP lands (see the mocked-primitives note in `LIMITS.md`).
-    pub message_id: H256,
-    /// Destination Hyperlane domain.
-    pub destination: u32,
-    /// Requested destination gas (the `gasLimit` argument to `payForGas`).
-    pub gas_amount: u64,
-    /// NIGHT actually attached, in the token's smallest unit.
-    pub payment: u128,
-}
-
-/// A single-read snapshot of the IGP payment state: every recorded
-/// `GasPayment` keyed by its append index, plus the `gas_payment_count`
-/// counter, decoded from ONE serialized state blob — the same
-/// single-fetch-per-scan shape as [`DispatchSnapshot`]. Decoding the count
-/// and the rows from the same blob keeps them mutually consistent within a
-/// scan.
-#[derive(Debug, Clone)]
-pub struct IgpSnapshot {
-    /// Every recorded payment, keyed by its append index (`0..payment_count`).
-    pub payments: HashMap<u32, IgpGasPayment>,
-    /// The `gas_payment_count` counter: the number of payments recorded.
-    pub payment_count: u32,
-}
-
-/// Read a little-endian `Uint<32>` from an atom's bytes. The runtime trims
-/// trailing zero bytes, so a value is at most 4 bytes and `0` is empty.
-fn atom_u32(bytes: &[u8]) -> ChainResult<u32> {
-    if bytes.len() > 4 {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected u32 atom of at most 4 bytes, got {}",
-            bytes.len()
-        ))
-        .into());
-    }
-    let mut le = [0u8; 4];
-    le[..bytes.len()].copy_from_slice(bytes);
-    Ok(u32::from_le_bytes(le))
-}
-
-/// Read a little-endian `Uint<64>` from an atom's bytes (trailing zeros
-/// trimmed on chain, so at most 8 bytes; empty == 0).
-fn atom_u64(bytes: &[u8]) -> ChainResult<u64> {
-    if bytes.len() > 8 {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected u64 atom of at most 8 bytes, got {}",
-            bytes.len()
-        ))
-        .into());
-    }
-    let mut le = [0u8; 8];
-    le[..bytes.len()].copy_from_slice(bytes);
-    Ok(u64::from_le_bytes(le))
-}
-
-/// Read a little-endian `Uint<128>` from an atom's bytes (trailing zeros
-/// trimmed on chain, so at most 16 bytes; empty == 0).
-fn atom_u128(bytes: &[u8]) -> ChainResult<u128> {
-    if bytes.len() > 16 {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected u128 atom of at most 16 bytes, got {}",
-            bytes.len()
-        ))
-        .into());
-    }
-    let mut le = [0u8; 16];
-    le[..bytes.len()].copy_from_slice(bytes);
-    Ok(u128::from_le_bytes(le))
-}
-
-/// Read a `Bytes<32>` atom (trailing zeros trimmed on chain), right-padded
-/// back to the full 32 bytes — the same trim/pad handling the `Bytes<141>`
-/// and delivery-id decoders use.
-fn atom_bytes32(bytes: &[u8]) -> ChainResult<H256> {
-    if bytes.len() > 32 {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected 32-byte atom, got {}",
-            bytes.len()
-        ))
-        .into());
-    }
-    let mut id = [0u8; 32];
-    id[..bytes.len()].copy_from_slice(bytes);
-    Ok(H256::from(id))
-}
-
-/// The per-field atoms of a struct-valued ledger `Map` value. A Compact
-/// struct stored as a map value is a single `Cell` whose `AlignedValue`
-/// concatenates one atom per field in declaration order — see the compiled
-/// IGP writer, which stores a `GasPayment` as
-/// `newCell(GasPaymentDescriptor.toValue(struct))` where `toValue` chains
-/// `messageId.toValue().concat(destination.toValue().concat(...))`. Returns
-/// the atom byte-slices in that order.
-fn struct_cell_atoms(node: &StateValue<DefaultDB>) -> ChainResult<Vec<&[u8]>> {
-    match node {
-        StateValue::Cell(sp) => {
-            let aligned = &**sp;
-            Ok(aligned.value.0.iter().map(|atom| &atom.0[..]).collect())
-        }
-        other => Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected cell for struct value, got {other:?}"
-        ))
-        .into()),
-    }
-}
-
-/// Decode a single `gas_payments` map value (the `GasPayment` struct cell)
-/// into an [`IgpGasPayment`]. The struct is stored as one cell whose atoms
-/// are, in order: messageId (`Bytes<32>`), destination (`Uint<32>`),
-/// gasAmount (`Uint<64>`), payment (`Uint<128>`) — the field-declaration
-/// order in `igp.compact` and the compiled writer's concatenation order.
-/// Fails loudly if the atom count is not exactly four, so a struct-layout
-/// change surfaces as a decode error rather than a silent field shift.
-fn decode_gas_payment(node: &StateValue<DefaultDB>) -> ChainResult<IgpGasPayment> {
-    let atoms = struct_cell_atoms(node)?;
-    if atoms.len() != 4 {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected 4 atoms in a GasPayment struct cell \
-             (messageId, destination, gasAmount, payment), got {}",
-            atoms.len()
-        ))
-        .into());
-    }
-    Ok(IgpGasPayment {
-        message_id: atom_bytes32(atoms[0])?,
-        destination: atom_u32(atoms[1])?,
-        gas_amount: atom_u64(atoms[2])?,
-        payment: atom_u128(atoms[3])?,
-    })
-}
-
-/// Decode the whole IGP payment state (every recorded `GasPayment` keyed by
-/// its append index, plus the `gas_payment_count` counter) from a single
-/// serialized state blob. The IGP indexer (#19) reads this once per scan and
-/// serves the requested index range from the returned in-memory map — the
-/// same single-fetch shape as [`decode_dispatch_snapshot`]. Decoding the
-/// count and the rows from the same blob keeps them mutually consistent.
-pub fn decode_igp_snapshot(bytes: &[u8]) -> ChainResult<IgpSnapshot> {
-    let cs = decode_contract_state(bytes)?;
-    let root = cs.data.get_ref();
-
-    let n = read_counter_u64(nav(root, &IGP_GAS_PAYMENT_COUNT_PATH)?)?;
-    let payment_count = u32::try_from(n).map_err(|_| {
-        HyperlaneMidnightError::StateDecode(format!(
-            "gas_payment_count {n} exceeds u32 (the contract asserts each payment fits a Uint<32> key)"
-        ))
-    })?;
-
-    let map = match nav(root, &IGP_GAS_PAYMENTS_PATH)? {
-        StateValue::Map(m) => m,
-        other => {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for gas_payments, got {other:?}"
-            ))
-            .into())
-        }
-    };
-
-    let mut payments = HashMap::with_capacity(map.size());
-    for entry in map.iter() {
-        let pair = &*entry;
-        // Map key is a little-endian `Uint<32>` append index. `parse_nonce_key`
-        // is the same `<= 4-byte LE u32` parse the dispatch map uses; here the
-        // key is the gas-payment index, not a nonce.
-        let key_av = &*pair.0;
-        let key_bytes = key_av
-            .value
-            .0
-            .first()
-            .map(|atom| atom.0.as_ref())
-            .unwrap_or(&[][..]);
-        // A key wider than 4 bytes is not a valid index key; skip rather than
-        // fail the whole snapshot (mirrors `decode_dispatch_snapshot`).
-        let Some(idx) = parse_nonce_key(key_bytes) else {
-            continue;
-        };
-        payments.insert(idx, decode_gas_payment(&pair.1)?);
-    }
-
-    Ok(IgpSnapshot {
-        payments,
-        payment_count,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use hyperlane_core::Encode as _;
+    use hyperlane_core::{Encode as _, H256};
     use midnight_base_crypto::fab::{AlignedValue, ValueAtom};
     use midnight_onchain_state::state::ChargedState;
     use midnight_storage::arena::Sp;
@@ -825,112 +442,27 @@ mod tests {
     }
 
     #[test]
-    fn decodes_synthetic_dispatched_message() {
-        let msg = sample_message(2);
-        let encoded = msg.to_vec();
-        assert_eq!(encoded.len(), ENCODED_MESSAGE_LEN, "message wire length");
-        let full: [u8; ENCODED_MESSAGE_LEN] = encoded.try_into().unwrap();
-
-        // `dispatched_messages: Map<Uint<32>, Bytes<141>>` keyed by nonce.
-        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(2u32), cell(full));
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(3u64),
-            StateValue::Map(map),
-        );
-
-        let decoded = decode_dispatched_message(&bytes, 2)
-            .expect("decode dispatched message")
-            .expect("message present at nonce 2");
-        assert_eq!(decoded, msg);
-
-        // A nonce with no stored message returns None.
-        assert!(decode_dispatched_message(&bytes, 5)
-            .expect("decode dispatched message")
-            .is_none());
-    }
-
-    #[test]
-    fn decodes_correct_message_among_many_entries() {
-        // Multiple map entries exercise the key-scan: a wrong-entry bug would
-        // return the wrong message body/recipient for a requested nonce.
+    fn decodes_dispatched_messages_sorted_by_nonce() {
+        // Multiple map entries exercise the key parse + sort: the merkle
+        // reconstruction ingests leaves in nonce order, so a wrong key parse
+        // or ordering bug would produce a different root.
         let mut map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new();
         let mut expected = Vec::new();
-        for nonce in [0u32, 1, 7, 42] {
+        for nonce in [7u32, 0, 42, 1] {
             let msg = sample_message(nonce);
             let full: [u8; ENCODED_MESSAGE_LEN] = msg.to_vec().try_into().unwrap();
             map = map.insert(AlignedValue::from(nonce), cell(full));
             expected.push((nonce, msg));
         }
+        expected.sort_by_key(|(nonce, _)| *nonce);
         let bytes = mailbox_state_bytes(
             StateValue::Map(HashMap::new()),
             cell(43u64),
             StateValue::Map(map),
         );
 
-        // Each requested nonce returns exactly its own message.
-        for (nonce, msg) in &expected {
-            let decoded = decode_dispatched_message(&bytes, *nonce)
-                .expect("decode dispatched message")
-                .unwrap_or_else(|| panic!("message present at nonce {nonce}"));
-            assert_eq!(&decoded, msg, "nonce {nonce} returned the wrong message");
-            assert_eq!(decoded.nonce, *nonce);
-        }
-
-        // The same holds for the single-read snapshot decode.
-        let snapshot = decode_dispatch_snapshot(&bytes).expect("decode snapshot");
-        assert_eq!(snapshot.nonce_count, 43);
-        assert_eq!(snapshot.messages.len(), expected.len());
-        for (nonce, msg) in &expected {
-            assert_eq!(snapshot.messages.get(nonce), Some(msg));
-        }
-    }
-
-    #[test]
-    fn decodes_dispatched_message_right_padding_trimmed_value() {
-        // The runtime trims trailing zero bytes from a `Bytes<141>` leaf
-        // (`From<[u8; N]> for ValueAtom` drops trailing zeros). This message has
-        // an all-zero body, so its 141-byte encoding ends in many zeros and is
-        // stored as a SHORT atom; the decoder must right-pad back to 141.
-        let msg = HyperlaneMessage {
-            version: 3,
-            nonce: 9,
-            origin: 1,
-            sender: H256::repeat_byte(0x01),
-            destination: 2,
-            recipient: H256::repeat_byte(0x02),
-            // All-zero 64-byte body, so the wire encoding ends in many zeros.
-            body: vec![0u8; 64],
-        };
-        let encoded = msg.to_vec();
-        assert_eq!(encoded.len(), ENCODED_MESSAGE_LEN);
-        let full: [u8; ENCODED_MESSAGE_LEN] = encoded.clone().try_into().unwrap();
-
-        // Confirm the stored atom is actually shorter than 141 (the trim
-        // happened), so this test really exercises the right-pad branch and not
-        // the verbatim path.
-        let stored = ValueAtom::from(full);
-        assert!(
-            stored.0.len() < ENCODED_MESSAGE_LEN,
-            "expected the trailing-zero body to be trimmed on store, got {} bytes",
-            stored.0.len()
-        );
-
-        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(9u32), cell(full));
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(10u64),
-            StateValue::Map(map),
-        );
-
-        // Decoding right-pads back to the full 141 bytes and recovers the
-        // original message (including the all-zero body).
-        let decoded = decode_dispatched_message(&bytes, 9)
-            .expect("decode dispatched message")
-            .expect("message present at nonce 9");
-        assert_eq!(decoded, msg);
+        let decoded = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
+        assert_eq!(decoded, expected, "every message, sorted by nonce");
     }
 
     #[test]
@@ -977,28 +509,6 @@ mod tests {
             decoded[0].1, msg,
             "trimmed leaf must right-pad back to the original 141-byte message"
         );
-    }
-
-    #[test]
-    fn decodes_synthetic_deliveries_set() {
-        let id_a = H256::repeat_byte(0x01);
-        let id_b = H256::repeat_byte(0x02);
-        // `deliveries: Set<Bytes<32>>` stores each member as the map key with a
-        // unit/null value.
-        let set = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(id_a.0), StateValue::Null)
-            .insert(AlignedValue::from(id_b.0), StateValue::Null);
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(set),
-            cell(0u64),
-            StateValue::Map(HashMap::new()),
-        );
-
-        let mut ids = decode_deliveries(&bytes).expect("decode deliveries");
-        ids.sort();
-        let mut expected = vec![id_a, id_b];
-        expected.sort();
-        assert_eq!(ids, expected);
     }
 
     /// Serialize a synthetic ISM `StateValue` tree into the tagged
@@ -1147,81 +657,6 @@ mod tests {
                 addr("5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb"),
             ],
             "validator addresses in slot order"
-        );
-    }
-
-    // Decodes the IGP `gas_payments` + `gas_payment_count` state from a
-    // committed fixture, generated by
-    // `contracts/tests/utils/generate-igp-fixture.ts` (the Compact simulator
-    // runs the real `payForGas` circuit logic, then `ContractState.serialize()`
-    // produces the same tagged format the indexer serves — the same offline
-    // fixture approach as the #15 dispatch/merkle fixtures, because a live
-    // `payForGas` proof needs a >12 GB prover the local devnet can't supply).
-    //
-    // Three rows exercise the full struct decode:
-    //   * row 0 — a full 32-byte messageId, multi-byte destination/gasAmount
-    //     and a large payment (all four atoms non-empty, full width);
-    //   * row 1 — a messageId that trims to one byte on store (0x01 then
-    //     zeros) plus an overpayment (exercises the Bytes<32> right-pad);
-    //   * row 2 — gasAmount == 0 (an empty MIDDLE atom) and payment == 1 (a
-    //     one-byte atom), pinning that a zero field keeps its atom slot so
-    //     positional decoding of the following field stays aligned.
-    #[test]
-    #[ignore = "igp-state fixture is ledger-8 (v6) contract-state; regenerate for ledger-9.1 v8 via contracts/tests/utils/generate-igp-fixture.ts"]
-    fn decodes_igp_gas_payments_fixture() {
-        let hex = include_str!("../tests/fixtures/igp-state.hex").trim();
-        let bytes = hex::decode(hex).expect("fixture is valid hex");
-
-        let snapshot = decode_igp_snapshot(&bytes).expect("decode IGP snapshot");
-        assert_eq!(snapshot.payment_count, 3, "three payments recorded");
-        assert_eq!(snapshot.payments.len(), 3, "three rows decoded");
-
-        // row 0: full 32-byte messageId, quote payment.
-        let row0 = snapshot.payments.get(&0).expect("row 0 present");
-        assert_eq!(row0.message_id, H256::repeat_byte(0xaa));
-        assert_eq!(row0.destination, 99);
-        assert_eq!(row0.gas_amount, 100_000);
-        assert_eq!(row0.payment, 2_000_000_000_000_000);
-
-        // row 1: messageId trims to a single 0x01 byte on store; the decoder
-        // right-pads it back to 32. Overpayment recorded verbatim (no refund).
-        let row1 = snapshot.payments.get(&1).expect("row 1 present");
-        let mut want_id = [0u8; 32];
-        want_id[0] = 0x01;
-        assert_eq!(row1.message_id, H256::from(want_id));
-        assert_eq!(row1.destination, 99);
-        assert_eq!(row1.gas_amount, 100_000);
-        assert_eq!(row1.payment, 2_000_000_000_000_007);
-
-        // row 2: zero gasAmount (empty middle atom) + a one-byte payment.
-        let row2 = snapshot.payments.get(&2).expect("row 2 present");
-        assert_eq!(row2.message_id, H256::repeat_byte(0xcc));
-        assert_eq!(row2.destination, 99);
-        assert_eq!(row2.gas_amount, 0);
-        assert_eq!(row2.payment, 1);
-    }
-
-    // The `GasPayment` struct is a 4-atom cell (messageId, destination,
-    // gasAmount, payment). `decode_gas_payment` must reject any other shape
-    // loudly rather than silently decode it wrong -- the fail-loud guard against
-    // a future struct-layout change. (The layout guard + fixture protect against
-    // real drift; this pins that the decoder itself refuses a wrong shape.)
-    #[test]
-    fn decode_gas_payment_rejects_wrong_shape() {
-        // A single-atom cell exercises the `!= 4 atoms` branch.
-        let one_atom = cell(5u32);
-        let err = decode_gas_payment(&one_atom).expect_err("1-atom cell must be rejected");
-        assert!(
-            err.to_string().contains("4 atoms"),
-            "expected an atom-count error, got: {err}"
-        );
-
-        // A non-cell value is rejected by the struct-cell type check.
-        let not_a_cell = StateValue::Map(HashMap::new());
-        let err = decode_gas_payment(&not_a_cell).expect_err("non-cell must be rejected");
-        assert!(
-            err.to_string().contains("expected cell"),
-            "expected a cell-type error, got: {err}"
         );
     }
 }
