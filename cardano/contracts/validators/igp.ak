@@ -1,4 +1,6 @@
+use aiken/collection/dict
 use aiken/collection/list
+use aiken/interval
 use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Script}
 use cardano/assets
@@ -75,10 +77,15 @@ fn validate_pay_for_gas(
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == own_address })
 
-  // 5. Verify the IGP received the payment
-  // The continuation should have at least own_value + required_lovelace
-  let expected_lovelace = assets.lovelace_of(own_value) + required_lovelace
-  expect assets.lovelace_of(continuation.value) >= expected_lovelace
+  // 5. Verify the IGP received exactly the payment.
+  //    Comparing the delta rather than the total keeps "how much was paid"
+  //    separate from "how much the UTXO already held", and the exact match
+  //    means an over-funded output cannot be constructed at all. Overpayment
+  //    is unrecoverable for the payer here (there is no refund path, only
+  //    `claim` to the beneficiary), so rejecting it is kinder than keeping it.
+  let paid =
+    assets.lovelace_of(continuation.value) - assets.lovelace_of(own_value)
+  expect paid == required_lovelace
 
   // 6. Verify all native tokens (including state NFT) are preserved
   expect native_tokens_preserved(own_value, continuation.value)
@@ -173,22 +180,24 @@ fn calculate_gas_payment(
   destination: Domain,
   gas_amount: Int,
 ) -> Int {
-  // Find gas oracle for destination
-  let config =
-    when find_gas_oracle(datum.gas_oracles, destination) is {
-      Some(c) -> c
-      None ->
-        GasOracleConfig {
-          gas_price: 1,
-          token_exchange_rate: 1000000,
-          gas_overhead: 0,
-        }
-    }
+  // A destination with no oracle has no price, so paying for it is rejected
+  // rather than defaulted. The former fallback (price 1, rate 1e6) divided out
+  // to zero for any realistic gas amount, so a domain enrolled without its
+  // oracle configured was payable for free: sends succeeded, nothing was ever
+  // delivered, and nothing failed anywhere near the missing config.
+  expect Some(config) = find_gas_oracle(datum.gas_oracles, destination)
 
   expect gas_amount > 0
 
-  // Calculate: gas_amount * gas_price * token_exchange_rate / scale_factor
-  // gas_amount is already total gas (gasLimit + gasOverhead), pre-computed by CLI
+  // gas_amount * gas_price * token_exchange_rate / scale_factor.
+  //
+  // `gas_amount` already includes the destination's `gas_overhead`, added by
+  // the caller, which is why `config.gas_overhead` is not applied again here.
+  // The field is published in the datum so clients know what to add.
+  //
+  // The scale factor is 1e12, not the 1e10 Hyperlane uses elsewhere. Exchange
+  // rates configured here must be scaled to match; a rate copied from tooling
+  // that assumes 1e10 will be off by a factor of 100.
   gas_amount * config.gas_price * config.token_exchange_rate / 1000000000000
 }
 
@@ -276,4 +285,187 @@ fn datum_preserved(old: IgpDatum, new: IgpDatum) -> Bool {
     old.beneficiary == new.beneficiary,
     old.gas_oracles == new.gas_oracles,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const test_domain: Domain = 11155111
+
+const test_message_id =
+  #"424b25342a401ee2029bfe8241e61e3e4ff5209913d03c7dafe46e3f0faa0096"
+
+const test_script_hash =
+  #"00000000000000000000000000000000000000000000000000000009"
+
+const test_own_ref =
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000001",
+    output_index: 0,
+  }
+
+/// Matches the deployed Sepolia oracle: 1 gwei gas price, and an exchange rate
+/// scaled against the 1e12 divisor in `calculate_gas_payment`.
+fn test_igp_datum() -> IgpDatum {
+  IgpDatum {
+    owner: #"00000000000000000000000000000000000000000000000000000001",
+    beneficiary: #"00000000000000000000000000000000000000000000000000000002",
+    gas_oracles: [
+      (
+        test_domain,
+        GasOracleConfig {
+          gas_price: 1000000000,
+          token_exchange_rate: 7171,
+          gas_overhead: 0,
+        },
+      ),
+    ],
+  }
+}
+
+fn igp_address() -> Address {
+  Address {
+    payment_credential: Script(test_script_hash),
+    stake_credential: None,
+  }
+}
+
+/// The IGP holds its state NFT plus whatever lovelace has accumulated.
+fn igp_value(lovelace: Int) -> assets.Value {
+  assets.merge(
+    assets.from_lovelace(lovelace),
+    assets.from_asset(test_script_hash, #"494750205374617465", 1),
+  )
+}
+
+fn pay_tx(held: Int, continuation_lovelace: Int) -> Transaction {
+  let datum = InlineDatum(test_igp_datum())
+  Transaction {
+    inputs: [
+      transaction.Input {
+        output_reference: test_own_ref,
+        output: Output {
+          address: igp_address(),
+          value: igp_value(held),
+          datum,
+          reference_script: None,
+        },
+      },
+    ],
+    reference_inputs: [],
+    outputs: [
+      Output {
+        address: igp_address(),
+        value: igp_value(continuation_lovelace),
+        datum,
+        reference_script: None,
+      },
+    ],
+    fee: 0,
+    mint: assets.zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: interval.everything,
+    extra_signatories: [],
+    redeemers: [],
+    datums: dict.empty,
+    id: #"0000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+/// 211000 * 1e9 * 7171 / 1e12 = 1513081 lovelace
+const test_gas_amount = 211000
+
+const test_required = 1513081
+
+const test_held = 5000000
+
+test quoted_payment_is_accepted() {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_held + test_required),
+    test_own_ref,
+  )
+}
+
+test underpayment_is_rejected() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_held + test_required - 1),
+    test_own_ref,
+  )
+}
+
+/// The reason the check compares the delta exactly: an over-funded output is
+/// unrecoverable for the payer, so it is refused rather than absorbed.
+test overpayment_is_rejected() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_held + test_required + 1),
+    test_own_ref,
+  )
+}
+
+test no_payment_is_rejected() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_held),
+    test_own_ref,
+  )
+}
+
+/// The accumulated balance must not be drained under cover of a payment.
+test draining_the_igp_while_paying_is_rejected() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount,
+    pay_tx(test_held, test_required),
+    test_own_ref,
+  )
+}
+
+/// The payment scales with the requested gas, so a larger request costs more
+/// and the previously correct amount no longer satisfies it.
+test payment_scales_with_requested_gas() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain,
+    test_gas_amount * 2,
+    pay_tx(test_held, test_held + test_required),
+    test_own_ref,
+  )
+}
+
+/// A destination with no configured oracle is not payable. The previous
+/// fallback priced it at zero, so a domain enrolled without its oracle looked
+/// paid for and never delivered.
+test unconfigured_destination_is_rejected() fail {
+  validate_pay_for_gas(
+    test_igp_datum(),
+    test_message_id,
+    test_domain + 1,
+    test_gas_amount,
+    pay_tx(test_held, test_held),
+    test_own_ref,
+  )
 }

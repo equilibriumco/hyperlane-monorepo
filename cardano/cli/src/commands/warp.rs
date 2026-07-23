@@ -1779,7 +1779,13 @@ async fn transfer(
             .iter()
             .find(|(d, _, _, _)| *d == domain)
             .map(|(_, gp, er, oh)| (*gp, *er, *oh))
-            .unwrap_or((1, 1_000_000, 0));
+            .ok_or_else(|| {
+                anyhow!(
+                    "No gas oracle configured for domain {domain}. \
+                     Set one with `igp set-gas-oracle --domain {domain} ...` before sending, \
+                     or omit --gas-limit to dispatch without paying interchain gas."
+                )
+            })?;
         let total_gas = gas_lim + gas_overhead;
         let igp_payment = calculate_gas_payment(total_gas, gas_price, exchange_rate);
 
