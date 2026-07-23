@@ -1,7 +1,11 @@
 use aiken/collection/list
 use aiken/crypto.{keccak_256}
 use aiken/primitive/bytearray
-use types.{Message, Checkpoint, encode_message, encode_domain_hash, encode_checkpoint}
+use multisig.{verify_checkpoint}
+use types.{
+  Checkpoint, Message, MessageIdMultisig, MultisigIsmDatum, ValidatorSignature,
+  encode_checkpoint, encode_domain_hash, encode_message,
+}
 
 /// Test helper: create a sample message
 fn sample_message() -> Message {
@@ -520,4 +524,160 @@ test actual_eth_signed_message_matches() {
 
   let expected = #"e5bc3d2efa932ef4b864c340fd6775d9b6e7c541feddb0762594c9a596fea2a1"
   eth_signed_message == expected
+}
+
+// ---------------------------------------------------------------------------
+// Signature counting and threshold
+//
+// These drive `verify_checkpoint` with the real Sepolia signatures above. The
+// tests further up only cover hashing and address derivation, so without these
+// the counting path (duplicate rejection, validator-set membership, the ECDSA
+// verify itself, and the threshold comparison) runs untested.
+// ---------------------------------------------------------------------------
+
+const sepolia_domain = 11155111
+
+/// Compress an uncompressed (x || y) key: 0x02 for an even y, 0x03 for odd.
+fn compress(uncompressed: ByteArray) -> ByteArray {
+  let x = bytearray.take(uncompressed, 32)
+  let prefix =
+    if bytearray.at(uncompressed, 63) % 2 == 0 {
+      #"02"
+    } else {
+      #"03"
+    }
+  bytearray.concat(prefix, x)
+}
+
+/// Fixture signatures are 65 bytes (r || s || v); the circuit verifies r || s.
+fn sepolia_validator_signature(idx: Int) -> ValidatorSignature {
+  expect Some(uncompressed) = at(sepolia_validator_pubkeys_uncompressed(), idx)
+  expect Some(signature) = at(sepolia_signatures(), idx)
+  ValidatorSignature {
+    compressed_pubkey: compress(uncompressed),
+    uncompressed_pubkey: uncompressed,
+    signature: bytearray.take(signature, 64),
+  }
+}
+
+fn sepolia_ism_datum(
+  threshold: Int,
+  validators: List<ByteArray>,
+) -> MultisigIsmDatum {
+  MultisigIsmDatum {
+    validators: [(sepolia_domain, validators)],
+    thresholds: [(sepolia_domain, threshold)],
+    owner: #"00000000000000000000000000000000000000000000000000000000",
+    module_type: MessageIdMultisig,
+  }
+}
+
+/// Positive control. Without this the negative tests below could pass simply
+/// because nothing verifies at all.
+test accepts_two_distinct_validators_at_threshold_two() {
+  verify_checkpoint(
+    sepolia_ism_datum(2, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [sepolia_validator_signature(0), sepolia_validator_signature(1)],
+  )
+}
+
+test accepts_one_validator_at_threshold_one() {
+  verify_checkpoint(
+    sepolia_ism_datum(1, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [sepolia_validator_signature(0)],
+  )
+}
+
+/// The error the Hyperlane implementation guide warns about: one validator's
+/// signature replayed to reach a threshold it should not reach on its own.
+/// Both copies verify and both belong to an enrolled validator, so only the
+/// seen-address check in `count_valid_signatures` stops this.
+test rejects_one_signature_submitted_twice() {
+  !verify_checkpoint(
+    sepolia_ism_datum(2, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [sepolia_validator_signature(0), sepolia_validator_signature(0)],
+  )
+}
+
+/// Three copies should not reach a threshold of three either.
+test rejects_one_signature_submitted_three_times() {
+  !verify_checkpoint(
+    sepolia_ism_datum(3, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [
+      sepolia_validator_signature(0),
+      sepolia_validator_signature(0),
+      sepolia_validator_signature(0),
+    ],
+  )
+}
+
+/// A genuine signature from someone who is not in the validator set.
+test rejects_a_signer_outside_the_validator_set() {
+  expect Some(only_validator_1) = at(sepolia_validator_addresses(), 1)
+  !verify_checkpoint(
+    sepolia_ism_datum(1, [only_validator_1]),
+    sepolia_checkpoint(),
+    [sepolia_validator_signature(0)],
+  )
+}
+
+/// A duplicate must not top up a real quorum either: one enrolled validator
+/// plus a repeat of that same validator is still one signature.
+test rejects_a_duplicate_padding_a_short_quorum() {
+  expect Some(only_validator_0) = at(sepolia_validator_addresses(), 0)
+  !verify_checkpoint(
+    sepolia_ism_datum(2, [only_validator_0]),
+    sepolia_checkpoint(),
+    [sepolia_validator_signature(0), sepolia_validator_signature(0)],
+  )
+}
+
+/// Signatures are bound to the checkpoint they were produced over.
+test rejects_signatures_over_a_different_checkpoint() {
+  let tampered =
+    Checkpoint {
+      ..sepolia_checkpoint(),
+      merkle_root: #"0000000000000000000000000000000000000000000000000000000000000001",
+    }
+  !verify_checkpoint(
+    sepolia_ism_datum(2, sepolia_validator_addresses()),
+    tampered,
+    [sepolia_validator_signature(0), sepolia_validator_signature(1)],
+  )
+}
+
+test rejects_a_tampered_signature() {
+  let good = sepolia_validator_signature(0)
+  let flipped =
+    ValidatorSignature {
+      ..good,
+      signature: bytearray.concat(
+        bytearray.take(good.signature, 63),
+        #"ff",
+      ),
+    }
+  !verify_checkpoint(
+    sepolia_ism_datum(1, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [flipped],
+  )
+}
+
+/// The two key formats must describe the same point. A caller supplying a
+/// compressed key from one validator and an uncompressed key from another
+/// would otherwise verify against one and be credited as the other.
+test rejects_mismatched_key_formats() fail {
+  let sig_0 = sepolia_validator_signature(0)
+  let sig_1 = sepolia_validator_signature(1)
+  let spliced =
+    ValidatorSignature { ..sig_0, uncompressed_pubkey: sig_1.uncompressed_pubkey }
+  verify_checkpoint(
+    sepolia_ism_datum(1, sepolia_validator_addresses()),
+    sepolia_checkpoint(),
+    [spliced],
+  )
 }
