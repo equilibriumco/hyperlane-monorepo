@@ -1009,3 +1009,104 @@ test merkleroot_binding_rejects_wrong_origin() {
     #"01",
   )
 }
+
+// ============================================================================
+// Sender derivation
+//
+// The mailbox derives the sender from an input the caller is spending rather
+// than taking it as a parameter, so it cannot be forged: spending that input
+// already requires satisfying its credential. These pin the three address
+// forms a dispatcher can take.
+// ============================================================================
+
+const test_sender_ref =
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000042",
+    output_index: 0,
+  }
+
+const test_wallet_pkh = #"11111111111111111111111111111111111111111111111111111111"
+
+const test_bare_script_hash =
+  #"22222222222222222222222222222222222222222222222222222222"
+
+const test_sender_nft_policy =
+  #"33333333333333333333333333333333333333333333333333333333"
+
+fn sender_input(credential: Credential, value: assets.Value) -> Input {
+  Input {
+    output_reference: test_sender_ref,
+    output: Output {
+      address: Address { payment_credential: credential, stake_credential: None },
+      value,
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+fn sender_tx(input: Input) -> Transaction {
+  make_tx([input], [])
+}
+
+/// A plain wallet dispatching is stamped 0x00000000 || key hash.
+test wallet_sender_is_prefixed_key_hash() {
+  let tx =
+    sender_tx(
+      sender_input(
+        Credential.VerificationKey(test_wallet_pkh),
+        assets.from_lovelace(10000000),
+      ),
+    )
+  get_sender_address(tx, test_sender_ref) == bytearray.concat(
+    #"00000000",
+    test_wallet_pkh,
+  )
+}
+
+/// A script with no state NFT is stamped 0x02000000 || script hash, the form a
+/// generic recipient like the greeting is addressed by.
+test bare_script_sender_is_prefixed_script_hash() {
+  let tx =
+    sender_tx(
+      sender_input(Script(test_bare_script_hash), assets.from_lovelace(10000000)),
+    )
+  get_sender_address(tx, test_sender_ref) == bytearray.concat(
+    #"02000000",
+    test_bare_script_hash,
+  )
+}
+
+/// A script carrying a state NFT is stamped 0x01000000 || policy, which is how
+/// a warp route identifies itself to its counterpart.
+test script_with_state_nft_sender_is_prefixed_policy() {
+  let value =
+    assets.merge(
+      assets.from_lovelace(10000000),
+      assets.from_asset(test_sender_nft_policy, #"", 1),
+    )
+  let tx = sender_tx(sender_input(Script(test_bare_script_hash), value))
+  get_sender_address(tx, test_sender_ref) == bytearray.concat(
+    #"01000000",
+    test_sender_nft_policy,
+  )
+}
+
+/// Two dispatchers cannot collide: distinct wallets produce distinct senders.
+test distinct_wallets_produce_distinct_senders() {
+  let a =
+    sender_tx(
+      sender_input(
+        Credential.VerificationKey(test_wallet_pkh),
+        assets.from_lovelace(10000000),
+      ),
+    )
+  let b =
+    sender_tx(
+      sender_input(
+        Credential.VerificationKey(test_bare_script_hash),
+        assets.from_lovelace(10000000),
+      ),
+    )
+  get_sender_address(a, test_sender_ref) != get_sender_address(b, test_sender_ref)
+}

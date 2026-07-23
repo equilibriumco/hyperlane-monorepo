@@ -53,6 +53,35 @@ pub struct MessageArgs {
 
 #[derive(Subcommand)]
 enum MessageCommands {
+    /// Dispatch an arbitrary message to a remote domain
+    ///
+    /// The sender stamped into the message is derived from the wallet UTXO
+    /// spent as `sender_ref`, so it cannot be chosen. This is the generic
+    /// path; warp routes dispatch through `warp transfer` instead.
+    Dispatch {
+        /// Destination domain ID
+        #[arg(long)]
+        destination: u32,
+
+        /// Recipient address, 32 bytes hex
+        #[arg(long)]
+        recipient: String,
+
+        /// Message body, hex encoded
+        #[arg(long)]
+        body: String,
+
+        /// Application gas for the destination. Omit to dispatch without
+        /// paying interchain gas, in which case the relayer will hold the
+        /// message until someone pays for it.
+        #[arg(long)]
+        gas_limit: Option<u64>,
+
+        /// Print the transaction without submitting it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// List pending messages at a recipient script address
     List {
         /// Recipient script address to check for messages
@@ -137,6 +166,13 @@ pub async fn execute(ctx: &CliContext, args: MessageArgs) -> Result<()> {
             list_messages(ctx, &recipient_address, &nft_policy, &format, show_body).await
         }
 
+        MessageCommands::Dispatch {
+            destination,
+            recipient,
+            body,
+            gas_limit,
+            dry_run,
+        } => dispatch(ctx, destination, &recipient, &body, gas_limit, dry_run).await,
         MessageCommands::Show { message_utxo } => show_message(ctx, &message_utxo).await,
 
         MessageCommands::Receive {
@@ -657,4 +693,371 @@ pub fn decode_body_utf8(hex_body: &str) -> Option<String> {
         }
         Err(_) => None,
     }
+}
+
+/// Dispatch an arbitrary message to a remote domain.
+///
+/// This is the generic sender path: any wallet can dispatch, and the mailbox
+/// derives the sender from the input spent as `sender_ref` rather than taking
+/// it as a parameter, so it cannot be forged. A wallet sender is stamped as
+/// `0x00000000 || key_hash`. Warp routes have their own path through
+/// `warp transfer`, which additionally moves tokens.
+async fn dispatch(
+    ctx: &CliContext,
+    destination: u32,
+    recipient: &str,
+    body: &str,
+    gas_limit: Option<u64>,
+    dry_run: bool,
+) -> Result<()> {
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+
+    use crate::commands::igp::{
+        build_pay_for_gas_redeemer, calculate_gas_payment, get_igp_policy, parse_igp_datum,
+    };
+    use crate::commands::warp::{
+        compute_message_id_for_transfer, parse_mailbox_datum_for_transfer,
+        update_merkle_tree_for_transfer,
+    };
+    use crate::utils::cbor::{build_igp_datum, build_mailbox_datum, build_mailbox_dispatch_redeemer};
+
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+    println!("{}", "Dispatching Message".cyan().bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════════════════".cyan()
+    );
+
+    let recipient = recipient.strip_prefix("0x").unwrap_or(recipient);
+    if recipient.len() != 64 {
+        return Err(anyhow!(
+            "Recipient must be 32 bytes (64 hex chars), got {} chars",
+            recipient.len()
+        ));
+    }
+    let body = body.strip_prefix("0x").unwrap_or(body);
+    hex::decode(body).map_err(|e| anyhow!("Body must be hex: {e}"))?;
+
+    let api_key = ctx.require_api_key()?;
+    let keypair = ctx.load_signing_key()?;
+    let payer_pkh = keypair.verification_key_hash_hex();
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let deployment = ctx.load_deployment_info()?;
+    let mailbox_info = deployment
+        .mailbox
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not found in deployment_info.json"))?;
+    let mailbox_policy = mailbox_info
+        .state_nft
+        .as_ref()
+        .map(|n| n.policy_id.clone())
+        .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?;
+
+    println!("\n{}", "Step 1: Reading mailbox state...".cyan());
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&mailbox_policy, "")
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {mailbox_policy}"))?;
+    let mailbox_datum_val = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
+    let mailbox_data = parse_mailbox_datum_for_transfer(mailbox_datum_val)?;
+    println!("  Local Domain: {}", mailbox_data.local_domain);
+    println!("  Outbound Nonce: {}", mailbox_data.outbound_nonce);
+
+    // The sender is derived from an input we spend, so a wallet UTXO doubles as
+    // the fee source and the sender reference.
+    println!("\n{}", "Step 2: Selecting sender UTXO...".cyan());
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    let sender_utxo = payer_utxos
+        .iter()
+        .filter(|u| u.assets.is_empty() && u.lovelace >= 10_000_000)
+        .max_by_key(|u| u.lovelace)
+        .ok_or_else(|| {
+            anyhow!("No ADA-only wallet UTXO of at least 10 ADA to use as fee and sender")
+        })?;
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.assets.is_empty()
+                && u.lovelace >= 5_000_000
+                && !(u.tx_hash == sender_utxo.tx_hash && u.output_index == sender_utxo.output_index)
+        })
+        .ok_or_else(|| anyhow!("No second ADA-only UTXO of at least 5 ADA for collateral"))?;
+    println!(
+        "  Sender UTXO: {}#{}",
+        sender_utxo.tx_hash, sender_utxo.output_index
+    );
+
+    // A wallet sender is 0x00000000 || key hash, matching the mailbox's
+    // get_sender_address for a VerificationKey credential.
+    let sender_hex = format!("00000000{payer_pkh}");
+    println!("  Sender: 0x{sender_hex}");
+
+    println!("\n{}", "Step 3: Building message...".cyan());
+    let message_id = compute_message_id_for_transfer(
+        3,
+        mailbox_data.outbound_nonce,
+        mailbox_data.local_domain,
+        &sender_hex,
+        destination,
+        recipient,
+        body,
+    )?;
+    println!("  Destination: {destination}");
+    println!("  Recipient: 0x{recipient}");
+    println!("  Body: {} bytes", body.len() / 2);
+    println!("  Message ID: 0x{message_id}");
+
+    let new_merkle = update_merkle_tree_for_transfer(
+        &mailbox_data.merkle_branches,
+        mailbox_data.merkle_count,
+        &message_id,
+    )?;
+
+    let branches_refs: Vec<&str> = new_merkle.branches.iter().map(|s| s.as_str()).collect();
+    let new_mailbox_datum = build_mailbox_datum(
+        mailbox_data.local_domain,
+        &mailbox_data.default_ism,
+        &mailbox_data.owner,
+        mailbox_data.outbound_nonce + 1,
+        &branches_refs,
+        new_merkle.count,
+        &mailbox_data.processed_tree_root,
+    )?;
+
+    let mailbox_redeemer = build_mailbox_dispatch_redeemer(
+        destination,
+        recipient,
+        body,
+        &sender_utxo.tx_hash,
+        sender_utxo.output_index,
+        &[],
+    )?;
+
+    // Optional interchain gas, paid in the same transaction so the dispatch
+    // cannot land unpaid. Omitting --gas-limit dispatches without paying, which
+    // is valid but leaves the message held until someone pays for it.
+    let igp_data = if let Some(gas_lim) = gas_limit {
+        println!("\n{}", "Step 4: Preparing gas payment...".cyan());
+        let igp_policy_id = get_igp_policy(ctx, None)?;
+        let igp_utxo = client
+            .find_utxo_by_asset(&igp_policy_id, "")
+            .await?
+            .ok_or_else(|| anyhow!("IGP UTXO not found with policy {igp_policy_id}"))?;
+        let igp_datum_val = igp_utxo
+            .inline_datum
+            .as_ref()
+            .ok_or_else(|| anyhow!("IGP UTXO has no inline datum"))?;
+        let (owner, beneficiary, gas_oracles) = parse_igp_datum(igp_datum_val)?;
+
+        let (gas_price, exchange_rate, gas_overhead) = gas_oracles
+            .iter()
+            .find(|(d, _, _, _)| *d == destination)
+            .map(|(_, gp, er, oh)| (*gp, *er, *oh))
+            .ok_or_else(|| {
+                anyhow!(
+                    "No gas oracle configured for domain {destination}. \
+                     Set one with `igp set-oracle --domain {destination} ...` first."
+                )
+            })?;
+
+        // The contract adds the overhead itself; the redeemer carries only the
+        // application gas.
+        let total_gas = gas_lim + gas_overhead;
+        let igp_payment = calculate_gas_payment(total_gas, gas_price, exchange_rate);
+        println!("  Application gas: {gas_lim}");
+        println!("  Overhead: {gas_overhead}");
+        println!("  Payment: {igp_payment} lovelace");
+
+        let igp_redeemer = build_pay_for_gas_redeemer(&hex::decode(&message_id)?, destination, gas_lim);
+        let igp_redeemer = pallas_codec::minicbor::to_vec(&igp_redeemer)
+            .map_err(|e| anyhow!("Failed to encode IGP redeemer: {e:?}"))?;
+        let new_igp_datum = build_igp_datum(
+            &hex::encode(&owner),
+            &hex::encode(&beneficiary),
+            &gas_oracles,
+        )?;
+        Some((igp_utxo, igp_policy_id, igp_payment, igp_redeemer, new_igp_datum))
+    } else {
+        println!("\n  {}", "No --gas-limit: dispatching without paying interchain gas".yellow());
+        None
+    };
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        println!("  Message ID: 0x{message_id}");
+        return Ok(());
+    }
+
+    println!("\n{}", "Step 5: Building transaction...".cyan());
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+    let cost_model = client.get_plutusv3_cost_model().await?;
+
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
+    let sender_tx_hash: [u8; 32] = hex::decode(&sender_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid sender tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let payer_pkh_bytes: [u8; 28] = hex::decode(&payer_pkh)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid payer key hash"))?;
+
+    let mailbox_addr = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)?;
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)?;
+
+    let mailbox_policy_bytes: [u8; 28] = hex::decode(&mailbox_policy)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid mailbox policy"))?;
+    let mailbox_asset_name = mailbox_utxo
+        .assets
+        .iter()
+        .find(|a| a.policy_id == mailbox_policy)
+        .map(|a| hex::decode(&a.asset_name).unwrap_or_default())
+        .unwrap_or_default();
+
+    let mailbox_output = Output::new(mailbox_addr, mailbox_utxo.lovelace)
+        .set_inline_datum(new_mailbox_datum)
+        .add_asset(
+            Hash::new(mailbox_policy_bytes),
+            mailbox_asset_name.clone(),
+            1,
+        )
+        .map_err(|e| anyhow!("Failed to add mailbox state NFT: {e:?}"))?;
+
+    let fee_estimate = 2_500_000u64;
+    let igp_pay_total = igp_data.as_ref().map(|d| d.2).unwrap_or(0);
+    let change = sender_utxo
+        .lovelace
+        .saturating_sub(fee_estimate)
+        .saturating_sub(igp_pay_total);
+    if change < 1_000_000 {
+        return Err(anyhow!(
+            "Sender UTXO of {} lovelace does not cover the fee and gas payment",
+            sender_utxo.lovelace
+        ));
+    }
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(
+            Hash::new(sender_tx_hash),
+            sender_utxo.output_index as u64,
+        ))
+        .input(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        ))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
+        .disclosed_signer(Hash::new(payer_pkh_bytes))
+        .output(mailbox_output)
+        .add_spend_redeemer(
+            Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
+            mailbox_redeemer,
+            Some(ExUnits {
+                mem: 5_000_000,
+                steps: 2_000_000_000,
+            }),
+        )
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(ctx.network_id());
+
+    if let Some((ref igp_utxo, ref igp_policy_id, igp_pay, ref igp_redeemer, ref new_igp_datum)) =
+        igp_data
+    {
+        let igp_tx_hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IGP tx hash"))?;
+        let igp_policy_bytes: [u8; 28] = hex::decode(igp_policy_id)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IGP policy"))?;
+        let igp_asset_name = igp_utxo
+            .assets
+            .iter()
+            .find(|a| a.policy_id == *igp_policy_id)
+            .map(|a| hex::decode(&a.asset_name).unwrap_or_default())
+            .unwrap_or_default();
+        let igp_addr = pallas_addresses::Address::from_bech32(&igp_utxo.address)?;
+
+        let igp_output = Output::new(igp_addr, igp_utxo.lovelace + igp_pay)
+            .set_inline_datum(new_igp_datum.clone())
+            .add_asset(Hash::new(igp_policy_bytes), igp_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add IGP state NFT: {e:?}"))?;
+
+        staging = staging
+            .input(Input::new(
+                Hash::new(igp_tx_hash),
+                igp_utxo.output_index as u64,
+            ))
+            .output(igp_output)
+            .add_spend_redeemer(
+                Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
+                igp_redeemer.clone(),
+                Some(ExUnits {
+                    mem: 5_000_000,
+                    steps: 2_000_000_000,
+                }),
+            );
+
+        if let Some(rs) = deployment
+            .igp
+            .as_ref()
+            .and_then(|i| i.reference_script_utxo.as_ref())
+        {
+            let rs_hash: [u8; 32] = hex::decode(&rs.tx_hash)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid IGP reference script tx hash"))?;
+            staging =
+                staging.reference_input(Input::new(Hash::new(rs_hash), rs.output_index as u64));
+        }
+    }
+
+    if let Some(rs) = mailbox_info.reference_script_utxo.as_ref() {
+        let rs_hash: [u8; 32] = hex::decode(&rs.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid mailbox reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(rs_hash), rs.output_index as u64));
+    } else {
+        let script_raw = ctx.load_script_from_blueprint("mailbox", "mailbox.spend")?;
+        staging = staging.script(ScriptKind::PlutusV3, hex::decode(&script_raw)?);
+    }
+
+    staging = staging.output(Output::new(payer_addr, change));
+
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {e:?}"))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    let signature = keypair.sign(&tx.tx_hash.0);
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {e:?}"))?;
+
+    println!("\n{}", "Step 6: Submitting...".cyan());
+    let submitted = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
+
+    println!("\n{}", "Dispatched".green().bold());
+    println!("  TX: {submitted}");
+    println!("  Message ID: 0x{message_id}");
+    Ok(())
 }

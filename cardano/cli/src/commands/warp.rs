@@ -2825,20 +2825,20 @@ fn get_warp_policy(ctx: &CliContext, warp_policy: Option<String>) -> Result<Stri
 // ============================================================================
 
 /// Mailbox data needed for transfer
-struct MailboxDataForTransfer {
-    local_domain: u32,
-    default_ism: String,
-    owner: String,
-    outbound_nonce: u32,
-    merkle_branches: Vec<String>,
-    merkle_count: u32,
-    processed_tree_root: String,
+pub(crate) struct MailboxDataForTransfer {
+    pub(crate) local_domain: u32,
+    pub(crate) default_ism: String,
+    pub(crate) owner: String,
+    pub(crate) outbound_nonce: u32,
+    pub(crate) merkle_branches: Vec<String>,
+    pub(crate) merkle_count: u32,
+    pub(crate) processed_tree_root: String,
 }
 
 /// Merkle tree state after update
-struct MerkleTreeUpdate {
-    branches: Vec<String>,
-    count: u32,
+pub(crate) struct MerkleTreeUpdate {
+    pub(crate) branches: Vec<String>,
+    pub(crate) count: u32,
 }
 
 /// Build warp message body: recipient (32 bytes) || amount (32 bytes, uint256 big-endian)
@@ -2862,7 +2862,7 @@ fn build_warp_message_body(recipient_hex: &str, amount: u128) -> Result<String> 
 }
 
 /// Compute message ID (keccak256 of encoded message)
-fn compute_message_id_for_transfer(
+pub(crate) fn compute_message_id_for_transfer(
     version: u8,
     nonce: u32,
     origin: u32,
@@ -2912,7 +2912,7 @@ fn compute_message_id_for_transfer(
 }
 
 /// Update merkle tree with a new leaf (message hash)
-fn update_merkle_tree_for_transfer(
+pub(crate) fn update_merkle_tree_for_transfer(
     current_branches: &[String],
     current_count: u32,
     message_id: &str,
@@ -2975,7 +2975,7 @@ fn hash_pair(left: &str, right: &str) -> Result<String> {
 }
 
 /// Parse mailbox datum for transfer
-fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<MailboxDataForTransfer> {
+pub(crate) fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<MailboxDataForTransfer> {
     // Check if datum is a hex string (raw CBOR)
     if let Some(hex_str) = datum.as_str() {
         return parse_mailbox_datum_from_cbor_for_transfer(hex_str);
