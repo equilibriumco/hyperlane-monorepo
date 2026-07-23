@@ -289,11 +289,11 @@ fn gas_overhead_for(
 
     let decoded: PlutusData = minicbor::decode(&hex::decode(datum_hex).ok()?).ok()?;
 
-    // IgpDatum: Constr 0 [owner, beneficiary, gas_oracles]
+    // IgpDatum: Constr 0 [version, owner, beneficiary, gas_oracles]
     let PlutusData::Constr(datum) = decoded else {
         return None;
     };
-    let oracles = datum.fields.to_vec().into_iter().nth(2)?;
+    let oracles = datum.fields.to_vec().into_iter().nth(3)?;
     let PlutusData::Array(entries) = oracles else {
         return None;
     };
@@ -724,7 +724,7 @@ mod gas_overhead_tests {
         })
     }
 
-    /// IgpDatum: Constr 0 [owner, beneficiary, gas_oracles]
+    /// IgpDatum: Constr 0 [version, owner, beneficiary, gas_oracles]
     /// where each oracle is [domain, Constr 0 [gas_price, rate, overhead]]
     fn igp_datum_hex(oracles: Vec<(i64, i64)>) -> String {
         let entries: Vec<PlutusData> = oracles
@@ -737,6 +737,7 @@ mod gas_overhead_tests {
             })
             .collect();
         let datum = constr(vec![
+            int(0), // version
             PlutusData::BoundedBytes(vec![0u8; 28].into()),
             PlutusData::BoundedBytes(vec![1u8; 28].into()),
             PlutusData::Array(MaybeIndefArray::Def(entries)),

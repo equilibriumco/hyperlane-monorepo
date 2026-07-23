@@ -1503,42 +1503,43 @@ fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    if fields.len() < 5 {
+    if fields.len() < 7 {
         return Err(anyhow!(
-            "Mailbox datum must have at least 5 fields, got {}",
+            "Mailbox datum must have at least 7 fields, got {}. A deployment \
+             predating the datum version field must be redeployed.",
             fields.len()
         ));
     }
 
     let local_domain = fields
-        .get(0)
+        .get(1)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid local_domain"))? as u32;
 
     let default_ism = fields
-        .get(1)
+        .get(2)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Invalid default_ism"))?
         .to_string();
 
     let owner = fields
-        .get(2)
+        .get(3)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Invalid owner"))?
         .to_string();
 
     let outbound_nonce = fields
-        .get(3)
+        .get(4)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
 
     // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
     let merkle_tree = fields
-        .get(4)
+        .get(5)
         .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
 
     let merkle_tree_fields = merkle_tree
@@ -1576,7 +1577,7 @@ fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
         .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
 
     let processed_tree_root = fields
-        .get(5)
+        .get(6)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .unwrap_or("5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f")
@@ -1608,20 +1609,20 @@ fn parse_mailbox_datum_from_cbor(hex_str: &str) -> Result<MailboxData> {
     };
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 5 {
+    if fields_vec.len() < 7 {
         return Err(anyhow!(
             "Mailbox datum must have at least 5 fields, got {}",
             fields_vec.len()
         ));
     }
 
-    let local_domain = extract_u32(fields_vec[0])?;
-    let default_ism = extract_bytes_hex(fields_vec[1])?;
-    let owner = extract_bytes_hex(fields_vec[2])?;
-    let outbound_nonce = extract_u32(fields_vec[3])?;
+    let local_domain = extract_u32(fields_vec[1])?;
+    let default_ism = extract_bytes_hex(fields_vec[2])?;
+    let owner = extract_bytes_hex(fields_vec[3])?;
+    let outbound_nonce = extract_u32(fields_vec[4])?;
 
     // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
-    let merkle_tree_fields = match fields_vec[4] {
+    let merkle_tree_fields = match fields_vec[5] {
         PlutusData::Constr(c) if c.tag == 121 => {
             let f: Vec<&PlutusData> = c.fields.iter().collect();
             if f.len() < 2 {
@@ -1644,7 +1645,7 @@ fn parse_mailbox_datum_from_cbor(hex_str: &str) -> Result<MailboxData> {
     let merkle_count = extract_u32(merkle_tree_fields[1])?;
 
     let processed_tree_root = if fields_vec.len() > 5 {
-        extract_bytes_hex(fields_vec[5])?
+        extract_bytes_hex(fields_vec[6])?
     } else {
         "5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f".to_string()
     };
@@ -1703,4 +1704,79 @@ fn find_mailbox_params(mailbox_info: &ScriptInfo) -> Result<(&str, &str)> {
         .map(|p| p.value.as_str())
         .ok_or_else(|| anyhow!("ism_nft_policy not found in mailbox.appliedParameters"))?;
     Ok((vm_policy, ism_nft))
+}
+
+#[cfg(test)]
+mod datum_roundtrip_tests {
+    use super::*;
+    use crate::utils::cbor::{build_mailbox_datum, decode_plutus_datum};
+
+    /// Encode a datum, decode it the way Blockfrost hands it back, parse it, and
+    /// check every field survived. This is the check that catches a parser
+    /// reading the wrong index: the types line up either way, only the values
+    /// move, so nothing else notices.
+    #[test]
+    fn mailbox_datum_survives_encode_decode_parse() {
+        let branches: Vec<String> = (0..32u8)
+            .map(|i| format!("{:02x}", i).repeat(32))
+            .collect();
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let default_ism = "aa".repeat(28);
+        let owner = "bb".repeat(28);
+        let root = "cc".repeat(32);
+
+        let cbor = build_mailbox_datum(2003, &default_ism, &owner, 7, &branch_refs, 5, &root)
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let parsed = parse_mailbox_datum(&json).expect("parse");
+
+        assert_eq!(parsed.local_domain, 2003, "local_domain");
+        assert_eq!(parsed.default_ism, default_ism, "default_ism");
+        assert_eq!(parsed.owner, owner, "owner");
+        assert_eq!(parsed.outbound_nonce, 7, "outbound_nonce");
+        assert_eq!(parsed.merkle_count, 5, "merkle_count");
+        assert_eq!(parsed.merkle_branches, branches, "merkle_branches");
+        assert_eq!(parsed.processed_tree_root, root, "processed_tree_root");
+    }
+
+    /// The CBOR path is a separate parser from the JSON one and shifted
+    /// independently, so it gets its own round trip.
+    #[test]
+    fn mailbox_datum_survives_the_cbor_parser() {
+        let branches: Vec<String> = (0..32u8)
+            .map(|i| format!("{:02x}", i).repeat(32))
+            .collect();
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let default_ism = "dd".repeat(28);
+        let owner = "ee".repeat(28);
+        let root = "ff".repeat(32);
+
+        let cbor = build_mailbox_datum(9, &default_ism, &owner, 3, &branch_refs, 1, &root)
+            .expect("build");
+        let parsed = parse_mailbox_datum_from_cbor(&hex::encode(&cbor)).expect("parse");
+
+        assert_eq!(parsed.local_domain, 9, "local_domain");
+        assert_eq!(parsed.default_ism, default_ism, "default_ism");
+        assert_eq!(parsed.owner, owner, "owner");
+        assert_eq!(parsed.outbound_nonce, 3, "outbound_nonce");
+        assert_eq!(parsed.merkle_count, 1, "merkle_count");
+        assert_eq!(parsed.merkle_branches, branches, "merkle_branches");
+        assert_eq!(parsed.processed_tree_root, root, "processed_tree_root");
+    }
+
+    /// Distinct values in every position, so a parser reading a neighbouring
+    /// field produces a mismatch rather than a coincidentally equal value.
+    #[test]
+    fn adjacent_mailbox_fields_are_not_confused() {
+        let branches: Vec<String> = vec!["11".repeat(32); 32];
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let cbor = build_mailbox_datum(1, &"22".repeat(28), &"33".repeat(28), 2, &branch_refs, 3, &"44".repeat(32))
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let parsed = parse_mailbox_datum(&json).expect("parse");
+
+        assert_ne!(parsed.local_domain, parsed.outbound_nonce);
+        assert_ne!(parsed.default_ism, parsed.owner);
+        assert_ne!(parsed.merkle_count, parsed.local_domain);
+    }
 }

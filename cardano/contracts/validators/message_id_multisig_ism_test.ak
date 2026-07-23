@@ -564,7 +564,7 @@ fn sepolia_ism_datum(
   threshold: Int,
   validators: List<ByteArray>,
 ) -> MultisigIsmDatum {
-  MultisigIsmDatum {
+  MultisigIsmDatum { version: 0, 
     validators: [(sepolia_domain, validators)],
     thresholds: [(sepolia_domain, threshold)],
     owner: #"00000000000000000000000000000000000000000000000000000000",

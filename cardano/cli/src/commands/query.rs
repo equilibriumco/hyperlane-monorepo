@@ -163,24 +163,25 @@ async fn query_mailbox(ctx: &CliContext, mailbox_policy: Option<String>) -> Resu
         println!("\n{}", "Mailbox State:".green());
 
         if let Some(fields) = datum.get("fields").and_then(|f| f.as_array()) {
+            // field 0 is the datum version
             let local_domain = fields
-                .get(0)
+                .get(1)
                 .and_then(|d| d.get("int"))
                 .and_then(|i| i.as_u64());
             let default_ism = fields
-                .get(1)
+                .get(2)
                 .and_then(|i| i.get("bytes"))
                 .and_then(|b| b.as_str());
             let owner = fields
-                .get(2)
+                .get(3)
                 .and_then(|o| o.get("bytes"))
                 .and_then(|b| b.as_str());
             let outbound_nonce = fields
-                .get(3)
+                .get(4)
                 .and_then(|n| n.get("int"))
                 .and_then(|i| i.as_u64());
             // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
-            let merkle_tree = fields.get(4);
+            let merkle_tree = fields.get(5);
             let (merkle_branches_count, merkle_count) = if let Some(mt) = merkle_tree {
                 let mt_fields = mt.get("fields").and_then(|f| f.as_array());
                 if let Some(mtf) = mt_fields {

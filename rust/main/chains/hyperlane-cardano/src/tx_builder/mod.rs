@@ -4037,13 +4037,14 @@ fn read_processed_tree_root_from_utxo(utxo: &Utxo) -> Result<[u8; 32], TxBuilder
                 MaybeIndefArray::Def(f) => f,
                 MaybeIndefArray::Indef(f) => f,
             };
-            if fields.len() < 6 {
+            if fields.len() < 7 {
                 return Err(TxBuilderError::Encoding(format!(
-                    "MailboxDatum expected 6 fields, got {}",
+                    "MailboxDatum expected 7 fields, got {}. A deployment predating \
+                     the datum version field must be redeployed.",
                     fields.len()
                 )));
             }
-            match &fields[5] {
+            match &fields[6] {
                 PlutusData::BoundedBytes(bytes) => {
                     if bytes.len() != 32 {
                         return Err(TxBuilderError::Encoding(format!(
@@ -4091,16 +4092,17 @@ fn build_mailbox_continuation_datum(
         )?
     };
 
-    // MailboxDatum = Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree, processed_tree_root]
+    // MailboxDatum = Constr 0 [version, local_domain, default_ism, owner, outbound_nonce, merkle_tree, processed_tree_root]
     match original_data {
         PlutusData::Constr(mut constr) => {
             let mut fields: Vec<PlutusData> = match constr.fields {
                 MaybeIndefArray::Def(f) => f,
                 MaybeIndefArray::Indef(f) => f,
             };
-            if fields.len() < 6 {
+            if fields.len() < 7 {
                 return Err(TxBuilderError::Encoding(format!(
-                    "MailboxDatum expected 6 fields, got {}",
+                    "MailboxDatum expected 7 fields, got {}. A deployment predating \
+                     the datum version field must be redeployed.",
                     fields.len()
                 )));
             }
@@ -4132,9 +4134,10 @@ fn build_mailbox_continuation_datum_from_cbor(
                 MaybeIndefArray::Def(f) => f,
                 MaybeIndefArray::Indef(f) => f,
             };
-            if fields.len() < 6 {
+            if fields.len() < 7 {
                 return Err(TxBuilderError::Encoding(format!(
-                    "MailboxDatum expected 6 fields, got {}",
+                    "MailboxDatum expected 7 fields, got {}. A deployment predating \
+                     the datum version field must be redeployed.",
                     fields.len()
                 )));
             }

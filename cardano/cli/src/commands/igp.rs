@@ -1476,29 +1476,35 @@ pub(crate) fn parse_igp_datum(
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid IGP datum structure"))?;
 
-    if fields.len() < 3 {
-        return Err(anyhow!("IGP datum must have 3 fields"));
+    if fields.len() < 4 {
+        return Err(anyhow!(
+            "IGP datum has {} fields, expected 4. A deployment predating the \
+             datum version field must be redeployed.",
+            fields.len()
+        ));
     }
 
-    // owner (field 0)
+    // field 0 is the datum version, which nothing off-chain needs to read
+
+    // owner (field 1)
     let owner = hex::decode(
-        fields[0]
+        fields[1]
             .get("bytes")
             .and_then(|b| b.as_str())
             .ok_or_else(|| anyhow!("Invalid owner"))?,
     )?;
 
-    // beneficiary (field 1)
+    // beneficiary (field 2)
     let beneficiary = hex::decode(
-        fields[1]
+        fields[2]
             .get("bytes")
             .and_then(|b| b.as_str())
             .ok_or_else(|| anyhow!("Invalid beneficiary"))?,
     )?;
 
-    // gas_oracles (field 2)
+    // gas_oracles (field 3)
     let mut gas_oracles = Vec::new();
-    if let Some(list) = fields[2].get("list").and_then(|l| l.as_array()) {
+    if let Some(list) = fields[3].get("list").and_then(|l| l.as_array()) {
         for entry in list {
             let items: Vec<&serde_json::Value> = entry
                 .get("list")
@@ -1933,5 +1939,44 @@ mod tests {
         // The CBOR should start with d8 7a (tag 122 = Constr 1)
         assert_eq!(cbor[0], 0xd8);
         assert_eq!(cbor[1], 0x7a);
+    }
+}
+
+#[cfg(test)]
+mod datum_roundtrip_tests {
+    use super::*;
+    use crate::utils::cbor::{build_igp_datum, decode_plutus_datum};
+
+    #[test]
+    fn igp_datum_survives_encode_decode_parse() {
+        let owner = "11".repeat(28);
+        let beneficiary = "22".repeat(28);
+        let oracles = vec![
+            (11155111u32, 1_000_000_000u64, 7171u64, 211_000u64),
+            (2003u32, 1u64, 1_395_000u64, 42u64),
+        ];
+
+        let cbor = build_igp_datum(&owner, &beneficiary, &oracles).expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (parsed_owner, parsed_beneficiary, parsed_oracles) =
+            parse_igp_datum(&json).expect("parse");
+
+        assert_eq!(hex::encode(parsed_owner), owner, "owner");
+        assert_eq!(hex::encode(parsed_beneficiary), beneficiary, "beneficiary");
+        assert_eq!(parsed_oracles, oracles, "gas_oracles");
+    }
+
+    /// Owner and beneficiary are adjacent same-width fields, so a one-off read
+    /// would swap them silently. Distinct values make that a failure.
+    #[test]
+    fn igp_owner_and_beneficiary_are_not_swapped() {
+        let owner = "aa".repeat(28);
+        let beneficiary = "bb".repeat(28);
+        let cbor = build_igp_datum(&owner, &beneficiary, &[(1, 2, 3, 4)]).expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (parsed_owner, parsed_beneficiary, _) = parse_igp_datum(&json).expect("parse");
+
+        assert_eq!(hex::encode(&parsed_owner), owner);
+        assert_ne!(hex::encode(&parsed_owner), hex::encode(&parsed_beneficiary));
     }
 }

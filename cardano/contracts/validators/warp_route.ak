@@ -68,13 +68,12 @@ validator warp_route(mailbox_policy_id: PolicyId) {
         validate_set_destination_gas(warp_datum, domain, gas, tx, own_ref)
 
       MigrateWarp { new_address } -> {
-        let datum_as_data: Data = warp_datum
         validate_migrate(
           warp_datum.owner,
           new_address,
           tx,
           own_ref,
-          datum_as_data,
+          warp_datum.version,
         )
       }
     }
@@ -151,6 +150,7 @@ fn validate_transfer_remote(
   expect cont_datum.total_bridged == datum.total_bridged + amount
   expect cont_datum.ism == datum.ism
   expect cont_datum.destination_gas == datum.destination_gas
+  expect cont_datum.version == datum.version
 
   // All native tokens (including state NFT) must be preserved.
   // For Native/Collateral lock, token quantities only increase so this always holds.
@@ -245,6 +245,7 @@ fn validate_receive_transfer(
   expect cont_datum.total_bridged == datum.total_bridged - local_amount
   expect cont_datum.ism == datum.ism
   expect cont_datum.destination_gas == datum.destination_gas
+  expect cont_datum.version == datum.version
 
   // 9. Ensure state NFT is preserved in continuation.
   //    For collateral release, the collateral token quantity decreases — exclude it.
@@ -298,6 +299,7 @@ fn validate_enroll_remote_route(
   expect cont_datum.total_bridged == datum.total_bridged
   expect cont_datum.ism == datum.ism
   expect cont_datum.destination_gas == datum.destination_gas
+  expect cont_datum.version == datum.version
 
   True
 }
@@ -868,7 +870,7 @@ const test_owner = #"00000000000000000000000000000000000000000000000000000007"
 const test_gas_domain: Domain = 1
 
 fn gas_datum(destination_gas: List<(Domain, Int)>) -> WarpRouteDatum {
-  WarpRouteDatum {
+  WarpRouteDatum { version: 0, 
     config: types.WarpRouteConfig {
       token_type: Native,
       decimals: 6,

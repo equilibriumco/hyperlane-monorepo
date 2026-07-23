@@ -1450,7 +1450,7 @@ fn parse_warp_datum(
         datum.clone()
     };
 
-    // WarpRouteDatum { config, owner, total_bridged, ism }
+    // WarpRouteDatum { version, config, owner, total_bridged, ism, destination_gas }
     let fields = parsed_datum
         .get("fields")
         .and_then(|f| f.as_array())
@@ -1461,15 +1461,17 @@ fn parse_warp_datum(
             )
         })?;
 
-    if fields.len() < 4 {
+    if fields.len() < 6 {
         return Err(anyhow!(
-            "Invalid datum: expected 4 fields, got {}",
+            "Invalid datum: expected 6 fields, got {}. A route deployed before \
+             the datum version field must be redeployed.",
             fields.len()
         ));
     }
 
     // Parse config (first field)
-    let config = &fields[0];
+    // field 0 is the datum version
+    let config = &fields[1];
     let config_fields = config
         .get("fields")
         .and_then(|f| f.as_array())
@@ -1590,17 +1592,17 @@ fn parse_warp_datum(
         }
     }
 
-    // Parse owner (second field of datum)
+    // Parse owner (field 2)
     let owner = fields
-        .get(1)
+        .get(2)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Invalid owner"))?
         .to_string();
 
-    // Parse total_bridged (third field of datum)
+    // Parse total_bridged (field 3)
     let total_bridged = fields
-        .get(2)
+        .get(3)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_i64())
         .unwrap_or(0);
@@ -1631,7 +1633,7 @@ fn parse_destination_gas(datum: &serde_json::Value) -> Result<Vec<(u32, i64)>> {
     let Some(entries) = parsed_datum
         .get("fields")
         .and_then(|f| f.as_array())
-        .and_then(|f| f.get(4))
+        .and_then(|f| f.get(5))
         .and_then(|f| f.get("list"))
         .and_then(|l| l.as_array())
     else {
@@ -2987,7 +2989,7 @@ pub(crate) fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Res
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    if fields.len() < 5 {
+    if fields.len() < 7 {
         return Err(anyhow!(
             "Mailbox datum must have at least 5 fields, got {}",
             fields.len()
@@ -2995,34 +2997,34 @@ pub(crate) fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Res
     }
 
     let local_domain = fields
-        .get(0)
+        .get(1)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid local_domain"))? as u32;
 
     let default_ism = fields
-        .get(1)
+        .get(2)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Invalid default_ism"))?
         .to_string();
 
     let owner = fields
-        .get(2)
+        .get(3)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Invalid owner"))?
         .to_string();
 
     let outbound_nonce = fields
-        .get(3)
+        .get(4)
         .and_then(|f| f.get("int"))
         .and_then(|i| i.as_u64())
         .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
 
     // Parse nested MerkleTreeState
     let merkle_tree = fields
-        .get(4)
+        .get(5)
         .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
 
     let merkle_tree_fields = merkle_tree
@@ -3056,7 +3058,7 @@ pub(crate) fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Res
         .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
 
     let processed_tree_root = fields
-        .get(5)
+        .get(6)
         .and_then(|f| f.get("bytes"))
         .and_then(|b| b.as_str())
         .unwrap_or("5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f")
@@ -3085,20 +3087,20 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
     };
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 5 {
+    if fields_vec.len() < 7 {
         return Err(anyhow!(
             "Mailbox datum must have at least 5 fields, got {}",
             fields_vec.len()
         ));
     }
 
-    let local_domain = extract_u32_for_transfer(fields_vec[0])?;
-    let default_ism = extract_bytes_hex_for_transfer(fields_vec[1])?;
-    let owner = extract_bytes_hex_for_transfer(fields_vec[2])?;
-    let outbound_nonce = extract_u32_for_transfer(fields_vec[3])?;
+    let local_domain = extract_u32_for_transfer(fields_vec[1])?;
+    let default_ism = extract_bytes_hex_for_transfer(fields_vec[2])?;
+    let owner = extract_bytes_hex_for_transfer(fields_vec[3])?;
+    let outbound_nonce = extract_u32_for_transfer(fields_vec[4])?;
 
     // Parse nested MerkleTreeState
-    let merkle_tree_fields = match fields_vec[4] {
+    let merkle_tree_fields = match fields_vec[5] {
         PlutusData::Constr(c) if c.tag == 121 => {
             let f: Vec<&PlutusData> = c.fields.iter().collect();
             if f.len() < 2 {
@@ -3120,7 +3122,7 @@ fn parse_mailbox_datum_from_cbor_for_transfer(hex_str: &str) -> Result<MailboxDa
     let merkle_count = extract_u32_for_transfer(merkle_tree_fields[1])?;
 
     let processed_tree_root = if fields_vec.len() > 5 {
-        extract_bytes_hex_for_transfer(fields_vec[5])?
+        extract_bytes_hex_for_transfer(fields_vec[6])?
     } else {
         "5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f".to_string()
     };
@@ -3947,4 +3949,98 @@ async fn migrate(
     println!("  2. Update relayer config with new warp route address");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod datum_roundtrip_tests {
+    use super::*;
+    use crate::utils::cbor::decode_plutus_datum;
+
+    fn routes() -> Vec<RemoteRoute> {
+        vec![
+            RemoteRoute { domain: 11155111, router: "aa".repeat(32) },
+            RemoteRoute { domain: 2003, router: "bb".repeat(32) },
+        ]
+    }
+
+    #[test]
+    fn native_warp_datum_survives_encode_decode_parse() {
+        let owner = "cc".repeat(28);
+        let gas = vec![(11155111u32, 1_800_000i64)];
+        let cbor = build_warp_route_native_datum_with_routes(6, 18, &routes(), &owner, 42, &gas)
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+
+        let (token_type, decimals, remote_decimals, parsed_routes, parsed_owner, total) =
+            parse_warp_datum(&json).expect("parse");
+
+        assert!(matches!(token_type, WarpTokenTypeInfo::Native), "token_type");
+        assert_eq!(decimals, 6, "decimals");
+        assert_eq!(remote_decimals, 18, "remote_decimals");
+        assert_eq!(parsed_owner, owner, "owner");
+        assert_eq!(total, 42, "total_bridged");
+        assert_eq!(parsed_routes.len(), 2, "route count");
+        assert_eq!(parsed_routes[0].domain, 11155111);
+        assert_eq!(parsed_routes[0].router, "aa".repeat(32));
+        assert_eq!(parse_destination_gas(&json).expect("gas"), gas, "destination_gas");
+    }
+
+    #[test]
+    fn collateral_warp_datum_survives_encode_decode_parse() {
+        let owner = "dd".repeat(28);
+        let policy = "ee".repeat(28);
+        let asset = "4354455354";
+        let cbor = build_warp_route_collateral_datum_with_routes(
+            &policy, asset, 6, 18, &routes(), &owner, 7, &[],
+        )
+        .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (token_type, decimals, _, _, parsed_owner, total) =
+            parse_warp_datum(&json).expect("parse");
+
+        match token_type {
+            WarpTokenTypeInfo::Collateral { policy_id, asset_name } => {
+                assert_eq!(policy_id, policy, "token policy");
+                assert_eq!(asset_name, asset, "asset name");
+            }
+            other => panic!("expected collateral, got {other:?}"),
+        }
+        assert_eq!(decimals, 6);
+        assert_eq!(parsed_owner, owner);
+        assert_eq!(total, 7);
+        assert!(parse_destination_gas(&json).expect("gas").is_empty());
+    }
+
+    #[test]
+    fn synthetic_warp_datum_survives_encode_decode_parse() {
+        let owner = "0f".repeat(28);
+        let minting = "1f".repeat(28);
+        let cbor = build_warp_route_synthetic_datum_with_routes(
+            &minting, 6, 18, &routes(), &owner, 0, &[(2003, 5)],
+        )
+        .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (token_type, _, _, _, parsed_owner, _) = parse_warp_datum(&json).expect("parse");
+
+        match token_type {
+            WarpTokenTypeInfo::Synthetic { minting_policy } => {
+                assert_eq!(minting_policy, minting, "minting policy")
+            }
+            other => panic!("expected synthetic, got {other:?}"),
+        }
+        assert_eq!(parsed_owner, owner);
+        assert_eq!(parse_destination_gas(&json).expect("gas"), vec![(2003u32, 5i64)]);
+    }
+
+    /// decimals and remote_decimals are adjacent small ints, the pair most
+    /// likely to be silently transposed. 6 and 18 are not interchangeable:
+    /// swapping them scales transfers by 10^12.
+    #[test]
+    fn warp_decimals_are_not_transposed() {
+        let cbor = build_warp_route_native_datum_with_routes(6, 18, &routes(), &"01".repeat(28), 0, &[])
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (_, decimals, remote_decimals, _, _, _) = parse_warp_datum(&json).expect("parse");
+        assert_eq!((decimals, remote_decimals), (6, 18));
+    }
 }

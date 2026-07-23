@@ -67,8 +67,7 @@ validator merkle_root_multisig_ism {
         validate_set_threshold(ism_datum, domain, threshold, tx, own_ref)
 
       MrMigrateIsm { new_address } -> {
-        let datum_as_data: Data = ism_datum
-        validate_migrate(ism_datum.owner, new_address, tx, own_ref, datum_as_data)
+        validate_migrate(ism_datum.owner, new_address, tx, own_ref, ism_datum.version)
       }
     }
   }
@@ -85,7 +84,7 @@ validator merkle_root_multisig_ism {
 test merkleroot_verify_rejects_zero_threshold() fail {
   let origin = 1
   let datum =
-    MultisigIsmDatum {
+    MultisigIsmDatum { version: 0, 
       validators: [(origin, [])],
       thresholds: [(origin, 0)],
       owner: #"00000000000000000000000000000000000000000000000000000000",

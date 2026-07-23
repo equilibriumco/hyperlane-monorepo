@@ -205,7 +205,10 @@ pub fn build_mailbox_datum(
 ) -> Result<Vec<u8>> {
     let mut builder = CborBuilder::new();
 
-    builder.start_constr(0).uint(local_domain as u64);
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+    builder.uint(local_domain as u64);
 
     builder.bytes_hex(default_ism_hash)?;
     builder.bytes_hex(owner_pkh)?;
@@ -263,6 +266,8 @@ pub fn build_ism_datum(
     let mut builder = CborBuilder::new();
 
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // Validators list: List<(Domain, List<Address>)>
     // NOTE: In Plutus/Aiken, tuples are encoded as plain CBOR arrays, NOT as Constr 0
@@ -383,6 +388,8 @@ pub fn build_igp_datum(
     let mut builder = CborBuilder::new();
 
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // owner: VerificationKeyHash (28 bytes)
     builder.bytes_hex(owner_pkh)?;
@@ -835,6 +842,8 @@ fn build_warp_route_datum(
 
     // WarpRouteDatum - Constr 0
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // config: WarpRouteConfig - Constr 0
     builder.start_constr(0);
@@ -1037,6 +1046,8 @@ pub fn build_warp_route_collateral_datum_with_routes(
 
     // WarpRouteDatum - Constr 0
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // config: WarpRouteConfig - Constr 0
     builder.start_constr(0);
@@ -1106,6 +1117,8 @@ pub fn build_warp_route_synthetic_datum_with_routes(
 
     // WarpRouteDatum - Constr 0
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // config: WarpRouteConfig - Constr 0
     builder.start_constr(0);
@@ -1175,6 +1188,8 @@ pub fn build_warp_route_native_datum_with_routes(
 
     // WarpRouteDatum - Constr 0 (indefinite length)
     builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
 
     // config: WarpRouteConfig - Constr 0
     builder.start_constr(0);

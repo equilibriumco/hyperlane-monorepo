@@ -1,3 +1,4 @@
+use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
@@ -211,12 +212,30 @@ pub fn has_policy_in_inputs(tx: Transaction, policy_id: ByteArray) -> Bool {
 
 /// Validate a migration: move state UTXO to a new script address.
 /// Checks: owner signature, continuation at new_address with same datum and value.
+/// Move a state UTXO to a new script address, bumping the datum version.
+///
+/// Migration is executed by the OLD validator: it is a spend of the UTXO at the
+/// old address, and Cardano does not validate outputs when they are created, so
+/// the new script has no say until someone first spends the migrated UTXO. The
+/// old code therefore cannot verify a datum shape that did not exist when it was
+/// compiled.
+///
+/// What it can do is read field 0. Plutus Data is self-describing, so the
+/// version is legible out of any shape, and requiring it to be exactly one more
+/// than the current version keeps the failure on this side of the move: a
+/// migration that gets it wrong is rejected while the state is still spendable
+/// under the old script, rather than stranding the UTXO at an address whose
+/// script will not accept it.
+///
+/// Everything beyond field 0 is owner-attested. The owner already sets validator
+/// sets, oracles and ownership; migration additionally lets them rewrite state,
+/// which is a trust event and is why this is owner-gated and value-preserving.
 pub fn validate_migrate(
   owner: VerificationKeyHash,
   new_address: Address,
   tx: Transaction,
   own_ref: OutputReference,
-  expected_datum: Data,
+  current_version: Int,
 ) -> Bool {
   expect is_signed_by(tx, owner)
   expect Some(own_input) = find_input(tx, own_ref)
@@ -224,6 +243,11 @@ pub fn validate_migrate(
   expect Some(continuation) =
     list.find(tx.outputs, fn(output) { output.address == new_address })
   expect InlineDatum(cont_datum_data) = continuation.datum
-  expect cont_datum_data == expected_datum
+
+  // Read field 0 without knowing the rest of the shape.
+  let fields = builtin.un_constr_data(cont_datum_data).2nd
+  expect Some(version_field) = list.at(fields, 0)
+  expect builtin.un_i_data(version_field) == current_version + 1
+
   value_preserved(own_value, continuation.value)
 }

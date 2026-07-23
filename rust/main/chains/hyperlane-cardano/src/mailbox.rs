@@ -233,9 +233,9 @@ impl CardanoMailbox {
                 ChainCommunicationError::from_other_str("Invalid local_domain in mailbox datum")
             })? as u32;
 
-        // Parse default_ism (field 1) - 28-byte script hash
+        // Parse default_ism (field 2) - 28-byte script hash
         let default_ism_hex = fields
-            .get(1)
+            .get(2)
             .and_then(|f| f.get("bytes"))
             .and_then(|b| b.as_str())
             .ok_or_else(|| {
@@ -248,9 +248,9 @@ impl CardanoMailbox {
             .try_into()
             .map_err(|_| ChainCommunicationError::from_other_str("Invalid default_ism length"))?;
 
-        // Parse owner (field 2) - 28-byte verification key hash
+        // Parse owner (field 3) - 28-byte verification key hash
         let owner_hex = fields
-            .get(2)
+            .get(3)
             .and_then(|f| f.get("bytes"))
             .and_then(|b| b.as_str())
             .ok_or_else(|| {
@@ -263,23 +263,23 @@ impl CardanoMailbox {
             .try_into()
             .map_err(|_| ChainCommunicationError::from_other_str("Invalid owner length"))?;
 
-        // Parse outbound_nonce (field 3)
+        // Parse outbound_nonce (field 4)
         let outbound_nonce = fields
-            .get(3)
+            .get(4)
             .and_then(|f| f.get("int"))
             .and_then(|i| i.as_u64())
             .ok_or_else(|| {
                 ChainCommunicationError::from_other_str("Invalid outbound_nonce in mailbox datum")
             })? as u32;
 
-        // Parse merkle_tree (field 4) - nested MerkleTreeState structure
+        // Parse merkle_tree (field 5) - nested MerkleTreeState structure
         // Format: { "constructor": 0, "fields": [{ "list": [...branches...] }, { "int": count }] }
-        let merkle_tree = self.parse_merkle_tree_state(fields.get(4).ok_or_else(|| {
+        let merkle_tree = self.parse_merkle_tree_state(fields.get(5).ok_or_else(|| {
             ChainCommunicationError::from_other_str("Missing merkle_tree in mailbox datum")
         })?)?;
 
         let processed_tree_root = fields
-            .get(5)
+            .get(6)
             .and_then(|v| v.get("bytes"))
             .and_then(|v| v.as_str())
             .and_then(|s| hex::decode(s).ok())

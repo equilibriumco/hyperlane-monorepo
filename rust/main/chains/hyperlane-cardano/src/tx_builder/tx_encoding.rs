@@ -521,11 +521,11 @@ pub(crate) fn build_ism_datum(
 }
 
 /// Extract owner from ISM datum PlutusData.
-/// ISM datum structure: Constr(121, [validators_list, thresholds_list, owner_bytes])
+/// ISM datum structure: Constr(121, [version, validators_list, thresholds_list, owner_bytes])
 pub(crate) fn extract_ism_owner(datum: &PlutusData) -> Result<[u8; 28], TxBuilderError> {
     match datum {
-        PlutusData::Constr(constr) if constr.fields.len() == 3 => {
-            let owner_field = &constr.fields[2];
+        PlutusData::Constr(constr) if constr.fields.len() == 4 => {
+            let owner_field = &constr.fields[3];
 
             let owner_bytes: &[u8] = match owner_field {
                 PlutusData::BoundedBytes(bytes) => bytes.as_ref(),

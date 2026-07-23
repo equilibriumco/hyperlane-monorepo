@@ -1534,15 +1534,17 @@ fn parse_ism_datum_full(
         .and_then(|f| f.as_array())
         .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
 
-    // Parse validators (field 0) - maintain order!
+    // Parse validators (field 1; field 0 is the datum version)
     let mut validators_list: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
     if let Some(validators_arr) = fields
-        .get(0)
+        .get(1)
         .and_then(|v| v.get("list"))
         .and_then(|l| l.as_array())
     {
         for entry in validators_arr {
-            if let Some(entry_fields) = entry.get("fields").and_then(|f| f.as_array()) {
+            // A tuple encodes as a plain Plutus list, so the entry carries
+            // "list" rather than the "fields" a constructor would have.
+            if let Some(entry_fields) = entry.get("list").and_then(|f| f.as_array()) {
                 let domain = entry_fields
                     .get(0)
                     .and_then(|d| d.get("int"))
@@ -1568,15 +1570,15 @@ fn parse_ism_datum_full(
         }
     }
 
-    // Parse thresholds (field 1) - maintain order!
+    // Parse thresholds (field 2)
     let mut thresholds_list: Vec<(u32, u32)> = Vec::new();
     if let Some(thresholds_arr) = fields
-        .get(1)
+        .get(2)
         .and_then(|v| v.get("list"))
         .and_then(|l| l.as_array())
     {
         for entry in thresholds_arr {
-            if let Some(entry_fields) = entry.get("fields").and_then(|f| f.as_array()) {
+            if let Some(entry_fields) = entry.get("list").and_then(|f| f.as_array()) {
                 let domain = entry_fields
                     .get(0)
                     .and_then(|d| d.get("int"))
@@ -1596,9 +1598,9 @@ fn parse_ism_datum_full(
         }
     }
 
-    // Parse owner (field 2)
+    // Parse owner (field 3)
     let owner = fields
-        .get(2)
+        .get(3)
         .and_then(|o| o.get("bytes"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| anyhow!("Missing owner field"))?;
@@ -1627,7 +1629,7 @@ fn parse_ism_datum_from_cbor(
     }
 
     let fields_vec: Vec<&PlutusData> = fields.iter().collect();
-    if fields_vec.len() < 3 {
+    if fields_vec.len() < 4 {
         return Err(anyhow!(
             "ISM datum must have 3 fields, got {}",
             fields_vec.len()
@@ -1637,7 +1639,7 @@ fn parse_ism_datum_from_cbor(
     // Parse validators (field 0) - MAINTAIN ORDER
     // Tuples in Aiken can be encoded as Constr 0 (tag 121)
     let mut validators_vec: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
-    if let PlutusData::Array(validators_list) = fields_vec[0] {
+    if let PlutusData::Array(validators_list) = fields_vec[1] {
         for entry in validators_list.iter() {
             // Tuple (domain, keys) can be Constr 0 or Array
             let entry_fields: Vec<&PlutusData> = match entry {
@@ -1663,7 +1665,7 @@ fn parse_ism_datum_from_cbor(
     // Parse thresholds (field 1) - MAINTAIN ORDER
     // Tuples in Aiken can be encoded as Constr 0 (tag 121)
     let mut thresholds_vec: Vec<(u32, u32)> = Vec::new();
-    if let PlutusData::Array(thresholds_list) = fields_vec[1] {
+    if let PlutusData::Array(thresholds_list) = fields_vec[2] {
         for entry in thresholds_list.iter() {
             // Tuple (domain, threshold) can be Constr 0 or Array
             let entry_fields: Vec<&PlutusData> = match entry {
@@ -1680,7 +1682,7 @@ fn parse_ism_datum_from_cbor(
     }
 
     // Parse owner (field 2)
-    let owner = match fields_vec[2] {
+    let owner = match fields_vec[3] {
         PlutusData::BoundedBytes(b) => b.to_vec(),
         _ => return Err(anyhow!("Expected owner as bytes")),
     };
@@ -1824,4 +1826,75 @@ fn build_set_threshold_redeemer_plutus(domain: u32, threshold: u32) -> PlutusDat
             PlutusData::BigInt(BigInt::Int((threshold as i64).into())),
         ]),
     })
+}
+
+#[cfg(test)]
+mod datum_roundtrip_tests {
+    use super::*;
+    use crate::utils::cbor::{build_ism_datum, decode_plutus_datum, IsmModuleType};
+
+    fn fixture() -> (Vec<(u32, Vec<String>)>, Vec<(u32, u32)>, String) {
+        (
+            vec![
+                (
+                    11155111,
+                    vec!["aa".repeat(20), "bb".repeat(20), "cc".repeat(20)],
+                ),
+                (2003, vec!["dd".repeat(20)]),
+            ],
+            vec![(11155111, 2), (2003, 1)],
+            "ef".repeat(28),
+        )
+    }
+
+    #[test]
+    fn ism_datum_survives_encode_decode_parse() {
+        let (validators, thresholds, owner) = fixture();
+        let cbor = build_ism_datum(&validators, &thresholds, &owner, IsmModuleType::MessageId)
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (parsed_validators, parsed_thresholds, parsed_owner) =
+            parse_ism_datum_full(&json).expect("parse");
+
+        assert_eq!(hex::encode(parsed_owner), owner, "owner");
+        assert_eq!(parsed_thresholds, thresholds, "thresholds");
+        assert_eq!(parsed_validators.len(), 2, "validator domain count");
+        assert_eq!(parsed_validators[0].0, 11155111);
+        assert_eq!(
+            parsed_validators[0]
+                .1
+                .iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>(),
+            validators[0].1
+        );
+    }
+
+    #[test]
+    fn ism_datum_survives_the_cbor_parser() {
+        let (validators, thresholds, owner) = fixture();
+        let cbor = build_ism_datum(&validators, &thresholds, &owner, IsmModuleType::MerkleRoot)
+            .expect("build");
+        let (parsed_validators, parsed_thresholds, parsed_owner) =
+            parse_ism_datum_from_cbor(&hex::encode(&cbor)).expect("parse");
+
+        assert_eq!(hex::encode(parsed_owner), owner, "owner");
+        assert_eq!(parsed_thresholds, thresholds, "thresholds");
+        assert_eq!(parsed_validators[1].0, 2003);
+    }
+
+    /// Validators and thresholds are adjacent lists keyed by the same domains.
+    /// Reading one where the other belongs yields a shape error rather than a
+    /// wrong value, but the threshold count is the thing that must not drift.
+    #[test]
+    fn ism_thresholds_track_their_domains() {
+        let (validators, thresholds, owner) = fixture();
+        let cbor = build_ism_datum(&validators, &thresholds, &owner, IsmModuleType::MessageId)
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let (_, parsed_thresholds, _) = parse_ism_datum_full(&json).expect("parse");
+
+        assert_eq!(parsed_thresholds[0], (11155111, 2));
+        assert_eq!(parsed_thresholds[1], (2003, 1));
+    }
 }

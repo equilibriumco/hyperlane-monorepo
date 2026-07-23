@@ -84,13 +84,12 @@ validator mailbox(
         validate_transfer_ownership(mailbox_datum, new_owner, tx, own_ref)
 
       MigrateMailbox { new_address } -> {
-        let datum_as_data: Data = mailbox_datum
         validate_migrate(
           mailbox_datum.owner,
           new_address,
           tx,
           own_ref,
-          datum_as_data,
+          mailbox_datum.version,
         )
       }
     }
@@ -241,6 +240,8 @@ fn validate_continuation(
   expect InlineDatum(cont_datum_data) = continuation.datum
   expect cont_datum: MailboxDatum = cont_datum_data
   expect and {
+      // Only migration bumps the version.
+      cont_datum.version == new_datum.version,
       cont_datum.local_domain == new_datum.local_domain,
       cont_datum.default_ism == new_datum.default_ism,
       cont_datum.owner == new_datum.owner,
@@ -596,7 +597,7 @@ fn unbounded_validity_range() -> Interval<Int> {
 
 fn make_warp_input(ism_override: Option<IsmConfig>) -> Input {
   let datum =
-    WarpRouteDatum {
+    WarpRouteDatum { version: 0, 
       config: WarpRouteConfig {
         token_type: Native,
         decimals: 6,
@@ -833,7 +834,7 @@ fn make_ism_verify_tx_with_asset(state_asset_name: ByteArray) -> Transaction {
           },
           value,
           datum: InlineDatum(
-            MultisigIsmDatum {
+            MultisigIsmDatum { version: 0, 
               validators: [],
               thresholds: [],
               owner: #"00000000000000000000000000000000000000000000000000000000",
@@ -948,7 +949,7 @@ fn make_merkleroot_ism_tx(
             1,
           ),
           datum: InlineDatum(
-            MultisigIsmDatum {
+            MultisigIsmDatum { version: 0, 
               validators: [],
               thresholds: [],
               owner: #"00000000000000000000000000000000000000000000000000000000",

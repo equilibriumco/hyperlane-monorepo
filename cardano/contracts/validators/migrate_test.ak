@@ -45,7 +45,7 @@ fn empty_validity_range() -> Interval<Int> {
 }
 
 fn sample_mailbox_datum() -> MailboxDatum {
-  MailboxDatum {
+  MailboxDatum { version: 0, 
     local_domain: 2003,
     default_ism: #"aaaa000000000000000000000000000000000000000000000000aaaa",
     owner: owner_key,
@@ -90,49 +90,91 @@ fn mock_tx(signatories: List<ByteArray>, outputs: List<Output>) -> Transaction {
   }
 }
 
-test migrate_succeeds_with_owner_sig_and_datum_preserved() {
+test migrate_succeeds_when_version_is_incremented() {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
+  let migrated = MailboxDatum { ..datum, version: datum.version + 1 }
   let continuation = Output {
     address: new_address(),
     value: base_value(),
-    datum: InlineDatum(datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_fails_without_owner_sig() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
+  let migrated = MailboxDatum { ..datum, version: datum.version + 1 }
+  let continuation = Output {
+    address: new_address(),
+    value: base_value(),
+    datum: InlineDatum(migrated),
+    reference_script: None,
+  }
+  let tx = mock_tx([], [continuation])
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
+}
+
+/// Migration is owner-attested beyond the version: the old validator cannot
+/// verify a shape it was not compiled against, so rewriting state is allowed
+/// provided the version moves forward.
+test migrate_allows_state_to_change_when_version_moves() {
+  let datum = sample_mailbox_datum()
+  let migrated =
+    MailboxDatum { ..datum, version: datum.version + 1, outbound_nonce: 999 }
+  let continuation = Output {
+    address: new_address(),
+    value: base_value(),
+    datum: InlineDatum(migrated),
+    reference_script: None,
+  }
+  let tx = mock_tx([owner_key], [continuation])
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
+}
+
+/// The version is the one thing the old code can check, so a migration that
+/// leaves it alone is refused while the state is still spendable here.
+test migrate_fails_when_version_unchanged() fail {
+  let datum = sample_mailbox_datum()
   let continuation = Output {
     address: new_address(),
     value: base_value(),
     datum: InlineDatum(datum),
     reference_script: None,
   }
-  let tx = mock_tx([], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  let tx = mock_tx([owner_key], [continuation])
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
-test migrate_fails_when_datum_modified() fail {
+test migrate_fails_when_version_skips_ahead() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
-  let modified_datum = MailboxDatum { ..datum, outbound_nonce: 999 }
+  let migrated = MailboxDatum { ..datum, version: datum.version + 2 }
   let continuation = Output {
     address: new_address(),
     value: base_value(),
-    datum: InlineDatum(modified_datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
+}
+
+test migrate_fails_when_version_goes_backwards() fail {
+  let datum = sample_mailbox_datum()
+  let migrated = MailboxDatum { ..datum, version: datum.version - 1 }
+  let continuation = Output {
+    address: new_address(),
+    value: base_value(),
+    datum: InlineDatum(migrated),
+    reference_script: None,
+  }
+  let tx = mock_tx([owner_key], [continuation])
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_fails_when_value_not_preserved() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
   let continuation = Output {
     address: new_address(),
     value: from_lovelace(1_000_000),
@@ -140,12 +182,11 @@ test migrate_fails_when_value_not_preserved() fail {
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_fails_when_no_continuation_at_new_address() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
   let wrong_output = Output {
     address: old_address(),
     value: base_value(),
@@ -153,12 +194,11 @@ test migrate_fails_when_no_continuation_at_new_address() fail {
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [wrong_output])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_fails_when_continuation_has_no_datum() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
   let continuation = Output {
     address: new_address(),
     value: base_value(),
@@ -166,60 +206,59 @@ test migrate_fails_when_continuation_has_no_datum() fail {
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_succeeds_with_extra_lovelace() {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
+  let migrated = MailboxDatum { ..datum, version: datum.version + 1 }
   let continuation = Output {
     address: new_address(),
     value: merge(from_lovelace(10_000_000), from_asset(state_nft_policy, "", 1)),
-    datum: InlineDatum(datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_works_with_igp_datum() {
-  let igp_datum = IgpDatum {
+  let igp_datum = IgpDatum { version: 0, 
     owner: owner_key,
     beneficiary: #"deadbeef",
     gas_oracles: [(11155111, GasOracleConfig { gas_price: 1_000_000_000, token_exchange_rate: 7171, gas_overhead: 150_000 })],
   }
-  let datum_as_data: Data = igp_datum
+  let migrated = IgpDatum { ..igp_datum, version: igp_datum.version + 1 }
   let continuation = Output {
     address: new_address(),
     value: base_value(),
-    datum: InlineDatum(igp_datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), igp_datum.version)
 }
 
 test migrate_works_with_ism_datum() {
-  let ism_datum = MultisigIsmDatum {
+  let ism_datum = MultisigIsmDatum { version: 0, 
     validators: [(11155111, [#"aabbccdd00000000000000000000000000000000"])],
     thresholds: [(11155111, 1)],
     owner: owner_key,
     module_type: MessageIdMultisig,
   }
-  let datum_as_data: Data = ism_datum
+  let migrated = MultisigIsmDatum { ..ism_datum, version: ism_datum.version + 1 }
   let continuation = Output {
     address: new_address(),
     value: base_value(),
-    datum: InlineDatum(ism_datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), ism_datum.version)
 }
 
 test migrate_fails_when_nft_extracted_but_lovelace_preserved() fail {
   let datum = sample_mailbox_datum()
-  let datum_as_data: Data = datum
   // Attacker preserves lovelace but omits the state NFT
   let continuation = Output {
     address: new_address(),
@@ -228,11 +267,11 @@ test migrate_fails_when_nft_extracted_but_lovelace_preserved() fail {
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), datum.version)
 }
 
 test migrate_works_with_warp_datum() {
-  let warp_datum = WarpRouteDatum {
+  let warp_datum = WarpRouteDatum { version: 0, 
     config: WarpRouteConfig {
       token_type: Native,
       decimals: 6,
@@ -244,13 +283,13 @@ test migrate_works_with_warp_datum() {
     ism: None,
     destination_gas: [],
   }
-  let datum_as_data: Data = warp_datum
+  let migrated = WarpRouteDatum { ..warp_datum, version: warp_datum.version + 1 }
   let continuation = Output {
     address: new_address(),
     value: base_value(),
-    datum: InlineDatum(warp_datum),
+    datum: InlineDatum(migrated),
     reference_script: None,
   }
   let tx = mock_tx([owner_key], [continuation])
-  validate_migrate(owner_key, new_address(), tx, own_ref(), datum_as_data)
+  validate_migrate(owner_key, new_address(), tx, own_ref(), warp_datum.version)
 }

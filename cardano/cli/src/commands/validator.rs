@@ -657,7 +657,8 @@ fn parse_mailbox_domain(datum: &Option<serde_json::Value>) -> Result<u32> {
 
         if let PlutusData::Constr(c) = parsed {
             let fields: Vec<&PlutusData> = c.fields.iter().collect();
-            if let Some(PlutusData::BigInt(BigInt::Int(i))) = fields.first() {
+            // field 0 is the datum version; local_domain is field 1
+            if let Some(PlutusData::BigInt(BigInt::Int(i))) = fields.get(1) {
                 return Ok(i64::try_from(i.0)? as u32);
             }
         }
@@ -671,7 +672,7 @@ fn parse_mailbox_domain(datum: &Option<serde_json::Value>) -> Result<u32> {
         .ok_or_else(|| anyhow!("Invalid mailbox datum"))?;
 
     fields
-        .first()
+        .get(1)
         .and_then(|d| d.get("int"))
         .and_then(|i| i.as_u64())
         .map(|d| d as u32)

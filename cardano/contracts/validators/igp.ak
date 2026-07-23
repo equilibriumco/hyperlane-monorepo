@@ -42,8 +42,7 @@ validator igp {
         validate_set_gas_oracle(igp_datum, domain, config, tx, own_ref)
 
       MigrateIgp { new_address } -> {
-        let datum_as_data: Data = igp_datum
-        validate_migrate(igp_datum.owner, new_address, tx, own_ref, datum_as_data)
+        validate_migrate(igp_datum.owner, new_address, tx, own_ref, igp_datum.version)
       }
     }
   }
@@ -283,6 +282,9 @@ fn address_to_bytes(addr: Address) -> ByteArray {
 /// Verify datum fields are preserved (except gas_oracles for SetGasOracle)
 fn datum_preserved(old: IgpDatum, new: IgpDatum) -> Bool {
   and {
+    // Only migration bumps the version; an ordinary spend carrying a different
+    // one would leave the next migration computing `old + 1` from a moved base.
+    old.version == new.version,
     old.owner == new.owner,
     old.beneficiary == new.beneficiary,
     old.gas_oracles == new.gas_oracles,
@@ -310,7 +312,7 @@ const test_own_ref =
 /// Matches the deployed Sepolia oracle: 1 gwei gas price, and an exchange rate
 /// scaled against the 1e12 divisor in `calculate_gas_payment`.
 fn test_igp_datum() -> IgpDatum {
-  IgpDatum {
+  IgpDatum { version: 0, 
     owner: #"00000000000000000000000000000000000000000000000000000001",
     beneficiary: #"00000000000000000000000000000000000000000000000000000002",
     gas_oracles: [

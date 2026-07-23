@@ -189,13 +189,14 @@ impl CardanoMultisigIsm {
         }
 
         // Parse validators list (field 0): list of (domain, list of pubkeys)
-        let validators = self.parse_validators_from_plutus(fields[0])?;
+        // field 0 is the datum version
+        let validators = self.parse_validators_from_plutus(fields[1])?;
 
         // Parse thresholds list (field 1): list of (domain, threshold)
-        let thresholds = self.parse_thresholds_from_plutus(fields[1])?;
+        let thresholds = self.parse_thresholds_from_plutus(fields[2])?;
 
         // Parse owner (field 2): 28-byte pubkey hash
-        let owner = self.parse_owner_from_plutus(fields[2])?;
+        let owner = self.parse_owner_from_plutus(fields[3])?;
 
         // Parse module_type (field 3): Constr 0 = MessageId, Constr 1 = MerkleRoot.
         // Default to MessageId if absent (datums predating the field).

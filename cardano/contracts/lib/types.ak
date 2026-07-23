@@ -162,6 +162,11 @@ pub type MerkleTreeState {
 
 /// Mailbox state stored in datum
 pub type MailboxDatum {
+  /// Datum layout version. Field 0 on every datum so a validator can read it
+  /// out of a shape it does not otherwise know, which is what lets a migration
+  /// check that state moved forward rather than sideways. Bumped by migration
+  /// only; ordinary spends preserve it.
+  version: Int,
   /// Cardano domain ID
   local_domain: Domain,
   /// Default ISM for message verification
@@ -214,8 +219,18 @@ pub type ModuleType {
   MerkleRootMultisig
 }
 
+/// Current datum layout version. A fresh deploy writes 0, so the first
+/// migration moves 0 to 1. Bump when a datum's shape changes; migration asserts
+/// the new state carries exactly one more than the old one.
+pub const datum_version: Int = 0
+
 /// Multisig ISM configuration (shared by the MessageId and MerkleRoot ISMs)
 pub type MultisigIsmDatum {
+  /// Datum layout version. Field 0 on every datum so a validator can read it
+  /// out of a shape it does not otherwise know, which is what lets a migration
+  /// check that state moved forward rather than sideways. Bumped by migration
+  /// only; ordinary spends preserve it.
+  version: Int,
   /// Validators per origin domain: List of (domain, validators)
   validators: List<(Domain, List<ByteArray>)>,
   /// Threshold per origin domain: List of (domain, threshold)
@@ -353,6 +368,11 @@ pub type GasOracleConfig {
 
 /// IGP datum
 pub type IgpDatum {
+  /// Datum layout version. Field 0 on every datum so a validator can read it
+  /// out of a shape it does not otherwise know, which is what lets a migration
+  /// check that state moved forward rather than sideways. Bumped by migration
+  /// only; ordinary spends preserve it.
+  version: Int,
   owner: VerificationKeyHash,
   /// Address that receives collected fees
   beneficiary: ByteArray,
@@ -400,6 +420,11 @@ pub type WarpRouteConfig {
 
 /// Warp route datum
 pub type WarpRouteDatum {
+  /// Datum layout version. Field 0 on every datum so a validator can read it
+  /// out of a shape it does not otherwise know, which is what lets a migration
+  /// check that state moved forward rather than sideways. Bumped by migration
+  /// only; ordinary spends preserve it.
+  version: Int,
   config: WarpRouteConfig,
   owner: VerificationKeyHash,
   /// Total tokens bridged (for accounting)
