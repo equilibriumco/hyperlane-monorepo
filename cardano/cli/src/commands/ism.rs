@@ -1640,9 +1640,11 @@ fn build_ism_datum(
 ) -> Result<PlutusData> {
     // ISM Datum structure (Aiken type MultisigIsmDatum):
     // Constr 0 [
+    //   Int,                              // version (field 0 on every datum)
     //   List<(Domain, List<ByteArray>)>,  // validators
     //   List<(Domain, Int)>,              // thresholds
-    //   ByteArray                         // owner
+    //   ByteArray,                        // owner
+    //   Constr                            // module_type
     // ]
     // NOTE: In Plutus/Aiken, 2-tuples are encoded as plain CBOR arrays [a, b], NOT as Constr 0
     // CRITICAL: Order must be preserved for Plutus datum comparison!
@@ -1693,6 +1695,8 @@ fn build_ism_datum(
         tag: 121, // Constr 0
         any_constructor: None,
         fields: MaybeIndefArray::Indef(vec![
+            // Ordinary spends preserve the version; only migration moves it.
+            PlutusData::BigInt(BigInt::Int(0.into())),
             PlutusData::Array(MaybeIndefArray::Indef(validators_list)),
             PlutusData::Array(MaybeIndefArray::Indef(thresholds_list)),
             PlutusData::BoundedBytes(BoundedBytes::from(owner.to_vec())),
@@ -1805,6 +1809,43 @@ mod datum_roundtrip_tests {
         assert_eq!(hex::encode(parsed_owner), owner, "owner");
         assert_eq!(parsed_thresholds, thresholds, "thresholds");
         assert_eq!(parsed_validators[1].0, 2003);
+    }
+
+    /// `ism.rs` has its own `build_ism_datum` that shadows the one in
+    /// `utils::cbor`, and it is the one the admin commands actually call. It
+    /// shipped a datum missing the version field, which the on-chain
+    /// continuation check rejected by reading past the end of the record.
+    #[test]
+    fn the_local_builder_emits_the_version_field() {
+        use pallas_primitives::conway::PlutusData;
+        let (validators, thresholds, owner) = fixture();
+        let owner_bytes = hex::decode(&owner).unwrap();
+        // `super::` on purpose: an unqualified `build_ism_datum` here resolves
+        // to the one in `utils::cbor`, which is how the local one escaped the
+        // version change in the first place.
+        let datum = super::build_ism_datum(
+            &validators
+                .iter()
+                .map(|(d, ks)| {
+                    (*d, ks.iter().map(|k| hex::decode(k).unwrap()).collect())
+                })
+                .collect::<Vec<(u32, Vec<Vec<u8>>)>>(),
+            &thresholds,
+            &owner_bytes,
+            IsmModuleType::MessageId,
+        )
+        .expect("build");
+
+        let PlutusData::Constr(c) = datum else {
+            panic!("expected a Constr")
+        };
+        let fields = c.fields.to_vec();
+        assert_eq!(fields.len(), 5, "expected version + 4 fields");
+        assert!(
+            matches!(fields[0], PlutusData::BigInt(_)),
+            "field 0 must be the version int, got {:?}",
+            fields[0]
+        );
     }
 
     /// Validators and thresholds are adjacent lists keyed by the same domains.
