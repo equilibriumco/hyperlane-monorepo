@@ -1520,97 +1520,21 @@ fn parse_validators_from_datum(
 
 /// Parse full ISM datum to get validators, thresholds, and owner
 /// Parse ISM datum, returning ordered lists to preserve entry order (critical for Plutus comparison)
+/// Parse an ISM datum into (validators, thresholds, owner).
+///
+/// Blockfrost returns `inline_datum` as CBOR hex, so that is the only form this
+/// ever sees. A JSON branch used to exist alongside this and was unreachable;
+/// it also decoded tuples as constructors when they encode as plain lists, so
+/// it silently returned empty validators and thresholds.
 fn parse_ism_datum_full(
     datum: &serde_json::Value,
 ) -> Result<(Vec<(u32, Vec<Vec<u8>>)>, Vec<(u32, u32)>, Vec<u8>)> {
-    // Check if datum is a hex string (raw CBOR from Blockfrost)
-    if let Some(hex_str) = datum.as_str() {
-        return parse_ism_datum_from_cbor(hex_str);
-    }
-
-    // Otherwise try the JSON format
-    let fields = datum
-        .get("fields")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
-
-    // Parse validators (field 1; field 0 is the datum version)
-    let mut validators_list: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
-    if let Some(validators_arr) = fields
-        .get(1)
-        .and_then(|v| v.get("list"))
-        .and_then(|l| l.as_array())
-    {
-        for entry in validators_arr {
-            // A tuple encodes as a plain Plutus list, so the entry carries
-            // "list" rather than the "fields" a constructor would have.
-            if let Some(entry_fields) = entry.get("list").and_then(|f| f.as_array()) {
-                let domain = entry_fields
-                    .get(0)
-                    .and_then(|d| d.get("int"))
-                    .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid domain in validators"))?
-                    as u32;
-
-                let mut validator_keys = Vec::new();
-                if let Some(keys) = entry_fields
-                    .get(1)
-                    .and_then(|a| a.get("list"))
-                    .and_then(|l| l.as_array())
-                {
-                    for key in keys {
-                        if let Some(bytes_str) = key.get("bytes").and_then(|b| b.as_str()) {
-                            let bytes = hex::decode(bytes_str)?;
-                            validator_keys.push(bytes);
-                        }
-                    }
-                }
-                validators_list.push((domain, validator_keys));
-            }
-        }
-    }
-
-    // Parse thresholds (field 2)
-    let mut thresholds_list: Vec<(u32, u32)> = Vec::new();
-    if let Some(thresholds_arr) = fields
-        .get(2)
-        .and_then(|v| v.get("list"))
-        .and_then(|l| l.as_array())
-    {
-        for entry in thresholds_arr {
-            if let Some(entry_fields) = entry.get("list").and_then(|f| f.as_array()) {
-                let domain = entry_fields
-                    .get(0)
-                    .and_then(|d| d.get("int"))
-                    .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid domain in thresholds"))?
-                    as u32;
-
-                let threshold = entry_fields
-                    .get(1)
-                    .and_then(|t| t.get("int"))
-                    .and_then(|i| i.as_u64())
-                    .ok_or_else(|| anyhow!("Invalid threshold"))?
-                    as u32;
-
-                thresholds_list.push((domain, threshold));
-            }
-        }
-    }
-
-    // Parse owner (field 3)
-    let owner = fields
-        .get(3)
-        .and_then(|o| o.get("bytes"))
-        .and_then(|b| b.as_str())
-        .ok_or_else(|| anyhow!("Missing owner field"))?;
-    let owner_bytes = hex::decode(owner)?;
-
-    Ok((validators_list, thresholds_list, owner_bytes))
+    let hex_str = datum.as_str().ok_or_else(|| {
+        anyhow!("ISM datum must be CBOR hex, got: {datum}")
+    })?;
+    parse_ism_datum_from_cbor(hex_str)
 }
 
-/// Parse ISM datum from raw CBOR hex
-/// Returns ordered lists (Vec) to preserve entry order - critical for Plutus comparison!
 fn parse_ism_datum_from_cbor(
     hex_str: &str,
 ) -> Result<(Vec<(u32, Vec<Vec<u8>>)>, Vec<(u32, u32)>, Vec<u8>)> {
@@ -1831,7 +1755,7 @@ fn build_set_threshold_redeemer_plutus(domain: u32, threshold: u32) -> PlutusDat
 #[cfg(test)]
 mod datum_roundtrip_tests {
     use super::*;
-    use crate::utils::cbor::{build_ism_datum, decode_plutus_datum, IsmModuleType};
+    use crate::utils::cbor::{build_ism_datum, IsmModuleType};
 
     fn fixture() -> (Vec<(u32, Vec<String>)>, Vec<(u32, u32)>, String) {
         (
@@ -1852,9 +1776,9 @@ mod datum_roundtrip_tests {
         let (validators, thresholds, owner) = fixture();
         let cbor = build_ism_datum(&validators, &thresholds, &owner, IsmModuleType::MessageId)
             .expect("build");
-        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let datum = serde_json::Value::String(hex::encode(&cbor));
         let (parsed_validators, parsed_thresholds, parsed_owner) =
-            parse_ism_datum_full(&json).expect("parse");
+            parse_ism_datum_full(&datum).expect("parse");
 
         assert_eq!(hex::encode(parsed_owner), owner, "owner");
         assert_eq!(parsed_thresholds, thresholds, "thresholds");
@@ -1891,8 +1815,8 @@ mod datum_roundtrip_tests {
         let (validators, thresholds, owner) = fixture();
         let cbor = build_ism_datum(&validators, &thresholds, &owner, IsmModuleType::MessageId)
             .expect("build");
-        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
-        let (_, parsed_thresholds, _) = parse_ism_datum_full(&json).expect("parse");
+        let datum = serde_json::Value::String(hex::encode(&cbor));
+        let (_, parsed_thresholds, _) = parse_ism_datum_full(&datum).expect("parse");
 
         assert_eq!(parsed_thresholds[0], (11155111, 2));
         assert_eq!(parsed_thresholds[1], (2003, 1));
