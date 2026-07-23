@@ -202,13 +202,14 @@ fn detect_from_plutus_data(
         _ => return Ok((RecipientKind::GenericRecipient, None)),
     };
 
-    // Constr 0 (tag 121) with 4 fields = WarpRouteDatum
+    // Constr 0 (tag 121) with 6 fields = WarpRouteDatum
     if tag != 121 || fields.len() < 5 {
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
-    // Check field 0 is config (Constr 0 with 4 fields including token_type)
-    let is_warp = match fields[0] {
+    // Field 0 is the datum version; config is field 1 (Constr 0 with 4 fields
+    // including token_type).
+    let is_warp = match fields[1] {
         PlutusData::Constr(c) => c.tag == 121 && c.fields.len() >= 4,
         _ => false,
     };
@@ -269,8 +270,9 @@ fn detect_from_json(
         return Ok((RecipientKind::GenericRecipient, None));
     }
 
-    // Check field 0 is config (has constructor 0 with 4 sub-fields)
-    let is_warp = fields[0]
+    // Field 0 is the datum version; config is field 1 (constructor 0 with 4
+    // sub-fields).
+    let is_warp = fields[1]
         .get("fields")
         .and_then(|f| f.as_array())
         .map(|f| f.len() >= 4)

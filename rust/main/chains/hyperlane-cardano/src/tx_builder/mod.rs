@@ -4648,37 +4648,46 @@ fn build_warp_route_continuation_datum(
 
     // Extract fields from the existing datum
     // Structure: Constr 0 [config, owner, total_bridged, ism, destination_gas]
-    let (config_field, owner, old_total_bridged, ism_field, destination_gas_field) =
+    let (version_field, config_field, owner, old_total_bridged, ism_field, destination_gas_field) =
         if let PlutusData::Constr(constr) = decoded {
             let fields: Vec<_> = constr.fields.clone().to_vec();
-            if fields.len() < 5 {
+            if fields.len() < 6 {
                 return Err(TxBuilderError::Encoding(format!(
-                    "Warp route datum has {} fields, expected 5. A route deployed \
-                 before destination_gas was added must be redeployed.",
+                    "Warp route datum has {} fields, expected 6. A route deployed \
+                 before the datum version field must be redeployed.",
                     fields.len()
                 )));
             }
 
-            // Config is a complex nested structure - preserve it as-is
-            let config = fields[0].clone();
+            // Field 0 is the datum version, so every field below is shifted by
+            // one. Config is a complex nested structure, preserved as-is.
+            let version = fields[0].clone();
+            let config = fields[1].clone();
 
-            let owner_bytes = extract_bytes(&fields[1]).ok_or_else(|| {
+            let owner_bytes = extract_bytes(&fields[2]).ok_or_else(|| {
                 TxBuilderError::Encoding(
                     "Failed to extract owner from warp route datum".to_string(),
                 )
             })?;
 
-            let total_bridged = extract_int(&fields[2]).unwrap_or(0);
+            let total_bridged = extract_int(&fields[3]).unwrap_or(0);
 
             // Preserve ism field as-is (Option<IsmConfig>)
-            let ism = fields[3].clone();
+            let ism = fields[4].clone();
 
             // Preserve destination_gas as-is; only the owner ever changes it, and
             // dropping it here would silently reset the route's gas config on
             // every inbound delivery.
-            let destination_gas = fields[4].clone();
+            let destination_gas = fields[5].clone();
 
-            (config, owner_bytes, total_bridged, ism, destination_gas)
+            (
+                version,
+                config,
+                owner_bytes,
+                total_bridged,
+                ism,
+                destination_gas,
+            )
         } else {
             return Err(TxBuilderError::Encoding(
                 "Warp route datum is not a Constr".to_string(),
@@ -4697,7 +4706,8 @@ fn build_warp_route_continuation_datum(
         tag: plutus_constr_tag(0),
         any_constructor: None,
         fields: MaybeIndefArray::Def(vec![
-            config_field, // Preserve config as-is
+            version_field, // Only migration moves the version
+            config_field,  // Preserve config as-is
             PlutusData::BoundedBytes(owner.into()),
             PlutusData::BigInt(BigInt::Int(new_total_bridged.into())),
             ism_field,             // Preserve ism as-is
