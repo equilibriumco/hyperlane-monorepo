@@ -49,13 +49,17 @@ impl TxStatus {
     /// Whether events from a transaction with this status should be served to
     /// the Hyperlane indexers. This is THE single place that decision lives.
     ///
-    /// - `Success`: state writes landed, index the events.
-    /// - `Failure`: nothing was applied, so the paired state write never
-    ///   happened — drop the events.
-    /// - `PartialSuccess`: included FOR NOW. Whether an event can be emitted
-    ///   from a failed segment (i.e. without its paired state write) is being
-    ///   verified separately on a devnet probe; flip this to `false` for
-    ///   `PartialSuccess` if segment attribution turns out unsafe.
+    /// A devnet probe (2026-07-23) settled the semantics: the indexer can
+    /// only serve events from execution that actually applied. Compact 0.33
+    /// places the whole circuit transcript in the guaranteed segment, and a
+    /// guaranteed-segment failure never enters a block at all; for
+    /// hypothetical partial-success transactions, the ledger collects events
+    /// only from segments that applied (`apply_fallible`'s `Ok` arm). So:
+    ///
+    /// - `Success` and `PartialSuccess`: any served event's paired state
+    ///   write is applied — index it.
+    /// - `Failure`: unreachable for contract-call events in practice; kept
+    ///   excluded as pure defence in depth.
     pub fn is_indexable(self) -> bool {
         match self {
             TxStatus::Success | TxStatus::PartialSuccess => true,
