@@ -375,8 +375,7 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-                let provider =
-                    h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
         }
@@ -550,7 +549,8 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 // The monolithic WarpRoute embeds the merkle tree; read its
                 // count / current_root from chain state via the indexer (#14).
-                let indexer = h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 let hook = h_midnight::MidnightMerkleTreeHook::new(
                     locator.address,
@@ -650,9 +650,9 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Reads dispatched messages from the WarpRoute contract's
-                // `dispatched_messages` ledger map via the Midnight indexer
-                // client (#14); the `nonce` counter is the sequence tip.
+                // Replays the WarpRoute contract's HYP_DISPATCH events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); the `nonce` counter is the sequence tip.
                 let client =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let indexer = h_midnight::MidnightDispatchIndexer::new(client, &locator);
@@ -745,9 +745,10 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Reads delivered message ids from the WarpRoute contract's
-                // `deliveries` ledger set via the Midnight indexer client
-                // (#14). Rate-limited: the full set is re-read each scan.
+                // Replays the WarpRoute contract's HYP_PROCESS events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); driven by the rate-limited (watermark) cursor
+                // like EVM deliveries.
                 let client =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let indexer = h_midnight::MidnightDeliveryIndexer::new(client, &locator);
@@ -929,9 +930,9 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Reads the append-only `gas_payments` map + `gas_payment_count`
-                // counter from the IGP contract state via the Midnight indexer
-                // client (#14); the counter is the sequence tip. Same struct as
+                // Replays the IGP contract's HYP_GAS_PAYMENT events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); no sequence, matching EVM. Same struct as
                 // build_interchain_gas_paymaster above.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
@@ -1074,10 +1075,11 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Reads leaf insertions from the WarpRoute contract's
-                // append-only dispatched-messages map via the Midnight indexer
-                // client (#14). Same struct as build_merkle_tree_hook above.
-                let indexer = h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                // Derives leaf insertions from the WarpRoute contract's
+                // HYP_DISPATCH events over block ranges (#95). Same struct as
+                // build_merkle_tree_hook above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 let hook = h_midnight::MidnightMerkleTreeHook::new(
                     locator.address,
