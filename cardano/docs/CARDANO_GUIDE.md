@@ -537,6 +537,42 @@ Warp routes mint/burn synthetic tokens representing assets from other chains. Th
 | Verified Message NFT  | Message authentication       | Mailbox-controlled      | Message processing (generic recipients only) | Message handling by recipient  |
 | Synthetic Token       | Bridged token representation | Warp route-controlled   | Token receive                                | Token send                     |
 
+### Datum Versioning
+
+Every state datum carries a `version: Int` as **field 0**:
+
+```aiken
+pub type MailboxDatum {
+  version: Int,          // field 0 on every state datum
+  local_domain: Domain,
+  default_ism: ScriptHash,
+  ...
+}
+```
+
+`MailboxDatum`, `IgpDatum`, `WarpRouteDatum` and `MultisigIsmDatum` all follow this
+shape. The field exists so a validator can read the version out of a datum whose
+remaining layout it does not know — which is what lets a migration check that
+state moved *forward* rather than sideways.
+
+**Rules:**
+
+- Ordinary spends **preserve** the version. Every validator's continuation check
+  asserts `old.version == new.version`, so a redeemer cannot quietly renumber
+  state.
+- Only `Migrate*` bumps it, computing `old + 1`. That is why an ordinary spend
+  carrying a different version is rejected: the next migration would otherwise
+  compute its successor from a moved base.
+
+**Implications when writing tooling:**
+
+Datum fields are positional in CBOR. Anything that builds or reads a datum by
+index must account for `version` occupying index 0 — `local_domain` is field 1,
+not field 0. A reader anchored to the old offsets does not fail loudly; it
+returns the neighbouring field's value. The Rust agent parses `local_domain`
+from index 1 for exactly this reason, and the mailbox datum tests assert every
+field at once so a future insertion cannot shift one silently.
+
 ---
 
 ## 4. Reference Scripts

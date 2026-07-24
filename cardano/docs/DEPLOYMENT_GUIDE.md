@@ -2385,6 +2385,23 @@ If you upgrade a contract and the script hash changes, that's expected. However,
 2. Update the relayer config with the new script hash and reference script UTXO
 3. The mailbox state UTXO is migrated to the new script address (if address changed)
 
+**Datum versions and migration**
+
+Every state datum carries `version: Int` as field 0 (see the Cardano Guide,
+[Datum Versioning](CARDANO_GUIDE.md#datum-versioning)). The `Migrate*` redeemers
+are the only thing that increments it; ordinary spends must preserve it, and the
+validators reject a spend that changes it.
+
+Two consequences when moving state to a new script address:
+
+- Migrate **through the CLI's migrate commands** (`mailbox migrate`, `igp migrate`,
+  `ism migrate`, `warp migrate`). Hand-built migration transactions that rebuild
+  the datum from scratch tend to drop or reset the version, and the validator
+  will reject them.
+- Anything reading datums by field index must be updated in lockstep with a
+  layout change. Positional reads do not fail loudly when a field is inserted —
+  they silently return the neighbouring value.
+
 **Every inbound delivery fails with a bare Plutus `error` (`ValidationTagMismatch … PlutusFailure`)**
 
 The most common cause is a **stale `verifiedMessageNftScriptCbor` / `verifiedMessageNftPolicyId`** in the agent config. `verified_message_nft` is parameterized with the **mailbox state-NFT policy**, so a mailbox redeploy changes its applied CBOR *and* policy id. If the config still holds the old script, the relayer mints under the wrong policy and that policy — searching the tx inputs for a mailbox it no longer matches — throws a bare `error`. Fix: re-read both values from `deployments/<net>/verified_message_nft_applied.plutus`:
