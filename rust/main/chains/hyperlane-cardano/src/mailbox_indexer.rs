@@ -1,5 +1,6 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider};
 use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
+use crate::reorg_detector::ReorgDetector;
 use crate::{CardanoMailbox, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
@@ -25,18 +26,34 @@ pub struct CardanoMailboxIndexer {
     provider: Arc<BlockfrostProvider>,
     mailbox: CardanoMailbox,
     conf: ConnectionConf,
+    reorg_detector: ReorgDetector,
 }
 
 impl CardanoMailboxIndexer {
     pub fn new(conf: &ConnectionConf, locator: ContractLocator) -> ChainResult<Self> {
-        let provider =
-            BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay);
+        let provider = Arc::new(BlockfrostProvider::new(
+            &conf.api_key,
+            conf.network,
+            conf.confirmation_block_delay,
+        ));
         let mailbox = CardanoMailbox::new(conf, locator, None)?;
         Ok(Self {
-            provider: Arc::new(provider),
+            reorg_detector: ReorgDetector::new(provider.clone()),
+            provider,
             mailbox,
             conf: conf.clone(),
         })
+    }
+
+    /// Re-check the last block we indexed from, then anchor on the newest block
+    /// in this scan. Blocks with no transactions are not anchored on, so an idle
+    /// chain costs no extra requests.
+    async fn track_rollbacks(&self, block_hashes: &HashMap<u64, H256>) {
+        self.reorg_detector.check().await;
+
+        if let Some((&height, &hash)) = block_hashes.iter().max_by_key(|(height, _)| **height) {
+            self.reorg_detector.anchor(height, hash).await;
+        }
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
@@ -483,6 +500,7 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
         );
 
         let block_hashes = self.fetch_block_hashes(&transactions).await;
+        self.track_rollbacks(&block_hashes).await;
 
         let futs: FuturesUnordered<_> = transactions
             .iter()
