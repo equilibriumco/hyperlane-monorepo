@@ -1569,6 +1569,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"},
                 {"bytes": "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89"},
                 {"list": []}
@@ -1593,6 +1594,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "aabbccdd"},
                 {"bytes": "11223344"},
                 {
@@ -1628,6 +1630,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "aabbccdd"},
                 {"bytes": "11223344"},
                 {
@@ -1675,6 +1678,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "aabbccdd"},
                 {"bytes": "11223344"}
             ]
@@ -1682,10 +1686,7 @@ mod tests {
 
         let result = parse_igp_datum(&datum);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must have 3 fields"));
+        assert!(result.unwrap_err().to_string().contains("expected 4"));
     }
 
     #[test]
@@ -1707,6 +1708,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"int": 123},
                 {"bytes": "11223344"},
                 {"list": []}
@@ -1723,6 +1725,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "aabbccdd"},
                 {"int": 456},
                 {"list": []}
@@ -1742,6 +1745,7 @@ mod tests {
         let datum = json!({
             "constructor": 0,
             "fields": [
+                {"int": 0},
                 {"bytes": "aabbccdd"},
                 {"bytes": "11223344"},
                 {

@@ -1347,11 +1347,12 @@ mod tests {
         assert_eq!(decoded["constructor"], 0);
 
         let fields = decoded["fields"].as_array().unwrap();
-        assert_eq!(fields.len(), 3);
+        assert_eq!(fields.len(), 4);
 
-        assert_eq!(fields[0]["bytes"].as_str().unwrap(), owner);
-        assert_eq!(fields[1]["bytes"].as_str().unwrap(), beneficiary);
-        assert!(fields[2]["list"].as_array().unwrap().is_empty());
+        assert_eq!(fields[0]["int"], 0, "datum version");
+        assert_eq!(fields[1]["bytes"].as_str().unwrap(), owner);
+        assert_eq!(fields[2]["bytes"].as_str().unwrap(), beneficiary);
+        assert!(fields[3]["list"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1365,7 +1366,7 @@ mod tests {
         let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
         let fields = decoded["fields"].as_array().unwrap();
 
-        let oracles_list = fields[2]["list"].as_array().unwrap();
+        let oracles_list = fields[3]["list"].as_array().unwrap();
         assert_eq!(oracles_list.len(), 1);
 
         let oracle_tuple = oracles_list[0]["list"].as_array().unwrap();
@@ -1395,7 +1396,7 @@ mod tests {
         let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
         let fields = decoded["fields"].as_array().unwrap();
 
-        let oracles_list = fields[2]["list"].as_array().unwrap();
+        let oracles_list = fields[3]["list"].as_array().unwrap();
         assert_eq!(oracles_list.len(), 2);
 
         let sepolia = oracles_list[0]["list"].as_array().unwrap();
