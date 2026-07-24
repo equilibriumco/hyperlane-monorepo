@@ -1564,6 +1564,38 @@ and greeting ([6.3](#63-test-the-greeting-end-to-end)) tests.
 ./cli/target/release/hyperlane-cardano --network $NETWORK query params
 ```
 
+### How the CLI Builds Transactions
+
+Two behaviours worth knowing before reading any failure below.
+
+**Every transaction is evaluated before it is submitted.** The CLI sends the
+built transaction to Blockfrost's evaluation endpoint first. This buys two
+things:
+
+- A failing script comes back with **the validator's own traces**, naming what
+  it rejected. Without this step the ledger reports only
+  `ValidationTagMismatch … FailedUnexpectedly`, which identifies neither the
+  script nor the check — diagnosing one meant hashing the base64 script bytes
+  from the error to work out which validator had failed.
+- Script **execution budgets are measured**, per redeemer, rather than declared
+  from a constant. Budgets are no longer in the source at all.
+
+**Fees are computed from the built transaction** — size, measured execution
+units, and every reference script the transaction reads — rather than estimated
+flat. Observed effect: an `igp set-oracle` went from a flat 2,000,000 lovelace
+to 285,290; a `warp transfer` from 5,000,000 to 741,302.
+
+Two things routinely catch people re-deriving this arithmetic:
+
+- **Conway charges per byte of every reference script a transaction reads**
+  (`min_fee_ref_script_cost_per_byte`, 15 on preview, and the rate steps up by a
+  fifth every 25,600 bytes). This stack reads reference scripts everywhere.
+  Omitting the term underprices by a wide margin, and it surfaces as
+  `FeeTooSmallUTxO` — an error that says nothing about scripts.
+- The two execution prices must be summed as exact rationals and rounded
+  **once**. Rounding each separately overshoots by a lovelace, which is enough
+  to be rejected.
+
 ### Common Issues
 
 #### "UTXO not found"
