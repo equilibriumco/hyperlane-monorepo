@@ -273,6 +273,12 @@ pub struct ProtocolParams {
     pub collateral_percentage: u32,
     pub max_collateral_inputs: u32,
     pub max_tx_size: u32,
+    /// Fee charged per unit of script memory, as a rational (numerator, denominator).
+    pub price_mem: (u64, u64),
+    /// Fee charged per unit of script CPU steps, as a rational.
+    pub price_step: (u64, u64),
+    /// Fee charged per byte of each reference script the transaction reads.
+    pub ref_script_cost_per_byte: u64,
 }
 
 impl Default for ProtocolParams {
@@ -286,6 +292,9 @@ impl Default for ProtocolParams {
             collateral_percentage: 150,
             max_collateral_inputs: 3,
             max_tx_size: 16384,
+            price_mem: (577, 10_000),
+            price_step: (721, 10_000_000),
+            ref_script_cost_per_byte: 15,
         }
     }
 }

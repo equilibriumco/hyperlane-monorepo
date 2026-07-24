@@ -9,7 +9,9 @@ use pallas_primitives::MaybeIndefArray;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::build_migrate_redeemer;
 use crate::utils::context::CliContext;
-use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
 
 /// Blueprint validator title for the deployed ISM's script, chosen by the ISM's
 /// module_type so spends attach the correct script (merkleroot vs messageid).
@@ -560,6 +562,7 @@ pub(crate) async fn set_validators(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -925,6 +928,7 @@ pub(crate) async fn set_threshold(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1419,7 +1423,7 @@ async fn migrate(
     }
 
     if change > 1_500_000 {
-        staging = staging.output(Output::new(payer_addr, change));
+        staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
     let staging = calibrate_ex_units(
@@ -1434,6 +1438,7 @@ async fn migrate(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;

@@ -14,7 +14,9 @@ use crate::utils::cbor::{normalize_datum, CborBuilder};
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{apply_validator_param, encode_script_hash_param};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
-use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
 
 /// Auto-derived message infrastructure from deployment_info.json
 pub struct MessageInfra {
@@ -1045,7 +1047,7 @@ async fn dispatch(
         staging = staging.script(ScriptKind::PlutusV3, hex::decode(&script_raw)?);
     }
 
-    staging = staging.output(Output::new(payer_addr, change));
+    staging = staging.output(Output::new(payer_addr.clone(), change));
 
     let mut declared = vec![(
         RedeemerRef::Spend(Input::new(
@@ -1064,6 +1066,7 @@ async fn dispatch(
         ));
     }
     let staging = calibrate_ex_units(&client, staging, declared).await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {e:?}"))?;

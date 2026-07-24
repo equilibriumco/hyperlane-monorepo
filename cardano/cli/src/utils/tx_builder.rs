@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use super::blockfrost::BlockfrostClient;
 use super::cbor::build_mint_redeemer;
 use super::crypto::Keypair;
-use super::types::Utxo;
+use super::types::{ProtocolParams, Utxo};
 
 /// Headroom over the measured cost, covering the small variation between
 /// evaluating against the current ledger tip and validating against the tip the
@@ -141,6 +141,149 @@ pub async fn calibrate_ex_units(
     Ok(staging)
 }
 
+/// Slack over the ledger minimum, absorbing the few bytes the fee and change
+/// values themselves shift by once written into the transaction.
+const FEE_MARGIN_PERCENT: u64 = 15;
+
+/// Bytes a signature witness adds, which the unsigned probe does not carry.
+const WITNESS_BYTES: u64 = 102;
+
+/// Conway prices reference scripts per byte, and the price steps up by a fifth
+/// for each further 25,600 bytes a transaction reads.
+fn ref_script_fee(total_bytes: u64, base_price: u64) -> u64 {
+    const TIER_BYTES: u64 = 25_600;
+    let (mut remaining, mut fee) = (total_bytes, 0u64);
+    let (mut num, mut den) = (base_price, 1u64);
+    while remaining > 0 {
+        let chunk = remaining.min(TIER_BYTES);
+        fee += (chunk * num).div_ceil(den);
+        remaining -= chunk;
+        // ×1.2, kept as a rational so the tiers stay exact.
+        num *= 6;
+        den *= 5;
+    }
+    fee
+}
+
+/// The ledger's minimum fee for a transaction of this size and script cost.
+fn min_fee(size: u64, mem: u64, steps: u64, ref_script_bytes: u64, params: &ProtocolParams) -> u64 {
+    let (mem_num, mem_den) = params.price_mem;
+    let (step_num, step_den) = params.price_step;
+    // The two execution prices are summed exactly and rounded once, not rounded
+    // individually — rounding each term costs an extra lovelace and the node
+    // rejects the transaction as overpaying nothing it asked for.
+    let num = mem as u128 * mem_num as u128 * step_den as u128
+        + steps as u128 * step_num as u128 * mem_den as u128;
+    let den = mem_den as u128 * step_den as u128;
+    let exec_fee = num.div_ceil(den) as u64;
+
+    params.tx_fee_per_byte * size
+        + params.tx_fee_fixed
+        + exec_fee
+        + ref_script_fee(ref_script_bytes, params.ref_script_cost_per_byte)
+}
+
+/// Replace the transaction's flat fee estimate with the fee its size and
+/// measured script cost actually require, returning the difference to the
+/// payer's change output.
+///
+/// A flat estimate has to be picked high enough for the largest transaction the
+/// builder might produce, so every smaller one overpays — the surplus is not
+/// refunded, it goes to the treasury. Worse, "high enough" is a guess like any
+/// other: a transaction that outgrows it is rejected with `FeeTooSmallUTxO`,
+/// which a shipped CLI's users cannot fix.
+///
+/// Call this after [`calibrate_ex_units`], so the script cost being charged for
+/// is the measured one. The change output is identified as the plain
+/// lovelace-only output paying `payer_addr`; when the transaction has none,
+/// there is nowhere to put the surplus and the fee is left alone rather than
+/// silently unbalancing the transaction.
+pub async fn apply_measured_fee(
+    client: &BlockfrostClient,
+    staging: StagingTransaction,
+    payer_addr: &pallas_addresses::Address,
+) -> Result<StagingTransaction> {
+    let Some(declared_fee) = staging.fee else {
+        return Ok(staging);
+    };
+
+    let probe = staging
+        .clone()
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction for fee measurement: {:?}", e))?;
+    let decoded = MultiEraTx::decode(probe.tx_bytes.as_ref())
+        .map_err(|e| anyhow!("Failed to decode built transaction: {e}"))?;
+
+    let (mem, steps) = decoded.redeemers().iter().fold((0u64, 0u64), |(m, s), r| {
+        let u = r.ex_units();
+        (m + u.mem, s + u.steps)
+    });
+
+    // Every reference script the transaction reads is charged per byte, so
+    // resolve each one's size from chain.
+    let mut ref_script_bytes = 0u64;
+    for input in decoded.reference_inputs() {
+        ref_script_bytes += client
+            .reference_script_size(&input.hash().to_string(), input.index() as u32)
+            .await?;
+    }
+
+    let params = client.get_protocol_params().await?;
+    // The probe is unsigned; the submitted transaction carries a witness per
+    // required signer.
+    let signers = staging
+        .disclosed_signers
+        .as_ref()
+        .map(|s| s.len() as u64)
+        .unwrap_or(0)
+        .max(1);
+    let size = probe.tx_bytes.as_ref().len() as u64 + signers * WITNESS_BYTES;
+    let required =
+        min_fee(size, mem, steps, ref_script_bytes, &params) * (100 + FEE_MARGIN_PERCENT) / 100;
+
+    if required == declared_fee {
+        return Ok(staging);
+    }
+
+    let payer_bytes = payer_addr.to_vec();
+    let mut staging = staging;
+    let Some(change) = staging.outputs.as_mut().and_then(|outputs| {
+        outputs.iter_mut().find(|o| {
+            o.assets.is_none()
+                && o.datum.is_none()
+                && o.script.is_none()
+                && o.address.0.to_vec() == payer_bytes
+        })
+    }) else {
+        // Nothing to balance against. Raising the fee would unbalance the
+        // transaction, so surface the shortfall instead of letting the node
+        // reject it with an error the user cannot act on.
+        if required > declared_fee {
+            return Err(anyhow!(
+                "Transaction needs a fee of {required} lovelace but declares {declared_fee}, \
+                 and has no change output to take the difference from."
+            ));
+        }
+        return Ok(staging);
+    };
+
+    if required > declared_fee {
+        let shortfall = required - declared_fee;
+        if change.lovelace < shortfall + params.min_utxo_lovelace {
+            return Err(anyhow!(
+                "Transaction needs a fee of {required} lovelace but declares {declared_fee}, \
+                 and its change output cannot cover the difference."
+            ));
+        }
+        change.lovelace -= shortfall;
+    } else {
+        change.lovelace += declared_fee - required;
+    }
+
+    staging.fee = Some(required);
+    Ok(staging)
+}
+
 /// Parse a UTXO reference string (format: "txhash#index")
 fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
     let parts: Vec<&str> = s.split('#').collect();
@@ -263,7 +406,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         // Add required signer
@@ -276,6 +419,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
         )
         .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
 
         // Build the transaction
         let tx = staging
@@ -351,7 +495,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         let tx = staging
@@ -470,7 +614,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         // Add required signer
@@ -485,6 +629,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
         )
         .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -586,7 +731,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         // Add required signer
@@ -751,7 +896,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         }
 
         if change > 1_500_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
@@ -766,6 +911,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         }
         declared.push((RedeemerRef::Mint(nft_policy), nft_burn_redeemer.to_vec()));
         let staging = calibrate_ex_units(self.client, staging, declared).await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -876,7 +1022,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
         }
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         // Add required signer (must be owner)
@@ -891,6 +1037,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             vec![(RedeemerRef::Spend(warp_input), redeemer.to_vec())],
         )
         .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -942,7 +1089,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         let tx = staging
@@ -1096,7 +1243,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             });
 
         if change >= 1_000_000 {
-            staging = staging.output(Output::new(payer_addr, change));
+            staging = staging.output(Output::new(payer_addr.clone(), change));
         }
 
         // Required signer: the owner key (so the Init handler passes)
@@ -1112,10 +1259,71 @@ impl<'a> HyperlaneTxBuilder<'a> {
             ],
         )
         .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build canonical-nft init transaction: {:?}", e))?;
 
         Ok(tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview_params() -> ProtocolParams {
+        ProtocolParams::default()
+    }
+
+    #[test]
+    fn min_fee_matches_a_known_transaction() {
+        // The warp transfer at 7450d1c4…: 2484 bytes, 1_494_777 mem,
+        // 513_446_587 steps, which the node accepted against a 387_946 minimum.
+        let fee = min_fee(2484, 1_494_777, 513_446_587, 0, &preview_params());
+        assert_eq!(fee, 387_946);
+    }
+
+    #[test]
+    fn script_cost_dominates_a_large_budget() {
+        // The budgets this CLI used to hardcode, at the same size.
+        let guessed = min_fee(2484, 12_000_000, 5_000_000_000, 0, &preview_params());
+        let measured = min_fee(2484, 1_494_777, 513_446_587, 0, &preview_params());
+        assert!(
+            guessed > measured * 3,
+            "guessed={guessed} measured={measured}"
+        );
+        // Both must still fit under the flat estimate the builders start from.
+        assert!(guessed < 2_000_000);
+    }
+
+    #[test]
+    fn charges_for_reference_scripts() {
+        // The IGP set-oracle transaction the node priced at 248_210: 615 bytes
+        // signed, 249_500 mem, 82_353_489 steps, reading a 3_029-byte reference
+        // script. Omitting that last term underprices it by 45_435.
+        let params = preview_params();
+        let with_ref = min_fee(615, 249_500, 82_353_489, 3_029, &params);
+        let without = min_fee(615, 249_500, 82_353_489, 0, &params);
+        assert_eq!(with_ref, 248_210);
+        assert_eq!(with_ref - without, 45_435);
+    }
+
+    #[test]
+    fn reference_script_price_steps_up_per_tier() {
+        // First 25_600 bytes at 15/byte, the next tier a fifth dearer.
+        assert_eq!(ref_script_fee(25_600, 15), 384_000);
+        assert_eq!(ref_script_fee(25_601, 15), 384_000 + 18);
+    }
+
+    #[test]
+    fn rounds_each_script_term_up() {
+        // A single step must still cost a whole lovelace, never zero.
+        let params = preview_params();
+        let base = min_fee(0, 0, 0, 0, &params);
+        assert_eq!(min_fee(0, 0, 1, 0, &params), base + 1);
+        assert_eq!(min_fee(0, 1, 0, 0, &params), base + 1);
+        // …and the two prices round together, not separately.
+        assert_eq!(min_fee(0, 1, 1, 0, &params), base + 1);
     }
 }

@@ -26,7 +26,9 @@ use crate::utils::plutus::{
     encode_script_hash_param, AppliedValidator,
 };
 use crate::utils::tx_builder::HyperlaneTxBuilder;
-use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
 use crate::utils::types::{ReferenceScriptUtxo, Utxo, WarpRouteDeployment};
 
 #[derive(Args)]
@@ -2762,6 +2764,7 @@ async fn transfer(
 
     // Build the transaction
     let staging = calibrate_ex_units(&client, staging, declared).await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
 
     let tx = staging
         .build_conway_raw()
@@ -3531,6 +3534,7 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
 
     let tx = staging
         .build_conway_raw()
@@ -3925,7 +3929,7 @@ async fn migrate(
     }
 
     if change > 1_500_000 {
-        staging = staging.output(Output::new(payer_addr, change));
+        staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
     let staging = calibrate_ex_units(
@@ -3940,6 +3944,7 @@ async fn migrate(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
 
     let tx = staging
         .build_conway_raw()

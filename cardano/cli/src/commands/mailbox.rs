@@ -12,7 +12,9 @@ use crate::utils::cbor::{
     build_migrate_redeemer,
 };
 use crate::utils::context::CliContext;
-use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
 use crate::utils::types::ScriptInfo;
 
 #[derive(Args)]
@@ -541,6 +543,7 @@ async fn dispatch(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1037,6 +1040,7 @@ async fn set_default_ism(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1377,7 +1381,7 @@ async fn migrate(
     }
 
     if change > 1_500_000 {
-        staging = staging.output(Output::new(payer_addr, change));
+        staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
     let staging = calibrate_ex_units(
@@ -1392,6 +1396,7 @@ async fn migrate(
         )],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;

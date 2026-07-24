@@ -12,7 +12,9 @@ use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{build_igp_datum, build_migrate_redeemer};
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
-use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
 use crate::utils::types::Utxo;
 
 /// Shared context for IGP transactions that require signing
@@ -283,7 +285,7 @@ impl IgpTxContext {
 
         if remaining > 1_500_000 {
             // Return change to payer
-            staging = staging.output(Output::new(payer_addr, remaining));
+            staging = staging.output(Output::new(payer_addr.clone(), remaining));
         } else {
             // Too small for a separate output; absorb into fee
             staging = staging.fee(fee_estimate + remaining);
@@ -295,6 +297,7 @@ impl IgpTxContext {
             vec![(RedeemerRef::Spend(igp_input), redeemer_cbor)],
         )
         .await?;
+        let staging = apply_measured_fee(&self.client, staging, &payer_addr).await?;
 
         // Build the transaction
         let tx = staging
@@ -1021,7 +1024,7 @@ async fn claim_fees(
     // Build beneficiary output (receives the claimed amount)
     let payer_addr = pallas_addresses::Address::from_bech32(&igp_ctx.payer_address)
         .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
-    let beneficiary_output = Output::new(payer_addr, amount);
+    let beneficiary_output = Output::new(payer_addr.clone(), amount);
 
     let tx_hash = igp_ctx
         .build_sign_submit(
@@ -1325,7 +1328,7 @@ async fn migrate_igp(
     }
 
     if change > 1_500_000 {
-        staging = staging.output(Output::new(payer_addr, change));
+        staging = staging.output(Output::new(payer_addr.clone(), change));
     }
 
     let staging = calibrate_ex_units(
@@ -1334,6 +1337,7 @@ async fn migrate_igp(
         vec![(RedeemerRef::Spend(migrate_input), redeemer_cbor)],
     )
     .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;

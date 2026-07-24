@@ -361,6 +361,9 @@ impl BlockfrostClient {
             collateral_percent: u32,
             max_collateral_inputs: u32,
             max_tx_size: u32,
+            price_mem: Option<f64>,
+            price_step: Option<f64>,
+            min_fee_ref_script_cost_per_byte: Option<u64>,
         }
 
         let params: EpochParams = self.get("/epochs/latest/parameters").await?;
@@ -379,6 +382,17 @@ impl BlockfrostClient {
             collateral_percentage: params.collateral_percent,
             max_collateral_inputs: params.max_collateral_inputs,
             max_tx_size: params.max_tx_size,
+            // Blockfrost reports these as decimals; carry them as exact
+            // rationals so the fee matches the ledger's own arithmetic.
+            price_mem: params
+                .price_mem
+                .map(|p| ((p * 10_000.0).round() as u64, 10_000))
+                .unwrap_or((577, 10_000)),
+            price_step: params
+                .price_step
+                .map(|p| ((p * 10_000_000.0).round() as u64, 10_000_000))
+                .unwrap_or((721, 10_000_000)),
+            ref_script_cost_per_byte: params.min_fee_ref_script_cost_per_byte.unwrap_or(15),
         })
     }
 
@@ -498,6 +512,40 @@ impl BlockfrostClient {
             println!("  Confirmed");
         }
         Ok(tx_hash)
+    }
+
+    /// Serialised size of the script attached to a transaction output, if any.
+    ///
+    /// Conway charges a fee per byte of every reference script a transaction
+    /// uses, so the size has to be resolved from chain to price a transaction
+    /// that reads one.
+    pub async fn reference_script_size(&self, tx_hash: &str, output_index: u32) -> Result<u64> {
+        #[derive(Deserialize)]
+        struct TxUtxos {
+            outputs: Vec<TxOutput>,
+        }
+        #[derive(Deserialize)]
+        struct TxOutput {
+            output_index: u32,
+            reference_script_hash: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct ScriptInfo {
+            serialised_size: Option<u64>,
+        }
+
+        let utxos: TxUtxos = self.get(&format!("/txs/{}/utxos", tx_hash)).await?;
+        let Some(hash) = utxos
+            .outputs
+            .into_iter()
+            .find(|o| o.output_index == output_index)
+            .and_then(|o| o.reference_script_hash)
+        else {
+            return Ok(0);
+        };
+
+        let info: ScriptInfo = self.get(&format!("/scripts/{}", hash)).await?;
+        Ok(info.serialised_size.unwrap_or(0))
     }
 
     /// Get transaction details
