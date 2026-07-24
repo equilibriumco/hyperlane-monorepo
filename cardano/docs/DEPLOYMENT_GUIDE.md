@@ -409,7 +409,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --signing-key $CARDANO_SIGNING_KEY \
   --network $NETWORK \
   init igp \
-  --oracle "11155111:1000000000:7171:211000"
+  --oracle "11155111:1000000000:7171:155100"
 ```
 
 Or fold it into `init all` (same flags), so the whole core comes up in one command:
@@ -420,12 +420,12 @@ Or fold it into `init all` (same flags), so the whole core comes up in one comma
   --origin-domains 11155111 \
   --validators "11155111:0xb22b65f2...,0x469f0940...,0xd3c75dcf..." \
   --thresholds "11155111:2" \
-  --oracle "11155111:1000000000:7171:211000" \
+  --oracle "11155111:1000000000:7171:155100" \
   --storage-location "s3://<bucket>/<region>/<folder>" \
   --validator-key $CARDANO_VALIDATOR_KEY
 ```
 
-- `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`. The `211000` overhead here targets a ~1.5× relayer margin for Sepolia delivery — see the **Gas Payment (IGP) Configuration & Enforcement** appendix for how the values are derived, the matching Sepolia-side oracle setup, and enabling relayer enforcement.
+- `--oracle`: repeatable gas oracle config per remote domain, format `"domain:gas_price:exchange_rate:gas_overhead"`. The `155100` overhead here targets a ~1.5× relayer margin for Sepolia delivery — see the **Gas Payment (IGP) Configuration & Enforcement** appendix for how the values are derived, the matching Sepolia-side oracle setup, and enabling relayer enforcement.
 - `--beneficiary`: address that can claim collected fees (defaults to the signing key's public key hash).
 - Omit `--oracle` from `init all` and the IGP is simply skipped.
 
@@ -3663,19 +3663,35 @@ Destination is EVM, so gas is real. Set the oracle at `init igp` (Phase 3.5) or
 recalibrate later:
 
 ```bash
-# gas_price = 1 gwei, exchange_rate = 7171 ADA/ETH, gas_overhead = 211000
-# (211000 ≈ 1.5 × the ~141k gas a Sepolia warp release costs)
+# gas_price = 1 gwei, exchange_rate = 7171 ADA/ETH, gas_overhead = 155100
+# (155100 ≈ 1.5 × the ~103.6k gas a Sepolia warp release actually used)
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
   igp set-oracle \
   --domain 11155111 \
   --gas-price 1000000000 \
   --exchange-rate 7171 \
-  --gas-overhead 211000
+  --gas-overhead 155100
 
 # verify
 $CLI --network $NETWORK igp show
 ```
+
+> **The exchange rate is scaled against `1e12` here**, not the `1e10` the Solidity
+> IGP uses. A rate copied from EVM tooling is off by 100×. The upside is that
+> `7171` is the human-readable ADA/ETH figure.
+
+> **The payment must match the quote exactly.** The Cardano IGP rejects
+> overpayment as well as underpayment — it has no refund path, only `Claim` to
+> the beneficiary, so an overpayment would be unrecoverable for the payer.
+> Recompute the amount from the same datum you are about to spend; if the owner
+> recalibrates in between, the transaction becomes invalid rather than merely
+> mispriced, and you resubmit.
+
+> **The overhead is added on-chain**, in every mode. Do not add it yourself to
+> `--gas-limit`, and note this differs from the Solidity IGP, whose standalone
+> `payForGas` does *not* add it. A top-up calculation ported across without
+> noticing double-counts and fails the exactness check.
 
 ### Sepolia → Cardano (Sepolia IGP charges ETH for Cardano delivery)
 
@@ -3740,8 +3756,8 @@ estimator (Blockfrost TX-evaluation for Cardano, `eth_estimateGas` for Sepolia):
 ### Paying for gas when you transfer
 
 - **Cardano → Sepolia** (`warp transfer`): pass `--gas-limit` so the transfer
-  bundles the IGP payment. With the Cardano overhead at 211000, `--gas-limit 0`
-  already pays `0 + 211000` gas (≈1.5×). `mailbox dispatch` has **no** gas option
+  bundles the IGP payment. With the Cardano overhead at 155100, `--gas-limit 0`
+  already pays `0 + 155100` gas (≈1.5×). `mailbox dispatch` has **no** gas option
   — pay separately (below).
   ```bash
   $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \

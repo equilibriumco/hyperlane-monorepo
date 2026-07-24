@@ -1108,29 +1108,34 @@ The `verified_message` UTXO stores the full body as inline datum (`coins_per_utx
 
 **Total = ~2,300,000 fixed + 4,354 * body_size variable**
 
+> Full derivation, both directions and the reasoning behind the split live in
+> [`design/igp-gas-model.md`](design/igp-gas-model.md). This section is the summary.
+
+### Gas is denominated 1:1 in lovelace
+
+Cardano has no gas market — fees are deterministic. Rather than invent a gas
+price, the **Sepolia→Cardano** oracle sets `gasPrice = 1`, so one gas unit *is*
+one lovelace and a `gasLimit` reads directly as "lovelace of estimated Cardano
+delivery cost". The exchange rate carries the whole conversion.
+
+> Superseded: earlier revisions modelled `gasPrice = 44` (Cardano's
+> `min_fee_a`) and divided costs by 44. Any oracle or `gasLimit` still using
+> that scheme is misconfigured.
+
 ### Oracle Configuration
-
-#### Mapping Cardano Costs to EVM IGP
-
-| IGP Parameter | Value | Meaning |
-|---------------|-------|---------|
-| `gasPrice` | 44 | Cardano's `min_fee_a` (lovelace per byte) |
-| `gasOverhead` | 52,000 | Fixed base costs / 44 |
-| `gasLimit` | varies | Variable cost passed by caller |
-| `tokenExchangeRate` | market-dependent | Converts lovelace to source chain token |
 
 #### EVM IGP (for Cardano destination)
 
 ```bash
-# StorageGasOracle
+# StorageGasOracle — gasPrice 1, exchange rate in wei-per-lovelace x 1e10
 cast send $STORAGE_GAS_ORACLE \
   "setRemoteGasDataConfigs((uint32,uint128,uint128)[])" \
-  "[(2003, <tokenExchangeRate>, 44)]"
+  "[(2003, 1395000000000000000, 1)]"
 
-# IGP
+# IGP — recipient-independent overhead, in lovelace
 cast send $IGP \
   "setDestinationGasConfigs((uint32,(address,uint96))[])" \
-  "[(2003, ($STORAGE_GAS_ORACLE, 52000))]"
+  "[(2003, ($STORAGE_GAS_ORACLE, 2062550))]"
 ```
 
 #### Cardano IGP (for EVM destination)
@@ -1139,68 +1144,82 @@ cast send $IGP \
 hyperlane-cardano igp set-oracle \
   --domain 11155111 \
   --gas-price 1000000000 \
-  --exchange-rate 34 \
-  --gas-overhead 100000
+  --exchange-rate 7171 \
+  --gas-overhead 155100
 ```
 
-### Exchange Rate Calibration
+**The Cardano IGP's scale factor is `1e12`, not the `1e10` used by the Solidity
+IGP.** An exchange rate copied from EVM tooling is wrong by a factor of 100. The
+upside is that the rate stays human-readable: 7171 ADA per ETH is written `7171`.
 
-Exchange rates must account for decimal differences between chains.
+### The overhead is charged on-chain
 
-**Cardano -> EVM** (Cardano IGP):
-
-```
-exchange_rate = market_rate_ada_per_eth * (1e18 / 1e6) / 1e12
-             = market_rate (approximately)
-```
-
-**EVM -> Cardano** (EVM IGP):
+`PayForGas` carries **application gas only** — what the recipient costs to run.
+The validator adds the destination's `gas_overhead` itself:
 
 ```
-tokenExchangeRate = (1 / market_rate) * (1e6 / 1e18) * 1e10
-                  = 1e22 / (market_rate * 1e6)
+payment = (gas_amount + gas_overhead) x gas_price x token_exchange_rate / 1e12
 ```
 
-### Understanding gasOverhead
+Omitting the overhead is therefore not a way to pay less, and unlike the Solidity
+IGP there is no mode that skips it — a standalone `igp pay-for-gas` top-up is
+charged the overhead exactly as a bundled payment is.
 
-The `gasOverhead` covers **fixed base costs** of delivering a message to Cardano, sized for the worst case (script recipients):
+### Payment is exact, and unpriced destinations are refused
 
-```
-gasOverhead = (550,000 + 1,700,000) / 44 = 2,250,000 / 44 ~ 51,136 -> rounded to 52,000
-```
+Two rules that differ from the EVM IGP and surprise people:
 
-The IGP's `quoteDispatch` adds `gasOverhead` to the caller-provided `gasLimit` automatically:
+- **The payment must equal the quote exactly.** Underpaying fails, and so does
+  *over*paying. The IGP has one way out — `Claim`, to the beneficiary — so an
+  overpayment is unrecoverable for the payer. Refusing the transaction costs a
+  retry; accepting it would cost the difference, silently.
+- **A destination with no configured oracle is rejected**, not defaulted. An
+  earlier fallback priced such domains at zero, so a domain enrolled without its
+  oracle looked paid for and was never delivered — failing nowhere near the
+  missing config.
 
-```
-totalGas = gasOverhead + gasLimit
-quote = totalGas * gasPrice * tokenExchangeRate / TOKEN_EXCHANGE_RATE_SCALE
-```
+There is no refund path, no fee token, and no refund address: payment is always
+lovelace, and the exact amount.
+
+### Recipient-specific cost: warp `destination_gas`
+
+The recipient-independent base belongs in the oracle's `gas_overhead`. Anything
+recipient-specific belongs with the recipient:
+
+| Sender | Where the recipient cost goes |
+|---|---|
+| Cardano warp route | `destination_gas` in the route datum, set by the owner via `warp set-destination-gas` |
+| Any other Cardano sender | `--gas-limit` on the dispatching command |
+| EVM warp route | `destinationGas` on the route (`GasRouter`) |
+| Any other EVM sender | `gasLimit` in `StandardHookMetadata` |
+
+The CLI resolves a warp transfer's gas as `--gas-limit` if given, else the route's
+`destination_gas` for that domain, else it omits the IGP input entirely. **The
+lookup is client-side**: the warp validator stores `destination_gas` and guards
+updates to it, but never checks that a transfer actually paid it.
 
 ### Dispatching to Cardano from EVM
 
-#### gasLimit Formulas
+A `gasLimit` is lovelace of Cardano delivery cost.
 
-| Recipient Type | gasLimit Formula | Rationale |
-|----------------|-----------------|-----------|
-| Warp route (`0x01`) | `body.length` | Only TX size fee at 44 lovelace/byte |
-| Script (`0x02`) | `body.length * 99` | `coins_per_utxo_byte` (4,310) / `gasPrice` (44) ~ 99 |
-
-#### Example: Warp Route
-
-```solidity
-bytes memory metadata = StandardHookMetadata.overrideGasLimit(body.length);
-uint256 fee = mailbox.quoteDispatch(cardanoDomain, recipient, body, metadata);
-mailbox.dispatch{value: fee}(cardanoDomain, recipient, body, metadata);
-```
+| Recipient Type | What the sender must cover |
+|----------------|----------------------------|
+| Warp route (`0x01`) | Covered by the overhead for native/collateral. A **synthetic mint** additionally needs ~1.2 ADA of recipient minUTxO the relayer fronts and never recovers — the paired route must carry `destinationGas` for it, or the mint is rejected as underpaid. |
+| Script (`0x02`) | The verified-message UTXO, which stores the full body in its inline datum: roughly `1_720_800 + 4_400 x body_bytes` lovelace. |
 
 #### Example: Script Recipient
 
 ```solidity
-uint256 gasLimit = body.length * 99;
+// ~1.5x the verified-message minUTxO for this body size
+uint256 gasLimit = (1_720_800 + 4_400 * body.length) * 3 / 2;
 bytes memory metadata = StandardHookMetadata.overrideGasLimit(gasLimit);
 uint256 fee = mailbox.quoteDispatch(cardanoDomain, recipient, body, metadata);
 mailbox.dispatch{value: fee}(cardanoDomain, recipient, body, metadata);
 ```
+
+Sending with **empty metadata** inherits Hyperlane's 50,000 default, which reads
+as 50,000 lovelace — far below any real delivery. The message dispatches and then
+parks as `GasPaymentRequirementNotMet`.
 
 #### EVM Warp Routes (Automatic)
 
@@ -1232,21 +1251,30 @@ The relayer indexes `PayForGas` transactions from the IGP contract. Messages wit
 
 ### Cost Summary Table
 
+All figures in lovelace, since `gasPrice = 1`.
+
 | | Warp Routes (`0x01`) | Script Recipients (`0x02`) |
 |---|---|---|
 | `verified_message` UTXO | Not created | Stores full body as inline datum |
-| Fixed base cost | ~0.6M lovelace | ~2.3M lovelace |
-| Per-byte cost | ~44 lovelace/byte | ~4,354 lovelace/byte |
-| gasLimit formula | `body.length` | `body.length * 99` |
-| 100B total cost | ~0.6 ADA | ~2.7 ADA |
-| 5,000B total cost | ~0.8 ADA | ~24.1 ADA |
+| Ledger fee | Covered by the oracle's `gas_overhead` | Covered by the oracle's `gas_overhead` |
+| Unrecoverable minUTxO | ~0 for native/collateral; ~1.2 ADA per synthetic mint | `1_720_800 + 4_400 x body_bytes` |
+| Who covers the recipient cost | Route `destination_gas` (synthetic only) | Sender's `gasLimit` |
+
+The relayer's estimate is **what it spends and cannot recover** — ledger fee plus
+that minUTxO — not the fee alone. Charging only the fee made the relayer deliver
+synthetic mints at a loss.
 
 ### Recalibration
 
-Update oracle values when:
+The oracle is a set of owner-set constants, not a feed. Drift in the sender's
+favour is the dangerous direction: messages look paid for and the relayer quietly
+declines to deliver them. Update when:
+
 - Market exchange rates change >10%
-- Cardano protocol parameters change (`min_fee_a`, `coins_per_utxo_byte`)
+- Cardano protocol parameters change (`min_fee_b`, `coins_per_utxo_byte`, and
+  since Conway `min_fee_ref_script_cost_per_byte`)
 - EVM destination gas prices change significantly
+- Measured delivery cost drifts from ~1.5x the overhead you sized for
 
 ---
 

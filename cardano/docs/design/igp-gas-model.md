@@ -89,12 +89,43 @@ Destination is EVM, so gas is **real** and priced the familiar way:
 ```
 gasPrice          = 1_000_000_000   (1 gwei, assumed Sepolia gas price)
 tokenExchangeRate = 7171            (1 ETH = 7171 ADA)
-gasOverhead       = 211000          (EVM process() base, +50% margin)
+gasOverhead       = 155100          (EVM process() base, +50% margin)
 SCALE             = 1e12            (custom Aiken IGP; keeps exchangeRate = human 7171)
 ```
 
 The relayer estimates via `eth_estimateGas`. Send a warp transfer with
-`--gas-limit 0` so the payment is `0 + overhead = 211000` gas.
+`--gas-limit 0` so the payment is `0 + overhead = 155100` gas.
+
+The overhead was retuned from `211000` after measurement: a Sepolia warp release
+used ~103.6k gas, so 211000 was collecting ~2.04× rather than the intended 1.5×.
+
+## What the Cardano IGP enforces on-chain
+
+The Aiken validator is stricter than its Solidity counterpart in three ways, all
+deliberate:
+
+- **The overhead is added by the contract**, from the oracle entry, in every
+  mode. `PayForGas` carries application gas only, so omitting the overhead is
+  not a way to pay less — and unlike Solidity's standalone `payForGas`, there is
+  no mode that skips it.
+- **The paid delta must equal the quote exactly.** Overpayment is rejected
+  alongside underpayment, because the IGP's only exit is `Claim` to the
+  beneficiary: an overpayment would silently become operator revenue with no
+  record that it was a mistake. Rejecting costs the payer a retry.
+- **A destination with no oracle is rejected**, not priced by a fallback. The
+  previous fallback (price 1, rate 1e6) divided out to zero for any realistic
+  gas amount, so a domain enrolled without its oracle was payable for free:
+  sends succeeded, nothing was delivered, and nothing failed near the missing
+  config.
+
+What it does *not* enforce: nothing links a `PayForGas` to a dispatch. The
+mailbox never inspects the IGP, and the IGP only length-checks the message id.
+Bundling the two in one transaction is a client convention — which is why an
+unpaid dispatch is a perfectly valid transaction that no relayer will carry.
+
+Warp `destination_gas` is likewise advisory: the route validator stores it and
+guards updates, but never checks that a transfer paid it. The CLI reads it when
+resolving `--gas-limit`.
 
 ## Enforcement
 
