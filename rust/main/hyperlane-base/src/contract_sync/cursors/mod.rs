@@ -73,7 +73,9 @@ impl Indexable for InterchainGasPayment {
             HyperlaneDomainProtocol::Radix => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::RateLimited,
-            HyperlaneDomainProtocol::Midnight => CursorType::SequenceAware,
+            // Midnight gas payments are indexed from HYP_GAS_PAYMENT events
+            // over block ranges with no sequence, matching EVM (#95).
+            HyperlaneDomainProtocol::Midnight => CursorType::RateLimited,
         }
     }
 
@@ -115,8 +117,8 @@ impl Indexable for Delivery {
             HyperlaneDomainProtocol::Radix => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::RateLimited,
-            // Midnight deliveries are an unordered on-chain Set with no
-            // sequence; rate-limited matches EVM/Cosmos (see #16).
+            // Midnight deliveries are indexed from HYP_PROCESS events over
+            // block ranges with no sequence, matching EVM (#95).
             HyperlaneDomainProtocol::Midnight => CursorType::RateLimited,
         }
     }

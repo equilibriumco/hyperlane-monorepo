@@ -1,25 +1,27 @@
-//! Dispatch and delivery indexers for the Midnight Mailbox.
+//! Dispatch and delivery indexers for the Midnight Mailbox (#95).
 //!
-//! Midnight has no event log and no Compact event system (see `LIMITS.md`), so
-//! both indexers read the WarpRoute contract's *block-final* ledger state
-//! through the Midnight indexer client (#14) instead of replaying logs:
+//! Both indexers replay the WarpRoute contract's `HYP_*` Misc events served
+//! by the Midnight indexer's `contractEvents` query, over BLOCK ranges — the
+//! same shape as the EVM event indexers (`IndexMode::Block` + block-range
+//! `fetch_logs_in_range`):
 //!
-//!   - [`MidnightDispatchIndexer`] serves dispatched `HyperlaneMessage`s out of
-//!     the `dispatched_messages: Map<Uint<32>, Bytes<141>>` ledger field, keyed
-//!     by nonce. It is sequence-aware: the `nonce` counter is the sequence tip,
-//!     and a requested nonce range maps one-to-one onto map keys. Each scan
-//!     reads the dispatch state ONCE (the whole map plus the nonce count) and
-//!     serves the requested range from that single decoded snapshot.
-//!   - [`MidnightDeliveryIndexer`] serves delivered message ids out of the
-//!     `deliveries: Set<Bytes<32>>` ledger field. The set is unordered and has
-//!     no sequence, so this indexer is rate-limited: every scan re-reads the
-//!     full set and the relayer's dedup store handles idempotency (see
-//!     `LIMITS.md`).
+//!   - [`MidnightDispatchIndexer`] decodes `HYP_DISPATCH` payloads (the
+//!     141-byte `HyperlaneMessage` wire form) into dispatched messages;
+//!     `Indexed.sequence` is the nonce decoded from the message, and the
+//!     sequence-aware cursor validates nonce contiguity across block ranges.
+//!     `latest_sequence_count_and_tip` stays a cheap state read of the
+//!     Mailbox `nonce` counter.
+//!   - [`MidnightDeliveryIndexer`] decodes `HYP_PROCESS` payloads (the
+//!     delivered message id) honoring the requested block range. Deliveries
+//!     have no sequence, so `latest_sequence_count_and_tip` is `(None, tip)`
+//!     and the framework drives it with the rate-limited (watermark) cursor,
+//!     exactly like EVM deliveries.
 //!
-//! Neither side has per-event block/tx metadata available from state, so the
-//! emitted [`LogMeta`] carries only the contract address and the current tip as
-//! the block number, with the remaining fields zeroed. This mirrors the
-//! Sealevel mailbox indexer's non-`advanced_log_meta` path.
+//! Each event carries its transaction + block metadata, so the emitted
+//! [`LogMeta`] is real: block number/hash, tx hash (widened to `H512`), the
+//! indexer-global tx id as the transaction index, and the chain-global event
+//! id as the log index. This is what lets the scraper store Midnight logs
+//! (it drops zero-tx-hash logs).
 
 use std::ops::RangeInclusive;
 
@@ -27,85 +29,23 @@ use async_trait::async_trait;
 
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneMessage, Indexed, Indexer, LogMeta,
-    SequenceAwareIndexer, H256, H512, U256,
+    SequenceAwareIndexer, H256, H512,
 };
 
-use crate::state_decode::DispatchSnapshot;
+use crate::events::{
+    address_hex, decode_dispatch_event, decode_process_event, event_log_meta, h512_to_h256,
+    has_name, MidnightEventReader, HYP_DISPATCH, HYP_PROCESS,
+};
+use crate::indexer_client::MiscEvent;
 use crate::MidnightIndexerClient;
 
-/// The minimal set of state reads the dispatch and delivery indexers need from
-/// the Midnight indexer client. Abstracting it behind a trait lets the indexers
-/// be unit-tested against a synthetic in-memory state without real network IO;
-/// production code uses the [`MidnightIndexerClient`] implementation below.
-#[async_trait]
-trait MidnightStateReader: Send + Sync {
-    /// Latest observed block height as a `u32` tip; heights beyond `u32::MAX`
-    /// saturate, and "no block seen yet" maps to `0`.
-    async fn read_tip(&self) -> ChainResult<u32>;
-    /// Whole dispatch state (every message keyed by nonce + the nonce count)
-    /// from a single state read.
-    async fn read_dispatch_snapshot(&self, address: &str) -> ChainResult<DispatchSnapshot>;
-    /// The full unordered `deliveries` set as message ids.
-    async fn read_deliveries(&self, address: &str) -> ChainResult<Vec<H256>>;
-}
-
-/// Map an indexer-reported block height to a `u32` tip. The indexer reports a
-/// `u64`; heights beyond `u32::MAX` saturate rather than truncate/wrap, and
-/// "no block observed yet" (`None`) maps to `0`.
-fn height_to_tip(height: Option<u64>) -> u32 {
-    height
-        .map(|h| u32::try_from(h).unwrap_or(u32::MAX))
-        .unwrap_or(0)
-}
-
-#[async_trait]
-impl MidnightStateReader for MidnightIndexerClient {
-    async fn read_tip(&self) -> ChainResult<u32> {
-        let height = self
-            .latest_block_height()
-            .await
-            .map_err(Into::<hyperlane_core::ChainCommunicationError>::into)?;
-        Ok(height_to_tip(height))
-    }
-
-    async fn read_dispatch_snapshot(&self, address: &str) -> ChainResult<DispatchSnapshot> {
-        MidnightIndexerClient::read_dispatch_snapshot(self, address).await
-    }
-
-    async fn read_deliveries(&self, address: &str) -> ChainResult<Vec<H256>> {
-        MidnightIndexerClient::read_deliveries(self, address).await
-    }
-}
-
-/// Render an `H256` contract address as the lowercase hex string the indexer
-/// client's `contractAction` query expects (no `0x` prefix), matching the
-/// convention used by the Midnight ISM reads.
-fn address_hex(address: &H256) -> String {
-    format!("{address:x}")
-}
-
-/// Build the `LogMeta` for a state-sourced item. Midnight block-final state
-/// gives us no per-event block hash, tx id, tx index or log index, so those are
-/// zeroed; `block_number` carries the current tip and `address` the WarpRoute
-/// contract. Mirrors Sealevel's non-advanced log-meta path.
-fn state_log_meta(address: H256, tip: u32) -> LogMeta {
-    LogMeta {
-        address,
-        block_number: tip as u64,
-        block_hash: H256::zero(),
-        transaction_id: H512::zero(),
-        transaction_index: 0,
-        log_index: U256::zero(),
-    }
-}
-
 /// Indexer that serves dispatched `HyperlaneMessage`s from the Midnight
-/// Mailbox's `dispatched_messages` map.
+/// Mailbox's `HYP_DISPATCH` events.
 #[derive(Debug, Clone)]
 pub struct MidnightDispatchIndexer {
     client: MidnightIndexerClient,
-    /// WarpRoute (Mailbox) contract address; both the GraphQL state read key and
-    /// the `LogMeta.address` reported for every dispatched message.
+    /// WarpRoute (Mailbox) contract address; both the GraphQL event-filter key
+    /// and the `LogMeta.address` reported for every dispatched message.
     address: H256,
 }
 
@@ -119,43 +59,56 @@ impl MidnightDispatchIndexer {
     }
 }
 
-/// Serve a nonce `range` from a single decoded dispatch `snapshot`, skipping
-/// nonces with no stored message. Shared by the production path and the unit
-/// tests so both exercise identical range/skip/`LogMeta` semantics.
-fn dispatch_logs_from_snapshot(
-    snapshot: &DispatchSnapshot,
+/// Decode the `HYP_DISPATCH` events out of a Misc-event batch. Non-dispatch
+/// events (gas payments from a shared-contract deployment, future kinds) are
+/// skipped; a dispatch event that fails to decode is an error, not a skip —
+/// a malformed dispatch would otherwise silently create a nonce gap that
+/// stalls the sequence-aware cursor with no diagnostic.
+fn dispatch_logs_from_events(
+    events: &[MiscEvent],
     address: H256,
-    tip: u32,
-    range: RangeInclusive<u32>,
-) -> Vec<(Indexed<HyperlaneMessage>, LogMeta)> {
-    let mut out = Vec::new();
-    for nonce in range {
-        // Each nonce is a key in `dispatched_messages`. A missing key (no
-        // message dispatched at that nonce) is skipped, not an error: the
-        // cursor may request nonces that have not been dispatched yet.
-        if let Some(message) = snapshot.messages.get(&nonce) {
+) -> ChainResult<Vec<(Indexed<HyperlaneMessage>, LogMeta)>> {
+    events
+        .iter()
+        .filter(|event| has_name(event, HYP_DISPATCH))
+        .map(|event| {
+            let message = decode_dispatch_event(event)?;
             // `Indexed::from(HyperlaneMessage)` sets `sequence` to the message
-            // nonce, which is exactly the dispatch sequence we want.
-            out.push((Indexed::from(message.clone()), state_log_meta(address, tip)));
-        }
-    }
-    out
+            // nonce, which is exactly the dispatch sequence the cursor keys on.
+            Ok((Indexed::from(message), event_log_meta(event, address)))
+        })
+        .collect()
 }
 
-/// Generic over the state reader so unit tests can drive the indexer logic with
-/// a synthetic in-memory reader. Production uses [`MidnightIndexerClient`].
-async fn fetch_dispatch_logs<R: MidnightStateReader>(
+/// Serve a block `range` of dispatches. Generic over the event reader so unit
+/// tests can drive the indexer logic with synthetic in-memory events;
+/// production uses [`MidnightIndexerClient`].
+async fn fetch_dispatch_logs<R: MidnightEventReader>(
     reader: &R,
     address: H256,
     range: RangeInclusive<u32>,
 ) -> ChainResult<Vec<(Indexed<HyperlaneMessage>, LogMeta)>> {
-    let address_hex = address_hex(&address);
-    let tip = reader.read_tip().await?;
-    // Single state read per scan: the whole dispatched map plus the nonce
-    // count come from one decoded snapshot, so the count and the per-nonce
-    // reads cannot disagree across snapshots.
-    let snapshot = reader.read_dispatch_snapshot(&address_hex).await?;
-    Ok(dispatch_logs_from_snapshot(&snapshot, address, tip, range))
+    let events = reader
+        .misc_events(&address_hex(&address), *range.start(), *range.end())
+        .await?;
+    dispatch_logs_from_events(&events, address)
+}
+
+/// Serve the dispatches emitted by one transaction. The framework hands an
+/// `H512`; a hash whose upper half is non-zero cannot be a Midnight tx hash,
+/// so it matches nothing.
+async fn fetch_dispatch_logs_by_tx<R: MidnightEventReader>(
+    reader: &R,
+    address: H256,
+    tx_hash: H512,
+) -> ChainResult<Vec<(Indexed<HyperlaneMessage>, LogMeta)>> {
+    let Some(tx_hash) = h512_to_h256(tx_hash) else {
+        return Ok(Vec::new());
+    };
+    let events = reader
+        .misc_events_by_tx(&address_hex(&address), &tx_hash)
+        .await?;
+    dispatch_logs_from_events(&events, address)
 }
 
 #[async_trait]
@@ -173,30 +126,34 @@ impl Indexer<HyperlaneMessage> for MidnightDispatchIndexer {
 
     async fn fetch_logs_by_tx_hash(
         &self,
-        _tx_hash: H512,
+        tx_hash: H512,
     ) -> ChainResult<Vec<(Indexed<HyperlaneMessage>, LogMeta)>> {
-        // Midnight state reads are not addressable by tx hash.
-        Ok(Vec::new())
+        fetch_dispatch_logs_by_tx(&self.client, self.address, tx_hash).await
     }
 }
 
 #[async_trait]
 impl SequenceAwareIndexer<HyperlaneMessage> for MidnightDispatchIndexer {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        let address = address_hex(&self.address);
+        // The Mailbox `nonce` counter is the dispatch count — a cheap state
+        // read (one fetch, one counter decode), kept alongside the
+        // event-based log fetch the way EVM reads `mailbox.nonce()`.
         let tip = self.client.read_tip().await?;
-        let snapshot = self.client.read_dispatch_snapshot(&address).await?;
-        Ok((Some(snapshot.nonce_count), tip))
+        let count = self
+            .client
+            .read_nonce_count(&address_hex(&self.address))
+            .await?;
+        Ok((Some(count), tip))
     }
 }
 
 /// Indexer that serves delivered message ids from the Midnight Mailbox's
-/// `deliveries` set. Rate-limited: every scan re-reads the full set.
+/// `HYP_PROCESS` events.
 #[derive(Debug, Clone)]
 pub struct MidnightDeliveryIndexer {
     client: MidnightIndexerClient,
-    /// WarpRoute (Mailbox) contract address; both the GraphQL state read key and
-    /// the `LogMeta.address` reported for every delivery.
+    /// WarpRoute (Mailbox) contract address; both the GraphQL event-filter key
+    /// and the `LogMeta.address` reported for every delivery.
     address: H256,
 }
 
@@ -210,33 +167,44 @@ impl MidnightDeliveryIndexer {
     }
 }
 
-/// Generic over the state reader so unit tests can drive the indexer logic with
-/// a synthetic in-memory reader. Production uses [`MidnightIndexerClient`].
-async fn fetch_delivery_logs<R: MidnightStateReader>(
-    reader: &R,
+/// Decode the `HYP_PROCESS` events out of a Misc-event batch. Deliveries
+/// carry no sequence (`Indexed::new`), matching EVM.
+fn delivery_logs_from_events(
+    events: &[MiscEvent],
     address: H256,
 ) -> ChainResult<Vec<(Indexed<H256>, LogMeta)>> {
-    let address_hex = address_hex(&address);
-    let tip = reader.read_tip().await?;
+    events
+        .iter()
+        .filter(|event| has_name(event, HYP_PROCESS))
+        .map(|event| {
+            let id = decode_process_event(event)?;
+            Ok((Indexed::new(id), event_log_meta(event, address)))
+        })
+        .collect()
+}
 
-    let ids = reader.read_deliveries(&address_hex).await?;
-    let log_meta = state_log_meta(address, tip);
-    Ok(ids
-        .into_iter()
-        .map(|id| (Indexed::new(id), log_meta.clone()))
-        .collect())
+/// Serve a block `range` of deliveries. Generic over the event reader for the
+/// same unit-test reason as [`fetch_dispatch_logs`].
+async fn fetch_delivery_logs<R: MidnightEventReader>(
+    reader: &R,
+    address: H256,
+    range: RangeInclusive<u32>,
+) -> ChainResult<Vec<(Indexed<H256>, LogMeta)>> {
+    let events = reader
+        .misc_events(&address_hex(&address), *range.start(), *range.end())
+        .await?;
+    delivery_logs_from_events(&events, address)
 }
 
 #[async_trait]
 impl Indexer<H256> for MidnightDeliveryIndexer {
     async fn fetch_logs_in_range(
         &self,
-        _range: RangeInclusive<u32>,
+        range: RangeInclusive<u32>,
     ) -> ChainResult<Vec<(Indexed<H256>, LogMeta)>> {
-        // The deliveries set has no nonce/sequence to slice by, so the range is
-        // ignored: every scan returns the full set. The relayer's dedup store
-        // (rate-limited cursor) makes re-emitting already-seen ids idempotent.
-        fetch_delivery_logs(&self.client, self.address).await
+        // The rate-limited (watermark) cursor walks block ranges and expects
+        // the fetch to honor them; the `fromBlock`/`toBlock` filter does.
+        fetch_delivery_logs(&self.client, self.address, range).await
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
@@ -245,18 +213,24 @@ impl Indexer<H256> for MidnightDeliveryIndexer {
 
     async fn fetch_logs_by_tx_hash(
         &self,
-        _tx_hash: H512,
+        tx_hash: H512,
     ) -> ChainResult<Vec<(Indexed<H256>, LogMeta)>> {
-        // Midnight state reads are not addressable by tx hash.
-        Ok(Vec::new())
+        let Some(tx_hash) = h512_to_h256(tx_hash) else {
+            return Ok(Vec::new());
+        };
+        let events = self
+            .client
+            .misc_events_by_tx(&address_hex(&self.address), &tx_hash)
+            .await?;
+        delivery_logs_from_events(&events, self.address)
     }
 }
 
 #[async_trait]
 impl SequenceAwareIndexer<H256> for MidnightDeliveryIndexer {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // Deliveries are an unordered set with no sequence; `None` signals the
-        // rate-limited cursor that there is no sequence to track.
+        // Deliveries have no sequence; `(None, tip)` matches the EVM mailbox
+        // delivery indexer and keeps the watermark cursor model.
         let tip = self.client.read_tip().await?;
         Ok((None, tip))
     }
@@ -266,30 +240,13 @@ impl SequenceAwareIndexer<H256> for MidnightDeliveryIndexer {
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
+    use hyperlane_core::{Encode as _, U256};
 
-    /// Synthetic in-memory state reader, the unit-test seam that lets the
-    /// indexer logic run without any network IO. Holds a pre-decoded dispatch
-    /// snapshot and delivery set; `read_*` just hand them back. Mirrors how the
-    /// `state_decode` tests build synthetic state instead of hitting a node.
-    struct FakeReader {
-        tip: u32,
-        snapshot: DispatchSnapshot,
-        deliveries: Vec<H256>,
-    }
+    use crate::events::test_util::{misc_event, FakeEventReader};
+    use crate::events::HYP_GAS_PAYMENT;
 
-    #[async_trait]
-    impl MidnightStateReader for FakeReader {
-        async fn read_tip(&self) -> ChainResult<u32> {
-            Ok(self.tip)
-        }
-        async fn read_dispatch_snapshot(&self, _address: &str) -> ChainResult<DispatchSnapshot> {
-            Ok(self.snapshot.clone())
-        }
-        async fn read_deliveries(&self, _address: &str) -> ChainResult<Vec<H256>> {
-            Ok(self.deliveries.clone())
-        }
-    }
+    const ADDRESS: H256 = H256::repeat_byte(0x42);
+    const TIP: u32 = 2000;
 
     fn message(nonce: u32) -> HyperlaneMessage {
         HyperlaneMessage {
@@ -299,168 +256,160 @@ mod tests {
             sender: H256::repeat_byte(0xAA),
             destination: 2,
             recipient: H256::repeat_byte(0xBB),
-            body: vec![nonce as u8; 8],
+            // The contract's wire form is a fixed Bytes<141>, i.e. a 64-byte
+            // body. The zero tail also pins the fixed-offset payload slicing
+            // (the padding past 141 is not part of the message).
+            body: {
+                let mut b = vec![0u8; 64];
+                b[0] = nonce as u8;
+                b
+            },
         }
     }
 
-    const ADDRESS: H256 = H256::repeat_byte(0x42);
-    const TIP: u32 = 99;
-
-    fn snapshot_with(nonces: &[u32], nonce_count: u32) -> DispatchSnapshot {
-        let mut messages = HashMap::new();
-        for &n in nonces {
-            messages.insert(n, message(n));
-        }
-        DispatchSnapshot {
-            messages,
-            nonce_count,
-        }
+    /// A dispatch event at block `1000 + id` (see `misc_event`).
+    fn dispatch_event(id: u64, nonce: u32) -> MiscEvent {
+        misc_event(id, HYP_DISPATCH, &message(nonce).to_vec())
     }
 
     #[tokio::test]
-    async fn dispatch_skips_missing_nonces_and_sets_sequence() {
-        // Nonces 0 and 2 are present; 1 and 3 are not.
-        let reader = FakeReader {
+    async fn dispatch_decodes_events_and_sets_sequence_from_nonce() {
+        let reader = FakeEventReader {
             tip: TIP,
-            snapshot: snapshot_with(&[0, 2], 3),
-            deliveries: vec![],
+            events: vec![
+                dispatch_event(1, 0),
+                // Foreign event kind interleaved in the same range: skipped.
+                misc_event(2, HYP_GAS_PAYMENT, &[0u8; 60]),
+                dispatch_event(3, 1),
+            ],
         };
 
-        let logs = fetch_dispatch_logs(&reader, ADDRESS, 0..=3)
+        let logs = fetch_dispatch_logs(&reader, ADDRESS, 0..=TIP)
             .await
             .expect("fetch dispatch logs");
 
-        // Only the two present nonces come back, in range order.
-        assert_eq!(logs.len(), 2, "missing nonces are skipped");
+        assert_eq!(logs.len(), 2, "only HYP_DISPATCH events are served");
         assert_eq!(logs[0].0.inner().nonce, 0);
-        assert_eq!(logs[1].0.inner().nonce, 2);
-
-        // `Indexed.sequence` is the message nonce.
-        assert_eq!(logs[0].0.sequence, Some(0));
-        assert_eq!(logs[1].0.sequence, Some(2));
+        assert_eq!(logs[0].0.sequence, Some(0), "sequence == decoded nonce");
+        assert_eq!(logs[1].0.inner().nonce, 1);
+        assert_eq!(logs[1].0.sequence, Some(1));
+        assert_eq!(logs[0].0.inner(), &message(0), "wire form round-trips");
     }
 
     #[tokio::test]
-    async fn dispatch_builds_expected_log_meta() {
-        let reader = FakeReader {
+    async fn dispatch_honors_block_range() {
+        // Events sit at blocks 1001 and 1003 (misc_event: 1000 + id).
+        let reader = FakeEventReader {
             tip: TIP,
-            snapshot: snapshot_with(&[5], 6),
-            deliveries: vec![],
+            events: vec![dispatch_event(1, 0), dispatch_event(3, 1)],
         };
 
-        let logs = fetch_dispatch_logs(&reader, ADDRESS, 5..=5)
+        // A range covering only the first block yields only the first event.
+        let logs = fetch_dispatch_logs(&reader, ADDRESS, 1000..=1002)
+            .await
+            .expect("fetch dispatch logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0.sequence, Some(0));
+
+        // A disjoint range yields nothing.
+        let logs = fetch_dispatch_logs(&reader, ADDRESS, 1004..=1100)
+            .await
+            .expect("fetch dispatch logs");
+        assert!(logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_builds_real_log_meta() {
+        let event = dispatch_event(5, 0);
+        let reader = FakeEventReader {
+            tip: TIP,
+            events: vec![event.clone()],
+        };
+
+        let logs = fetch_dispatch_logs(&reader, ADDRESS, 0..=TIP)
             .await
             .expect("fetch dispatch logs");
 
         assert_eq!(logs.len(), 1);
         let meta = &logs[0].1;
-        // address + block_number (tip) set, everything else zeroed.
         assert_eq!(meta.address, ADDRESS);
-        assert_eq!(meta.block_number, TIP as u64);
-        assert_eq!(meta.block_hash, H256::zero());
-        assert_eq!(meta.transaction_id, H512::zero());
-        assert_eq!(meta.transaction_index, 0);
-        assert_eq!(meta.log_index, U256::zero());
+        assert_eq!(meta.block_number, event.block_height);
+        assert_eq!(meta.block_hash, event.block_hash);
+        // Real tx hash, H256 -> H512 right-aligned widening.
+        assert_eq!(meta.transaction_id, H512::from(event.tx_hash));
+        assert_eq!(meta.transaction_index, event.tx_id);
+        assert_eq!(meta.log_index, U256::from(event.id));
     }
 
     #[tokio::test]
-    async fn dispatch_sequence_count_is_nonce_count() {
-        // `latest_sequence_count_and_tip` returns (Some(nonce_count), tip). The
-        // count comes straight from the snapshot, so cover it via the snapshot
-        // helper too: serving an empty range still yields the right count from
-        // the same snapshot the SequenceAwareIndexer impl would read.
-        let snapshot = snapshot_with(&[0, 1], 2);
-        assert_eq!(snapshot.nonce_count, 2);
-        // And serving a present range from that snapshot yields both messages.
-        let logs = dispatch_logs_from_snapshot(&snapshot, ADDRESS, TIP, 0..=1);
-        assert_eq!(logs.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn delivery_returns_full_set_as_ids() {
-        let id_a = H256::repeat_byte(0x01);
-        let id_b = H256::repeat_byte(0x02);
-        let reader = FakeReader {
+    async fn dispatch_fetch_by_tx_hash_filters_on_hash() {
+        let wanted = dispatch_event(1, 0);
+        let other = dispatch_event(2, 1);
+        let reader = FakeEventReader {
             tip: TIP,
-            snapshot: snapshot_with(&[], 0),
-            deliveries: vec![id_a, id_b],
+            events: vec![wanted.clone(), other],
         };
 
-        // Range is ignored; the full set comes back as H256 ids.
-        let logs = fetch_delivery_logs(&reader, ADDRESS)
+        // The transactionHash filter narrows to the one emitting tx.
+        let logs = fetch_dispatch_logs_by_tx(&reader, ADDRESS, wanted.tx_hash.into())
+            .await
+            .expect("fetch by tx hash");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0.sequence, Some(0));
+        assert_eq!(logs[0].1.transaction_id, H512::from(wanted.tx_hash));
+
+        // A non-Midnight H512 (non-zero upper half) matches nothing.
+        let mut foreign: H512 = wanted.tx_hash.into();
+        foreign.0[0] = 1;
+        let logs = fetch_dispatch_logs_by_tx(&reader, ADDRESS, foreign)
+            .await
+            .expect("fetch by tx hash");
+        assert!(logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_dispatch_event_is_an_error_not_a_gap() {
+        // A HYP_DISPATCH payload that is NOT a decodable message (wrong
+        // version byte is fine — read_from doesn't validate version; instead
+        // give it a short payload) must fail the whole fetch loudly.
+        let mut bad = misc_event(1, HYP_DISPATCH, &[0xFFu8; 16]);
+        bad.payload.truncate(16);
+        let err = dispatch_logs_from_events(&[bad], ADDRESS);
+        assert!(err.is_err(), "short dispatch payload must error");
+    }
+
+    #[tokio::test]
+    async fn delivery_decodes_process_events_in_range() {
+        let id_a = H256::repeat_byte(0x01);
+        let id_b = H256::repeat_byte(0x02);
+        let reader = FakeEventReader {
+            tip: TIP,
+            events: vec![
+                misc_event(1, HYP_PROCESS, id_a.as_bytes()),
+                // A dispatch in the same range is not a delivery.
+                dispatch_event(2, 0),
+                misc_event(3, HYP_PROCESS, id_b.as_bytes()),
+            ],
+        };
+
+        let logs = fetch_delivery_logs(&reader, ADDRESS, 0..=TIP)
             .await
             .expect("fetch delivery logs");
 
-        let mut ids: Vec<H256> = logs.iter().map(|(indexed, _)| *indexed.inner()).collect();
-        ids.sort();
-        let mut expected = vec![id_a, id_b];
-        expected.sort();
-        assert_eq!(ids, expected);
-
-        // Deliveries have no sequence.
+        assert_eq!(logs.len(), 2);
+        assert_eq!(*logs[0].0.inner(), id_a);
+        assert_eq!(*logs[1].0.inner(), id_b);
+        // Deliveries have no sequence (EVM parity).
         assert!(logs.iter().all(|(indexed, _)| indexed.sequence.is_none()));
-        // LogMeta carries address + tip.
-        assert_eq!(logs[0].1.address, ADDRESS);
-        assert_eq!(logs[0].1.block_number, TIP as u64);
-    }
+        // Real per-event meta.
+        assert_eq!(logs[0].1.block_number, 1001);
+        assert_eq!(logs[1].1.block_number, 1003);
 
-    // #18: the relayer lists pending Midnight-origin messages by draining the
-    // dispatch indexer over the WarpRoute's `dispatched_messages` map. The unit
-    // tests above drive the range/skip logic with a synthetic snapshot; this one
-    // runs the REAL decode path (`decode_dispatch_snapshot`) on the committed #16
-    // fixture and feeds it through the exact `fetch_dispatch_logs` the production
-    // `Indexer::fetch_logs_in_range` calls, proving the relayer enumerates both
-    // dispatches with `Indexed.sequence == nonce` (the invariant the relayer's
-    // forward/backward message cursor relies on) and that the enumerated messages
-    // are the fixture's decoded messages (same keccak ids the merkle indexer and
-    // validator anchor on).
-    #[tokio::test]
-    async fn dispatch_enumerates_committed_fixture_in_sequence() {
-        let bytes =
-            hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
-                .expect("fixture is valid hex");
-
-        let snapshot = crate::state_decode::decode_dispatch_snapshot(&bytes)
-            .expect("decode dispatch snapshot");
-        // The #16 fixture is a two-dispatch scenario (nonces 0 and 1).
-        assert_eq!(snapshot.nonce_count, 2, "fixture has two dispatches");
-        let last_nonce = snapshot.nonce_count - 1;
-
-        let reader = FakeReader {
-            tip: TIP,
-            snapshot,
-            deliveries: vec![],
-        };
-
-        // Drain the full nonce range up to the tip, as the relayer's cursor does.
-        let logs = fetch_dispatch_logs(&reader, ADDRESS, 0..=last_nonce)
+        // The range is honored: a window over only the second delivery.
+        let logs = fetch_delivery_logs(&reader, ADDRESS, 1003..=1003)
             .await
-            .expect("fetch dispatch logs");
-
-        assert_eq!(logs.len(), 2, "both dispatched messages are enumerated");
-        assert_eq!(logs[0].0.inner().nonce, 0);
-        assert_eq!(logs[0].0.sequence, Some(0));
-        assert_eq!(logs[1].0.inner().nonce, 1);
-        assert_eq!(logs[1].0.sequence, Some(1));
-
-        // The enumerated messages are exactly the fixture's decoded messages.
-        let mut decoded = crate::state_decode::decode_dispatched_messages(&bytes)
-            .expect("decode dispatched messages");
-        decoded.sort_by_key(|(nonce, _)| *nonce);
-        assert_eq!(logs[0].0.inner().id(), decoded[0].1.id());
-        assert_eq!(logs[1].0.inner().id(), decoded[1].1.id());
-    }
-
-    #[test]
-    fn tip_saturates_above_u32_max() {
-        // No block seen yet -> 0.
-        assert_eq!(height_to_tip(None), 0);
-        // In-range height passes through unchanged.
-        assert_eq!(height_to_tip(Some(12345)), 12345);
-        assert_eq!(height_to_tip(Some(u32::MAX as u64)), u32::MAX);
-        // A height above u32::MAX saturates to u32::MAX (does NOT wrap/truncate
-        // backwards to a small value).
-        assert_eq!(height_to_tip(Some(u32::MAX as u64 + 1)), u32::MAX);
-        assert_eq!(height_to_tip(Some(u64::MAX)), u32::MAX);
+            .expect("fetch delivery logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(*logs[0].0.inner(), id_b);
     }
 }

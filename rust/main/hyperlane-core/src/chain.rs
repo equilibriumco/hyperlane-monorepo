@@ -670,8 +670,10 @@ impl HyperlaneDomain {
         use HyperlaneDomainProtocol::*;
         let protocol = self.domain_protocol();
         match protocol {
-            Ethereum | Cosmos | CosmosNative | Starknet | Tron => IndexMode::Block,
-            Fuel | Sealevel | Radix | Aleo | Midnight => IndexMode::Sequence,
+            // Midnight indexes contract events over block ranges (the
+            // Midnight indexer's `contractEvents` query), like EVM.
+            Ethereum | Cosmos | CosmosNative | Starknet | Tron | Midnight => IndexMode::Block,
+            Fuel | Sealevel | Radix | Aleo => IndexMode::Sequence,
         }
     }
 }

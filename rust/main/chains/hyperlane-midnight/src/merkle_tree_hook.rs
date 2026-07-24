@@ -12,11 +12,18 @@
 //! the ISM. The `night` contract does NOT maintain an on-chain merkle tree
 //! (Hyperlane's MessageId security model never reads an origin-chain root, and
 //! the in-circuit keccak walk that a replicated tree needs dominated the
-//! outbound proving key), so this hook reconstructs the tree entirely
-//! off-chain by ingesting the append-only `dispatched_messages` map read from
-//! the deployed contract's state via the #14 indexer client, decoded by
+//! outbound proving key), so the CONTRACT half of this hook (`tree()` /
+//! `count()` / `latest_checkpoint()`) reconstructs the tree entirely off-chain
+//! by ingesting the append-only `dispatched_messages` map read from the
+//! deployed contract's state via the #14 indexer client, decoded by
 //! [`crate::state_decode`]. Sealevel likewise rebuilds its tree from the
 //! mailbox/outbox account; we mirror that.
+//!
+//! The INDEXER half is event-based (#95): it derives one
+//! `MerkleTreeInsertion(nonce, message.id())` per `HYP_DISPATCH` Misc event,
+//! fetched over block ranges — the same events the dispatch indexer replays,
+//! so the leaves it emits are exactly the messages the state reconstruction
+//! ingests.
 //!
 //! How the validator uses this (`agents/validator/src/submit.rs`): it feeds
 //! the `MerkleTreeInsertion`s emitted by the indexer into its local RocksDB
@@ -33,11 +40,16 @@ use async_trait::async_trait;
 
 use hyperlane_core::{
     accumulator::incremental::IncrementalMerkle, ChainCommunicationError, ChainResult, Checkpoint,
-    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneMessage,
-    HyperlaneProvider, IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook,
-    MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512, U256,
+    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider,
+    IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook, MerkleTreeInsertion,
+    ReorgPeriod, SequenceAwareIndexer, H256, H512,
 };
 
+use crate::events::{
+    decode_dispatch_event, event_log_meta, h512_to_h256, has_name, MidnightEventReader,
+    HYP_DISPATCH,
+};
+use crate::indexer_client::MiscEvent;
 use crate::state_decode::decode_dispatched_messages;
 use crate::MidnightProvider;
 
@@ -82,33 +94,25 @@ fn checkpoint_from_tree(
     })
 }
 
-/// Build the `MerkleTreeInsertion`s whose leaf index falls in `range`, from the
-/// decoded dispatched messages. Pure (no I/O) so it is unit-testable. Under
-/// `IndexMode::Sequence` the framework hands a leaf-index range; the resulting
-/// `Indexed` carries `sequence = leaf_index` (the sequence cursor keys on it),
-/// `leaf_index == nonce`, and `message_id == HyperlaneMessage::id()`.
-fn insertions_in_range(
-    messages: &[(u32, HyperlaneMessage)],
-    range: &RangeInclusive<u32>,
+/// Build a `MerkleTreeInsertion` for every `HYP_DISPATCH` event in a
+/// Misc-event batch. Every dispatch inserts exactly one leaf, so
+/// `leaf_index == nonce` (decoded from the 141-byte message wire form) and
+/// `message_id == HyperlaneMessage::id()` (keccak of those bytes — the same
+/// leaf the destination ISM re-derives). `insertion.into()` sets
+/// `Indexed.sequence = leaf_index`, which the sequence-aware cursor keys on.
+/// Non-dispatch events are skipped; a dispatch that fails to decode is an
+/// error, not a skip.
+fn insertions_from_events(
+    events: &[MiscEvent],
     address: H256,
-    block_number: u64,
-) -> Vec<(Indexed<MerkleTreeInsertion>, LogMeta)> {
-    messages
+) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
+    events
         .iter()
-        .filter(|(nonce, _)| range.contains(nonce))
-        .map(|(nonce, message)| {
-            let insertion = MerkleTreeInsertion::new(*nonce, message.id());
-            let meta = LogMeta {
-                address,
-                block_number,
-                block_hash: H256::zero(),
-                transaction_id: H512::zero(),
-                transaction_index: 0,
-                // Midnight state carries no per-message tx granularity; the
-                // leaf index is the stable per-insertion ordinal.
-                log_index: U256::from(*nonce),
-            };
-            (insertion.into(), meta)
+        .filter(|event| has_name(event, HYP_DISPATCH))
+        .map(|event| {
+            let message = decode_dispatch_event(event)?;
+            let insertion = MerkleTreeInsertion::new(message.nonce, message.id());
+            Ok((insertion.into(), event_log_meta(event, address)))
         })
         .collect()
 }
@@ -234,24 +238,20 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
 
 #[async_trait]
 impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
-    /// Midnight indexes by sequence (`IndexMode::Sequence`), so `range` is a
-    /// leaf-index range. We read the full append-only `dispatched_messages`
-    /// map and emit a `MerkleTreeInsertion` for each leaf whose index falls in
-    /// the range; the framework's sequence cursor handles dedup and progress.
-    /// This is the #14-established pull model (one `contractAction` read of
-    /// latest state, no per-block history).
+    /// Midnight indexes insertions over BLOCK ranges (`IndexMode::Block`, EVM
+    /// parity, #95): replay the `HYP_DISPATCH` events in the range and derive
+    /// one leaf per dispatch. The sequence-aware cursor validates leaf-index
+    /// contiguity across ranges.
     async fn fetch_logs_in_range(
         &self,
         range: RangeInclusive<u32>,
     ) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
-        let messages = self.dispatched_messages().await?;
-        let block_number = u64::from(self.latest_height_u32().await?);
-        Ok(insertions_in_range(
-            &messages,
-            &range,
-            self.address,
-            block_number,
-        ))
+        let events = self
+            .provider
+            .indexer()
+            .misc_events(&self.address_hex(), *range.start(), *range.end())
+            .await?;
+        insertions_from_events(&events, self.address)
     }
 
     /// Midnight has BFT finality, so the latest observed height is final.
@@ -260,15 +260,40 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
         self.latest_height_u32().await
     }
+
+    async fn fetch_logs_by_tx_hash(
+        &self,
+        tx_hash: H512,
+    ) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
+        // The relayer broadcasts dispatch txids from the message sync task to
+        // the merkle sync task; the dispatch and the insertion are the same
+        // event on Midnight, so the transactionHash filter serves both.
+        let Some(tx_hash) = h512_to_h256(tx_hash) else {
+            return Ok(Vec::new());
+        };
+        let events = self
+            .provider
+            .indexer()
+            .misc_events_by_tx(&self.address_hex(), &tx_hash)
+            .await?;
+        insertions_from_events(&events, self.address)
+    }
 }
 
 #[async_trait]
 impl SequenceAwareIndexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // Count from the off-chain reconstruction; the contract keeps no
-        // on-chain leaf count.
-        let count = self.tree(&ReorgPeriod::None).await?.tree.count() as u32;
+        // Every dispatch inserts exactly one leaf, so the Mailbox `nonce`
+        // counter IS the leaf count — a cheap state read (one fetch, one
+        // counter decode) instead of rebuilding the whole tree per cursor
+        // tick. `count()` (the MerkleTreeHook contract read) still derives
+        // from the full reconstruction above.
         let tip = self.latest_height_u32().await?;
+        let count = self
+            .provider
+            .indexer()
+            .read_nonce_count(&self.address_hex())
+            .await?;
         Ok((Some(count), tip))
     }
 }
@@ -314,54 +339,73 @@ mod tests {
         assert_eq!(cp.checkpoint.merkle_tree_hook_address, test_addr());
     }
 
-    // The core indexer logic the validator consumes: which leaves a range
-    // yields, and that each carries `sequence == leaf_index` and the right
-    // message id. Exercised offline against the committed dispatched fixture.
+    // The core indexer logic the validator consumes: every HYP_DISPATCH event
+    // yields one leaf with `sequence == leaf_index == nonce` and
+    // `message_id == HyperlaneMessage::id()`, carried with the real per-event
+    // LogMeta. The leaves are cross-checked against the SAME messages decoded
+    // from the committed state fixture, proving the event-derived leaves match
+    // what the state reconstruction (`tree()`) ingests.
     #[test]
-    fn insertions_respect_range_and_sequence() {
+    fn insertions_derive_from_dispatch_events() {
+        use hyperlane_core::{Encode as _, U256};
+
+        use crate::events::test_util::misc_event;
+        use crate::events::HYP_PROCESS;
+
         let hex = include_str!("../tests/fixtures/night-state-dispatched.hex").trim();
         let bytes = hex::decode(hex).expect("fixture is valid hex");
-        let messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
+        let mut messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
+        messages.sort_by_key(|(nonce, _)| *nonce);
         assert_eq!(messages.len(), 2, "fixture has two dispatches");
 
-        // Full range -> both leaves, sequence == leaf index, id == message.id().
-        let all = insertions_in_range(&messages, &(0..=1), test_addr(), 7);
+        // The wire bytes the contract emits are exactly the encoded message.
+        let events = vec![
+            misc_event(1, HYP_DISPATCH, &messages[0].1.to_vec()),
+            // A non-dispatch event in the same range is not an insertion.
+            misc_event(2, HYP_PROCESS, H256::repeat_byte(0x11).as_bytes()),
+            misc_event(3, HYP_DISPATCH, &messages[1].1.to_vec()),
+        ];
+
+        let all = insertions_from_events(&events, test_addr()).expect("derive insertions");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].0.sequence, Some(0));
         assert_eq!(all[1].0.sequence, Some(1));
         assert_eq!(
             *all[0].0.inner(),
-            MerkleTreeInsertion::new(0, messages[0].1.id())
+            MerkleTreeInsertion::new(0, messages[0].1.id()),
+            "leaf = (nonce, keccak id) of the decoded message"
         );
-        assert_eq!(all[0].1.log_index, U256::from(0u32));
+        assert_eq!(
+            *all[1].0.inner(),
+            MerkleTreeInsertion::new(1, messages[1].1.id())
+        );
+
+        // Real per-event LogMeta.
         assert_eq!(all[0].1.address, test_addr());
-        assert_eq!(all[0].1.block_number, 7);
-
-        // Sub-range -> only the matching leaf.
-        let one = insertions_in_range(&messages, &(1..=1), test_addr(), 7);
-        assert_eq!(one.len(), 1);
-        assert_eq!(one[0].0.sequence, Some(1));
-
-        // Out-of-range -> nothing.
-        assert!(insertions_in_range(&messages, &(5..=9), test_addr(), 7).is_empty());
+        assert_eq!(all[0].1.block_number, events[0].block_height);
+        assert_eq!(all[0].1.block_hash, events[0].block_hash);
+        assert_eq!(all[0].1.transaction_id, H512::from(events[0].tx_hash));
+        assert_eq!(all[0].1.transaction_index, events[0].tx_id);
+        assert_eq!(all[0].1.log_index, U256::from(events[0].id));
     }
 
     /// Live integration test against a running Midnight devnet with at least
     /// one dispatch. Exercises the full merkle path end to end: the leaf
-    /// count, that `fetch_logs_in_range` yields one insertion per leaf, and
-    /// that a local `IncrementalMerkle` rebuilt from those insertions matches
-    /// the root returned by `latest_checkpoint` (which reconstructs from the
-    /// same `dispatched_messages`) — the determinism the validator relies on.
-    /// This is the "roots match on synthetic traffic" acceptance check; the
-    /// panic-on-mismatch half lives in the upstream validator submitter and is
-    /// covered by the outbound E2E (#26). Ignored by default; run after a
-    /// `transferRemote`:
+    /// count, that `fetch_logs_in_range` over the whole block range yields
+    /// one insertion per leaf (from the HYP_DISPATCH events), and that a
+    /// local `IncrementalMerkle` rebuilt from those insertions matches the
+    /// root returned by `latest_checkpoint` (which reconstructs from the
+    /// `dispatched_messages` state) — the event/state parity the validator
+    /// relies on. This is the "roots match on synthetic traffic" acceptance
+    /// check; the panic-on-mismatch half lives in the upstream validator
+    /// submitter and is covered by the outbound E2E (#26). Ignored by
+    /// default; run after a `transferRemote`:
     ///
     ///   MIDNIGHT_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
     ///   MIDNIGHT_NIGHT_ADDRESS=<deployed night address hex> \
     ///   cargo test -p hyperlane-midnight merkle_root_parity -- --ignored --nocapture
     #[tokio::test]
-    #[ignore = "requires a running Midnight devnet with at least one dispatch"]
+    #[ignore = "requires a running Midnight devnet (events-epic indexer) with at least one dispatch"]
     async fn merkle_root_parity_against_live_devnet() {
         let endpoint = std::env::var("MIDNIGHT_INDEXER_URL")
             .expect("set MIDNIGHT_INDEXER_URL to the indexer GraphQL endpoint");
@@ -375,7 +419,7 @@ mod tests {
         let provider = MidnightProvider::new(domain.clone(), indexer);
         let hook = MidnightMerkleTreeHook::new(addr, domain, provider);
 
-        let (count_opt, _tip) = hook
+        let (count_opt, tip) = hook
             .latest_sequence_count_and_tip()
             .await
             .expect("latest sequence count");
@@ -385,8 +429,9 @@ mod tests {
             "dispatch at least one message before running this"
         );
 
+        // Block-range fetch (IndexMode::Block): the whole chain so far.
         let logs = hook
-            .fetch_logs_in_range(0..=count - 1)
+            .fetch_logs_in_range(0..=tip)
             .await
             .expect("fetch insertions");
         assert_eq!(logs.len(), count as usize, "one insertion per leaf");
