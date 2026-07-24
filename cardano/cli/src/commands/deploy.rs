@@ -62,7 +62,7 @@ enum DeployCommands {
         dry_run: bool,
     },
 
-    /// Deploy all core reference scripts (mailbox, ism, igp)
+    /// Deploy all core reference scripts (mailbox, ism, igp, validator_announce)
     ReferenceScriptsAll {
         /// Output lovelace per script (if not specified, calculates minimum for each script)
         #[arg(long)]
@@ -679,7 +679,12 @@ async fn deploy_all_reference_scripts(
     // The IGP reference script matters for third parties: without it, every gas
     // payer must ship a local copy of the compiled IGP script (and carry it in
     // each payment's witness set) just to call `pay-for-gas`.
-    let mut scripts: Vec<&'static str> = vec!["mailbox", "igp"];
+    //
+    // validator_announce belongs here because `announce()` hard-requires its
+    // reference script. Leaving it out of "all" meant a freshly deployed stack
+    // could never self-announce, and the operator only found out when a
+    // validator sat in an announce retry loop.
+    let mut scripts: Vec<&'static str> = vec!["mailbox", "igp", "validator_announce"];
     if let Ok(deployment) = ctx.load_deployment_info() {
         let mut flavours: Vec<String> = Vec::new();
         let default_mt = deployment

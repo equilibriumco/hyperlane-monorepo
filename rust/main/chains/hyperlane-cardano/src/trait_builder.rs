@@ -67,6 +67,17 @@ pub struct ConnectionConf {
     pub op_submission_config: OpSubmissionConfig,
 }
 
+/// Treat a blank reference-script UTXO as absent.
+///
+/// These are supplied through `${VAR}` substitution, and an unset variable
+/// substitutes to an empty string rather than disappearing. Kept as `Some("")`
+/// it reads as configured: the guards that would say "deploy the reference
+/// script first" pass, and the failure surfaces much later as an unhelpful
+/// `Invalid UTXO reference format ''`.
+fn blank_as_unset(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawConnectionConf {
@@ -176,7 +187,7 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .into_config_result(|| cwp.join("mailbox_script_hash"))?;
 
         // Warp route shared reference script UTXO (optional)
-        let warp_route_reference_script_utxo = raw.warp_route_reference_script_utxo;
+        let warp_route_reference_script_utxo = blank_as_unset(raw.warp_route_reference_script_utxo);
 
         let ism_policy_id = raw
             .ism_policy_id
@@ -201,16 +212,17 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             .ok_or(MissingPolicyId("validator_announce"))
             .into_config_result(|| cwp.join("validator_announce_policy_id"))?;
 
-        let validator_announce_reference_script_utxo = raw.validator_announce_reference_script_utxo;
+        let validator_announce_reference_script_utxo =
+            blank_as_unset(raw.validator_announce_reference_script_utxo);
 
         // Mailbox script CBOR is optional (deprecated - use reference scripts instead)
         let mailbox_script_cbor = raw.mailbox_script_cbor;
         // Mailbox reference script UTXO (preferred method)
-        let mailbox_reference_script_utxo = raw.mailbox_reference_script_utxo;
+        let mailbox_reference_script_utxo = blank_as_unset(raw.mailbox_reference_script_utxo);
 
         // ISM script options (prefer reference script, fall back to inline)
         let ism_script_cbor = raw.ism_script_cbor;
-        let ism_reference_script_utxo = raw.ism_reference_script_utxo;
+        let ism_reference_script_utxo = blank_as_unset(raw.ism_reference_script_utxo);
 
         // Verified message NFT policy (optional - enables direct message delivery)
         let verified_message_nft_policy_id = raw.verified_message_nft_policy_id;
@@ -254,5 +266,26 @@ impl FromRawConf<RawConnectionConf> for ConnectionConf {
             max_batch_size,
             op_submission_config,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blank_as_unset;
+
+    /// An unset `${VAR}` substitutes to an empty string, which must not read as
+    /// a configured reference script — that swaps an actionable "deploy the
+    /// reference script first" for an opaque UTXO parse error at submit time.
+    #[test]
+    fn blank_reference_script_utxo_is_unset() {
+        assert_eq!(blank_as_unset(Some(String::new())), None);
+        assert_eq!(blank_as_unset(Some("   ".into())), None);
+        assert_eq!(blank_as_unset(None), None);
+    }
+
+    #[test]
+    fn a_real_reference_script_utxo_is_kept() {
+        let utxo = "263944bde781bf6297ce44e42b23923d48f45f16469395587bf1ab23820d5642#0";
+        assert_eq!(blank_as_unset(Some(utxo.into())), Some(utxo.to_string()));
     }
 }
