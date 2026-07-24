@@ -459,17 +459,28 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   deploy reference-scripts-all
 ```
 
-This deploys a reference script (15 ADA minimum UTXO each) for:
+This deploys a reference script (minimum UTXO sized per script, ~9–37 ADA) for:
 
 - The mailbox validator
+- The IGP
+- The **validator announce** validator
 - The **default** ISM (whichever flavour is recorded in `deployment_info.json`'s `ism`)
 - Every ISM flavour recorded under `deployment_info.json`'s `alt_isms[]` (see [Dual-ISM](#34-deploying-both-ism-flavours-dual-ism)) — so if you initialized both a MessageId and a MerkleRoot ISM, this single command deploys reference scripts for both.
+
+> **The validator_announce reference script is mandatory, not an optimization.**
+> `announce()` requires it: without one, a validator cannot announce its
+> checkpoint storage location at all, and the failure appears as a validator
+> stuck in an announce retry loop rather than at deploy time. It was previously
+> omitted from this command; deployments created before that fix have no such
+> reference script and need [4.3](#43-parametrize-validator_announce) followed
+> by a single `deploy reference-script --script validator_announce`.
 
 ### 4.2 Deploy Individual Reference Script (Alternative)
 
 ```bash
 # Deploy a specific script by name (uses applied script automatically)
-# Valid names: mailbox, message_id_multisig_ism, merkle_root_multisig_ism
+# Valid names: mailbox, igp, validator_announce,
+#              message_id_multisig_ism, merkle_root_multisig_ism
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
   --signing-key $CARDANO_SIGNING_KEY \
@@ -487,7 +498,30 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   --lovelace 15000000
 ```
 
-### 4.3 Verify Reference Script Deployment
+### 4.3 Parametrize validator_announce
+
+`validator_announce` is parameterized on `(mailbox_policy_id, mailbox_domain)`,
+so its script only exists once a mailbox does. `init all` does not derive it —
+this does, and it submits no transaction:
+
+```bash
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+./cli/target/release/hyperlane-cardano \
+  --signing-key $CARDANO_SIGNING_KEY \
+  --network $NETWORK \
+  init validator-announce
+```
+
+It writes `deployments/$NETWORK/validator_announce_applied.plutus` and records
+the applied parameters in `deployment_info.json`, which is what
+`deploy reference-script --script validator_announce` then reads. Run it before
+Phase 4 on a fresh deployment; `reference-scripts-all` needs it in place.
+
+The domain comes from the **live mailbox datum**, not from the configured
+network, so a mailbox on an unexpected domain cannot silently yield a
+`validator_announce` that does not match it.
+
+### 4.4 Verify Reference Script Deployment
 
 The CLI automatically saves the reference script UTXOs to `deployment_info.json`. You can verify the deployment:
 
@@ -1598,6 +1632,38 @@ Two things routinely catch people re-deriving this arithmetic:
 
 ### Common Issues
 
+#### Validator loops on "Attempting self announce" and never signs
+
+**Symptom**: the validator repeats *Checking for validator announcement* →
+*Attempting self announce* → `Failed to announce validator`, and never reaches
+the checkpoint loop. Often with
+`Invalid UTXO reference format ''. Expected 'tx_hash#output_index'`.
+
+**Cause**: `announce()` requires the `validator_announce` **reference script**,
+and there is none. Either it was never deployed (older `reference-scripts-all`
+omitted it) or `CARDANO_VA_REF_UTXO` is empty in the environment — an unset
+`${VAR}` substitutes to an empty string, which used to read as *configured* and
+produce the UTXO-format error instead of a message about the missing script.
+
+**Solution**:
+
+```bash
+# 1. derive and record the applied script (no transaction)
+$CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK init validator-announce
+
+# 2. deploy its reference script (~9 ADA)
+BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
+  $CLI --signing-key $CARDANO_SIGNING_KEY --network $NETWORK \
+  deploy reference-script --script validator_announce
+
+# 3. point the agents at it
+#    CARDANO_VA_REF_UTXO=<tx_hash>#0
+```
+
+A validator only announces when its configured storage location differs from
+what is already announced on-chain, so this stays invisible until a fresh
+deployment or a storage-location change.
+
 #### "UTXO not found"
 
 **Cause**: Blockfrost cache may be stale after recent transactions.
@@ -1826,7 +1892,7 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `deploy info`                  | Show validator information                                                       |
 | `deploy generate-config`       | Generate deployment configuration                                                |
 | `deploy reference-script`      | Deploy single reference script                                                   |
-| `deploy reference-scripts-all` | Deploy reference scripts for mailbox + default ISM + every `alt_isms[]` entry     |
+| `deploy reference-scripts-all` | Deploy reference scripts for mailbox + IGP + validator_announce + default ISM + every `alt_isms[]` entry |
 
 ### Init Commands
 
@@ -1837,6 +1903,7 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `init igp`       | Initialize the Interchain Gas Paymaster (not covered by `init all`)                                          |
 | `init recipient` | Initialize a recipient contract                                                                              |
 | `init all`       | Initialize mailbox + default ISM (optionally configure ISM validators + validator announce too); does NOT init IGP |
+| `init validator-announce` | Apply mailbox parameters to `validator_announce` and record them (no transaction) — required before its reference script can be deployed |
 | `init status`    | Show initialization status                                                                                   |
 
 ### Mailbox Commands
