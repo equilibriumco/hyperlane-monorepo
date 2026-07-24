@@ -179,7 +179,7 @@ impl CardanoMailbox {
 
         // First try parsing as JSON (may already be JSON from some API responses)
         if let Ok(datum_json) = serde_json::from_str::<Value>(inline_datum) {
-            return self.parse_mailbox_datum_json(&datum_json);
+            return Self::parse_mailbox_datum_json(&datum_json);
         }
 
         // If inline_datum is CBOR hex (starts with hex chars), fetch JSON via data_hash
@@ -203,11 +203,16 @@ impl CardanoMailbox {
         // Blockfrost wraps the datum in a `json_value` field
         let inner_json = datum_json.get("json_value").unwrap_or(&datum_json);
 
-        self.parse_mailbox_datum_json(inner_json)
+        Self::parse_mailbox_datum_json(inner_json)
     }
 
     /// Parse mailbox datum from Blockfrost's JSON format
-    fn parse_mailbox_datum_json(&self, json: &Value) -> ChainResult<MailboxDatum> {
+    /// Parse a `MailboxDatum` from Blockfrost's Plutus JSON.
+    ///
+    /// Field order matches the Aiken type, `version` first:
+    /// `[version, local_domain, default_ism, owner, outbound_nonce,
+    /// merkle_tree, processed_tree_root]`.
+    fn parse_mailbox_datum_json(json: &Value) -> ChainResult<MailboxDatum> {
         // Blockfrost returns datum as JSON with Plutus data structure
         // Format: { "fields": [...], "constructor": N }
         let fields = json
@@ -273,7 +278,7 @@ impl CardanoMailbox {
 
         // Parse merkle_tree (field 5) - nested MerkleTreeState structure
         // Format: { "constructor": 0, "fields": [{ "list": [...branches...] }, { "int": count }] }
-        let merkle_tree = self.parse_merkle_tree_state(fields.get(5).ok_or_else(|| {
+        let merkle_tree = Self::parse_merkle_tree_state(fields.get(5).ok_or_else(|| {
             ChainCommunicationError::from_other_str("Missing merkle_tree in mailbox datum")
         })?)?;
 
@@ -304,7 +309,7 @@ impl CardanoMailbox {
     }
 
     /// Parse MerkleTreeState from Blockfrost's JSON format
-    fn parse_merkle_tree_state(&self, json: &Value) -> ChainResult<MerkleTreeState> {
+    fn parse_merkle_tree_state(json: &Value) -> ChainResult<MerkleTreeState> {
         // MerkleTreeState format: { "constructor": 0, "fields": [branches_list, count] }
         let fields = json
             .get("fields")
@@ -367,14 +372,6 @@ impl CardanoMailbox {
         Ok(MerkleTreeState { branches, count })
     }
 
-    /// Returns the merkle tree state from the mailbox datum.
-    ///
-    /// Returns: (tree, block_height)
-    /// - tree: IncrementalMerkle with actual branches from the datum
-    /// - block_height: Current finalized block height
-    ///
-    /// The Aiken contracts now store the full branch state (32 branches × 32 bytes)
-    /// in the datum, enabling proper merkle tree reconstruction.
     /// The merkle tree as the mailbox holds it *right now*, with the indexing
     /// tip. Use only where the live view is what is wanted; anything that gets
     /// signed or attested must go through [`Self::tree_at_reorg_period`].
@@ -765,9 +762,17 @@ mod tests {
     use hyperlane_core::accumulator::INITIAL_ROOT;
     use serde_json::json;
 
-    /// Helper to create a mock mailbox datum JSON for testing
-    /// Now uses nested MerkleTreeState structure with branches
+    const TEST_DEFAULT_ISM: &str = "1111111111111111111111111111111111111111111111111111111a";
+    const TEST_OWNER: &str = "2222222222222222222222222222222222222222222222222222222b";
+    const TEST_SMT_ROOT: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    /// A mailbox datum exactly as the Aiken type lays it out, `version` first.
+    ///
+    /// `version` is a parameter rather than a constant so a test can give it a
+    /// value distinguishable from `local_domain` — the two are adjacent ints,
+    /// and reading one where the other belongs is otherwise invisible.
     fn create_test_mailbox_datum_json(
+        version: u32,
         local_domain: u32,
         outbound_nonce: u32,
         branches: &[[u8; 32]],
@@ -781,9 +786,10 @@ mod tests {
         json!({
             "constructor": 0,
             "fields": [
+                {"int": version},
                 {"int": local_domain},
-                {"bytes": "00000000000000000000000000000000000000000000000000000000"},  // default_ism
-                {"bytes": "00000000000000000000000000000000000000000000000000000000"},  // owner
+                {"bytes": TEST_DEFAULT_ISM},
+                {"bytes": TEST_OWNER},
                 {"int": outbound_nonce},
                 {
                     "constructor": 0,
@@ -791,9 +797,14 @@ mod tests {
                         {"list": branches_list},
                         {"int": merkle_count}
                     ]
-                }
+                },
+                {"bytes": TEST_SMT_ROOT}
             ]
         })
+    }
+
+    fn parse(datum: &serde_json::Value) -> MailboxDatum {
+        CardanoMailbox::parse_mailbox_datum_json(datum).expect("datum should parse")
     }
 
     /// Helper to create zero branches (32 zero hashes)
@@ -841,60 +852,86 @@ mod tests {
         }
     }
 
+    /// Every field, read through the real parser. Asserting on all of them at
+    /// once is what makes a layout shift show up: adding a field moves each
+    /// subsequent one, and a test that checks a single field would keep passing
+    /// for the fields it does not look at.
     #[test]
-    fn test_parse_mailbox_datum_extracts_merkle_tree_state() {
-        // Create a test datum with known branches
+    fn parses_every_field_at_its_own_offset() {
         let mut branches = zero_branches();
-        branches[0] = [0xab; 32]; // Set first branch to a known value
+        branches[0] = [0xab; 32];
 
-        let datum_json = create_test_mailbox_datum_json(2003, 0, &branches, 1);
+        let datum = parse(&create_test_mailbox_datum_json(0, 2003, 7, &branches, 42));
 
-        // Extract the MerkleTreeState from the JSON
-        let fields = datum_json.get("fields").unwrap().as_array().unwrap();
-        let merkle_tree_json = fields.get(4).unwrap();
-        let merkle_fields = merkle_tree_json.get("fields").unwrap().as_array().unwrap();
-
-        // Extract branches list
-        let branches_list = merkle_fields
-            .get(0)
-            .and_then(|f| f.get("list"))
-            .and_then(|l| l.as_array())
-            .unwrap();
-
-        // Verify first branch
-        let first_branch_hex = branches_list
-            .get(0)
-            .and_then(|b| b.get("bytes"))
-            .and_then(|b| b.as_str())
-            .unwrap();
-        assert_eq!(first_branch_hex, hex::encode([0xab; 32]));
-
-        // Extract count
-        let count = merkle_fields
-            .get(1)
-            .and_then(|f| f.get("int"))
-            .and_then(|i| i.as_u64())
-            .unwrap() as u32;
-        assert_eq!(count, 1);
+        assert_eq!(datum.local_domain, 2003);
+        assert_eq!(
+            datum.default_ism,
+            hex::decode(TEST_DEFAULT_ISM).unwrap()[..]
+        );
+        assert_eq!(datum.owner, hex::decode(TEST_OWNER).unwrap()[..]);
+        assert_eq!(datum.outbound_nonce, 7);
+        assert_eq!(datum.merkle_tree.count, 42);
+        assert_eq!(datum.merkle_tree.branches[0], [0xab; 32]);
+        assert_eq!(
+            datum.processed_tree_root,
+            hex::decode(TEST_SMT_ROOT).unwrap()[..]
+        );
     }
 
+    /// The regression this file previously had no guard for. `version` was
+    /// added ahead of `local_domain`, and the parser kept reading the domain
+    /// from field 0 — silently yielding the version number instead.
+    ///
+    /// A version equal to the domain would let that bug pass, so they differ.
     #[test]
-    fn test_parse_mailbox_datum_extracts_merkle_count() {
-        let branches = zero_branches();
-        let datum_json = create_test_mailbox_datum_json(2003, 5, &branches, 42);
+    fn local_domain_is_read_past_the_version_field() {
+        let datum = parse(&create_test_mailbox_datum_json(
+            0,
+            2003,
+            0,
+            &zero_branches(),
+            0,
+        ));
 
-        let fields = datum_json.get("fields").unwrap().as_array().unwrap();
-        let merkle_tree_json = fields.get(4).unwrap();
-        let merkle_fields = merkle_tree_json.get("fields").unwrap().as_array().unwrap();
+        assert_eq!(
+            datum.local_domain, 2003,
+            "local_domain must come from field 1; field 0 is the datum layout version"
+        );
+    }
 
-        // Extract merkle_count (field 1 of MerkleTreeState)
-        let merkle_count = merkle_fields
-            .get(1)
-            .and_then(|f| f.get("int"))
-            .and_then(|i| i.as_u64())
-            .unwrap() as u32;
+    /// A future migration bumps `version` without touching anything else, so a
+    /// parser anchored to the wrong field would start returning the new version
+    /// as the domain.
+    #[test]
+    fn bumping_the_version_does_not_change_the_domain() {
+        let at_v0 = parse(&create_test_mailbox_datum_json(
+            0,
+            2003,
+            0,
+            &zero_branches(),
+            0,
+        ));
+        let at_v1 = parse(&create_test_mailbox_datum_json(
+            1,
+            2003,
+            0,
+            &zero_branches(),
+            0,
+        ));
 
-        assert_eq!(merkle_count, 42);
+        assert_eq!(at_v0.local_domain, at_v1.local_domain);
+    }
+
+    /// Datums shorter than the current layout are rejected rather than parsed
+    /// into whatever the offsets happen to land on.
+    #[test]
+    fn a_truncated_datum_is_rejected() {
+        let truncated = json!({
+            "constructor": 0,
+            "fields": [{"int": 0}, {"int": 2003}, {"bytes": TEST_DEFAULT_ISM}]
+        });
+
+        assert!(CardanoMailbox::parse_mailbox_datum_json(&truncated).is_err());
     }
 
     #[test]
