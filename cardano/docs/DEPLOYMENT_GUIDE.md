@@ -628,6 +628,16 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 
 This applies two parameters — `verified_message_nft_policy` and `owner` (the owner defaults to the signing key's public key hash; override with `--owner <pkh>`) — to the `greeting` validator, then deploys the **three-UTXO canonical-config pattern** over **two transactions**:
 
+> **Leave `--verified-message-nft-policy` alone.** It defaults to the mailbox's
+> applied `verified_message_nft_policy`, which is what you want. Pass it only
+> when the mailbox is absent from `deployment_info.json`. Supplying the wrong
+> value — the mailbox policy id, say — produces a recipient parameterized
+> against an NFT policy the relayer never mints under, so every delivery to it
+> fails inside the recipient with no indication that the parameter is the cause.
+> The flag was previously spelled `--mailbox-hash`, which invited exactly that
+> mistake; the old spelling still works as an alias.
+
+
 - **TX1** funds an ADA-only "init-signal" UTXO at the recipient's script address.
 - **TX2** spends that UTXO with the `Init` redeemer (owner-signed), mints the canonical config NFT and the state NFT, and creates the three outputs.
 
@@ -1901,7 +1911,7 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | `init mailbox`   | Initialize mailbox contract                                                                                 |
 | `init ism`       | Initialize an ISM instance (`--module-type` selects/adds a flavour — see [Dual-ISM](#34-deploying-both-ism-flavours-dual-ism)) |
 | `init igp`       | Initialize the Interchain Gas Paymaster (not covered by `init all`)                                          |
-| `init recipient` | Initialize a recipient contract                                                                              |
+| `init recipient` | Initialize a recipient contract (`--verified-message-nft-policy` overrides the policy it is parameterized with; normally derived from the mailbox — see below) |
 | `init all`       | Initialize mailbox + default ISM (optionally configure ISM validators + validator announce too); does NOT init IGP |
 | `init validator-announce` | Apply mailbox parameters to `validator_announce` and record them (no transaction) — required before its reference script can be deployed |
 | `init status`    | Show initialization status                                                                                   |
@@ -1912,6 +1922,23 @@ After deployment, your `deployment_info.json` will contain addresses like:
 | ------------------------- | ----------------------------- |
 | `mailbox set-default-ism` | Update default ISM            |
 | `mailbox show`            | Display current configuration |
+
+### Message Commands
+
+| Command            | Description                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| `message dispatch` | Dispatch an arbitrary message to a remote domain from a wallet                                     |
+
+`message dispatch` is the generic outbound path; warp routes go through
+`warp transfer` instead. Two things to know:
+
+- **The sender cannot be chosen.** It is derived from the wallet UTXO the
+  transaction spends as `sender_ref`, so claiming to be someone else would mean
+  being able to spend their UTXO. A wallet is stamped `0x00000000 || key hash`.
+- **`--gas-limit` is what pays the IGP.** Omit it and the message dispatches
+  with no interchain gas payment at all — a valid transaction that no relayer
+  will carry until someone pays for it with `igp pay-for-gas`. Nothing on-chain
+  ties a dispatch to a payment; bundling them is a client convention.
 
 ### ISM Commands
 
