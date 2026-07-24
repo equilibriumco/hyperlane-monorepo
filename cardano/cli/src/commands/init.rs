@@ -89,9 +89,11 @@ enum InitCommands {
     /// TX2: Spend the init-signal (Init redeemer), mint canonical config NFT + state NFTs,
     ///      create all three output UTXOs.
     Recipient {
-        /// Mailbox policy ID (required to parameterize the recipient)
-        #[arg(long)]
-        mailbox_hash: Option<String>,
+        /// verified_message_nft policy ID the recipient is parameterized with.
+        /// Defaults to the mailbox's applied verified_message_nft_policy; only
+        /// pass this when the mailbox is absent from deployment_info.json.
+        #[arg(long, alias = "mailbox-hash")]
+        verified_message_nft_policy: Option<String>,
 
         /// Custom ISM script hash (optional, uses default if not specified)
         #[arg(long)]
@@ -250,7 +252,7 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
             .await
         }
         InitCommands::Recipient {
-            mailbox_hash,
+            verified_message_nft_policy,
             custom_ism,
             custom_ism_policy,
             domain,
@@ -265,7 +267,7 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
         } => {
             init_recipient(
                 ctx,
-                mailbox_hash,
+                verified_message_nft_policy,
                 custom_ism,
                 custom_ism_policy,
                 domain,
@@ -1233,7 +1235,7 @@ fn parse_oracle_config(s: &str) -> Result<(u32, u64, u64, u64)> {
 
 async fn init_recipient(
     ctx: &CliContext,
-    mailbox_hash: Option<String>,
+    verified_message_nft_policy: Option<String>,
     custom_ism: Option<String>,
     custom_ism_policy: Option<String>,
     domain: Option<u32>,
@@ -1275,7 +1277,7 @@ async fn init_recipient(
         .as_ref()
         .ok_or_else(|| anyhow!("Mailbox not found in deployment info"))?;
 
-    let verified_msg_nft_policy = match mailbox_hash {
+    let verified_msg_nft_policy = match verified_message_nft_policy {
         Some(h) => h,
         None => mailbox_info
             .applied_parameters
@@ -1284,7 +1286,7 @@ async fn init_recipient(
             .map(|p| p.value.clone())
             .ok_or_else(|| {
                 anyhow!(
-                    "verified_message_nft_policy not found in mailbox params. Use --mailbox-hash"
+                    "verified_message_nft_policy not found in mailbox params. Pass --verified-message-nft-policy"
                 )
             })?,
     };
