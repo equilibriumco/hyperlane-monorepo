@@ -16,7 +16,6 @@ use hyperlane_core::{
 };
 use serde_json::Value;
 use std::fmt::{Debug, Formatter};
-use std::num::NonZeroU64;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
@@ -224,9 +223,9 @@ impl CardanoMailbox {
             ));
         }
 
-        // Parse local_domain (field 0)
+        // Parse local_domain (field 1 — field 0 is the datum layout version)
         let local_domain = fields
-            .first()
+            .get(1)
             .and_then(|f| f.get("int"))
             .and_then(|i| i.as_u64())
             .ok_or_else(|| {
@@ -376,27 +375,117 @@ impl CardanoMailbox {
     ///
     /// The Aiken contracts now store the full branch state (32 branches × 32 bytes)
     /// in the datum, enabling proper merkle tree reconstruction.
-    pub async fn tree_and_tip(
-        &self,
-        lag: Option<NonZeroU64>,
-    ) -> ChainResult<(IncrementalMerkle, u32)> {
-        assert!(lag.is_none(), "Cardano always returns the finalized result");
-
+    /// The merkle tree as the mailbox holds it *right now*, with the indexing
+    /// tip. Use only where the live view is what is wanted; anything that gets
+    /// signed or attested must go through [`Self::tree_at_reorg_period`].
+    pub async fn live_tree_and_tip(&self) -> ChainResult<(IncrementalMerkle, u32)> {
         // Fetch mailbox UTXO and tip in parallel (independent queries)
         let (utxo, tip) =
             tokio::try_join!(self.find_mailbox_utxo(), self.finalized_block_number(),)?;
         let datum = self.parse_mailbox_datum(&utxo).await?;
 
-        // Build an IncrementalMerkle tree from the datum's full branch state
+        Ok((Self::tree_from_datum(&datum), tip))
+    }
+
+    /// How many blocks behind the tip to read, given a configured reorg period.
+    ///
+    /// Never shallower than `confirmation_block_delay`: below that the
+    /// provider's asset index may not have caught up, so a shallower read
+    /// would fail to find state that exists rather than read older state.
+    ///
+    /// Ouroboros Praos offers no finality tags, so a `Tag` reorg period is
+    /// rejected rather than silently reinterpreted as some block count.
+    fn read_depth(reorg_period: &ReorgPeriod, confirmation_block_delay: u32) -> ChainResult<u32> {
+        let blocks = match reorg_period {
+            ReorgPeriod::None => 0,
+            ReorgPeriod::Blocks(blocks) => blocks.get(),
+            ReorgPeriod::Tag(_) => {
+                return Err(ChainCommunicationError::InvalidReorgPeriod(
+                    reorg_period.clone(),
+                ))
+            }
+        };
+        Ok(blocks.max(confirmation_block_delay))
+    }
+
+    /// The merkle tree as of `reorg_period` blocks behind the tip, paired with
+    /// the height the state actually came from.
+    ///
+    /// Reading behind the tip is what makes a signed checkpoint safe: a root
+    /// taken from the live tip can be rolled back out of existence after it has
+    /// been signed, and a signature cannot be withdrawn.
+    pub async fn tree_at_reorg_period(
+        &self,
+        reorg_period: &ReorgPeriod,
+    ) -> ChainResult<(IncrementalMerkle, u32)> {
+        let depth = Self::read_depth(reorg_period, self.conf.confirmation_block_delay)?;
+        let tip = self
+            .provider
+            .get_tip()
+            .await
+            .map_err(ChainCommunicationError::from_other)?;
+        self.tree_at_height(tip.saturating_sub(depth as u64)).await
+    }
+
+    /// The merkle tree as the mailbox held it at `height`.
+    ///
+    /// Cardano exposes only the current UTXO set, so past state has to be
+    /// reconstructed: find the last transaction that moved the mailbox state
+    /// NFT at or before `height`, and read the datum it produced. This is the
+    /// hand-rolled equivalent of an `eth_call` pinned to a block.
+    pub async fn tree_at_height(&self, height: u64) -> ChainResult<(IncrementalMerkle, u32)> {
+        let asset = format!(
+            "{}{}",
+            self.conf.mailbox_policy_id, self.conf.mailbox_asset_name_hex
+        );
+
+        let tx = self
+            .provider
+            .find_asset_tx_at_or_before(&asset, height)
+            .await
+            .map_err(ChainCommunicationError::from_other)?
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "No mailbox state found at or before block {height}"
+                ))
+            })?;
+
+        let utxos = self
+            .provider
+            .get_transaction_utxos(&tx.tx_hash)
+            .await
+            .map_err(ChainCommunicationError::from_other)?;
+
+        let utxo = utxos
+            .outputs
+            .into_iter()
+            .find(|output| output.value.iter().any(|value| value.unit == asset))
+            .ok_or_else(|| {
+                ChainCommunicationError::from_other_str(&format!(
+                    "Transaction {} moved the mailbox state NFT but produced no output holding it",
+                    tx.tx_hash
+                ))
+            })?;
+
+        let datum = self.parse_mailbox_datum(&utxo).await?;
+        debug!(
+            height = tx.block_height,
+            requested = height,
+            count = datum.merkle_tree.count,
+            "Read mailbox state behind the tip"
+        );
+
+        Ok((Self::tree_from_datum(&datum), tx.block_height as u32))
+    }
+
+    fn tree_from_datum(datum: &MailboxDatum) -> IncrementalMerkle {
         let mut branch = [H256::zero(); TREE_DEPTH];
         for (i, datum_branch) in datum.merkle_tree.branches.iter().enumerate() {
             if i < TREE_DEPTH {
                 branch[i] = H256::from_slice(datum_branch);
             }
         }
-        let count = datum.merkle_tree.count as usize;
-
-        Ok((IncrementalMerkle::new(branch, count), tip))
+        IncrementalMerkle::new(branch, datum.merkle_tree.count as usize)
     }
 }
 
@@ -425,9 +514,8 @@ impl Debug for CardanoMailbox {
 
 #[async_trait]
 impl Mailbox for CardanoMailbox {
-    async fn count(&self, _reorg_period: &ReorgPeriod) -> ChainResult<u32> {
-        // For Cardano, we ignore reorg_period as it always returns finalized results
-        self.tree_and_tip(None)
+    async fn count(&self, reorg_period: &ReorgPeriod) -> ChainResult<u32> {
+        self.tree_at_reorg_period(reorg_period)
             .await
             .map(|(tree, _)| tree.count() as u32)
     }
@@ -711,6 +799,46 @@ mod tests {
     /// Helper to create zero branches (32 zero hashes)
     fn zero_branches() -> Vec<[u8; 32]> {
         vec![[0u8; 32]; TREE_DEPTH]
+    }
+
+    /// The depth a checkpoint read backs off by. Getting this wrong is not a
+    /// wrong number on a dashboard — too shallow means signing a root that can
+    /// still be rolled back out from under the signature.
+    mod read_depth {
+        use super::*;
+        use std::num::NonZeroU32;
+
+        const DELAY: u32 = 5;
+
+        #[test]
+        fn configured_period_is_honored_when_deeper_than_the_indexing_delay() {
+            let period = ReorgPeriod::Blocks(NonZeroU32::new(20).unwrap());
+            assert_eq!(CardanoMailbox::read_depth(&period, DELAY).unwrap(), 20);
+        }
+
+        /// Below the indexing delay the provider may not have the block yet, so
+        /// a shallower read fails to find state rather than reading older state.
+        #[test]
+        fn indexing_delay_is_the_floor() {
+            let period = ReorgPeriod::Blocks(NonZeroU32::new(2).unwrap());
+            assert_eq!(CardanoMailbox::read_depth(&period, DELAY).unwrap(), DELAY);
+        }
+
+        #[test]
+        fn absent_period_still_backs_off_by_the_delay() {
+            assert_eq!(
+                CardanoMailbox::read_depth(&ReorgPeriod::None, DELAY).unwrap(),
+                DELAY
+            );
+        }
+
+        /// Praos has no finality tags. Accepting one would mean silently
+        /// choosing a block count the operator never asked for.
+        #[test]
+        fn finality_tags_are_rejected_rather_than_reinterpreted() {
+            let period = ReorgPeriod::Tag("finalized".into());
+            assert!(CardanoMailbox::read_depth(&period, DELAY).is_err());
+        }
     }
 
     #[test]

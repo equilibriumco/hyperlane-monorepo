@@ -797,6 +797,68 @@ impl BlockfrostProvider {
         Ok(result)
     }
 
+    /// The real chain tip, without the indexing lag `get_latest_block` applies.
+    ///
+    /// Only for callers that subtract their own depth and so must not have one
+    /// subtracted for them.
+    #[instrument(skip(self))]
+    pub async fn get_tip(&self) -> Result<u64, BlockfrostProviderError> {
+        self.rate_limit().await;
+        let block = self.with_timeout(self.api.blocks_latest()).await?;
+        Ok(block.height.unwrap_or(0) as u64)
+    }
+
+    /// The most recent transaction involving `asset` at or before `max_height`.
+    ///
+    /// Pages newest-first and returns on the first match, so the cost is set by
+    /// how far back `max_height` is rather than by how long the asset has
+    /// existed — unlike `get_asset_transactions`, which walks the whole history.
+    #[instrument(skip(self))]
+    pub async fn find_asset_tx_at_or_before(
+        &self,
+        asset: &str,
+        max_height: u64,
+    ) -> Result<Option<AddressTransaction>, BlockfrostProviderError> {
+        let mut page = 1;
+        const PAGE_SIZE: usize = 100;
+
+        loop {
+            self.rate_limit().await;
+            let pagination = Pagination::new(Order::Desc, page, PAGE_SIZE);
+
+            let txs = match self
+                .with_timeout(self.api.assets_transactions(asset, pagination))
+                .await
+            {
+                Ok(txs) => txs,
+                Err(e) => {
+                    let error_str = format!("{e:?}");
+                    if error_str.contains("404") || error_str.contains("Not Found") {
+                        return Ok(None);
+                    }
+                    return Err(e);
+                }
+            };
+
+            let page_len = txs.len();
+            for tx in txs {
+                if tx.block_height as u64 <= max_height {
+                    return Ok(Some(AddressTransaction {
+                        tx_hash: tx.tx_hash,
+                        block_height: tx.block_height as u64,
+                        block_time: tx.block_time as u64,
+                        tx_index: tx.tx_index as u32,
+                    }));
+                }
+            }
+
+            if page_len < PAGE_SIZE {
+                return Ok(None);
+            }
+            page += 1;
+        }
+    }
+
     /// Get transaction UTXO details
     #[instrument(skip(self))]
     pub async fn get_transaction_utxos(

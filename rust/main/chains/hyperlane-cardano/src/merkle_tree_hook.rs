@@ -67,11 +67,11 @@ impl MerkleTreeHook for CardanoMerkleTreeHook {
     #[instrument(skip(self))]
     async fn latest_checkpoint(
         &self,
-        _reorg_period: &ReorgPeriod,
+        reorg_period: &ReorgPeriod,
     ) -> ChainResult<CheckpointAtBlock> {
-        // Get the tree state from the mailbox datum
-        // The Aiken contracts now store full branch state, so tree.root() is correct
-        let (tree, block_height) = self.mailbox.tree_and_tip(None).await?;
+        // Read behind the tip: this checkpoint gets signed, and a signature over
+        // a root that later gets rolled back cannot be withdrawn.
+        let (tree, block_height) = self.mailbox.tree_at_reorg_period(reorg_period).await?;
 
         let root = tree.root();
         let index = tree.count().saturating_sub(1) as u32;
@@ -95,10 +95,8 @@ impl MerkleTreeHook for CardanoMerkleTreeHook {
     }
 
     #[instrument(skip(self))]
-    async fn tree(&self, _reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
-        // Get the tree state from the mailbox
-        // The Aiken contracts now store full branch state, so the tree is complete
-        let (tree, block_height) = self.mailbox.tree_and_tip(None).await?;
+    async fn tree(&self, reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
+        let (tree, block_height) = self.mailbox.tree_at_reorg_period(reorg_period).await?;
 
         Ok(IncrementalMerkleAtBlock {
             tree,
@@ -107,15 +105,23 @@ impl MerkleTreeHook for CardanoMerkleTreeHook {
     }
 
     #[instrument(skip(self))]
-    async fn count(&self, _reorg_period: &ReorgPeriod) -> ChainResult<u32> {
-        let (tree, _) = self.mailbox.tree_and_tip(None).await?;
+    async fn count(&self, reorg_period: &ReorgPeriod) -> ChainResult<u32> {
+        let (tree, _) = self.mailbox.tree_at_reorg_period(reorg_period).await?;
         Ok(tree.count() as u32)
     }
 
-    async fn latest_checkpoint_at_block(&self, _height: u64) -> ChainResult<CheckpointAtBlock> {
-        // Cardano doesn't easily support querying at specific block heights
-        // For now, return the latest checkpoint
-        self.latest_checkpoint(&ReorgPeriod::None).await
+    async fn latest_checkpoint_at_block(&self, height: u64) -> ChainResult<CheckpointAtBlock> {
+        let (tree, block_height) = self.mailbox.tree_at_height(height).await?;
+
+        Ok(CheckpointAtBlock {
+            checkpoint: Checkpoint {
+                merkle_tree_hook_address: self.address(),
+                mailbox_domain: self.domain.id(),
+                root: tree.root(),
+                index: tree.count().saturating_sub(1) as u32,
+            },
+            block_height: Some(block_height as u64),
+        })
     }
 }
 

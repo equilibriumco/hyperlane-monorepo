@@ -509,7 +509,7 @@ impl Indexer<HyperlaneMessage> for CardanoMailboxIndexer {
 impl SequenceAwareIndexer<HyperlaneMessage> for CardanoMailboxIndexer {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
         self.mailbox
-            .tree_and_tip(None)
+            .live_tree_and_tip()
             .await
             .map(|(tree, tip)| (Some(tree.count() as u32), tip))
     }
