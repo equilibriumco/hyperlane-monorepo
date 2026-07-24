@@ -19,5 +19,12 @@
     "tx_hash": "849f5c62f12bd2d93b9c9852a0e4bb590e3acabbed27a39ff2eb247ade8a745a",
     "output_index": 0,
     "lovelace": 18000000
+  },
+  {
+    "script_name": "validator_announce",
+    "script_hash": "092a77de62c6fe005e51dbe8b2c23aaec35a21d02be6e0f51e4e74ec",
+    "tx_hash": "6d090874f3162bc7cd5e5a9452d9ce9454345ab23d541eba608c9f336055e539",
+    "output_index": 0,
+    "lovelace": 9000000
   }
 ]

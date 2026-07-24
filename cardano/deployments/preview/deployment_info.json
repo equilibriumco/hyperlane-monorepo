@@ -94,6 +94,11 @@
         "description": "Local Hyperlane domain of the mailbox"
       }
     ],
+    "referenceScriptUtxo": {
+      "txHash": "6d090874f3162bc7cd5e5a9452d9ce9454345ab23d541eba608c9f336055e539",
+      "outputIndex": 0,
+      "lovelace": 9000000
+    },
     "initialized": true
   },
   "warp_routes": [
