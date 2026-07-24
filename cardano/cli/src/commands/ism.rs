@@ -9,6 +9,7 @@ use pallas_primitives::MaybeIndefArray;
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::build_migrate_redeemer;
 use crate::utils::context::CliContext;
+use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
 
 /// Blueprint validator title for the deployed ISM's script, chosen by the ISM's
 /// module_type so spends attach the correct script (merkleroot vs messageid).
@@ -461,7 +462,7 @@ pub(crate) async fn set_validators(
 
     // Build the transaction using pallas_txbuilder
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let ism_address = pallas_addresses::Address::from_bech32(&ism_utxo.address)
@@ -527,10 +528,7 @@ pub(crate) async fn set_validators(
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // ISM script
         .script(ScriptKind::PlutusV3, ism_script_bytes)
@@ -549,6 +547,19 @@ pub(crate) async fn set_validators(
     }
 
     // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(ism_tx_hash),
+                ism_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -792,7 +803,7 @@ pub(crate) async fn set_threshold(
 
     // Build the transaction using pallas_txbuilder
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let ism_address = pallas_addresses::Address::from_bech32(&ism_utxo.address)
@@ -866,10 +877,7 @@ pub(crate) async fn set_threshold(
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -904,6 +912,19 @@ pub(crate) async fn set_threshold(
     }
 
     // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(ism_tx_hash),
+                ism_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1305,7 +1326,7 @@ async fn migrate(
     let validity_end = current_slot + 7200;
 
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Build new script address from the provided hash
     let new_hash_array: [u8; 28] = new_hash_bytes
@@ -1371,11 +1392,8 @@ async fn migrate(
         .output(ism_output)
         .add_spend_redeemer(
             Input::new(Hash::new(ism_tx_hash), ism_utxo.output_index as u64),
-            redeemer_cbor,
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -1404,6 +1422,18 @@ async fn migrate(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(ism_tx_hash),
+                ism_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1529,9 +1559,9 @@ fn parse_validators_from_datum(
 fn parse_ism_datum_full(
     datum: &serde_json::Value,
 ) -> Result<(Vec<(u32, Vec<Vec<u8>>)>, Vec<(u32, u32)>, Vec<u8>)> {
-    let hex_str = datum.as_str().ok_or_else(|| {
-        anyhow!("ISM datum must be CBOR hex, got: {datum}")
-    })?;
+    let hex_str = datum
+        .as_str()
+        .ok_or_else(|| anyhow!("ISM datum must be CBOR hex, got: {datum}"))?;
     parse_ism_datum_from_cbor(hex_str)
 }
 
@@ -1826,9 +1856,7 @@ mod datum_roundtrip_tests {
         let datum = super::build_ism_datum(
             &validators
                 .iter()
-                .map(|(d, ks)| {
-                    (*d, ks.iter().map(|k| hex::decode(k).unwrap()).collect())
-                })
+                .map(|(d, ks)| (*d, ks.iter().map(|k| hex::decode(k).unwrap()).collect()))
                 .collect::<Vec<(u32, Vec<Vec<u8>>)>>(),
             &thresholds,
             &owner_bytes,

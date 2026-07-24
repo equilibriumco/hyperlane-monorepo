@@ -12,12 +12,12 @@ use crate::commands::igp::{
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{
     build_enroll_remote_route_redeemer, build_igp_datum, build_mailbox_datum,
-    build_set_destination_gas_redeemer,
     build_mailbox_dispatch_redeemer, build_migrate_redeemer, build_mint_redeemer,
-    build_transfer_remote_redeemer, build_warp_route_collateral_datum,
-    build_warp_route_collateral_datum_with_routes, build_warp_route_native_datum,
-    build_warp_route_native_datum_with_routes, build_warp_route_synthetic_datum,
-    build_warp_route_synthetic_datum_with_routes, decode_plutus_datum, RemoteRoute,
+    build_set_destination_gas_redeemer, build_transfer_remote_redeemer,
+    build_warp_route_collateral_datum, build_warp_route_collateral_datum_with_routes,
+    build_warp_route_native_datum, build_warp_route_native_datum_with_routes,
+    build_warp_route_synthetic_datum, build_warp_route_synthetic_datum_with_routes,
+    decode_plutus_datum, RemoteRoute,
 };
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
@@ -26,6 +26,7 @@ use crate::utils::plutus::{
     encode_script_hash_param, AppliedValidator,
 };
 use crate::utils::tx_builder::HyperlaneTxBuilder;
+use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
 use crate::utils::types::{ReferenceScriptUtxo, Utxo, WarpRouteDeployment};
 
 #[derive(Args)]
@@ -2151,8 +2152,7 @@ async fn transfer(
 
         // Build IGP redeemer (gas_amount = application gas; the contract adds
         // the destination's overhead on top)
-        let igp_redeemer =
-            build_pay_for_gas_redeemer(&hex::decode(&message_id)?, domain, gas_lim);
+        let igp_redeemer = build_pay_for_gas_redeemer(&hex::decode(&message_id)?, domain, gas_lim);
         let igp_redeemer_cbor = pallas_codec::minicbor::to_vec(&igp_redeemer)
             .map_err(|e| anyhow!("Failed to encode IGP redeemer: {:?}", e))?;
 
@@ -2309,7 +2309,7 @@ async fn transfer(
 
     // Build the transaction using pallas_txbuilder
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses
     let warp_addr = pallas_addresses::Address::from_bech32(&warp_utxo.address)?;
@@ -2451,6 +2451,23 @@ async fn transfer(
         fee_estimate + change
     };
 
+    let mut declared = vec![
+        (
+            RedeemerRef::Spend(Input::new(
+                Hash::new(warp_tx_hash),
+                warp_utxo.output_index as u64,
+            )),
+            warp_redeemer.clone(),
+        ),
+        (
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            mailbox_redeemer.clone(),
+        ),
+    ];
+
     let mut staging = StagingTransaction::new()
         // Fee input
         .input(Input::new(
@@ -2481,19 +2498,13 @@ async fn transfer(
         .add_spend_redeemer(
             Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64),
             warp_redeemer.clone(),
-            Some(ExUnits {
-                mem: 2_000_000,
-                steps: 1_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // Mailbox spend redeemer
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
             mailbox_redeemer.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // Cost model
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -2545,11 +2556,15 @@ async fn transfer(
             .add_spend_redeemer(
                 Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
                 igp_redeemer_cbor.clone(),
-                Some(ExUnits {
-                    mem: 5_000_000,
-                    steps: 2_000_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             );
+        declared.push((
+            RedeemerRef::Spend(Input::new(
+                Hash::new(igp_tx_hash),
+                igp_utxo.output_index as u64,
+            )),
+            igp_redeemer_cbor.clone(),
+        ));
 
         // Add IGP script via reference or inline
         if let Some(ref igp_deploy) = deployment.igp {
@@ -2658,12 +2673,10 @@ async fn transfer(
         let burn_redeemer = crate::utils::cbor::build_synthetic_burn_redeemer(amount as i64);
         staging = staging.add_mint_redeemer(
             Hash::new(mint_policy_bytes),
-            burn_redeemer,
-            Some(ExUnits {
-                mem: 500_000,
-                steps: 200_000_000,
-            }),
+            burn_redeemer.clone(),
+            PLACEHOLDER_EX_UNITS,
         );
+        declared.push((RedeemerRef::Mint(mint_policy_bytes), burn_redeemer));
 
         // Load and add the minting policy script
         // The synthetic policy is bound to this route's code and state NFT.
@@ -2748,6 +2761,8 @@ async fn transfer(
     }
 
     // Build the transaction
+    let staging = calibrate_ex_units(&client, staging, declared).await?;
+
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -2978,7 +2993,9 @@ fn hash_pair(left: &str, right: &str) -> Result<String> {
 }
 
 /// Parse mailbox datum for transfer
-pub(crate) fn parse_mailbox_datum_for_transfer(datum: &serde_json::Value) -> Result<MailboxDataForTransfer> {
+pub(crate) fn parse_mailbox_datum_for_transfer(
+    datum: &serde_json::Value,
+) -> Result<MailboxDataForTransfer> {
     // Check if datum is a hex string (raw CBOR)
     if let Some(hex_str) = datum.as_str() {
         return parse_mailbox_datum_from_cbor_for_transfer(hex_str);
@@ -3423,7 +3440,7 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
 
     use pallas_addresses::Network;
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     let current_slot = client.get_latest_slot().await?;
     let validity_end = current_slot + 7200; // ~2 hours
@@ -3483,11 +3500,8 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
         .script(ScriptKind::PlutusV3, nft_script)
         .add_mint_redeemer(
             Hash::new(nft_policy_hash),
-            mint_redeemer_cbor,
-            Some(ExUnits {
-                mem: 1_000_000,
-                steps: 500_000_000,
-            }),
+            mint_redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .fee(fee_estimate)
@@ -3508,6 +3522,16 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
     staging = staging.disclosed_signer(Hash::new(payer_hash));
 
     // Build the transaction
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Mint(nft_policy_hash),
+            mint_redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
+
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -3810,7 +3834,7 @@ async fn migrate(
     let validity_end = current_slot + 7200;
 
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?
         .try_into()
@@ -3868,11 +3892,8 @@ async fn migrate(
         .output(migration_output)
         .add_spend_redeemer(
             Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64),
-            redeemer_cbor,
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -3906,6 +3927,19 @@ async fn migrate(
     if change > 1_500_000 {
         staging = staging.output(Output::new(payer_addr, change));
     }
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(warp_tx_hash),
+                warp_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
 
     let tx = staging
         .build_conway_raw()
@@ -3963,8 +3997,14 @@ mod datum_roundtrip_tests {
 
     fn routes() -> Vec<RemoteRoute> {
         vec![
-            RemoteRoute { domain: 11155111, router: "aa".repeat(32) },
-            RemoteRoute { domain: 2003, router: "bb".repeat(32) },
+            RemoteRoute {
+                domain: 11155111,
+                router: "aa".repeat(32),
+            },
+            RemoteRoute {
+                domain: 2003,
+                router: "bb".repeat(32),
+            },
         ]
     }
 
@@ -3979,7 +4019,10 @@ mod datum_roundtrip_tests {
         let (token_type, decimals, remote_decimals, parsed_routes, parsed_owner, total) =
             parse_warp_datum(&json).expect("parse");
 
-        assert!(matches!(token_type, WarpTokenTypeInfo::Native), "token_type");
+        assert!(
+            matches!(token_type, WarpTokenTypeInfo::Native),
+            "token_type"
+        );
         assert_eq!(decimals, 6, "decimals");
         assert_eq!(remote_decimals, 18, "remote_decimals");
         assert_eq!(parsed_owner, owner, "owner");
@@ -3987,7 +4030,11 @@ mod datum_roundtrip_tests {
         assert_eq!(parsed_routes.len(), 2, "route count");
         assert_eq!(parsed_routes[0].domain, 11155111);
         assert_eq!(parsed_routes[0].router, "aa".repeat(32));
-        assert_eq!(parse_destination_gas(&json).expect("gas"), gas, "destination_gas");
+        assert_eq!(
+            parse_destination_gas(&json).expect("gas"),
+            gas,
+            "destination_gas"
+        );
     }
 
     #[test]
@@ -3996,7 +4043,14 @@ mod datum_roundtrip_tests {
         let policy = "ee".repeat(28);
         let asset = "4354455354";
         let cbor = build_warp_route_collateral_datum_with_routes(
-            &policy, asset, 6, 18, &routes(), &owner, 7, &[],
+            &policy,
+            asset,
+            6,
+            18,
+            &routes(),
+            &owner,
+            7,
+            &[],
         )
         .expect("build");
         let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
@@ -4004,7 +4058,10 @@ mod datum_roundtrip_tests {
             parse_warp_datum(&json).expect("parse");
 
         match token_type {
-            WarpTokenTypeInfo::Collateral { policy_id, asset_name } => {
+            WarpTokenTypeInfo::Collateral {
+                policy_id,
+                asset_name,
+            } => {
                 assert_eq!(policy_id, policy, "token policy");
                 assert_eq!(asset_name, asset, "asset name");
             }
@@ -4021,7 +4078,13 @@ mod datum_roundtrip_tests {
         let owner = "0f".repeat(28);
         let minting = "1f".repeat(28);
         let cbor = build_warp_route_synthetic_datum_with_routes(
-            &minting, 6, 18, &routes(), &owner, 0, &[(2003, 5)],
+            &minting,
+            6,
+            18,
+            &routes(),
+            &owner,
+            0,
+            &[(2003, 5)],
         )
         .expect("build");
         let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
@@ -4034,7 +4097,10 @@ mod datum_roundtrip_tests {
             other => panic!("expected synthetic, got {other:?}"),
         }
         assert_eq!(parsed_owner, owner);
-        assert_eq!(parse_destination_gas(&json).expect("gas"), vec![(2003u32, 5i64)]);
+        assert_eq!(
+            parse_destination_gas(&json).expect("gas"),
+            vec![(2003u32, 5i64)]
+        );
     }
 
     /// decimals and remote_decimals are adjacent small ints, the pair most
@@ -4042,8 +4108,9 @@ mod datum_roundtrip_tests {
     /// swapping them scales transfers by 10^12.
     #[test]
     fn warp_decimals_are_not_transposed() {
-        let cbor = build_warp_route_native_datum_with_routes(6, 18, &routes(), &"01".repeat(28), 0, &[])
-            .expect("build");
+        let cbor =
+            build_warp_route_native_datum_with_routes(6, 18, &routes(), &"01".repeat(28), 0, &[])
+                .expect("build");
         let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
         let (_, decimals, remote_decimals, _, _, _) = parse_warp_datum(&json).expect("parse");
         assert_eq!((decimals, remote_decimals), (6, 18));

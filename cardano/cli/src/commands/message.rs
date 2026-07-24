@@ -14,6 +14,7 @@ use crate::utils::cbor::{normalize_datum, CborBuilder};
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{apply_validator_param, encode_script_hash_param};
 use crate::utils::tx_builder::HyperlaneTxBuilder;
+use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
 
 /// Auto-derived message infrastructure from deployment_info.json
 pub struct MessageInfra {
@@ -711,7 +712,7 @@ async fn dispatch(
     dry_run: bool,
 ) -> Result<()> {
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     use crate::commands::igp::{
         build_pay_for_gas_redeemer, calculate_gas_payment, get_igp_policy, parse_igp_datum,
@@ -720,7 +721,9 @@ async fn dispatch(
         compute_message_id_for_transfer, parse_mailbox_datum_for_transfer,
         update_merkle_tree_for_transfer,
     };
-    use crate::utils::cbor::{build_igp_datum, build_mailbox_datum, build_mailbox_dispatch_redeemer};
+    use crate::utils::cbor::{
+        build_igp_datum, build_mailbox_datum, build_mailbox_dispatch_redeemer,
+    };
 
     println!(
         "\n{}",
@@ -877,7 +880,8 @@ async fn dispatch(
         println!("  Overhead: {gas_overhead}");
         println!("  Payment: {igp_payment} lovelace");
 
-        let igp_redeemer = build_pay_for_gas_redeemer(&hex::decode(&message_id)?, destination, gas_lim);
+        let igp_redeemer =
+            build_pay_for_gas_redeemer(&hex::decode(&message_id)?, destination, gas_lim);
         let igp_redeemer = pallas_codec::minicbor::to_vec(&igp_redeemer)
             .map_err(|e| anyhow!("Failed to encode IGP redeemer: {e:?}"))?;
         let new_igp_datum = build_igp_datum(
@@ -885,9 +889,18 @@ async fn dispatch(
             &hex::encode(&beneficiary),
             &gas_oracles,
         )?;
-        Some((igp_utxo, igp_policy_id, igp_payment, igp_redeemer, new_igp_datum))
+        Some((
+            igp_utxo,
+            igp_policy_id,
+            igp_payment,
+            igp_redeemer,
+            new_igp_datum,
+        ))
     } else {
-        println!("\n  {}", "No --gas-limit: dispatching without paying interchain gas".yellow());
+        println!(
+            "\n  {}",
+            "No --gas-limit: dispatching without paying interchain gas".yellow()
+        );
         None
     };
 
@@ -967,11 +980,8 @@ async fn dispatch(
         .output(mailbox_output)
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
-            mailbox_redeemer,
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            mailbox_redeemer.clone(),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .fee(fee_estimate)
@@ -1009,10 +1019,7 @@ async fn dispatch(
             .add_spend_redeemer(
                 Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
                 igp_redeemer.clone(),
-                Some(ExUnits {
-                    mem: 5_000_000,
-                    steps: 2_000_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             );
 
         if let Some(rs) = deployment
@@ -1040,6 +1047,23 @@ async fn dispatch(
 
     staging = staging.output(Output::new(payer_addr, change));
 
+    let mut declared = vec![(
+        RedeemerRef::Spend(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        )),
+        mailbox_redeemer.clone(),
+    )];
+    if let Some((ref igp_utxo, _, _, ref igp_redeemer, _)) = igp_data {
+        let hash: [u8; 32] = hex::decode(&igp_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IGP tx hash"))?;
+        declared.push((
+            RedeemerRef::Spend(Input::new(Hash::new(hash), igp_utxo.output_index as u64)),
+            igp_redeemer.clone(),
+        ));
+    }
+    let staging = calibrate_ex_units(&client, staging, declared).await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {e:?}"))?;

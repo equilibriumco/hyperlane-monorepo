@@ -3,14 +3,143 @@
 use anyhow::{anyhow, Result};
 use pallas_addresses::Network;
 use pallas_crypto::hash::Hash;
+use pallas_traverse::MultiEraTx;
 use pallas_txbuilder::{
     BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
 };
+use std::collections::HashMap;
 
 use super::blockfrost::BlockfrostClient;
 use super::cbor::build_mint_redeemer;
 use super::crypto::Keypair;
 use super::types::Utxo;
+
+/// Headroom over the measured cost, covering the small variation between
+/// evaluating against the current ledger tip and validating against the tip the
+/// transaction actually lands on.
+const EX_UNITS_MARGIN_PERCENT: u64 = 10;
+
+/// Budget a redeemer carries only so the transaction can be evaluated. Every
+/// caller replaces it with the measured cost before building, and evaluation
+/// reports what a script truly needs regardless of what it was given, so this
+/// value has no bearing on the result.
+pub const PLACEHOLDER_EX_UNITS: Option<ExUnits> = Some(ExUnits {
+    mem: 1_000_000,
+    steps: 500_000_000,
+});
+
+/// What each redeemer actually costs, measured by evaluating the transaction.
+///
+/// Evaluation reports costs positionally — `spend:2` is the third of the
+/// transaction's sorted inputs — so this keeps those orderings alongside the
+/// results and lets callers look a cost up by the input or policy they already
+/// hold, rather than working out the position themselves.
+pub struct MeasuredExUnits {
+    by_key: HashMap<String, super::blockfrost::ExUnitsRequired>,
+    spend_order: Vec<(Vec<u8>, u64)>,
+    mint_order: Vec<Vec<u8>>,
+}
+
+impl MeasuredExUnits {
+    fn units_at(&self, key: Option<String>) -> Option<ExUnits> {
+        let needed = self.by_key.get(&key?)?;
+        Some(ExUnits {
+            mem: needed.mem * (100 + EX_UNITS_MARGIN_PERCENT) / 100,
+            steps: needed.steps * (100 + EX_UNITS_MARGIN_PERCENT) / 100,
+        })
+    }
+
+    /// Measured cost of the redeemer spending `input`.
+    pub fn spend(&self, input: &Input) -> Option<ExUnits> {
+        let key = self
+            .spend_order
+            .iter()
+            .position(|(hash, index)| {
+                hash.as_slice() == input.tx_hash.0.as_slice() && *index == input.txo_index as u64
+            })
+            .map(|i| format!("spend:{i}"));
+        self.units_at(key)
+    }
+
+    /// Measured cost of the redeemer minting or burning under `policy`.
+    pub fn mint(&self, policy: &[u8; 28]) -> Option<ExUnits> {
+        let key = self
+            .mint_order
+            .iter()
+            .position(|p| p.as_slice() == policy.as_slice())
+            .map(|i| format!("mint:{i}"));
+        self.units_at(key)
+    }
+}
+
+/// A redeemer's target, recorded when it is declared so its budget can be
+/// replaced once measured.
+#[derive(Clone)]
+pub enum RedeemerRef {
+    Spend(Input),
+    Mint([u8; 28]),
+}
+
+/// Re-declare a transaction's redeemers with the ExUnits its scripts actually
+/// consume.
+///
+/// Hand-declared budgets have to be guesses on the high side, since one that is
+/// too small is only discovered when the node rejects the transaction. That is
+/// tolerable while iterating on a deployment and not tolerable in a shipped
+/// tool, where the person hitting it cannot edit the source to raise a number.
+///
+/// Callers declare each redeemer with [`PLACEHOLDER_EX_UNITS`] and record it in
+/// `declared`; evaluation then reports what each script truly needs — it
+/// disregards the budget it was handed — and those measurements replace the
+/// placeholders. A redeemer that evaluation does not report keeps the
+/// placeholder, so a gap can only leave a budget too generous, never too small.
+pub async fn calibrate_ex_units(
+    client: &BlockfrostClient,
+    staging: StagingTransaction,
+    declared: Vec<(RedeemerRef, Vec<u8>)>,
+) -> Result<StagingTransaction> {
+    if declared.is_empty() {
+        return Ok(staging);
+    }
+
+    let probe = staging
+        .clone()
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction for evaluation: {:?}", e))?;
+
+    let by_key = client.evaluate_tx(probe.tx_bytes.as_ref()).await?;
+
+    let decoded = MultiEraTx::decode(probe.tx_bytes.as_ref())
+        .map_err(|e| anyhow!("Failed to decode built transaction: {e}"))?;
+    let measured = MeasuredExUnits {
+        by_key,
+        spend_order: decoded
+            .inputs_sorted_set()
+            .iter()
+            .map(|i| (i.hash().to_vec(), i.index()))
+            .collect(),
+        mint_order: decoded
+            .mints_sorted_set()
+            .iter()
+            .map(|m| m.policy().to_vec())
+            .collect(),
+    };
+
+    let mut staging = staging;
+    for (target, redeemer) in declared {
+        staging = match target {
+            RedeemerRef::Spend(input) => {
+                let units = measured.spend(&input).or(PLACEHOLDER_EX_UNITS);
+                staging.add_spend_redeemer(input, redeemer, units)
+            }
+            RedeemerRef::Mint(policy) => {
+                let units = measured.mint(&policy).or(PLACEHOLDER_EX_UNITS);
+                staging.add_mint_redeemer(Hash::new(policy), redeemer, units)
+            }
+        };
+    }
+    Ok(staging)
+}
 
 /// Parse a UTXO reference string (format: "txhash#index")
 fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
@@ -121,11 +250,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
             .add_mint_redeemer(
                 Hash::new(policy_id),
-                mint_redeemer,
-                Some(ExUnits {
-                    mem: 500_000,
-                    steps: 200_000_000,
-                }),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
@@ -143,6 +269,13 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Add required signer
         let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
         staging = staging.disclosed_signer(signer_hash);
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
+        )
+        .await?;
 
         // Build the transaction
         let tx = staging
@@ -324,11 +457,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
             .add_mint_redeemer(
                 Hash::new(policy_id),
-                mint_redeemer,
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
@@ -348,6 +478,13 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
+        )
+        .await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -436,11 +573,8 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
             .add_mint_redeemer(
                 Hash::new(policy_id),
-                mint_redeemer,
-                Some(ExUnits {
-                    mem: 500_000,
-                    steps: 200_000_000,
-                }),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
@@ -566,24 +700,18 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Add spend redeemer for recipient state (required for script-based recipients)
         if let Some(redeemer) = recipient_redeemer {
             staging = staging.add_spend_redeemer(
-                state_input,
+                state_input.clone(),
                 redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             );
         }
 
         // Add spend redeemer for message UTXO (when it's at a script address)
         if let Some(redeemer) = message_redeemer {
             staging = staging.add_spend_redeemer(
-                message_input,
+                message_input.clone(),
                 redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 500_000,
-                    steps: 200_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             );
         }
 
@@ -591,10 +719,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(nft_policy),
                 nft_burn_redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 500_000,
-                    steps: 200_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
@@ -632,6 +757,15 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
         staging = staging.disclosed_signer(signer_hash);
 
+        let mut declared = Vec::new();
+        if let Some(redeemer) = recipient_redeemer {
+            declared.push((RedeemerRef::Spend(state_input), redeemer.to_vec()));
+        }
+        if let Some(redeemer) = message_redeemer {
+            declared.push((RedeemerRef::Spend(message_input), redeemer.to_vec()));
+        }
+        declared.push((RedeemerRef::Mint(nft_policy), nft_burn_redeemer.to_vec()));
+        let staging = calibrate_ex_units(self.client, staging, declared).await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -722,14 +856,7 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .input(warp_input.clone())
             .collateral_input(collateral)
             .output(warp_output)
-            .add_spend_redeemer(
-                warp_input,
-                redeemer.to_vec(),
-                Some(ExUnits {
-                    mem: 14_000_000,
-                    steps: 10_000_000_000,
-                }),
-            )
+            .add_spend_redeemer(warp_input.clone(), redeemer.to_vec(), PLACEHOLDER_EX_UNITS)
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
             .invalid_from_slot(validity_end)
@@ -757,6 +884,13 @@ impl<'a> HyperlaneTxBuilder<'a> {
         staging = staging.disclosed_signer(signer_hash);
 
         // Build the transaction
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Spend(warp_input), redeemer.to_vec())],
+        )
+        .await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -855,6 +989,10 @@ impl<'a> HyperlaneTxBuilder<'a> {
         let init_signal_tx_hash: [u8; 32] = hex::decode(&init_signal_utxo.tx_hash)?
             .try_into()
             .map_err(|_| anyhow!("Invalid init-signal tx hash"))?;
+        let init_signal_input = Input::new(
+            Hash::new(init_signal_tx_hash),
+            init_signal_utxo.output_index as u64,
+        );
         let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
             .try_into()
             .map_err(|_| anyhow!("Invalid fee UTXO tx hash"))?;
@@ -935,30 +1073,18 @@ impl<'a> HyperlaneTxBuilder<'a> {
             .add_mint_redeemer(
                 Hash::new(canonical_policy),
                 build_mint_redeemer(),
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             )
             .add_mint_redeemer(
                 Hash::new(state_policy),
                 build_mint_redeemer(),
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
+                PLACEHOLDER_EX_UNITS,
             )
             // Spend redeemer for init-signal UTXO (Init = Constr 0 [])
             .add_spend_redeemer(
-                Input::new(
-                    Hash::new(init_signal_tx_hash),
-                    init_signal_utxo.output_index as u64,
-                ),
-                init_redeemer,
-                Some(ExUnits {
-                    mem: 1_000_000,
-                    steps: 500_000_000,
-                }),
+                init_signal_input.clone(),
+                init_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
             )
             .language_view(ScriptKind::PlutusV3, cost_model)
             .fee(fee_estimate)
@@ -976,6 +1102,16 @@ impl<'a> HyperlaneTxBuilder<'a> {
         // Required signer: the owner key (so the Init handler passes)
         staging = staging.disclosed_signer(Hash::new(*owner_pkh));
 
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![
+                (RedeemerRef::Mint(canonical_policy), build_mint_redeemer()),
+                (RedeemerRef::Mint(state_policy), build_mint_redeemer()),
+                (RedeemerRef::Spend(init_signal_input), init_redeemer),
+            ],
+        )
+        .await?;
         let tx = staging
             .build_conway_raw()
             .map_err(|e| anyhow!("Failed to build canonical-nft init transaction: {:?}", e))?;

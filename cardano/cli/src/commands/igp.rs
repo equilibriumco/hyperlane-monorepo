@@ -6,12 +6,13 @@ use colored::Colorize;
 use pallas_crypto::hash::Hash;
 use pallas_primitives::conway::{BigInt, Constr, PlutusData};
 use pallas_primitives::MaybeIndefArray;
-use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
 use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::{build_igp_datum, build_migrate_redeemer};
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
+use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
 use crate::utils::types::Utxo;
 
 /// Shared context for IGP transactions that require signing
@@ -214,6 +215,8 @@ impl IgpTxContext {
                 0
             };
 
+        let igp_input = Input::new(Hash::new(igp_tx_hash), self.igp_utxo.output_index as u64);
+
         // Build staging transaction
         let mut staging = StagingTransaction::new()
             // IGP script input
@@ -228,14 +231,10 @@ impl IgpTxContext {
             ))
             // IGP continuation output
             .output(igp_output)
-            // Spend redeemer for IGP input
             .add_spend_redeemer(
-                Input::new(Hash::new(igp_tx_hash), self.igp_utxo.output_index as u64),
-                redeemer_cbor,
-                Some(ExUnits {
-                    mem: 5_000_000,
-                    steps: 2_000_000_000,
-                }),
+                igp_input.clone(),
+                redeemer_cbor.clone(),
+                PLACEHOLDER_EX_UNITS,
             )
             // Cost model for script data hash
             .language_view(ScriptKind::PlutusV3, cost_model)
@@ -289,6 +288,13 @@ impl IgpTxContext {
             // Too small for a separate output; absorb into fee
             staging = staging.fee(fee_estimate + remaining);
         }
+
+        let staging = calibrate_ex_units(
+            &self.client,
+            staging,
+            vec![(RedeemerRef::Spend(igp_input), redeemer_cbor)],
+        )
+        .await?;
 
         // Build the transaction
         let tx = staging
@@ -1274,6 +1280,8 @@ async fn migrate_igp(
     let fee_estimate = 2_000_000u64;
     let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
 
+    let migrate_input = Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64);
+
     let mut staging = StagingTransaction::new()
         .input(Input::new(
             Hash::new(igp_tx_hash),
@@ -1289,12 +1297,9 @@ async fn migrate_igp(
         ))
         .output(igp_output)
         .add_spend_redeemer(
-            Input::new(Hash::new(igp_tx_hash), igp_utxo.output_index as u64),
-            redeemer_cbor,
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            migrate_input.clone(),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -1323,6 +1328,12 @@ async fn migrate_igp(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(RedeemerRef::Spend(migrate_input), redeemer_cbor)],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;

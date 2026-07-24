@@ -12,6 +12,7 @@ use crate::utils::cbor::{
     build_migrate_redeemer,
 };
 use crate::utils::context::CliContext;
+use crate::utils::tx_builder::{calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS};
 use crate::utils::types::ScriptInfo;
 
 #[derive(Args)]
@@ -433,7 +434,7 @@ async fn dispatch(
 
     // Build the transaction using pallas_txbuilder
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let mailbox_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
@@ -498,10 +499,7 @@ async fn dispatch(
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -530,6 +528,19 @@ async fn dispatch(
     }
 
     // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -924,7 +935,7 @@ async fn set_default_ism(
 
     // Build the transaction using pallas_txbuilder
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     // Parse addresses and hashes
     let mailbox_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
@@ -982,10 +993,7 @@ async fn set_default_ism(
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         // Cost model for script data hash
         .language_view(ScriptKind::PlutusV3, cost_model)
@@ -1016,6 +1024,19 @@ async fn set_default_ism(
     }
 
     // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1287,7 +1308,7 @@ async fn migrate(
     let validity_end = current_slot + 7200;
 
     use pallas_crypto::hash::Hash;
-    use pallas_txbuilder::{BuildConway, ExUnits, Input, Output, ScriptKind, StagingTransaction};
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
 
     let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
         .try_into()
@@ -1334,10 +1355,7 @@ async fn migrate(
         .add_spend_redeemer(
             Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
             redeemer_cbor.clone(),
-            Some(ExUnits {
-                mem: 5_000_000,
-                steps: 2_000_000_000,
-            }),
+            PLACEHOLDER_EX_UNITS,
         )
         .language_view(ScriptKind::PlutusV3, cost_model)
         .disclosed_signer(Hash::new(owner_hash))
@@ -1362,6 +1380,18 @@ async fn migrate(
         staging = staging.output(Output::new(payer_addr, change));
     }
 
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
     let tx = staging
         .build_conway_raw()
         .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
@@ -1717,9 +1747,7 @@ mod datum_roundtrip_tests {
     /// move, so nothing else notices.
     #[test]
     fn mailbox_datum_survives_encode_decode_parse() {
-        let branches: Vec<String> = (0..32u8)
-            .map(|i| format!("{:02x}", i).repeat(32))
-            .collect();
+        let branches: Vec<String> = (0..32u8).map(|i| format!("{:02x}", i).repeat(32)).collect();
         let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
         let default_ism = "aa".repeat(28);
         let owner = "bb".repeat(28);
@@ -1743,16 +1771,14 @@ mod datum_roundtrip_tests {
     /// independently, so it gets its own round trip.
     #[test]
     fn mailbox_datum_survives_the_cbor_parser() {
-        let branches: Vec<String> = (0..32u8)
-            .map(|i| format!("{:02x}", i).repeat(32))
-            .collect();
+        let branches: Vec<String> = (0..32u8).map(|i| format!("{:02x}", i).repeat(32)).collect();
         let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
         let default_ism = "dd".repeat(28);
         let owner = "ee".repeat(28);
         let root = "ff".repeat(32);
 
-        let cbor = build_mailbox_datum(9, &default_ism, &owner, 3, &branch_refs, 1, &root)
-            .expect("build");
+        let cbor =
+            build_mailbox_datum(9, &default_ism, &owner, 3, &branch_refs, 1, &root).expect("build");
         let parsed = parse_mailbox_datum_from_cbor(&hex::encode(&cbor)).expect("parse");
 
         assert_eq!(parsed.local_domain, 9, "local_domain");
@@ -1770,8 +1796,16 @@ mod datum_roundtrip_tests {
     fn adjacent_mailbox_fields_are_not_confused() {
         let branches: Vec<String> = vec!["11".repeat(32); 32];
         let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
-        let cbor = build_mailbox_datum(1, &"22".repeat(28), &"33".repeat(28), 2, &branch_refs, 3, &"44".repeat(32))
-            .expect("build");
+        let cbor = build_mailbox_datum(
+            1,
+            &"22".repeat(28),
+            &"33".repeat(28),
+            2,
+            &branch_refs,
+            3,
+            &"44".repeat(32),
+        )
+        .expect("build");
         let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
         let parsed = parse_mailbox_datum(&json).expect("parse");
 
