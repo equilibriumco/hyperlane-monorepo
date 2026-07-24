@@ -201,6 +201,17 @@ enum InitCommands {
         dry_run: bool,
     },
 
+    /// Apply parameters to the validator_announce script and record them
+    ///
+    /// The script is parameterized on the mailbox, so its hash is only known
+    /// once a mailbox exists. This derives it, writes the applied script next
+    /// to the other deployment artifacts, and records the parameters — which
+    /// is what `deploy reference-script --script validator_announce` needs.
+    ///
+    /// Submits no transaction. Run it after `init mailbox` and before
+    /// deploying reference scripts.
+    ValidatorAnnounce,
+
     /// Show initialization status of contracts
     Status,
 
@@ -312,6 +323,19 @@ pub async fn execute(ctx: &CliContext, args: InitArgs) -> Result<()> {
                 dry_run,
             )
             .await
+        }
+        InitCommands::ValidatorAnnounce => {
+            println!("{}", "Parametrizing validator_announce...".cyan());
+            let parametrized =
+                crate::commands::validator::parametrize_validator_announce(ctx).await?;
+            println!("\n{}", "✓ validator_announce parametrized".green().bold());
+            println!("  Script Hash: {}", parametrized.script_hash);
+            println!("  Address: {}", parametrized.address);
+            println!(
+                "\nNext: deploy reference-script --script validator_announce\n\
+                 (announce() cannot run until that reference script exists)"
+            );
+            Ok(())
         }
         InitCommands::Status => show_status(ctx).await,
         InitCommands::GenerateDatums {

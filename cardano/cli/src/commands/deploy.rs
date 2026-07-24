@@ -781,6 +781,10 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
     // For parameterized scripts, check if we have an applied version from initialization
     let applied_script_path = match script_name {
         "mailbox" => Some(ctx.network_deployments_dir().join("mailbox_applied.plutus")),
+        "validator_announce" => Some(
+            ctx.network_deployments_dir()
+                .join("validator_announce_applied.plutus"),
+        ),
         _ => None,
     };
 
@@ -798,7 +802,9 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
         } else {
             return Err(anyhow!(
                 "Validator '{}' is parameterized but no applied script found at {:?}. Run 'init {}' first.",
-                script_name, applied_path, script_name
+                script_name,
+                applied_path,
+                script_name.replace('_', "-")
             ));
         }
     }
@@ -843,7 +849,7 @@ fn load_script(ctx: &CliContext, script_name: &str) -> Result<(Vec<u8>, String, 
         return Err(anyhow!(
             "Validator '{}' is parameterized. Run 'init {}' first to apply parameters.",
             title,
-            script_name
+            script_name.replace('_', "-")
         ));
     }
 

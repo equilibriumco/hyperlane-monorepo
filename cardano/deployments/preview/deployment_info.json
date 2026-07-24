@@ -80,6 +80,20 @@
     "hashBeforeParametrization": "db264a22625d7adaf23e0f7724d3e3e80cb0fe72ca1e972f81015a20",
     "hash": "092a77de62c6fe005e51dbe8b2c23aaec35a21d02be6e0f51e4e74ec",
     "address": "addr_test1wqyj5a77vtr0uqz728d73vkz82hvxk3p6q47dc84re88fmq7negfk",
+    "appliedParameters": [
+      {
+        "name": "mailbox_policy_id",
+        "paramType": "PolicyId",
+        "value": "1e580dcce041a6efd93e9f8bd5883343b19b3cc2b3ba2d03faa815f8",
+        "description": "Mailbox state NFT policy the announcements are bound to"
+      },
+      {
+        "name": "mailbox_domain",
+        "paramType": "Domain",
+        "value": "2003",
+        "description": "Local Hyperlane domain of the mailbox"
+      }
+    ],
     "initialized": true
   },
   "warp_routes": [

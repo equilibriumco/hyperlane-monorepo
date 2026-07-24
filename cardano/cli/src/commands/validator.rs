@@ -16,8 +16,8 @@ use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::cbor::CborBuilder;
 use crate::utils::context::CliContext;
 use crate::utils::crypto::Keypair;
-use crate::utils::plutus::{apply_validator_params, script_hash_to_address};
-use crate::utils::types::Utxo;
+use crate::utils::plutus::{apply_validator_params, script_hash_to_address, AppliedValidator};
+use crate::utils::types::{AppliedParameter, Utxo};
 
 #[derive(Args)]
 pub struct ValidatorArgs {
@@ -143,49 +143,15 @@ pub(crate) async fn announce_validator(
     let payer_address = cardano_keypair.address_bech32(ctx.pallas_network());
     println!("  Payer Address: {}", payer_address);
 
-    // Get mailbox info from deployment
-    let deployment = ctx.load_deployment_info()?;
-    let mailbox = deployment
-        .mailbox
-        .as_ref()
-        .ok_or_else(|| anyhow!("Mailbox not deployed. Run 'init mailbox' first."))?;
-
-    let mailbox_policy_id = mailbox
-        .state_nft_policy
-        .as_ref()
-        .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?;
-
-    // Get local domain from mailbox UTXO datum
     let api_key = ctx.require_api_key()?;
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
-    let mailbox_utxo = client
-        .find_utxo_by_asset(mailbox_policy_id, "")
-        .await?
-        .ok_or_else(|| anyhow!("Mailbox UTXO not found"))?;
-
-    let local_domain = parse_mailbox_domain(&mailbox_utxo.inline_datum)?;
-    println!("  Mailbox Policy: {}", mailbox_policy_id);
-    println!("  Local Domain: {}", local_domain);
-
-    // Parametrize the validator_announce script
-    let contracts_dir = ctx.contracts_dir.clone();
-
-    let policy_id_cbor = encode_policy_id_param(mailbox_policy_id)?;
-    let domain_cbor = encode_int_param(local_domain);
-
-    println!("\n{}", "Applying validator parameters...".cyan());
-    let applied = apply_validator_params(
-        &contracts_dir,
-        "validator_announce",
-        "validator_announce",
-        &[&hex::encode(&policy_id_cbor), &hex::encode(&domain_cbor)],
-    )?;
-
-    let va_script_hash = &applied.policy_id;
-    let va_address = script_hash_to_address(va_script_hash, ctx.pallas_network())?;
-    println!("  Script Hash: {}", va_script_hash);
-    println!("  Script Address: {}", va_address);
+    let parametrized = parametrize_validator_announce(ctx).await?;
+    let mailbox_policy_id = &parametrized.mailbox_policy_id;
+    let local_domain = parametrized.local_domain;
+    let applied = &parametrized.applied;
+    let va_script_hash = &parametrized.script_hash;
+    let va_address = &parametrized.address;
 
     // Compute the announcement digest (matching contract's formula)
     let announcement_digest =
@@ -480,6 +446,105 @@ pub(crate) async fn announce_validator(
     }
 
     Ok(())
+}
+
+/// A parametrized `validator_announce`, plus the inputs it was derived from.
+pub(crate) struct ParametrizedValidatorAnnounce {
+    pub applied: AppliedValidator,
+    pub script_hash: String,
+    pub address: String,
+    pub mailbox_policy_id: String,
+    pub local_domain: u32,
+}
+
+/// Apply `(mailbox_policy_id, mailbox_domain)` to `validator_announce` and
+/// persist the result.
+///
+/// The script is parameterized, so its hash only exists once a mailbox does.
+/// Persisting the applied script and the parameters behind it is what lets
+/// `deploy reference-script` find it afterwards — and `announce()` cannot run
+/// without that reference script, so skipping this step leaves a validator
+/// permanently unable to announce.
+pub(crate) async fn parametrize_validator_announce(
+    ctx: &CliContext,
+) -> Result<ParametrizedValidatorAnnounce> {
+    let deployment = ctx.load_deployment_info()?;
+    let mailbox = deployment
+        .mailbox
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox not deployed. Run 'init mailbox' first."))?;
+
+    let mailbox_policy_id = mailbox
+        .state_nft_policy
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?
+        .clone();
+
+    // The domain is read from the live mailbox datum rather than assumed from
+    // the network, so a mailbox configured for a different domain cannot
+    // silently produce a validator_announce that does not match it.
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&mailbox_policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found"))?;
+    let local_domain = parse_mailbox_domain(&mailbox_utxo.inline_datum)?;
+
+    println!("  Mailbox Policy: {}", mailbox_policy_id);
+    println!("  Local Domain: {}", local_domain);
+
+    let policy_id_cbor = encode_policy_id_param(&mailbox_policy_id)?;
+    let domain_cbor = encode_int_param(local_domain);
+
+    println!("\n{}", "Applying validator parameters...".cyan());
+    let applied = apply_validator_params(
+        &ctx.contracts_dir,
+        "validator_announce",
+        "validator_announce",
+        &[&hex::encode(&policy_id_cbor), &hex::encode(&domain_cbor)],
+    )?;
+
+    let script_hash = applied.policy_id.clone();
+    let address = script_hash_to_address(&script_hash, ctx.pallas_network())?;
+    println!("  Script Hash: {}", script_hash);
+    println!("  Script Address: {}", address);
+
+    let script_path = ctx
+        .network_deployments_dir()
+        .join("validator_announce_applied.plutus");
+    applied.save_plutus_file(&script_path, "Applied validator_announce validator")?;
+    println!("  Applied script saved to: {:?}", script_path);
+
+    let mut deployment = deployment;
+    if let Some(ref mut va) = deployment.validator_announce {
+        va.hash = script_hash.clone();
+        va.address = address.clone();
+        va.applied_parameters = vec![
+            AppliedParameter {
+                name: "mailbox_policy_id".to_string(),
+                param_type: "PolicyId".to_string(),
+                value: mailbox_policy_id.clone(),
+                description: Some("Mailbox state NFT policy the announcements are bound to".into()),
+            },
+            AppliedParameter {
+                name: "mailbox_domain".to_string(),
+                param_type: "Domain".to_string(),
+                value: local_domain.to_string(),
+                description: Some("Local Hyperlane domain of the mailbox".into()),
+            },
+        ];
+        ctx.save_deployment_info(&deployment)?;
+        println!("{}", "✓ Deployment info updated".green());
+    }
+
+    Ok(ParametrizedValidatorAnnounce {
+        applied,
+        script_hash,
+        address,
+        mailbox_policy_id,
+        local_domain,
+    })
 }
 
 /// Show validator announcements
