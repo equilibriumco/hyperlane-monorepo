@@ -1400,6 +1400,66 @@ S3 URL format: `s3://<bucket>/<region>/<folder>`
   validator announce --storage-location "s3://your-bucket/your-region/your-folder"
 ```
 
+### Reorgs and settlement
+
+Cardano's Ouroboros Praos settles **probabilistically**. There is no finality
+gadget and no `finalized` block tag: a recently minted block can be rolled back,
+and the chance of that decays exponentially with depth. The protocol bounds the
+worst case at `k = 2160` blocks (~12h), which is the depth beyond which a node
+refuses to switch chains at all — not something that happens in normal operation.
+
+This matters for a validator more than for most agents. A signed checkpoint
+cannot be withdrawn, so signing a root that later disappears leaves a valid
+signature attesting to a dispatch that never happened — on the destination side,
+a mint with nothing backing it.
+
+#### `reorgPeriod` — reading behind the tip
+
+The validator reads mailbox state **`reorgPeriod` blocks behind the tip** rather
+than at it. Because Cardano exposes only the current UTXO set, past state is
+reconstructed: the agent walks the mailbox state NFT back to the last
+transaction at or before the target height and reads the datum it produced. This
+is the equivalent of pinning an `eth_call` to a block.
+
+```json
+"blocks": { "reorgPeriod": 2, "estimateBlockTime": 20 }
+```
+
+- The **effective depth is `max(reorgPeriod, confirmationBlockDelay)`.** Reading
+  shallower than the indexing delay does not read fresher state — it fails to
+  find state that exists, because the provider's index has not caught up.
+- **A block-tag reorg period is rejected.** `"finalized"` and friends are
+  meaningful on post-merge Ethereum; on Praos there is nothing to point them at,
+  so the agent errors rather than silently substituting a block count.
+- Each block is ~20s, so the setting is a direct latency cost on every message.
+
+Choose the number from measured rollback depth rather than from a guess, and
+leave headroom over the worst you have observed. Tightening later is easy;
+loosening after an incident is not.
+
+#### Rollback detection
+
+Two independent mechanisms:
+
+- **Root mismatch** (chain-agnostic, inherited from the validator): the agent
+  rebuilds the tree from indexed dispatches and compares it with the checkpoint
+  read from chain. A disagreement is reported and the validator crash-loops
+  deliberately. This only fires at checkpoint time, and only for rollbacks that
+  move the merkle root.
+- **Direct detection** (Cardano-specific): the indexer remembers the newest
+  block it actually read data from and re-checks, on the following scan, that
+  the chain still has that block at that height. A different hash, or a height
+  that has fallen off the end, is reported as a rollback. This catches rollbacks
+  the root check cannot see — a reverted gas payment or delivery leaves the root
+  untouched.
+
+Blockfrost offers no chain-sync subscription, so there is no rollback signal to
+subscribe to; asking is the only option. Anchoring only on blocks that carried
+transactions keeps that to zero extra requests while the chain is idle. A
+provider that cannot answer is deliberately **not** reported as a rollback —
+this log is meant to stop an operator, and one that fires on API hiccups would
+teach them to scroll past it.
+
 ### Monitoring
 
 Prometheus metrics on configured port (default 9091):
@@ -1412,7 +1472,9 @@ Prometheus metrics on configured port (default 9091):
 
 **Rate limiting**: Blockfrost free tier allows 10 requests/second. Increase `interval` or reduce `maxSignConcurrency`.
 
-**Reorg handling**: Validator includes reorg detection. If detected, it panics with a detailed error. Do NOT force restart -- investigate first.
+**Reorg handling**: see [Reorgs and settlement](#reorgs-and-settlement) below. If a
+reorg is reported the validator panics with a detailed error. Do NOT force
+restart — investigate first.
 
 **"Mailbox not deployed"**: Deploy mailbox first via CLI.
 
@@ -1666,22 +1728,26 @@ The limitation becomes relevant when sustained volume exceeds ~100/hour or low-l
 
 ### What's Missing
 
-1. **Reorg Reporter**: Not implemented for Cardano (needed for production hardening)
-2. **On-chain Custom ISM Enforcement**: Currently relayer-side only
+1. **On-chain Custom ISM Enforcement**: Currently relayer-side only
+2. **Scraper support**: no Cardano implementation, so no explorer/analytics indexing
+3. **Metrics**: the chain crate exposes almost none; rollback detection reports via logs only
 
 ### Recommended Next Steps
 
 **High Priority (Production):**
 1. Security audit (Aiken contracts, signature verification, merkle tree)
-2. IGP RPC endpoint and end-to-end testing
+2. Provider abstraction — Blockfrost is currently the sole source of truth for
+   an agent that signs checkpoints, with no fallback and no cross-check
+3. Choose `reorgPeriod` from measured rollback depth (see
+   [Reorgs and settlement](#reorgs-and-settlement))
 
 **Medium Priority (Hardening):**
-3. Cardano-specific reorg detection
 4. Monitoring and observability
 5. On-chain per-recipient ISM enforcement
+6. Key management for relayer/validator signing keys
 
 **Low Priority (Optimization):**
-6. UTXO contention mitigation via minting policies
+7. UTXO contention mitigation via minting policies
 
 ---
 

@@ -129,6 +129,12 @@ cast call <sepolia-route> 'balanceOf(address)(uint256)' $SIGNER
 **Expect 2–3 minutes.** The relayer's Cardano cursor waits out a reorg buffer
 before it indexes the block. It is not stuck.
 
+Two settings contribute, and the deeper one wins: `confirmationBlockDelay` (how
+far behind the tip the indexer scans) and `blocks.reorgPeriod` (how far behind
+the tip signed state is read). Raising either adds latency to every message at
+~20s per block — see
+[Reorgs and settlement](CARDANO_GUIDE.md#reorgs-and-settlement).
+
 ---
 
 ## Test 3 — Warp transfer (Sepolia → Cardano)
