@@ -1,10 +1,85 @@
 //! Blockfrost API client
 
 use anyhow::{anyhow, Context, Result};
+use pallas_primitives::conway::RedeemerTag;
+use pallas_traverse::MultiEraTx;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::types::{Asset, ProtocolParams, Utxo};
+
+/// ExUnits a redeemer needs, as reported by transaction evaluation.
+#[derive(Debug)]
+pub struct ExUnitsRequired {
+    pub mem: u64,
+    pub steps: u64,
+}
+
+/// Blockfrost proxies Ogmios, whose evaluation payload has shifted shape across
+/// versions; accept each rather than pin to one.
+fn parse_evaluated_ex_units(
+    result: &serde_json::Value,
+) -> Result<HashMap<String, ExUnitsRequired>> {
+    let mut units = HashMap::new();
+
+    // Ogmios v6: { "result": [ { "validator": {...}, "budget": {...} }, ... ] }
+    if let Some(entries) = result.get("result").and_then(|r| r.as_array()) {
+        for entry in entries {
+            let (Some(validator), Some(budget)) = (entry.get("validator"), entry.get("budget"))
+            else {
+                continue;
+            };
+            let purpose = validator
+                .get("purpose")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let index = validator.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+            units.insert(
+                format!("{purpose}:{index}"),
+                ExUnitsRequired {
+                    mem: budget.get("memory").and_then(|v| v.as_u64()).unwrap_or(0),
+                    steps: budget.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0),
+                },
+            );
+        }
+        if !units.is_empty() {
+            return Ok(units);
+        }
+    }
+
+    // Ogmios v5: { "result": { "EvaluationResult": { "spend:0": {...} } } }
+    let v5 = result
+        .get("result")
+        .and_then(|r| r.get("EvaluationResult"))
+        .or_else(|| result.get("EvaluationResult"));
+    if let Some(entries) = v5.and_then(|r| r.as_object()) {
+        for (key, value) in entries {
+            units.insert(
+                key.clone(),
+                ExUnitsRequired {
+                    mem: value.get("memory").and_then(|v| v.as_u64()).unwrap_or(0),
+                    steps: value.get("steps").and_then(|v| v.as_u64()).unwrap_or(0),
+                },
+            );
+        }
+        if !units.is_empty() {
+            return Ok(units);
+        }
+    }
+
+    // A script failed. The payload holds the validator's traces, which is the
+    // only place the actual reason is ever spelled out.
+    if let Some(failure) = result
+        .get("result")
+        .and_then(|r| r.get("EvaluationFailure"))
+        .or_else(|| result.get("fault"))
+    {
+        return Err(anyhow!("Script evaluation failed: {failure:#}"));
+    }
+
+    Err(anyhow!("Unrecognized evaluation response: {result}"))
+}
 
 /// Blockfrost API client
 pub struct BlockfrostClient {
@@ -328,8 +403,86 @@ impl BlockfrostClient {
             .collect()
     }
 
+    /// Run the transaction's scripts without submitting it.
+    ///
+    /// Returns the ExUnits each redeemer actually needs, keyed by
+    /// `"<purpose>:<index>"` (e.g. `"spend:0"`). A script that fails here comes
+    /// back as an `Err` carrying the validator's own trace output — the same
+    /// failure at submit time is reported by the node as an opaque
+    /// `ValidationTagMismatch` with no logs at all.
+    pub async fn evaluate_tx(&self, tx_cbor: &[u8]) -> Result<HashMap<String, ExUnitsRequired>> {
+        // This endpoint wants the CBOR hex-encoded, unlike /tx/submit which
+        // takes the raw bytes.
+        let url = format!("{}/utils/txs/evaluate", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .header("project_id", &self.api_key)
+            .header("Content-Type", "application/cbor")
+            .body(hex::encode(tx_cbor))
+            .send()
+            .await
+            .with_context(|| "Failed to request /utils/txs/evaluate")?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("Blockfrost error {}: {}", status, body));
+        }
+
+        let json: serde_json::Value =
+            serde_json::from_str(&body).with_context(|| "Failed to parse evaluate response")?;
+        parse_evaluated_ex_units(&json)
+    }
+
+    /// Evaluate before submitting so script failures surface with their traces,
+    /// and so a redeemer whose declared budget is too small is named outright
+    /// rather than failing as an unexplained node rejection.
+    async fn preflight(&self, tx_cbor: &[u8]) -> Result<()> {
+        let tx = MultiEraTx::decode(tx_cbor)
+            .map_err(|e| anyhow!("Failed to decode transaction for preflight: {e}"))?;
+
+        // Nothing to evaluate on a script-free transaction, and evaluating one
+        // returns an empty result that reads as an unparseable response.
+        let redeemers = tx.redeemers();
+        if redeemers.is_empty() {
+            return Ok(());
+        }
+
+        let required = self.evaluate_tx(tx_cbor).await?;
+
+        for redeemer in redeemers {
+            let purpose = match redeemer.tag() {
+                RedeemerTag::Spend => "spend",
+                RedeemerTag::Mint => "mint",
+                RedeemerTag::Cert => "certificate",
+                RedeemerTag::Reward => "withdrawal",
+                RedeemerTag::Vote => "vote",
+                RedeemerTag::Propose => "propose",
+            };
+            let key = format!("{}:{}", purpose, redeemer.index());
+            let Some(needed) = required.get(&key) else {
+                continue;
+            };
+            let declared = redeemer.ex_units();
+            if declared.mem < needed.mem || declared.steps < needed.steps {
+                return Err(anyhow!(
+                    "Redeemer {key} is under-budgeted: declared mem={} steps={}, needs mem={} steps={}. \
+                     Raise the ExUnits declared for this redeemer where the transaction is built.",
+                    declared.mem,
+                    declared.steps,
+                    needed.mem,
+                    needed.steps
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Submit a transaction (CBOR bytes)
     pub async fn submit_tx(&self, tx_cbor: &[u8]) -> Result<String> {
+        self.preflight(tx_cbor).await?;
         let tx_hash = self.post_cbor("/tx/submit", tx_cbor).await?;
         // Response is the tx hash as a JSON string
         Ok(tx_hash.trim_matches('"').to_string())
@@ -561,4 +714,44 @@ pub struct TxRedeemer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptDatum {
     pub json_value: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ogmios_v6_budgets() {
+        let json = serde_json::json!({
+            "result": [
+                {"validator": {"purpose": "spend", "index": 1},
+                 "budget": {"memory": 1234, "cpu": 5678}}
+            ]
+        });
+        let units = parse_evaluated_ex_units(&json).unwrap();
+        let spend = units.get("spend:1").expect("spend:1 present");
+        assert_eq!((spend.mem, spend.steps), (1234, 5678));
+    }
+
+    #[test]
+    fn parses_ogmios_v5_budgets() {
+        // v5 nests under EvaluationResult and names the step field differently.
+        let json = serde_json::json!({
+            "result": {"EvaluationResult": {"mint:0": {"memory": 11, "steps": 22}}}
+        });
+        let units = parse_evaluated_ex_units(&json).unwrap();
+        let mint = units.get("mint:0").expect("mint:0 present");
+        assert_eq!((mint.mem, mint.steps), (11, 22));
+    }
+
+    #[test]
+    fn script_failure_is_an_error_carrying_the_traces() {
+        let json = serde_json::json!({
+            "result": {"EvaluationFailure": {"ScriptFailures": {
+                "spend:0": [{"validatorFailed": {"traces": ["expect failed"]}}]
+            }}}
+        });
+        let err = parse_evaluated_ex_units(&json).unwrap_err().to_string();
+        assert!(err.contains("expect failed"), "traces must survive: {err}");
+    }
 }
