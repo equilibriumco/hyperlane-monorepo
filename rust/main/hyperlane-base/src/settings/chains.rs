@@ -7,14 +7,15 @@ use ethers::prelude::Selector;
 use ethers_prometheus::middleware::{ContractInfo, PrometheusMiddlewareConf};
 use eyre::{eyre, Context, Report, Result};
 use serde_json::Value;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use hyperlane_core::{
     config::OpSubmissionConfig, AggregationIsm, CcipReadIsm, ChainResult, ContractLocator,
     HyperlaneAbi, HyperlaneDomain, HyperlaneDomainProtocol, HyperlaneMessage, HyperlaneProvider,
-    IndexMode, InterchainGasPaymaster, InterchainGasPayment, InterchainSecurityModule, Mailbox,
-    MerkleTreeHook, MerkleTreeInsertion, MultisigIsm, NativeToken, ReorgPeriod, RoutingIsm,
-    SequenceAwareIndexer, SubmitterType, ValidatorAnnounce, H256,
+    IndexMode, Indexer, InterchainGasPaymaster, InterchainGasPayment, InterchainSecurityModule,
+    Mailbox, MerkleTreeHook, MerkleTreeInsertion, MultisigIsm, NativeToken, ReorgPeriod,
+    RoutingIsm, SameChainCcrSwap, SequenceAwareIndexer, SubmitterType, ValidatorAnnounce, H160,
+    H256,
 };
 use hyperlane_metric::prometheus_metric::ChainInfo;
 use hyperlane_operation_verifier::ApplicationOperationVerifier;
@@ -30,6 +31,8 @@ use hyperlane_ethereum::{
     EthereumReorgPeriod, EthereumValidatorAnnounceAbi,
 };
 use hyperlane_fuel as h_fuel;
+#[cfg(feature = "midnight")]
+use hyperlane_midnight::{self as h_midnight, MidnightSigner};
 use hyperlane_radix::{self as h_radix, RadixProvider};
 use hyperlane_sealevel::{
     self as h_sealevel, fallback::SealevelFallbackRpcClient, SealevelProvider, TransactionSubmitter,
@@ -76,6 +79,10 @@ pub struct ChainConf {
     pub domain: HyperlaneDomain,
     /// Signer configuration for this chain
     pub signer: Option<SignerConf>,
+    /// Identity keypair used as the relayer's on-chain identity (e.g. for TrustedRelayer ISMs).
+    /// Only valid for Sealevel chains — an error is returned if set on other protocols.
+    /// Falls back to `signer` if not set.
+    pub identity: Option<SignerConf>,
     /// Submitter type for this chain
     pub submitter: SubmitterType,
     /// The estimated block time, i.e. the average time the next block is added to the chain
@@ -194,6 +201,9 @@ pub enum ChainConnectionConf {
     Tron(h_tron::ConnectionConf),
     /// Cardano configuration
     Cardano(h_cardano::ConnectionConf),
+    /// Midnight configuration
+    #[cfg(feature = "midnight")]
+    Midnight(h_midnight::ConnectionConf),
 }
 
 impl ChainConnectionConf {
@@ -211,6 +221,8 @@ impl ChainConnectionConf {
             #[cfg(feature = "aleo")]
             Self::Aleo(_) => HyperlaneDomainProtocol::Aleo,
             Self::Cardano(_) => HyperlaneDomainProtocol::Cardano,
+            #[cfg(feature = "midnight")]
+            Self::Midnight(_) => HyperlaneDomainProtocol::Midnight,
         }
     }
 
@@ -307,6 +319,11 @@ impl ChainConf {
                 h_cardano::CardanoApplicationOperationVerifier::new(),
             )
                 as Box<dyn ApplicationOperationVerifier>),
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => Ok(Box::new(
+                h_midnight::application::MidnightApplicationOperationVerifier::new(),
+            )
+                as Box<dyn ApplicationOperationVerifier>),
         };
 
         result.context(ctx)
@@ -367,6 +384,13 @@ impl ChainConf {
                 let provider = h_cardano::CardanoProvider::new(conf, self.domain.clone());
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
+            }
         }
         .context(ctx)
     }
@@ -374,6 +398,17 @@ impl ChainConf {
     /// Try to convert the chain setting into a Mailbox contract
     pub async fn build_mailbox(&self, metrics: &CoreMetrics) -> Result<Box<dyn Mailbox>> {
         let ctx = "Building mailbox";
+
+        if self.identity.is_some()
+            && self.connection.protocol() != HyperlaneDomainProtocol::Sealevel
+        {
+            return Err(eyre!(
+                "'identity' is only supported for Sealevel chains, but chain '{}' uses protocol '{:?}'",
+                self.domain.name(),
+                self.connection.protocol()
+            ));
+        }
+
         let locator = self.locator(self.addresses.mailbox);
 
         match &self.connection {
@@ -390,6 +425,7 @@ impl ChainConf {
             }
             ChainConnectionConf::Sealevel(conf) => {
                 let keypair = self.sealevel_signer().await.context(ctx)?;
+                let identity_keypair = self.sealevel_identity_signer().await.context(ctx)?;
 
                 let provider =
                     Arc::new(build_sealevel_provider(self, &locator, &[], conf, metrics));
@@ -402,6 +438,7 @@ impl ChainConf {
                     conf,
                     &locator,
                     keypair.map(h_sealevel::SealevelKeypair::new),
+                    identity_keypair.map(h_sealevel::SealevelKeypair::new),
                 )
                 .map(|m| Box::new(m) as Box<dyn Mailbox>)
                 .map_err(Into::into)
@@ -454,6 +491,11 @@ impl ChainConf {
                     .map(|m| Box::new(m) as Box<dyn Mailbox>)
                     .map_err(Into::into)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let mailbox = h_midnight::MidnightMailbox::new(&locator, conf).context(ctx)?;
+                Ok(Box::new(mailbox) as Box<dyn Mailbox>)
+            }
         }
         .context(ctx)
     }
@@ -480,7 +522,7 @@ impl ChainConf {
                 let tx_submitter =
                     build_sealevel_tx_submitter(&provider, self, conf, &locator, metrics);
 
-                h_sealevel::SealevelMailbox::new(provider, tx_submitter, conf, &locator, None)
+                h_sealevel::SealevelMailbox::new(provider, tx_submitter, conf, &locator, None, None)
                     .map(|m| Box::new(m) as Box<dyn MerkleTreeHook>)
                     .map_err(Into::into)
             }
@@ -526,6 +568,20 @@ impl ChainConf {
                 let hook = h_cardano::CardanoMerkleTreeHook::new(conf, locator)?;
                 Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The monolithic WarpRoute embeds the merkle tree; read its
+                // count / current_root from chain state via the indexer (#14).
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
+            }
         }
         .context(ctx)
     }
@@ -536,7 +592,7 @@ impl ChainConf {
         metrics: &CoreMetrics,
         advanced_log_meta: bool,
     ) -> Result<Box<dyn SequenceAwareIndexer<HyperlaneMessage>>> {
-        let ctx = "Building delivery indexer";
+        let ctx = "Building message indexer";
         let locator = self.locator(self.addresses.mailbox);
 
         match &self.connection {
@@ -618,6 +674,16 @@ impl ChainConf {
             ChainConnectionConf::Cardano(conf) => {
                 let indexer = Box::new(h_cardano::CardanoMailboxIndexer::new(conf, locator)?);
                 Ok(indexer as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the WarpRoute contract's HYP_DISPATCH events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); the `nonce` counter is the sequence tip.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDispatchIndexer::new(client, &locator);
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
             }
         }
         .context(ctx)
@@ -708,6 +774,17 @@ impl ChainConf {
                 let indexer = Box::new(h_cardano::CardanoMailboxIndexer::new(conf, locator)?);
                 Ok(indexer as Box<dyn SequenceAwareIndexer<H256>>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the WarpRoute contract's HYP_PROCESS events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); driven by the rate-limited (watermark) cursor
+                // like EVM deliveries.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDeliveryIndexer::new(client, &locator);
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<H256>>)
+            }
         }
         .context(ctx)
     }
@@ -789,6 +866,23 @@ impl ChainConf {
                 let paymaster =
                     Box::new(h_cardano::CardanoInterchainGasPaymaster::new(conf, locator));
                 Ok(paymaster as Box<dyn InterchainGasPaymaster>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The IGP indexer struct doubles as the paymaster marker
+                // (the Aleo/Radix/CosmosNative pattern). It reads the IGP
+                // contract's `gas_payments` state via the indexer client
+                // (#14); the relayer never calls the paymaster trait itself,
+                // but every configured chain must supply the boxed object.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let paymaster = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(paymaster) as Box<dyn InterchainGasPaymaster>)
             }
         }
         .context(ctx)
@@ -876,8 +970,65 @@ impl ChainConf {
                 ));
                 Ok(indexer as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the IGP contract's HYP_GAS_PAYMENT events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); no sequence, matching EVM. Same struct as
+                // build_interchain_gas_paymaster above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let igp = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(igp) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
+            }
         }
         .context(ctx)
+    }
+
+    /// Build a CCR same-chain swap indexer for EVM chains.
+    /// Only supported for Ethereum connections; returns `Ok(None)` for other chain types.
+    pub async fn build_ccr_swap_indexer(
+        &self,
+        metrics: &CoreMetrics,
+        local_domain: u32,
+        ccr_to_erc20: std::collections::HashMap<H160, H160>,
+    ) -> Result<Option<Box<dyn Indexer<SameChainCcrSwap>>>> {
+        let ctx = "Building CCR swap indexer";
+        // Use a zero address as the locator — CcrSwapIndexer uses ccr_to_erc20 keys instead.
+        let locator = self.locator(H256::zero());
+
+        match &self.connection {
+            ChainConnectionConf::Ethereum(conf) => {
+                let reorg_period =
+                    EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                let indexer = self
+                    .build_ethereum(
+                        conf,
+                        &locator,
+                        metrics,
+                        h_eth::CcrSwapIndexerBuilder {
+                            local_domain,
+                            ccr_to_erc20,
+                            reorg_period,
+                        },
+                    )
+                    .await
+                    .context(ctx)?;
+                Ok(Some(indexer))
+            }
+            _ => {
+                warn!(
+                    domain = %self.domain.name(),
+                    "CCR swap indexer is only supported for Ethereum chains; skipping"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Try to convert the chain settings into a merkle tree hook indexer
@@ -967,6 +1118,21 @@ impl ChainConf {
             ChainConnectionConf::Cardano(conf) => {
                 let indexer = h_cardano::CardanoMerkleTreeHookIndexer::new(conf, locator)?;
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Derives leaf insertions from the WarpRoute contract's
+                // HYP_DISPATCH events over block ranges (#95). Same struct as
+                // build_merkle_tree_hook above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
         }
         .context(ctx)
@@ -1063,6 +1229,12 @@ impl ChainConf {
                 ));
                 Ok(va as Box<dyn ValidatorAnnounce>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let validator_announce =
+                    h_midnight::MidnightValidatorAnnounce::new(&locator, conf)?;
+                Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
+            }
         }
         .context("Building ValidatorAnnounce")
     }
@@ -1143,6 +1315,20 @@ impl ChainConf {
                 ));
                 Ok(ism as Box<dyn InterchainSecurityModule>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The ISM reads its module type from chain state (via the
+                // indexer) on each `module_type` call, not from config.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let ism = h_midnight::ism::MidnightInterchainSecurityModule::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
+            }
         }
         .context(ctx)
     }
@@ -1212,8 +1398,50 @@ impl ChainConf {
                 let ism = Box::new(h_cardano::CardanoMultisigIsm::new(conf, locator));
                 Ok(ism as Box<dyn MultisigIsm>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Validators + threshold are read from chain state by the ISM
+                // itself (via the indexer), not sourced from config.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let ism = h_midnight::ism::MidnightMultisigIsm::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(ism) as Box<dyn MultisigIsm>)
+            }
         }
         .context(ctx)
+    }
+
+    /// Creates a [`h_sealevel::SealevelCompositeIsm`] for a composite ISM program.
+    ///
+    /// Only valid for Sealevel chains; returns an error for all others.
+    pub async fn build_sealevel_composite_ism(
+        &self,
+        address: H256,
+        metrics: &CoreMetrics,
+    ) -> Result<h_sealevel::SealevelCompositeIsm> {
+        let ctx = "Building Sealevel composite ISM";
+        let locator = self.locator(address);
+
+        match &self.connection {
+            ChainConnectionConf::Sealevel(conf) => {
+                let keypair = self.sealevel_signer().await.context(ctx)?;
+                let identity_keypair = self.sealevel_identity_signer().await.context(ctx)?;
+                let provider =
+                    Arc::new(build_sealevel_provider(self, &locator, &[], conf, metrics));
+                Ok(h_sealevel::SealevelCompositeIsm::new(
+                    provider,
+                    locator,
+                    keypair.map(h_sealevel::SealevelKeypair::new),
+                    identity_keypair.map(h_sealevel::SealevelKeypair::new),
+                ))
+            }
+            _ => eyre::bail!("SealevelCompositeIsm is only supported on Sealevel chains"),
+        }
     }
 
     /// Try to convert the chain setting into a RoutingIsm Ism contract
@@ -1273,6 +1501,10 @@ impl ChainConf {
                 Ok(Box::new(ism) as Box<dyn RoutingIsm>)
             }
             ChainConnectionConf::Cardano(_) => Err(eyre!("Cardano does not support routing ISM")),
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support routing ISM")).context(ctx)
+            }
         }
         .context(ctx)
     }
@@ -1332,6 +1564,10 @@ impl ChainConf {
             ChainConnectionConf::Cardano(_) => {
                 Err(eyre!("Cardano does not support aggregation ISM yet")).context(ctx)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support aggregation ISM")).context(ctx)
+            }
         }
         .context(ctx)
     }
@@ -1369,13 +1605,19 @@ impl ChainConf {
             ChainConnectionConf::Radix(_) => {
                 Err(eyre!("Radix does not support CCIP read ISM yet")).context(ctx)
             }
-            ChainConnectionConf::Tron(_) => {
-                Err(eyre!("Tron does not support CCIP read ISM yet")).context(ctx)
+            ChainConnectionConf::Tron(conf) => {
+                let provider = build_tron_provider(self, conf, metrics, &locator, None)?;
+                let ism = h_tron::TronCcipReadIsm::new(provider, &locator);
+                Ok(Box::new(ism) as Box<dyn CcipReadIsm>)
             }
             #[cfg(feature = "aleo")]
             ChainConnectionConf::Aleo(_) => Err(eyre!("Aleo support missing")).context(ctx),
             ChainConnectionConf::Cardano(_) => {
                 Err(eyre!("Cardano does not support CCIP read ISM yet")).context(ctx)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support CCIP read ISM")).context(ctx)
             }
         }
         .context(ctx)
@@ -1416,6 +1658,8 @@ impl ChainConf {
                 ChainConnectionConf::Cardano(_) => {
                     Box::new(conf.build::<h_cardano::Keypair>().await?)
                 }
+                #[cfg(feature = "midnight")]
+                ChainConnectionConf::Midnight(_) => Box::new(conf.build::<MidnightSigner>().await?),
             };
             Ok(Some(chain_signer))
         } else {
@@ -1436,6 +1680,21 @@ impl ChainConf {
 
     async fn sealevel_signer(&self) -> Result<Option<h_sealevel::Keypair>> {
         self.signer().await
+    }
+
+    /// Returns the identity keypair for Sealevel chains — the relayer's on-chain identity used
+    /// e.g. by TrustedRelayer ISMs.
+    ///
+    /// Returns `None` when `identity` is not configured.  Callers that need a fallback (e.g.
+    /// `SealevelMailbox`) handle the None case themselves.  This matches the lander path in
+    /// `create_identity_keypair`: both return None when identity is absent, so the two paths
+    /// always agree on whether a distinct identity key is in use.
+    async fn sealevel_identity_signer(&self) -> Result<Option<h_sealevel::Keypair>> {
+        if let Some(conf) = &self.identity {
+            Ok(Some(conf.build::<h_sealevel::Keypair>().await?))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn cosmos_signer(&self) -> Result<Option<h_cosmos::Signer>> {
@@ -1460,6 +1719,12 @@ impl ChainConf {
     }
 
     async fn cardano_signer(&self) -> Result<Option<h_cardano::Keypair>> {
+        self.signer().await
+    }
+
+    #[cfg(feature = "midnight")]
+    #[allow(dead_code)]
+    async fn midnight_signer(&self) -> Result<Option<MidnightSigner>> {
         self.signer().await
     }
 

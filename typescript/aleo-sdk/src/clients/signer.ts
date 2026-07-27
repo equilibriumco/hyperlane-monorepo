@@ -1,14 +1,17 @@
 import { type AltVM } from '@hyperlane-xyz/provider-sdk';
-import { type TokenType } from '@hyperlane-xyz/provider-sdk/warp';
+import { TokenType } from '@hyperlane-xyz/provider-sdk/warp';
 import { assert, isNullish, retryAsync } from '@hyperlane-xyz/utils';
 
 import { type AleoProgram } from '../artifacts.js';
+import {
+  getFileOverrideProgramId,
+  loadProgramsInDeployOrder,
+} from '../utils/helper.node.js';
 import {
   RETRY_ATTEMPTS,
   RETRY_DELAY_MS,
   SUFFIX_LENGTH_LONG,
   getProgramSuffix,
-  loadProgramsInDeployOrder,
 } from '../utils/helper.js';
 import { type AleoReceipt, type AleoTransaction } from '../utils/types.js';
 
@@ -91,10 +94,27 @@ export class AleoSigner
     preferredSuffix?: string,
     maxAttempts = 20,
   ): Promise<string> {
+    if (tokenType === TokenType.native) {
+      return 'credits';
+    }
+
+    // If a file override is set, validate the override program isn't already deployed
+    const warpProgram =
+      tokenType === TokenType.collateral ? 'hyp_collateral' : 'hyp_synthetic';
+    const overrideProgramId = getFileOverrideProgramId(warpProgram);
+    if (overrideProgramId) {
+      const isDeployed = await this.isProgramDeployed(overrideProgramId);
+      assert(
+        !isDeployed,
+        `${overrideProgramId} ${AleoSigner.WARP_SUFFIX_ALREADY_DEPLOYED_ERROR}`,
+      );
+      return ''; // suffix unused — program name comes from the override file
+    }
+
     const configuredSuffix = preferredSuffix || this.warpSuffix;
 
     if (configuredSuffix) {
-      const tokenProgramId = `${this.prefix}_${tokenType}_${configuredSuffix}.aleo`;
+      const tokenProgramId = `${this.prefix}_warp_token_${configuredSuffix}.aleo`;
 
       const isAlreadyDeployed = await this.isProgramDeployed(tokenProgramId);
       assert(
@@ -107,7 +127,7 @@ export class AleoSigner
 
     for (let i = 0; i < maxAttempts; i++) {
       const suffix = this.generateSuffix(SUFFIX_LENGTH_LONG);
-      const tokenProgramId = `${this.prefix}_${tokenType}_${suffix}.aleo`;
+      const tokenProgramId = `${this.prefix}_warp_token_${suffix}.aleo`;
 
       if (!(await this.isProgramDeployed(tokenProgramId))) {
         return suffix;

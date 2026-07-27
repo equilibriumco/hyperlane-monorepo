@@ -48,6 +48,7 @@ impl Indexable for HyperlaneMessage {
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cardano => CursorType::SequenceAware,
+            HyperlaneDomainProtocol::Midnight => CursorType::SequenceAware,
         }
     }
 
@@ -74,6 +75,9 @@ impl Indexable for InterchainGasPayment {
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::RateLimited,
             HyperlaneDomainProtocol::Cardano => CursorType::RateLimited,
+            // Midnight gas payments are indexed from HYP_GAS_PAYMENT events
+            // over block ranges with no sequence, matching EVM (#95).
+            HyperlaneDomainProtocol::Midnight => CursorType::RateLimited,
         }
     }
 
@@ -95,6 +99,7 @@ impl Indexable for MerkleTreeInsertion {
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cardano => CursorType::SequenceAware,
+            HyperlaneDomainProtocol::Midnight => CursorType::SequenceAware,
         }
     }
 
@@ -116,6 +121,9 @@ impl Indexable for Delivery {
             HyperlaneDomainProtocol::Aleo => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Tron => CursorType::RateLimited,
             HyperlaneDomainProtocol::Cardano => CursorType::RateLimited,
+            // Midnight deliveries are indexed from HYP_PROCESS events over
+            // block ranges with no sequence, matching EVM (#95).
+            HyperlaneDomainProtocol::Midnight => CursorType::RateLimited,
         }
     }
 

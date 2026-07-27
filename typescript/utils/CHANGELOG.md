@@ -1,5 +1,29 @@
 # @hyperlane-xyz/utils
 
+## 36.0.0
+
+### Patch Changes
+
+- 9cd7606: `normalizeAddressEvm` now lowercases its input before checksumming, canonicalizing a bad-EIP-55-casing EVM address instead of returning it unchanged. `EvmIcaTxSubmitter.fromConfig` normalizes its origin-side EVM addresses (`owner`, origin `interchainAccountRouter`) up front, so bad casing no longer throws deep inside ethers mid-submission after irreversible deploys have run. Destination router and ISM (remote chain, not assumed EVM) are untouched.
+
+## 35.2.0
+
+## 35.1.0
+
+## 35.0.1
+
+### Patch Changes
+
+- da1cfb1: A `syntheticCcrSwapMessageId` helper was added to `@hyperlane-xyz/utils` for deterministically computing the synthetic message ID of a same-chain CCR swap given its transaction hash and log index. The scraper agent config schema in `@hyperlane-xyz/sdk` was extended with an optional `ccrRouters` field mapping domain IDs to their CCR router-to-collateral address pairs.
+
+## 35.0.0
+
+## 34.0.0
+
+## 33.1.1
+
+## 33.1.0
+
 ## 33.0.2
 
 ### Patch Changes

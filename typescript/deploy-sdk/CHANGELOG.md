@@ -1,5 +1,127 @@
 # @hyperlane-xyz/deploy-sdk
 
+## 7.0.0
+
+### Major Changes
+
+- aa41ce4: SVM fee program management was added to the SVM SDK with full create, read, and update support for all 6 fee types (linear, regressive, progressive, offchainQuotedLinear, routing, crossCollateralRouting). The provider-sdk fee types were refactored with a FeeParams discriminated union (bps vs raw), PascalCase FeeType/FeeStrategyType values, expanded DerivedFeeConfig with resolved bigint fields, and a required FeeReadContext parameter on createFeeArtifactManager. Shared BPS fee utilities (computeBps, bpsToRawFeeParams, constants) were consolidated into provider-sdk as the single source of truth — sdk and svm-sdk now import from provider-sdk. The EVM SDK TokenFeeType was converted from enum to const object for structural compatibility. Legacy pre-fee program bytes were preserved for upgrade testing. The repeated account-decoding boilerplate in the fee and token decoders was consolidated into a shared decodeDiscriminatedAccount helper.
+
+### Patch Changes
+
+- Updated dependencies [9cd7606]
+- Updated dependencies [aa41ce4]
+- Updated dependencies [2f9d783]
+- Updated dependencies [9bdab1d]
+- Updated dependencies [5a5968f]
+- Updated dependencies [823eca3]
+- Updated dependencies [70586aa]
+  - @hyperlane-xyz/utils@36.0.0
+  - @hyperlane-xyz/provider-sdk@7.0.0
+  - @hyperlane-xyz/sealevel-sdk@36.0.0
+  - @hyperlane-xyz/aleo-sdk@36.0.0
+  - @hyperlane-xyz/cosmos-sdk@36.0.0
+  - @hyperlane-xyz/radix-sdk@36.0.0
+  - @hyperlane-xyz/starknet-sdk@28.1.2
+  - @hyperlane-xyz/tron-sdk@23.1.2
+
+## 6.1.1
+
+### Patch Changes
+
+- @hyperlane-xyz/aleo-sdk@35.2.0
+- @hyperlane-xyz/cosmos-sdk@35.2.0
+- @hyperlane-xyz/radix-sdk@35.2.0
+- @hyperlane-xyz/sealevel-sdk@35.2.0
+- @hyperlane-xyz/utils@35.2.0
+- @hyperlane-xyz/starknet-sdk@28.1.1
+- @hyperlane-xyz/provider-sdk@6.1.1
+- @hyperlane-xyz/tron-sdk@23.1.1
+
+## 6.1.0
+
+### Patch Changes
+
+- Updated dependencies [d1b6f0a]
+- Updated dependencies [a911f17]
+  - @hyperlane-xyz/provider-sdk@6.1.0
+  - @hyperlane-xyz/starknet-sdk@28.1.0
+  - @hyperlane-xyz/cosmos-sdk@35.1.0
+  - @hyperlane-xyz/radix-sdk@35.1.0
+  - @hyperlane-xyz/aleo-sdk@35.1.0
+  - @hyperlane-xyz/tron-sdk@23.1.0
+  - @hyperlane-xyz/sealevel-sdk@35.1.0
+  - @hyperlane-xyz/utils@35.1.0
+
+## 6.0.4
+
+### Patch Changes
+
+- Updated dependencies [da1cfb1]
+  - @hyperlane-xyz/utils@35.0.1
+  - @hyperlane-xyz/aleo-sdk@35.0.1
+  - @hyperlane-xyz/cosmos-sdk@35.0.1
+  - @hyperlane-xyz/provider-sdk@6.0.4
+  - @hyperlane-xyz/radix-sdk@35.0.1
+  - @hyperlane-xyz/starknet-sdk@28.0.9
+  - @hyperlane-xyz/sealevel-sdk@35.0.1
+  - @hyperlane-xyz/tron-sdk@23.0.9
+
+## 6.0.3
+
+### Patch Changes
+
+- Updated dependencies [631d7e7]
+- Updated dependencies [f3851a3]
+  - @hyperlane-xyz/aleo-sdk@35.0.0
+  - @hyperlane-xyz/cosmos-sdk@35.0.0
+  - @hyperlane-xyz/radix-sdk@35.0.0
+  - @hyperlane-xyz/sealevel-sdk@35.0.0
+  - @hyperlane-xyz/utils@35.0.0
+  - @hyperlane-xyz/starknet-sdk@28.0.8
+  - @hyperlane-xyz/provider-sdk@6.0.3
+  - @hyperlane-xyz/tron-sdk@23.0.8
+
+## 6.0.2
+
+### Patch Changes
+
+- Updated dependencies [9a1ce26]
+  - @hyperlane-xyz/cosmos-sdk@34.0.0
+  - @hyperlane-xyz/aleo-sdk@34.0.0
+  - @hyperlane-xyz/radix-sdk@34.0.0
+  - @hyperlane-xyz/sealevel-sdk@34.0.0
+  - @hyperlane-xyz/utils@34.0.0
+  - @hyperlane-xyz/starknet-sdk@28.0.7
+  - @hyperlane-xyz/provider-sdk@6.0.2
+  - @hyperlane-xyz/tron-sdk@23.0.7
+
+## 6.0.1
+
+### Patch Changes
+
+- @hyperlane-xyz/aleo-sdk@33.1.1
+- @hyperlane-xyz/cosmos-sdk@33.1.1
+- @hyperlane-xyz/radix-sdk@33.1.1
+- @hyperlane-xyz/sealevel-sdk@33.1.1
+- @hyperlane-xyz/utils@33.1.1
+- @hyperlane-xyz/starknet-sdk@28.0.6
+- @hyperlane-xyz/provider-sdk@6.0.1
+- @hyperlane-xyz/tron-sdk@23.0.6
+
+## 6.0.0
+
+### Patch Changes
+
+- Updated dependencies [bfe4d2e]
+  - @hyperlane-xyz/provider-sdk@6.0.0
+  - @hyperlane-xyz/aleo-sdk@33.1.0
+  - @hyperlane-xyz/cosmos-sdk@33.1.0
+  - @hyperlane-xyz/radix-sdk@33.1.0
+  - @hyperlane-xyz/starknet-sdk@28.0.5
+  - @hyperlane-xyz/sealevel-sdk@33.1.0
+  - @hyperlane-xyz/tron-sdk@23.0.5
+  - @hyperlane-xyz/utils@33.1.0
+
 ## 5.1.0
 
 ### Minor Changes
