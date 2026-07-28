@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoWalletDetails } from './aleoWallet.js';
+import { useMidnightWalletDetails } from './midnight.js';
 import { useCosmosWalletDetails } from './cosmosWallet.js';
 import { useEthereumWalletDetails } from './ethereumWallet.js';
 import { useRadixWalletDetails } from './radixWallet.js';
@@ -18,6 +19,7 @@ export function useWalletDetails(): Record<KnownProtocolType, WalletDetails> {
   const starknetWallet = useStarknetWalletDetails();
   const radixWallet = useRadixWalletDetails();
   const aleoWallet = useAleoWalletDetails();
+  const midnightWallet = useMidnightWalletDetails();
   const tronWallet = useTronWalletDetails();
 
   return useMemo(
@@ -29,6 +31,7 @@ export function useWalletDetails(): Record<KnownProtocolType, WalletDetails> {
       [ProtocolType.Starknet]: starknetWallet,
       [ProtocolType.Radix]: radixWallet,
       [ProtocolType.Aleo]: aleoWallet,
+      [ProtocolType.Midnight]: midnightWallet,
       [ProtocolType.Tron]: tronWallet,
     }),
     [
@@ -38,6 +41,7 @@ export function useWalletDetails(): Record<KnownProtocolType, WalletDetails> {
       starknetWallet,
       radixWallet,
       aleoWallet,
+      midnightWallet,
       tronWallet,
     ],
   );
