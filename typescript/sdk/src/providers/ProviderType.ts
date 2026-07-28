@@ -77,6 +77,7 @@ export enum ProviderType {
   Radix = 'radix',
   Aleo = 'aleo',
   Tron = 'tron',
+  Midnight = 'midnight',
 }
 
 export type { KnownProtocolType };
@@ -93,6 +94,7 @@ export const PROTOCOL_TO_DEFAULT_PROVIDER_TYPE: Record<
   [ProtocolType.Radix]: ProviderType.Radix,
   [ProtocolType.Aleo]: ProviderType.Aleo,
   [ProtocolType.Tron]: ProviderType.Tron,
+  [ProtocolType.Midnight]: ProviderType.Midnight,
 };
 
 export type ProviderMap<Value> = Partial<Record<ProviderType, Value>>;
@@ -145,6 +147,15 @@ type ProtocolTypesMapping = {
     provider: TronProvider;
     contract: null;
     receipt: EthersV5TransactionReceipt;
+  };
+  // Midnight has no RPC-style provider: contract interaction happens through
+  // its GraphQL indexer and proof-server pipeline, so the provider only
+  // carries the endpoint config and transactions are not representable here.
+  [ProtocolType.Midnight]: {
+    transaction: never;
+    provider: MidnightProvider;
+    contract: null;
+    receipt: never;
   };
   [ProtocolType.Unknown]: {
     transaction: never;
@@ -253,6 +264,20 @@ export interface TronProvider extends TypedProviderBase<EV5Providers.Provider> {
   provider: EV5Providers.Provider;
 }
 
+/**
+ * Midnight exposes no JSON-RPC provider; chain access goes through its
+ * GraphQL indexer. The provider wraps the indexer endpoint so protocol-aware
+ * consumers can construct their own clients from it.
+ */
+export interface MidnightIndexerEndpoint {
+  url: string;
+}
+
+export interface MidnightProvider extends TypedProviderBase<MidnightIndexerEndpoint> {
+  type: ProviderType.Midnight;
+  provider: MidnightIndexerEndpoint;
+}
+
 export interface ZKSyncProvider extends TypedProviderBase<ZKSyncBaseProvider> {
   type: ProviderType.ZkSync;
   provider: ZKSyncBaseProvider;
@@ -276,7 +301,8 @@ export type TypedProvider =
   | GnosisTxBuilderProvider
   | RadixProvider
   | AleoProvider
-  | TronProvider;
+  | TronProvider
+  | MidnightProvider;
 
 /**
  * Contracts with discriminated union of provider type

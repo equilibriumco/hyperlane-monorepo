@@ -261,6 +261,10 @@ const STANDARD_TO_TOKEN: Record<TokenStandard, TokenArgs | null> = {
   [TokenStandard.AleoHypNative]: null,
   [TokenStandard.AleoHypCollateral]: null,
   [TokenStandard.AleoHypSynthetic]: null,
+  [TokenStandard.MidnightNative]: null,
+  [TokenStandard.MidnightHypNative]: null,
+  [TokenStandard.MidnightHypCollateral]: null,
+  [TokenStandard.MidnightHypSynthetic]: null,
 
   [TokenStandard.TRC20]: null,
   [TokenStandard.TRC721]: null,

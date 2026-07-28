@@ -54,4 +54,10 @@ export const PROTOCOL_TO_DEFAULT_NATIVE_TOKEN: Record<
     name: 'Tron',
     symbol: 'TRX',
   },
+  [ProtocolType.Midnight]: {
+    decimals: 6,
+    denom: 'STARs',
+    name: 'Night',
+    symbol: 'NIGHT',
+  },
 };
