@@ -4,10 +4,14 @@ import {
   addressToBytes,
   addressToBytes32,
   bytesToProtocolAddress,
+  eqAddressMidnight,
   isAddressStarknet,
+  isValidAddressMidnight,
   isValidAddressStarknet,
+  isValidTransactionHashMidnight,
   isZeroishAddress,
   normalizeAddressEvm,
+  normalizeAddressMidnight,
   padBytesToLength,
 } from './addresses.js';
 import { ProtocolType } from './types.js';
@@ -203,6 +207,49 @@ describe('Address utilities', () => {
       expect(normalizeAddressEvm(SOL_NON_ZERO_ADDR)).to.equal(
         SOL_NON_ZERO_ADDR,
       );
+    });
+  });
+
+  describe('midnight addresses', () => {
+    const MIDNIGHT_ADDR =
+      '0x69bd44340e2fca47d2612c62838a2b1cf74202a306a5d38b5b1a9b0da2b02b3f';
+
+    it('Validates 32-byte hex addresses', () => {
+      expect(isValidAddressMidnight(MIDNIGHT_ADDR)).to.be.true;
+      expect(
+        isValidAddressMidnight(MIDNIGHT_ADDR.slice(2).toUpperCase()),
+      ).to.be.true;
+      expect(isValidAddressMidnight('0x1234')).to.be.false;
+      expect(
+        isValidAddressMidnight('0x67C6390e8782b0B4F913f4dA99c065238Fb7DB30'),
+      ).to.be.false;
+    });
+
+    it('Round-trips bytes to address', () => {
+      expect(
+        bytesToProtocolAddress(
+          addressToBytes(MIDNIGHT_ADDR, ProtocolType.Midnight),
+          ProtocolType.Midnight,
+        ),
+      ).to.equal(MIDNIGHT_ADDR);
+    });
+
+    it('Normalizes to lowercase 0x-prefixed form', () => {
+      const upper = MIDNIGHT_ADDR.slice(2).toUpperCase();
+      expect(normalizeAddressMidnight(upper)).to.equal(MIDNIGHT_ADDR);
+      expect(eqAddressMidnight(upper, MIDNIGHT_ADDR)).to.be.true;
+    });
+
+    it('Identifies zeroish addresses', () => {
+      expect(isZeroishAddress('0x' + '00'.repeat(32))).to.be.true;
+      expect(isZeroishAddress(MIDNIGHT_ADDR)).to.be.false;
+    });
+
+    it('Validates transaction hashes', () => {
+      expect(isValidTransactionHashMidnight('0x' + 'ab'.repeat(32))).to.be
+        .true;
+      expect(isValidTransactionHashMidnight('ab'.repeat(32))).to.be.true;
+      expect(isValidTransactionHashMidnight('0x1234')).to.be.false;
     });
   });
 });
