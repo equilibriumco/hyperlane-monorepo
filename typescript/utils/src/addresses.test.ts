@@ -4,7 +4,9 @@ import {
   addressToBytes,
   addressToBytes32,
   bytesToProtocolAddress,
+  isAddressCardano,
   isAddressStarknet,
+  isValidAddressCardano,
   isValidAddressStarknet,
   isZeroishAddress,
   padBytesToLength,
@@ -37,6 +39,13 @@ const STARKNET_ADDRESSES = [
   // 64 characters (no 0x prefix)
   '049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7',
 ];
+
+// Enterprise (payment-credential-only) addresses on preview/mainnet, plus a
+// mainnet base address that also carries a staking credential.
+const CARDANO_TESTNET_SCRIPT_ADDR =
+  'addr_test1wqfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysu9csdk';
+const CARDANO_MAINNET_KEY_ADDR =
+  'addr1vy6rgdp5xs6rgdp5xs6rgdp5xs6rgdp5xs6rgdp5xs6rgdqpc04ek';
 
 // TODO increase address utility test coverage
 describe('Address utilities', () => {
@@ -155,6 +164,45 @@ describe('Address utilities', () => {
       const bytes32 =
         '0x0b6a86806a0354c82b8f049eb75d9c97e370a6f0c0cfa15f47909c3fe1c8f794';
       expect(addressToBytes32(bytes32)).to.equal(bytes32);
+    });
+  });
+
+  describe('Cardano addresses', () => {
+    it('Recognizes Shelley bech32 addresses', () => {
+      expect(isAddressCardano(CARDANO_TESTNET_SCRIPT_ADDR)).to.be.true;
+      expect(isAddressCardano(CARDANO_MAINNET_KEY_ADDR)).to.be.true;
+      expect(isAddressCardano(ETH_NON_ZERO_ADDR)).to.be.false;
+      expect(isAddressCardano('addr1notbech32')).to.be.false;
+    });
+
+    it('Round-trips through the 32-byte Hyperlane encoding', () => {
+      for (const [address, prefix] of [
+        [CARDANO_TESTNET_SCRIPT_ADDR, 'addr_test'],
+        [CARDANO_MAINNET_KEY_ADDR, 'addr'],
+      ] as const) {
+        const bytes = addressToBytes(address, ProtocolType.Cardano);
+        expect(bytes.length).to.equal(32);
+        // Bytes 1..4 are the reserved padding of the Cardano encoding.
+        expect(Array.from(bytes.slice(1, 4))).to.deep.equal([0, 0, 0]);
+        expect(
+          bytesToProtocolAddress(bytes, ProtocolType.Cardano, prefix),
+        ).to.equal(address);
+      }
+    });
+
+    it('Tags script vs key payment credentials', () => {
+      expect(
+        addressToBytes(CARDANO_TESTNET_SCRIPT_ADDR, ProtocolType.Cardano)[0],
+      ).to.equal(0x02);
+      expect(
+        addressToBytes(CARDANO_MAINNET_KEY_ADDR, ProtocolType.Cardano)[0],
+      ).to.equal(0x00);
+    });
+
+    it('Rejects malformed addresses', () => {
+      expect(isValidAddressCardano(CARDANO_TESTNET_SCRIPT_ADDR)).to.be.true;
+      expect(isValidAddressCardano('addr_test1qqqq')).to.be.false;
+      expect(isValidAddressCardano(ETH_NON_ZERO_ADDR)).to.be.false;
     });
   });
 

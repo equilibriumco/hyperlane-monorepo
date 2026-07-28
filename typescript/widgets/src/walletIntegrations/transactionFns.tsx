@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 import type { MultiProviderAdapter } from '@hyperlane-xyz/sdk/providers/MultiProviderAdapter';
-import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
+import { type SdkSupportedProtocol, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoTransactionFns } from './aleo.js';
 import { useCosmosTransactionFns } from './cosmos.js';
@@ -14,7 +14,7 @@ import { useTronTransactionFns } from './tron.js';
 
 export function useTransactionFns(
   multiProvider: MultiProviderAdapter,
-): Record<KnownProtocolType, ChainTransactionFns> {
+): Record<SdkSupportedProtocol, ChainTransactionFns> {
   const {
     switchNetwork: onSwitchEvmNetwork,
     sendTransaction: onSendEvmTx,

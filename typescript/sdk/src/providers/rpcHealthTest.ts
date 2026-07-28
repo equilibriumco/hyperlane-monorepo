@@ -1,5 +1,5 @@
 import { Mailbox__factory } from '@hyperlane-xyz/core';
-import { Address, ProtocolType, rootLogger } from '@hyperlane-xyz/utils';
+import { Address, rootLogger } from '@hyperlane-xyz/utils';
 
 import { ChainMetadata } from '../metadata/chainMetadataTypes.js';
 
@@ -9,11 +9,11 @@ import {
   CosmJsProvider,
   CosmJsWasmProvider,
   EthersV5Provider,
-  KnownProtocolType,
   ProviderType,
   RadixProvider,
   SolanaWeb3Provider,
   StarknetJsProvider,
+  isSdkSupportedProtocol,
 } from './ProviderType.js';
 import { protocolToDefaultProviderBuilder } from './defaultProviderBuilderMaps.js';
 
@@ -22,11 +22,10 @@ export async function isRpcHealthy(
   rpcIndex: number,
 ): Promise<boolean> {
   const rpc = metadata.rpcUrls[rpcIndex];
-  if (metadata.protocol === ProtocolType.Unknown) {
+  if (!isSdkSupportedProtocol(metadata.protocol)) {
     return false;
   }
-  const protocol = metadata.protocol as KnownProtocolType;
-  const builder = protocolToDefaultProviderBuilder[protocol];
+  const builder = protocolToDefaultProviderBuilder[metadata.protocol];
   const provider = builder([rpc], metadata.chainId);
   if (provider.type === ProviderType.EthersV5)
     return isEthersV5ProviderHealthy(provider.provider, metadata);

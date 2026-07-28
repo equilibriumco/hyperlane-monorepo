@@ -10,12 +10,32 @@ export enum ProtocolType {
   Radix = 'radix',
   Aleo = 'aleo',
   Tron = 'tron',
+  Cardano = 'cardano',
   Unknown = 'unknown',
 }
 // A type that also allows for literal values of the enum
 export type ProtocolTypeValue = `${ProtocolType}`;
 // All protocol types except Unknown - for use in mappings that only support known protocols
 export type KnownProtocolType = Exclude<ProtocolType, ProtocolType.Unknown>;
+
+/**
+ * Protocols with a client-side TypeScript implementation: providers, signers,
+ * token standards and wallet integrations.
+ *
+ * Cardano is excluded. Hyperlane interacts with it from the Rust agents only,
+ * and it surfaces in TypeScript purely as scraped explorer data, so there is
+ * nothing to put in those maps but throwing stubs.
+ */
+export type SdkSupportedProtocol = Exclude<
+  KnownProtocolType,
+  ProtocolType.Cardano
+>;
+
+export function isSdkSupportedProtocol(
+  protocol: ProtocolType,
+): protocol is SdkSupportedProtocol {
+  return protocol !== ProtocolType.Unknown && protocol !== ProtocolType.Cardano;
+}
 
 export function isEVMLike(protocol: ProtocolType): boolean {
   return protocol === ProtocolType.Ethereum || protocol === ProtocolType.Tron;
@@ -30,6 +50,7 @@ export const ProtocolSmallestUnit = {
   [ProtocolType.Radix]: 'attos',
   [ProtocolType.Aleo]: 'microcredits',
   [ProtocolType.Tron]: 'SUN',
+  [ProtocolType.Cardano]: 'lovelace',
   [ProtocolType.Unknown]: 'unknown',
 };
 

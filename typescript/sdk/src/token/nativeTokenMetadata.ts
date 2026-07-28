@@ -54,4 +54,10 @@ export const PROTOCOL_TO_DEFAULT_NATIVE_TOKEN: Record<
     name: 'Tron',
     symbol: 'TRX',
   },
+  [ProtocolType.Cardano]: {
+    decimals: 6,
+    denom: 'lovelace',
+    name: 'Cardano',
+    symbol: 'ADA',
+  },
 };
