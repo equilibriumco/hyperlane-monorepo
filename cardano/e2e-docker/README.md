@@ -154,6 +154,37 @@ docker compose up -d
 6. **Monitor relayer** logs for message delivery
 7. **Verify delivery** on destination chain
 
+## Scraper + GraphQL API
+
+The `scraper`, `postgres` and `hasura` services index Cardano into a relational
+database and expose it over GraphQL, which is what [hyperlane-explorer] reads.
+
+```bash
+# Start just the indexing stack (no validator/relayer needed)
+docker compose up -d postgres scraper hasura
+
+# One-off: tell Hasura which tables to expose
+./hasura/track-tables.sh
+```
+
+Then point the explorer at the API:
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8080/v1/graphql pnpm dev
+```
+
+The scraper applies its own migrations on startup, which include the Cardano
+domain rows (`cardano` 2001, `cardanopreprod` 2002, `cardanopreview` 2003) that
+the `block`/`message` foreign keys require.
+
+| Service  | Port | Purpose                                        |
+| -------- | ---- | ---------------------------------------------- |
+| postgres | 5432 | Scraper database                               |
+| hasura   | 8080 | GraphQL API + console (admin secret `hyperlane`) |
+| scraper  | 9092 | Prometheus metrics                             |
+
+[hyperlane-explorer]: https://github.com/hyperlane-xyz/hyperlane-explorer
+
 ## Related Documentation
 
 - [Hyperlane Documentation](https://docs.hyperlane.xyz/)

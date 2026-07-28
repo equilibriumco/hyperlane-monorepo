@@ -968,6 +968,36 @@ impl BlockfrostProvider {
         })
     }
 
+    /// Get a transaction's on-chain summary (block placement and paid fee).
+    ///
+    /// Only the scraper needs this; the relayer/validator paths work off
+    /// UTXOs and redeemers.
+    #[instrument(skip(self))]
+    pub async fn get_transaction(
+        &self,
+        tx_hash: &str,
+    ) -> Result<TransactionInfo, BlockfrostProviderError> {
+        self.rate_limit().await;
+        let tx = self
+            .with_timeout(self.api.transaction_by_hash(tx_hash))
+            .await?;
+        Ok(TransactionInfo {
+            hash: tx.hash,
+            block_hash: tx.block,
+            block_height: tx.block_height.max(0) as u64,
+            block_time: tx.block_time.max(0) as u64,
+            index: tx.index.max(0) as u32,
+            fees: tx.fees.parse().map_err(|e| {
+                BlockfrostProviderError::Deserialization(format!(
+                    "Unparseable tx fee '{}': {e}",
+                    tx.fees
+                ))
+            })?,
+            size: tx.size.max(0) as u64,
+            valid_contract: tx.valid_contract,
+        })
+    }
+
     /// Get transactions in a block with manual pagination
     #[instrument(skip(self))]
     pub async fn get_block_transactions(
@@ -1044,6 +1074,23 @@ pub struct AddressTransaction {
     pub block_height: u64,
     pub block_time: u64,
     pub tx_index: u32,
+}
+
+/// On-chain summary of a single transaction.
+#[derive(Debug, Clone)]
+pub struct TransactionInfo {
+    pub hash: String,
+    pub block_hash: String,
+    pub block_height: u64,
+    pub block_time: u64,
+    /// Position of the transaction within its block
+    pub index: u32,
+    /// Fee paid, in lovelace
+    pub fees: u64,
+    /// Serialized transaction size, in bytes
+    pub size: u64,
+    /// False when the transaction's scripts failed and only collateral was taken
+    pub valid_contract: bool,
 }
 
 /// Transaction UTXOs

@@ -1,5 +1,5 @@
-use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
-use hyperlane_core::{HyperlaneMessage, ModuleType, H256};
+use crate::consts::{KEY_HASH_ADDR_PREFIX, POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
+use hyperlane_core::{HyperlaneMessage, ModuleType, H256, H512};
 use pallas_addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
 };
@@ -550,6 +550,60 @@ pub fn extract_script_hash_from_address(address: &str) -> Result<ScriptHash, Str
     }
 }
 
+/// Pack a 32-byte Cardano transaction hash into Hyperlane's `H512` transaction id.
+///
+/// Cardano left-aligns: the hash occupies bytes 0..32 and the tail stays zero.
+/// Every Cardano `LogMeta` and `TxOutcome` uses this layout, so
+/// [`h512_to_tx_hash`] is its exact inverse.
+pub fn tx_hash_to_h512(tx_hash: &str) -> Result<H512, String> {
+    let bytes =
+        hex::decode(tx_hash).map_err(|e| format!("Invalid tx hash hex '{tx_hash}': {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "Tx hash has unexpected length {} (expected 32): '{tx_hash}'",
+            bytes.len()
+        ));
+    }
+    let mut packed = [0u8; 64];
+    packed[..32].copy_from_slice(&bytes);
+    Ok(H512::from(packed))
+}
+
+/// Recover the hex Cardano transaction hash from a Hyperlane `H512` transaction id.
+///
+/// Accepts the right-aligned layout too, since generic Hyperlane code widens
+/// `H256` into `H512` by zero-extending on the left.
+pub fn h512_to_tx_hash(id: &H512) -> String {
+    let bytes = id.as_bytes();
+    let hash = if bytes[32..].iter().all(|b| *b == 0) {
+        &bytes[..32]
+    } else {
+        &bytes[32..]
+    };
+    hex::encode(hash)
+}
+
+/// Convert a bech32 Cardano address to the 32-byte Hyperlane address encoding
+/// its payment credential: `[prefix, 0x00, 0x00, 0x00, <28-byte hash>]`.
+///
+/// Script credentials get [`SCRIPT_HASH_ADDR_PREFIX`], key credentials
+/// [`KEY_HASH_ADDR_PREFIX`], matching what recipients see on-chain.
+pub fn address_to_h256(address: &str) -> Result<H256, String> {
+    let addr = Address::from_bech32(address)
+        .map_err(|e| format!("Invalid bech32 address {address}: {e}"))?;
+    let Address::Shelley(shelley) = addr else {
+        return Err(format!("Expected Shelley address, got: {address}"));
+    };
+    let prefix = match shelley.payment() {
+        ShelleyPaymentPart::Script(_) => SCRIPT_HASH_ADDR_PREFIX,
+        ShelleyPaymentPart::Key(_) => KEY_HASH_ADDR_PREFIX,
+    };
+    let mut h = [0u8; 32];
+    h[0] = prefix;
+    h[4..32].copy_from_slice(shelley.payment().as_hash().as_ref());
+    Ok(H256(h))
+}
+
 /// Extract the 28-byte Cardano credential from a Hyperlane bytes32 recipient.
 ///
 /// Hyperlane bytes32 pads 28-byte Cardano hashes with 4 leading bytes:
@@ -632,6 +686,49 @@ mod tests {
 
         let recovered = h256_to_policy_id(&h).unwrap();
         assert_eq!(recovered, id);
+    }
+
+    #[test]
+    fn test_tx_hash_h512_roundtrip() {
+        let hash = "a".repeat(64);
+        let id = tx_hash_to_h512(&hash).unwrap();
+        // Cardano left-aligns, so the tail must stay zero.
+        assert!(id.as_bytes()[32..].iter().all(|b| *b == 0));
+        assert_eq!(h512_to_tx_hash(&id), hash);
+
+        assert!(tx_hash_to_h512("abcd").is_err(), "wrong length rejected");
+        assert!(
+            tx_hash_to_h512(&"z".repeat(64)).is_err(),
+            "bad hex rejected"
+        );
+    }
+
+    #[test]
+    fn test_h512_to_tx_hash_accepts_right_aligned() {
+        // Generic Hyperlane code widens H256 into H512 on the left.
+        let widened: H512 = H256::repeat_byte(0xbe).into();
+        assert_eq!(h512_to_tx_hash(&widened), "be".repeat(32));
+    }
+
+    #[test]
+    fn test_address_to_h256_tags_credential_kind() {
+        let script = script_hash_bytes_to_address(&[0x12; 28], Network::Testnet).unwrap();
+        let h = address_to_h256(&script).unwrap();
+        assert_eq!(h.0[0..4], [SCRIPT_HASH_ADDR_PREFIX, 0x00, 0x00, 0x00]);
+        assert_eq!(&h.0[4..32], &[0x12; 28]);
+
+        let key = Address::Shelley(ShelleyAddress::new(
+            Network::Testnet,
+            ShelleyPaymentPart::Key(pallas_crypto::hash::Hash::new([0x34; 28])),
+            ShelleyDelegationPart::Null,
+        ))
+        .to_bech32()
+        .unwrap();
+        let h = address_to_h256(&key).unwrap();
+        assert_eq!(h.0[0..4], [KEY_HASH_ADDR_PREFIX, 0x00, 0x00, 0x00]);
+        assert_eq!(&h.0[4..32], &[0x34; 28]);
+
+        assert!(address_to_h256("not-an-address").is_err());
     }
 
     #[test]

@@ -8,6 +8,12 @@ pub const POLICY_ID_ADDR_PREFIX: u8 = 0x01;
 /// Cardano script hash in bytes 4..32.
 pub const SCRIPT_HASH_ADDR_PREFIX: u8 = 0x02;
 
+/// Hyperlane address prefix for payment-key-hash credentials (ordinary wallets).
+/// A 32-byte Hyperlane address with this leading byte encodes a 28-byte
+/// Cardano payment key hash in bytes 4..32. Zero so that key-hash credentials
+/// round-trip through the legacy `0x00000000` script-prefix compatibility path.
+pub const KEY_HASH_ADDR_PREFIX: u8 = 0x00;
+
 /// Minimum byte length of Hyperlane multisig ISM metadata.
 ///
 /// Layout:

@@ -1,13 +1,14 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider, TransactionUtxos};
 use crate::provider::CardanoProvider;
 use crate::tx_builder::tx_encoding::extract_int;
+use crate::types::tx_hash_to_h512;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, HyperlaneChain, HyperlaneContract,
     HyperlaneDomain, HyperlaneProvider, Indexed, Indexer, InterchainGasPaymaster,
-    InterchainGasPayment, LogMeta, SequenceAwareIndexer, H256, H512, U256,
+    InterchainGasPayment, LogMeta, SequenceAwareIndexer, H256, U256,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -193,14 +194,7 @@ impl CardanoInterchainGasPaymasterIndexer {
                     address: self.address,
                     block_number: tx_info.block_height,
                     block_hash,
-                    transaction_id: H512::from_slice(&{
-                        let mut bytes = [0u8; 64];
-                        let tx_bytes =
-                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                        bytes[..tx_bytes.len().min(64)]
-                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                        bytes
-                    }),
+                    transaction_id: tx_hash_to_h512(&tx_info.tx_hash).unwrap_or_default(),
                     transaction_index: tx_info.tx_index as u64,
                     log_index: U256::from(redeemer.tx_index),
                 };

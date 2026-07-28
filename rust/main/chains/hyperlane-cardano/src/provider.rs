@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use hyperlane_core::{
     BlockInfo, ChainCommunicationError, ChainInfo, ChainResult, HyperlaneChain, HyperlaneDomain,
-    HyperlaneProvider, TxnInfo, H256, H512, U256,
+    HyperlaneProvider, TxnInfo, TxnReceiptInfo, H256, H512, U256,
 };
 use std::sync::Arc;
 
-use crate::blockfrost_provider::BlockfrostProvider;
+use crate::blockfrost_provider::{BlockfrostProvider, TransactionInfo, TransactionUtxos};
+use crate::types::{address_to_h256, h512_to_tx_hash};
 use crate::ConnectionConf;
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,52 @@ fn block_hash_to_h256(hash_hex: &str) -> ChainResult<H256> {
     Ok(H256::from_slice(&bytes))
 }
 
+/// The address that funded a transaction, as the 32-byte Hyperlane encoding of
+/// its payment credential.
+///
+/// Cardano transactions have no single sender, so the first spent (non-reference,
+/// non-collateral) input stands in — that is the fee payer for every transaction
+/// the Hyperlane agents build. Unresolvable addresses (Byron, malformed) yield
+/// zero rather than failing the whole lookup: the scraper would otherwise drop
+/// an entire message just because its sender could not be rendered.
+fn sender_from(utxos: &TransactionUtxos) -> H256 {
+    utxos
+        .inputs
+        .iter()
+        .find(|i| !i.reference && !i.collateral)
+        .and_then(|i| address_to_h256(&i.address).ok())
+        .unwrap_or_else(H256::zero)
+}
+
+/// Map Blockfrost transaction details onto the `TxnInfo` the scraper stores.
+///
+/// Cardano has no gas market: fees are computed from transaction size plus
+/// script execution units and paid in lovelace, so the paid fee stands in for
+/// `gas_limit`/`gas_used` and the price fields are unset. `receipt` must be
+/// `Some` — the scraper's `store_txns` rejects receipt-less transactions as
+/// "not yet included", and Blockfrost only serves on-chain transactions.
+fn txn_info_from(hash: H512, tx: TransactionInfo, utxos: TransactionUtxos) -> TxnInfo {
+    let fee = U256::from(tx.fees);
+    TxnInfo {
+        hash,
+        gas_limit: fee,
+        max_priority_fee_per_gas: None,
+        max_fee_per_gas: None,
+        gas_price: None,
+        // Cardano orders transactions by UTXO consumption, not by an account
+        // nonce; the in-block index is the closest stable ordinal.
+        nonce: tx.index as u64,
+        sender: sender_from(&utxos),
+        recipient: None,
+        receipt: Some(TxnReceiptInfo {
+            gas_used: fee,
+            cumulative_gas_used: fee,
+            effective_gas_price: None,
+        }),
+        raw_input_data: None,
+    }
+}
+
 #[async_trait]
 impl HyperlaneProvider for CardanoProvider {
     async fn get_block_by_height(&self, height: u64) -> ChainResult<BlockInfo> {
@@ -87,20 +134,18 @@ impl HyperlaneProvider for CardanoProvider {
     }
 
     async fn get_txn_by_hash(&self, hash: &H512) -> ChainResult<TxnInfo> {
-        let cardano_tx_hash = H256::from_slice(&hash.as_bytes()[0..32]);
-
-        Ok(TxnInfo {
-            hash: cardano_tx_hash.into(),
-            gas_limit: U256::zero(),
-            max_priority_fee_per_gas: None,
-            max_fee_per_gas: None,
-            gas_price: None,
-            nonce: 0,
-            sender: H256::zero(),
-            recipient: None,
-            receipt: None,
-            raw_input_data: None,
-        })
+        let tx_hash = h512_to_tx_hash(hash);
+        let tx = self
+            .provider
+            .get_transaction(&tx_hash)
+            .await
+            .map_err(to_chain_err)?;
+        let utxos = self
+            .provider
+            .get_transaction_utxos(&tx_hash)
+            .await
+            .map_err(to_chain_err)?;
+        Ok(txn_info_from(*hash, tx, utxos))
     }
 
     async fn is_contract(&self, _address: &H256) -> ChainResult<bool> {

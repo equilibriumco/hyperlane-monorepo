@@ -35,10 +35,12 @@ COPY rust/sealevel ../sealevel
 
 # Build release binaries
 RUN RUSTFLAGS="--cfg tokio_unstable" \
-    cargo build --release --bin validator --bin relayer && \
+    cargo build --release --bin validator --bin relayer --bin scraper --bin init-db && \
     mkdir -p /release && \
     cp target/release/validator /release && \
-    cp target/release/relayer /release
+    cp target/release/relayer /release && \
+    cp target/release/scraper /release && \
+    cp target/release/init-db /release
 
 # -------- Runtime Image --------
 FROM ubuntu:22.04
@@ -62,6 +64,8 @@ RUN apt-get update && \
 # Copy binaries from builder
 COPY --from=builder /release/validator /app/
 COPY --from=builder /release/relayer /app/
+COPY --from=builder /release/scraper /app/
+COPY --from=builder /release/init-db /app/
 
 # Copy entrypoint script
 COPY cardano/e2e-docker/entrypoint.sh /app/

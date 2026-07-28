@@ -1,6 +1,7 @@
 use crate::blockfrost_provider::{AddressTransaction, BlockfrostProvider};
 use crate::consts::{POLICY_ID_ADDR_PREFIX, SCRIPT_HASH_ADDR_PREFIX};
 use crate::reorg_detector::ReorgDetector;
+use crate::types::tx_hash_to_h512;
 use crate::{CardanoMailbox, ConnectionConf};
 use async_trait::async_trait;
 use bech32::FromBase32;
@@ -8,7 +9,7 @@ use ciborium::Value as CborValue;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use hyperlane_core::{
     ChainResult, ContractLocator, HyperlaneMessage, Indexed, Indexer, LogMeta,
-    SequenceAwareIndexer, H256, H512, U256,
+    SequenceAwareIndexer, H256, U256,
 };
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -438,14 +439,7 @@ impl CardanoMailboxIndexer {
                     address: H256::zero(),
                     block_number: tx_info.block_height,
                     block_hash,
-                    transaction_id: H512::from_slice(&{
-                        let mut bytes = [0u8; 64];
-                        let tx_bytes =
-                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                        bytes[..tx_bytes.len().min(64)]
-                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                        bytes
-                    }),
+                    transaction_id: tx_hash_to_h512(&tx_info.tx_hash).unwrap_or_default(),
                     transaction_index: tx_info.tx_index as u64,
                     log_index: U256::from(redeemer.tx_index),
                 };
@@ -591,14 +585,7 @@ impl Indexer<H256> for CardanoMailboxIndexer {
                     address: H256::zero(),
                     block_number: tx_info.block_height,
                     block_hash,
-                    transaction_id: H512::from_slice(&{
-                        let mut bytes = [0u8; 64];
-                        let tx_bytes =
-                            hex::decode(&tx_info.tx_hash).unwrap_or_else(|_| vec![0u8; 32]);
-                        bytes[..tx_bytes.len().min(64)]
-                            .copy_from_slice(&tx_bytes[..tx_bytes.len().min(64)]);
-                        bytes
-                    }),
+                    transaction_id: tx_hash_to_h512(&tx_info.tx_hash).unwrap_or_default(),
                     transaction_index: tx_info.tx_index as u64,
                     log_index: U256::from(idx),
                 };

@@ -127,8 +127,101 @@ services:
       retries: 3
       start_period: 10s
 
+  # Scraper database
+  # Backs both the scraper agent and the Hasura GraphQL API the explorer reads.
+  postgres:
+    image: postgres:14
+    container_name: hyperlane-scraper-db
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-47221c18c610}
+      POSTGRES_DB: postgres
+    volumes:
+      - scraper-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Cardano Scraper
+  # Indexes dispatches, deliveries and gas payments into Postgres.
+  # Applies the sea-orm migrations on startup before indexing.
+  scraper:
+    build:
+      context: ../..
+      dockerfile: cardano/e2e-docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-scraper-cardano
+    environment:
+      AGENT_TYPE: scraper
+      RUST_LOG: ${RUST_LOG:-info}
+
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+      CARDANO_IGP: ${CARDANO_IGP}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_WARP_ROUTE_REF_UTXO: ${CARDANO_WARP_ROUTE_REF_UTXO}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_POLICY_ID: ${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR: ${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}
+      CARDANO_IGP_SCRIPT_HASH: ${CARDANO_IGP_SCRIPT_HASH}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+    volumes:
+      - ./config:/app/config-templates:ro
+    ports:
+      - "9092:9090"  # Metrics (internal 9090)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # GraphQL API over the scraper database, for hyperlane-explorer.
+  # Point the explorer's NEXT_PUBLIC_API_URL at http://localhost:8080/v1/graphql.
+  hasura:
+    image: hasura/graphql-engine:v2.42.0
+    container_name: hyperlane-scraper-hasura
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      # Read-only anonymous access, matching how the hosted explorer API is exposed.
+      HASURA_GRAPHQL_UNAUTHORIZED_ROLE: public
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-hyperlane}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   validator-cardano-data:
     driver: local
   relayer-data:
+    driver: local
+  scraper-db-data:
     driver: local

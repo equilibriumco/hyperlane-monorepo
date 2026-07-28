@@ -48,6 +48,9 @@ case "$AGENT_TYPE" in
         exec /app/relayer "$@"
         ;;
     scraper)
+        # Idempotent: sea-orm skips migrations already recorded in the DB.
+        echo "Applying scraper database migrations"
+        /app/init-db
         echo "Starting scraper with CONFIG_FILES=$CONFIG_FILES"
         exec /app/scraper "$@"
         ;;
