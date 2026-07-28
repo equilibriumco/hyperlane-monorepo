@@ -1,13 +1,14 @@
 use crate::blockfrost_provider::{BlockfrostProvider, CardanoNetwork, Utxo};
 use crate::cardano::Keypair;
 use crate::provider::CardanoProvider;
+use crate::types::tx_hash_to_h512;
 use crate::ConnectionConf;
 use async_trait::async_trait;
 use ciborium::Value as CborValue;
 use hyperlane_core::{
     Announcement, ChainCommunicationError, ChainResult, ContractLocator, FixedPointNumber,
     HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider, Signable, SignedType,
-    TxOutcome, ValidatorAnnounce, H256, H512, U256,
+    TxOutcome, ValidatorAnnounce, H256, U256,
 };
 use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, VerifyingKey};
 use pallas_addresses::Network;
@@ -796,13 +797,8 @@ impl CardanoValidatorAnnounce {
 
         info!("Validator announce TX submitted: {tx_hash}");
 
-        let hash_bytes = hex::decode(&tx_hash).unwrap_or_default();
-        let mut tx_id_bytes = [0u8; 64];
-        tx_id_bytes[..hash_bytes.len().min(32)]
-            .copy_from_slice(&hash_bytes[..hash_bytes.len().min(32)]);
-
         Ok(TxOutcome {
-            transaction_id: H512::from(tx_id_bytes),
+            transaction_id: tx_hash_to_h512(&tx_hash).unwrap_or_default(),
             executed: true,
             gas_used: U256::from(final_fee),
             gas_price: FixedPointNumber::zero(),

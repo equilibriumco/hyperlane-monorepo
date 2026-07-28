@@ -37,11 +37,12 @@ use crate::consts::{
 use crate::recipient_resolver::{RecipientKind, RecipientResolver, ResolverError};
 use crate::redeemers::plutus_constr_tag;
 use crate::types::{
-    extract_cardano_credential_from_bytes32, script_hash_bytes_to_address, MailboxRedeemer, Message,
+    extract_cardano_credential_from_bytes32, script_hash_bytes_to_address, tx_hash_to_h512,
+    MailboxRedeemer, Message,
 };
 use crate::ConnectionConf;
 use hyperlane_core::{
-    ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, H512, U256,
+    ChainCommunicationError, FixedPointNumber, HyperlaneMessage, TxOutcome, U256,
 };
 use pallas_addresses::{Address, Network};
 use pallas_codec::minicbor;
@@ -1761,15 +1762,10 @@ impl HyperlaneTxBuilder {
             }
         }
 
-        // Convert tx_hash string to H512 (upper half, bytes 0..31)
-        let mut tx_id_bytes = [0u8; 64];
-        let hash_bytes = hex::decode(&tx_hash)
-            .map_err(|e| TxBuilderError::Encoding(format!("Invalid tx hash hex: {e}")))?;
-        tx_id_bytes[..hash_bytes.len().min(32)]
-            .copy_from_slice(&hash_bytes[..hash_bytes.len().min(32)]);
+        let transaction_id = tx_hash_to_h512(&tx_hash).map_err(TxBuilderError::Encoding)?;
 
         Ok(TxOutcome {
-            transaction_id: H512::from(tx_id_bytes),
+            transaction_id,
             executed: true,
             gas_used: U256::from(actual_fee),
             gas_price: FixedPointNumber::try_from(U256::from(1u64))
@@ -2104,13 +2100,8 @@ impl HyperlaneTxBuilder {
 
             success_count += 1;
 
-            let mut tx_id_bytes = [0u8; 64];
-            if let Ok(hash_bytes) = hex::decode(&actual_hash) {
-                tx_id_bytes[..hash_bytes.len().min(32)]
-                    .copy_from_slice(&hash_bytes[..hash_bytes.len().min(32)]);
-            }
             results.push(Ok(TxOutcome {
-                transaction_id: H512::from(tx_id_bytes),
+                transaction_id: tx_hash_to_h512(&actual_hash).unwrap_or_default(),
                 executed: true,
                 gas_used: U256::from(actual_fee),
                 gas_price: FixedPointNumber::try_from(U256::from(1u64))

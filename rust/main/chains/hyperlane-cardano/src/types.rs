@@ -552,9 +552,11 @@ pub fn extract_script_hash_from_address(address: &str) -> Result<ScriptHash, Str
 
 /// Pack a 32-byte Cardano transaction hash into Hyperlane's `H512` transaction id.
 ///
-/// Cardano left-aligns: the hash occupies bytes 0..32 and the tail stays zero.
-/// Every Cardano `LogMeta` and `TxOutcome` uses this layout, so
-/// [`h512_to_tx_hash`] is its exact inverse.
+/// Right-aligned, matching `hyperlane_core::bytes_to_h512`. The alignment is
+/// not cosmetic: the scraper writes ids through `h512_to_bytes`, which stores
+/// only the low 32 bytes when the high half is zero. A left-aligned id would
+/// be stored as all 64 bytes, so the explorer could neither render it nor
+/// find it when searching by transaction hash.
 pub fn tx_hash_to_h512(tx_hash: &str) -> Result<H512, String> {
     let bytes =
         hex::decode(tx_hash).map_err(|e| format!("Invalid tx hash hex '{tx_hash}': {e}"))?;
@@ -565,20 +567,20 @@ pub fn tx_hash_to_h512(tx_hash: &str) -> Result<H512, String> {
         ));
     }
     let mut packed = [0u8; 64];
-    packed[..32].copy_from_slice(&bytes);
+    packed[32..].copy_from_slice(&bytes);
     Ok(H512::from(packed))
 }
 
 /// Recover the hex Cardano transaction hash from a Hyperlane `H512` transaction id.
 ///
-/// Accepts the right-aligned layout too, since generic Hyperlane code widens
-/// `H256` into `H512` by zero-extending on the left.
+/// Also accepts the left-aligned layout that earlier Cardano builds emitted,
+/// so ids already recorded on disk still resolve.
 pub fn h512_to_tx_hash(id: &H512) -> String {
     let bytes = id.as_bytes();
-    let hash = if bytes[32..].iter().all(|b| *b == 0) {
-        &bytes[..32]
-    } else {
+    let hash = if bytes[..32].iter().all(|b| *b == 0) {
         &bytes[32..]
+    } else {
+        &bytes[..32]
     };
     hex::encode(hash)
 }
@@ -692,8 +694,9 @@ mod tests {
     fn test_tx_hash_h512_roundtrip() {
         let hash = "a".repeat(64);
         let id = tx_hash_to_h512(&hash).unwrap();
-        // Cardano left-aligns, so the tail must stay zero.
-        assert!(id.as_bytes()[32..].iter().all(|b| *b == 0));
+        // Right-aligned, so `h512_to_bytes` stores only the low 32 bytes.
+        assert!(id.as_bytes()[..32].iter().all(|b| *b == 0));
+        assert_eq!(hyperlane_core::h512_to_bytes(&id).len(), 32);
         assert_eq!(h512_to_tx_hash(&id), hash);
 
         assert!(tx_hash_to_h512("abcd").is_err(), "wrong length rejected");
@@ -704,10 +707,10 @@ mod tests {
     }
 
     #[test]
-    fn test_h512_to_tx_hash_accepts_right_aligned() {
-        // Generic Hyperlane code widens H256 into H512 on the left.
-        let widened: H512 = H256::repeat_byte(0xbe).into();
-        assert_eq!(h512_to_tx_hash(&widened), "be".repeat(32));
+    fn test_h512_to_tx_hash_accepts_legacy_left_aligned() {
+        let mut packed = [0u8; 64];
+        packed[..32].copy_from_slice(&[0xbe; 32]);
+        assert_eq!(h512_to_tx_hash(&H512::from(packed)), "be".repeat(32));
     }
 
     #[test]
