@@ -20,7 +20,7 @@ use sha3::{Digest, Keccak256};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::tx_builder::{parse_per_redeemer_ex_units, parse_utxo_ref};
+use crate::tx_builder::{parse_per_redeemer_ex_units, parse_utxo_ref, EvaluatedExUnits};
 
 /// Fee estimate for validator announce TX (ECDSA verify is expensive)
 const VA_ESTIMATED_FEE: u64 = 2_000_000;
@@ -31,9 +31,46 @@ const VA_MIN_UTXO: u64 = 2_000_000;
 /// change output min-UTXO. Cannot be computed dynamically because
 /// announce_tokens_needed() runs before any TX is built.
 const VA_MIN_USABLE_UTXO: u64 = 5_000_000;
-/// Default ExUnits for VA spend redeemer (ECDSA verification)
+/// Default ExUnits for VA spend redeemer (ECDSA verification).
+///
+/// Only a placeholder for the evaluation pass and a last-resort fallback: the
+/// real budget comes from evaluating the transaction. These sit at or near the
+/// protocol ceiling, so anything derived from them must be clamped.
 const VA_DEFAULT_MEM: u64 = 14_000_000;
 const VA_DEFAULT_STEPS: u64 = 10_000_000_000;
+/// Ceilings used when the protocol parameters cannot be read. Conservative on
+/// purpose: submitting above the real limit is a hard ledger rejection.
+const VA_FALLBACK_MAX_MEM: u64 = 14_000_000;
+const VA_FALLBACK_MAX_STEPS: u64 = 10_000_000_000;
+
+/// The ExUnits to declare for the announce transaction, given what evaluating
+/// it reported.
+///
+/// Redeemers are keyed by their position among the sorted inputs, and the
+/// announce transaction also carries fee and collateral inputs, so the script
+/// is not necessarily `spend:0`. It is the only script in the transaction, so
+/// the largest reported budget is the one to declare.
+///
+/// The 20% margin is clamped to `max_mem`/`max_steps`: a budget already near
+/// the ceiling would otherwise be pushed past `maxTxExecutionUnits`, which the
+/// ledger rejects outright.
+fn declared_ex_units(ex_units_map: &EvaluatedExUnits, max_mem: u64, max_steps: u64) -> ExUnits {
+    let (mem, steps) = ex_units_map
+        .values()
+        .fold((0u64, 0u64), |(acc_mem, acc_steps), (mem, steps)| {
+            (acc_mem.max(*mem), acc_steps.max(*steps))
+        });
+    let (mem, steps) = if mem == 0 || steps == 0 {
+        warn!(?ex_units_map, "Evaluation reported no usable script budget");
+        (VA_DEFAULT_MEM, VA_DEFAULT_STEPS)
+    } else {
+        (mem, steps)
+    };
+    ExUnits {
+        mem: (mem.saturating_mul(12) / 10).min(max_mem),
+        steps: (steps.saturating_mul(12) / 10).min(max_steps),
+    }
+}
 
 #[derive(Debug)]
 pub struct CardanoValidatorAnnounce {
@@ -45,6 +82,32 @@ pub struct CardanoValidatorAnnounce {
 }
 
 impl CardanoValidatorAnnounce {
+    /// This epoch's `maxTxExecutionUnits`, falling back to conservative
+    /// constants when the parameters cannot be read or parsed. Blockfrost
+    /// reports both as decimal strings.
+    async fn max_tx_ex_units(&self) -> (u64, u64) {
+        let params = match self.provider.get_protocol_parameters().await {
+            Ok(params) => params,
+            Err(e) => {
+                warn!("Could not read protocol parameters ({e}), using fallback ExUnits ceiling");
+                return (VA_FALLBACK_MAX_MEM, VA_FALLBACK_MAX_STEPS);
+            }
+        };
+        let field = |name: &str| -> Option<u64> {
+            let value = params.get(name)?;
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+        };
+        match (field("max_tx_ex_mem"), field("max_tx_ex_steps")) {
+            (Some(mem), Some(steps)) => (mem, steps),
+            _ => {
+                warn!("Protocol parameters missing max_tx_ex_*, using fallback ExUnits ceiling");
+                (VA_FALLBACK_MAX_MEM, VA_FALLBACK_MAX_STEPS)
+            }
+        }
+    }
+
     pub fn new(conf: &ConnectionConf, locator: ContractLocator, signer: Option<Keypair>) -> Self {
         let provider =
             BlockfrostProvider::new(&conf.api_key, conf.network, conf.confirmation_block_delay);
@@ -552,6 +615,11 @@ impl CardanoValidatorAnnounce {
             .await
             .map_err(ChainCommunicationError::from_other)?;
 
+        // The ledger rejects a transaction whose declared ExUnits exceed
+        // maxTxExecutionUnits, so the evaluated budget has to be clamped to what
+        // this epoch actually allows rather than to a compiled-in guess.
+        let (max_tx_mem, max_tx_steps) = self.max_tx_ex_units().await;
+
         // Build initial TX with placeholder ExUnits and fee
         let build_tx = |fee: u64, ex_units: ExUnits| -> ChainResult<Vec<u8>> {
             let va_output =
@@ -635,14 +703,8 @@ impl CardanoValidatorAnnounce {
             Ok(eval_result) => {
                 match parse_per_redeemer_ex_units(&eval_result) {
                     Ok(ex_units_map) => {
-                        // Use the spend:0 ExUnits (the VA script)
-                        let (mem, steps) = ex_units_map
-                            .get("spend:0")
-                            .copied()
-                            .unwrap_or((VA_DEFAULT_MEM, VA_DEFAULT_STEPS));
-                        // Add 20% margin
-                        let mem = mem * 12 / 10;
-                        let steps = steps * 12 / 10;
+                        let ExUnits { mem, steps } =
+                            declared_ex_units(&ex_units_map, max_tx_mem, max_tx_steps);
                         // Compute real fee (rough estimate based on TX size)
                         let tx_size = signed_tx.len() as u64;
                         let fee = std::cmp::max(
@@ -715,7 +777,49 @@ fn normalize_recovery_id(v: u64) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_recovery_id;
+    use super::{declared_ex_units, normalize_recovery_id, VA_DEFAULT_MEM, VA_DEFAULT_STEPS};
+    use crate::tx_builder::EvaluatedExUnits;
+
+    /// Preview/mainnet maxTxExecutionUnits at the time of writing.
+    const MAX_MEM: u64 = 14_000_000;
+    const MAX_STEPS: u64 = 10_000_000_000;
+
+    fn budgets(entries: &[(&str, u64, u64)]) -> EvaluatedExUnits {
+        entries
+            .iter()
+            .map(|(key, mem, steps)| ((*key).to_owned(), (*mem, *steps)))
+            .collect()
+    }
+
+    #[test]
+    fn takes_the_script_budget_whatever_its_redeemer_index() {
+        // The announce transaction carries fee and collateral inputs too, so the
+        // script's redeemer is not necessarily at index 0.
+        let evaluated = budgets(&[("spend:2", 8_000_000, 4_000_000_000)]);
+        let ex_units = declared_ex_units(&evaluated, MAX_MEM, MAX_STEPS);
+        // 20% margin on the evaluated budget.
+        assert_eq!(ex_units.mem, 9_600_000);
+        assert_eq!(ex_units.steps, 4_800_000_000);
+    }
+
+    #[test]
+    fn clamps_the_margin_to_the_ledger_limit() {
+        // A budget near the ceiling must not be pushed past it: the ledger
+        // rejects the transaction with ExUnitsTooBigUTxO.
+        let evaluated = budgets(&[("spend:1", MAX_MEM, MAX_STEPS)]);
+        let ex_units = declared_ex_units(&evaluated, MAX_MEM, MAX_STEPS);
+        assert_eq!(ex_units.mem, MAX_MEM);
+        assert_eq!(ex_units.steps, MAX_STEPS);
+    }
+
+    #[test]
+    fn falls_back_when_evaluation_reports_nothing_usable() {
+        let ex_units = declared_ex_units(&budgets(&[]), MAX_MEM, MAX_STEPS);
+        assert_eq!(ex_units.mem, (VA_DEFAULT_MEM * 12 / 10).min(MAX_MEM));
+        assert_eq!(ex_units.steps, (VA_DEFAULT_STEPS * 12 / 10).min(MAX_STEPS));
+        // And the fallback itself still respects the ceiling.
+        assert!(ex_units.mem <= MAX_MEM && ex_units.steps <= MAX_STEPS);
+    }
 
     #[test]
     fn normalizes_both_recovery_id_conventions() {

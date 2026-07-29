@@ -59,7 +59,7 @@ use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::{debug, info, instrument, warn};
 
 /// Per-redeemer ExUnits from evaluation, keyed by "spend:N" or "mint:N"
-type EvaluatedExUnits = HashMap<String, (u64, u64)>;
+pub type EvaluatedExUnits = HashMap<String, (u64, u64)>;
 
 /// Cached per-role ExUnits from the last successful Blockfrost evaluation.
 /// Used when the evaluate endpoint can't process tracked-state TXs (UTXOs
