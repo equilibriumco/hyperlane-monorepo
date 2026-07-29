@@ -695,7 +695,7 @@ impl HyperlaneTxBuilder {
         }
 
         // Minting policy ref script (synthetic routes)
-        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = warp_token_type {
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy, .. }) = warp_token_type {
             script_hashes.push(minting_policy.clone());
         }
 
@@ -2469,7 +2469,9 @@ impl HyperlaneTxBuilder {
         // ledger can validate the mint redeemer. The CLI's `warp deploy-minting-ref`
         // places this UTXO at the deployer/payer address with reference_script_hash
         // matching the minting policy hash.
-        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = &components.warp_token_type {
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy, .. }) =
+            &components.warp_token_type
+        {
             let mint_ref_utxo = payer_utxos
                 .iter()
                 .find(|u| u.reference_script_hash.as_deref() == Some(minting_policy.as_str()));
@@ -2617,7 +2619,9 @@ impl HyperlaneTxBuilder {
         let mut mint_policies: Vec<Vec<u8>> = vec![];
 
         // 1. Synthetic minting policy (if present)
-        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) = &components.warp_token_type {
+        if let Some(WarpTokenTypeInfo::Synthetic { minting_policy, .. }) =
+            &components.warp_token_type
+        {
             let policy_bytes = hex::decode(minting_policy).map_err(|e| {
                 TxBuilderError::Encoding(format!("Invalid minting_policy hex: {e}"))
             })?;
@@ -2640,16 +2644,17 @@ impl HyperlaneTxBuilder {
         mint_policies.sort();
 
         // Find sorted index for each mint policy
-        let synthetic_mint_idx = if let Some(WarpTokenTypeInfo::Synthetic { minting_policy }) =
-            &components.warp_token_type
-        {
-            let policy_bytes = hex::decode(minting_policy).map_err(|e| {
-                TxBuilderError::Encoding(format!("Invalid minting_policy hex: {e}"))
-            })?;
-            mint_policies.iter().position(|p| *p == policy_bytes)
-        } else {
-            None
-        };
+        let synthetic_mint_idx =
+            if let Some(WarpTokenTypeInfo::Synthetic { minting_policy, .. }) =
+                &components.warp_token_type
+            {
+                let policy_bytes = hex::decode(minting_policy).map_err(|e| {
+                    TxBuilderError::Encoding(format!("Invalid minting_policy hex: {e}"))
+                })?;
+                mint_policies.iter().position(|p| *p == policy_bytes)
+            } else {
+                None
+            };
 
         let verified_nft_mint_idx = if components.verified_message_datum_cbor.is_some() {
             if let Some(ref policy_id) = self.conf.verified_message_nft_policy_id {
@@ -2884,16 +2889,25 @@ impl HyperlaneTxBuilder {
                         release_amount, recipient_output_cost
                     );
                 }
-                WarpTokenTypeInfo::Synthetic { minting_policy } => {
-                    // Synthetic: Mint tokens directly to recipient address
+                WarpTokenTypeInfo::Synthetic {
+                    minting_policy,
+                    asset_name,
+                } => {
+                    // Synthetic: Mint tokens directly to recipient address,
+                    // under the asset name the route's datum declares.
                     info!(
-                        "Synthetic route - minting {} tokens to recipient {}",
+                        "Synthetic route - minting {} tokens (asset name '{}') to recipient {}",
                         release_amount,
+                        asset_name,
                         hex::encode(recipient_bytes)
                     );
 
                     let minting_policy_bytes: Hash<28> = parse_policy_id(minting_policy)?;
-                    let asset_name: Vec<u8> = Vec::new(); // Empty asset name for synthetic tokens
+                    let asset_name: Vec<u8> = hex::decode(asset_name).map_err(|e| {
+                        TxBuilderError::Encoding(format!(
+                            "Invalid synthetic asset name hex in route datum: {e}"
+                        ))
+                    })?;
 
                     // Mint the synthetic tokens
                     tx = tx
@@ -4423,8 +4437,12 @@ pub enum WarpTokenTypeInfo {
         policy_id: String,
         asset_name: String,
     },
-    /// Synthetic tokens - no release (tokens are minted on the other side)
-    Synthetic { minting_policy: String },
+    /// Synthetic tokens - minted to the recipient on delivery
+    Synthetic {
+        minting_policy: String,
+        /// Hex asset name from the route datum (empty for legacy routes)
+        asset_name: String,
+    },
 }
 
 /// Warp route decimal configuration
@@ -4516,7 +4534,7 @@ fn extract_warp_route_decimals(recipient_utxo: &Utxo) -> Result<WarpRouteDecimal
 /// Extract the warp route token type from the datum
 /// The token_type is config.fields[0] and is a Constr with:
 /// - tag 121 (constructor 0) = Collateral { policy_id, asset_name }
-/// - tag 122 (constructor 1) = Synthetic { minting_policy }
+/// - tag 122 (constructor 1) = Synthetic { minting_policy, asset_name }
 /// - tag 123 (constructor 2) = Native
 fn extract_warp_route_token_type(
     recipient_utxo: &Utxo,
@@ -4589,7 +4607,7 @@ fn extract_warp_route_token_type(
                     })
                 }
                 122 => {
-                    // Constructor 1 = Synthetic { minting_policy }
+                    // Constructor 1 = Synthetic { minting_policy, asset_name }
                     let tt_fields = tt_constr.fields.clone().to_vec();
                     if tt_fields.is_empty() {
                         return Err(TxBuilderError::Encoding(
@@ -4604,7 +4622,17 @@ fn extract_warp_route_token_type(
                                     "Failed to extract Synthetic minting_policy".to_string(),
                                 )
                             })?;
-                    Ok(WarpTokenTypeInfo::Synthetic { minting_policy })
+                    // Legacy datums carry no asset_name field; missing means
+                    // the empty name — exactly what those routes mint.
+                    let asset_name = tt_fields
+                        .get(1)
+                        .and_then(extract_bytes)
+                        .map(hex::encode)
+                        .unwrap_or_default();
+                    Ok(WarpTokenTypeInfo::Synthetic {
+                        minting_policy,
+                        asset_name,
+                    })
                 }
                 123 => {
                     // Constructor 2 = Native
@@ -5087,6 +5115,7 @@ mod tests {
     fn warp_payer_extra_covers_unrecovered_min_utxo() {
         let synth = WarpTokenTypeInfo::Synthetic {
             minting_policy: "aa".into(),
+            asset_name: "684e49474854".into(),
         };
         let collat = WarpTokenTypeInfo::Collateral {
             policy_id: "bb".into(),

@@ -37,10 +37,11 @@ fn validate_mint_or_burn(
   policy_id: ByteArray,
   tx: Transaction,
 ) -> Bool {
-  // Synthetic routes use only the empty asset name.
+  // Exactly one asset name per tx under this policy. WHICH name is valid
+  // is the warp route's decision: its mint validation pins the name from
+  // its own datum, and the total-minted check leaves no room for others.
   let mint_pairs = dict.to_pairs(assets.tokens(tx.mint, policy_id))
-  expect [Pair(asset_name, quantity)] = mint_pairs
-  expect asset_name == #""
+  expect [Pair(_asset_name, quantity)] = mint_pairs
   expect quantity != 0
 
   // Bind the mint/burn direction to the warp action. The warp validator then
@@ -137,7 +138,9 @@ fn test_tx_with_state_policy(
     reference_inputs: [],
     outputs: [],
     fee: 0,
-    mint: assets.from_asset(test_synthetic_policy, #"", quantity),
+    // Non-empty name: the policy is name-agnostic (the warp route pins the
+    // name from its datum); "hNIGHT" here locks that property in.
+    mint: assets.from_asset(test_synthetic_policy, #"684e49474854", quantity),
     certificates: [],
     withdrawals: [],
     validity_range: Interval {

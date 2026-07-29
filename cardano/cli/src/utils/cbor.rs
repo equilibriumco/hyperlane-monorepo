@@ -810,8 +810,11 @@ pub enum WarpTokenType<'a> {
         policy_id: &'a str,
         asset_name: &'a str,
     },
-    /// Synthetic: mint new tokens via minting_policy
-    Synthetic { minting_policy: &'a str },
+    /// Synthetic: mint new tokens via minting_policy, under asset_name (hex)
+    Synthetic {
+        minting_policy: &'a str,
+        asset_name: &'a str,
+    },
     /// Native: lock ADA directly
     Native,
 }
@@ -860,10 +863,14 @@ fn build_warp_route_datum(
             builder.bytes_hex(asset_name)?;
             builder.end_constr();
         }
-        WarpTokenType::Synthetic { minting_policy } => {
-            // Synthetic - Constr 1 [minting_policy]
+        WarpTokenType::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
+            // Synthetic - Constr 1 [minting_policy, asset_name]
             builder.start_constr(1);
             builder.bytes_hex(minting_policy)?;
+            builder.bytes_hex(asset_name)?;
             builder.end_constr();
         }
         WarpTokenType::Native => {
@@ -940,12 +947,16 @@ pub fn build_warp_route_native_datum(
 /// Synthetic warp routes mint new tokens via a minting policy.
 pub fn build_warp_route_synthetic_datum(
     minting_policy: &str,
+    asset_name: &str,
     decimals: u32,
     remote_decimals: u32,
     owner_pkh: &str,
 ) -> Result<Vec<u8>> {
     build_warp_route_datum(
-        WarpTokenType::Synthetic { minting_policy },
+        WarpTokenType::Synthetic {
+            minting_policy,
+            asset_name,
+        },
         decimals,
         remote_decimals,
         owner_pkh,
@@ -1106,6 +1117,7 @@ pub fn build_warp_route_collateral_datum_with_routes(
 /// Build a WarpRoute datum for Synthetic type with remote routes
 pub fn build_warp_route_synthetic_datum_with_routes(
     minting_policy: &str,
+    asset_name: &str,
     decimals: u32,
     remote_decimals: u32,
     remote_routes: &[RemoteRoute],
@@ -1123,9 +1135,10 @@ pub fn build_warp_route_synthetic_datum_with_routes(
     // config: WarpRouteConfig - Constr 0
     builder.start_constr(0);
 
-    // token_type: WarpTokenType::Synthetic - Constr 1
+    // token_type: WarpTokenType::Synthetic - Constr 1 [minting_policy, asset_name]
     builder.start_constr(1);
     builder.bytes_hex(minting_policy)?;
+    builder.bytes_hex(asset_name)?;
     builder.end_constr();
 
     // decimals: Int (local token decimals)

@@ -306,7 +306,10 @@ async fn deploy(
         }
         TokenType::Native => deploy_native_route(ctx, decimals, remote_decimals, dry_run).await,
         TokenType::Synthetic => {
-            deploy_synthetic_route(ctx, decimals, remote_decimals, dry_run).await
+            // Same --token-asset flag as collateral (hex asset name); empty by
+            // default. The name becomes route state in the datum.
+            let asset = token_asset.unwrap_or_default();
+            deploy_synthetic_route(ctx, &asset, decimals, remote_decimals, dry_run).await
         }
     }
 }
@@ -785,6 +788,7 @@ fn print_deployment_summary(
 /// Deploy a Synthetic warp route (mints synthetic tokens)
 async fn deploy_synthetic_route(
     ctx: &CliContext,
+    asset_name: &str,
     decimals: u8,
     remote_decimals: u8,
     dry_run: bool,
@@ -824,6 +828,7 @@ async fn deploy_synthetic_route(
     println!("\n{}", "Step 3: Preparing warp route deployment...".cyan());
     let warp_datum = build_warp_route_synthetic_datum(
         synthetic_policy_id,
+        asset_name,
         decimals as u32,
         remote_decimals as u32,
         &deploy_ctx.owner_pkh,
@@ -855,6 +860,7 @@ async fn deploy_synthetic_route(
         "decimals": decimals,
         "synthetic_policy": synthetic_policy_id,
         "minting_policy": synthetic_policy_id,
+        "token_asset": asset_name,
     });
     let warp_tx_hash =
         finalize_warp_deployment(ctx, &deploy_ctx, &warp_datum, "synthetic", extra_info).await?;
@@ -1041,9 +1047,13 @@ async fn enroll_router(
             total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &new_routes,
@@ -1289,9 +1299,13 @@ async fn set_destination_gas(
             total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &new_routes,
@@ -1436,6 +1450,8 @@ enum WarpTokenTypeInfo {
     },
     Synthetic {
         minting_policy: String,
+        /// Hex asset name from the route datum (empty for legacy routes).
+        asset_name: String,
     },
     Native,
 }
@@ -1519,7 +1535,7 @@ fn parse_warp_datum(
             }
         }
         1 => {
-            // Synthetic { minting_policy }
+            // Synthetic { minting_policy, asset_name }
             let tt_fields = token_type_data
                 .get("fields")
                 .and_then(|f| f.as_array())
@@ -1532,7 +1548,19 @@ fn parse_warp_datum(
                 .ok_or_else(|| anyhow!("Invalid Synthetic: missing minting_policy"))?
                 .to_string();
 
-            WarpTokenTypeInfo::Synthetic { minting_policy }
+            // Legacy datums have no asset_name field; missing means the
+            // empty name, which is exactly what those routes mint.
+            let asset_name = tt_fields
+                .get(1)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            WarpTokenTypeInfo::Synthetic {
+                minting_policy,
+                asset_name,
+            }
         }
         2 => {
             // Native (no fields - ADA is held directly in warp route UTXO)
@@ -2008,9 +2036,13 @@ async fn transfer(
             new_total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &remote_routes,
@@ -2207,15 +2239,20 @@ async fn transfer(
                 })
                 .cloned()
         }
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
-            // Find UTXO with synthetic tokens to burn
-            // Synthetic tokens use empty asset name
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
+            // Find UTXO holding the route's synthetic asset (policy + the
+            // asset name recorded in the route datum) to burn from
             payer_utxos
                 .iter()
                 .find(|u| {
-                    u.assets
-                        .iter()
-                        .any(|a| a.policy_id == *minting_policy && a.quantity >= amount)
+                    u.assets.iter().any(|a| {
+                        a.policy_id == *minting_policy
+                            && a.asset_name == *asset_name
+                            && a.quantity >= amount
+                    })
                 })
                 .cloned()
         }
@@ -2411,7 +2448,7 @@ async fn transfer(
     // If a token change output is created, it absorbs the token UTXO's lovelace; otherwise
     // the excess goes into the main change output.
     let token_utxo_extra = match (&token_utxo, &token_type) {
-        (Some(tu), WarpTokenTypeInfo::Synthetic { minting_policy }) => {
+        (Some(tu), WarpTokenTypeInfo::Synthetic { minting_policy, .. }) => {
             let qty = tu
                 .assets
                 .iter()
@@ -2637,7 +2674,7 @@ async fn transfer(
     }
 
     // Add synthetic token burning if needed
-    if let (WarpTokenTypeInfo::Synthetic { minting_policy }, Some(ref tu)) =
+    if let (WarpTokenTypeInfo::Synthetic { minting_policy, .. }, Some(ref tu)) =
         (&token_type, &token_utxo)
     {
         println!("  Adding synthetic token burn...");
@@ -4082,8 +4119,11 @@ mod datum_roundtrip_tests {
     fn synthetic_warp_datum_survives_encode_decode_parse() {
         let owner = "0f".repeat(28);
         let minting = "1f".repeat(28);
+        // "hNIGHT" — a non-empty asset name must round-trip through the datum
+        let asset = "684e49474854";
         let cbor = build_warp_route_synthetic_datum_with_routes(
             &minting,
+            asset,
             6,
             18,
             &routes(),
@@ -4096,8 +4136,12 @@ mod datum_roundtrip_tests {
         let (token_type, _, _, _, parsed_owner, _) = parse_warp_datum(&json).expect("parse");
 
         match token_type {
-            WarpTokenTypeInfo::Synthetic { minting_policy } => {
-                assert_eq!(minting_policy, minting, "minting policy")
+            WarpTokenTypeInfo::Synthetic {
+                minting_policy,
+                asset_name,
+            } => {
+                assert_eq!(minting_policy, minting, "minting policy");
+                assert_eq!(asset_name, asset, "asset name");
             }
             other => panic!("expected synthetic, got {other:?}"),
         }

@@ -123,7 +123,7 @@ fn validate_transfer_remote(
           amount,
         )
 
-      Synthetic { minting_policy } ->
+      Synthetic { minting_policy, .. } ->
         validate_synthetic_burn(minting_policy, amount, tx)
 
       Native -> validate_native_lock(own_input.output, continuation, amount)
@@ -218,9 +218,10 @@ fn validate_receive_transfer(
           tx,
         )
 
-      Synthetic { minting_policy } ->
+      Synthetic { minting_policy, asset_name } ->
         validate_synthetic_mint(
           minting_policy,
+          asset_name,
           wire_transfer.recipient,
           local_amount,
           tx,
@@ -413,9 +414,12 @@ fn validate_synthetic_burn(
   minted == -amount
 }
 
-/// Validate synthetic tokens minted to recipient wallet
+/// Validate synthetic tokens minted to recipient wallet. The asset name
+/// comes from the route's own datum; combined with the total-minted check
+/// this pins every minted unit to that name.
 fn validate_synthetic_mint(
   minting_policy: ScriptHash,
+  asset_name: AssetName,
   recipient: ByteArray,
   amount: Int,
   tx: Transaction,
@@ -423,7 +427,8 @@ fn validate_synthetic_mint(
   let minted = get_minted_amount(tx, minting_policy)
   expect minted == amount
 
-  expect recipient_receives_tokens(tx, recipient, minting_policy, "", amount)
+  expect
+    recipient_receives_tokens(tx, recipient, minting_policy, asset_name, amount)
   True
 }
 
