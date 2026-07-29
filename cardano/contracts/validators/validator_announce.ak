@@ -30,7 +30,11 @@ use types.{
 /// 5. Contract verifies signature and derives Ethereum address from public key
 /// 6. Announcement is stored with the Ethereum address as validator identity
 ///
-validator validator_announce(mailbox_policy_id: PolicyId, mailbox_domain: Domain) {
+validator validator_announce(
+  mailbox_policy_id: PolicyId,
+  mailbox_domain: Domain,
+  mailbox_script_hash: ByteArray,
+) {
   spend(
     datum: Option<ValidatorAnnounceDatum>,
     redeemer: ValidatorAnnounceRedeemer,
@@ -43,6 +47,7 @@ validator validator_announce(mailbox_policy_id: PolicyId, mailbox_domain: Domain
           datum,
           mailbox_policy_id,
           mailbox_domain,
+          mailbox_script_hash,
           storage_location,
           compressed_pubkey,
           uncompressed_pubkey,
@@ -52,7 +57,14 @@ validator validator_announce(mailbox_policy_id: PolicyId, mailbox_domain: Domain
         )
 
       Revoke { compressed_pubkey, uncompressed_pubkey, signature } ->
-        validate_revoke(datum, mailbox_policy_id, mailbox_domain, compressed_pubkey, uncompressed_pubkey, signature)
+        validate_revoke(
+          datum,
+          mailbox_domain,
+          mailbox_script_hash,
+          compressed_pubkey,
+          uncompressed_pubkey,
+          signature,
+        )
     }
   }
 
@@ -66,6 +78,7 @@ fn validate_announce(
   datum: Option<ValidatorAnnounceDatum>,
   mailbox_policy_id: PolicyId,
   mailbox_domain: Domain,
+  mailbox_script_hash: ByteArray,
   new_storage_location: ByteArray,
   compressed_pubkey: ByteArray,
   uncompressed_pubkey: ByteArray,
@@ -81,7 +94,7 @@ fn validate_announce(
 
   // Compute the announcement digest that should have been signed
   let announcement_digest = compute_announcement_digest(
-    mailbox_policy_id,
+    mailbox_script_hash,
     mailbox_domain,
     new_storage_location,
   )
@@ -185,8 +198,8 @@ fn validate_update_announcement(
 /// Validate revoking an announcement
 fn validate_revoke(
   datum: Option<ValidatorAnnounceDatum>,
-  mailbox_policy_id: PolicyId,
   mailbox_domain: Domain,
+  mailbox_script_hash: ByteArray,
   compressed_pubkey: ByteArray,
   uncompressed_pubkey: ByteArray,
   signature: ByteArray,
@@ -199,7 +212,7 @@ fn validate_revoke(
 
   // Compute revocation digest (use empty storage location to indicate revocation)
   let revocation_digest = compute_announcement_digest(
-    mailbox_policy_id,
+    mailbox_script_hash,
     mailbox_domain,
     #"",  // Empty storage location indicates revocation
   )
@@ -224,16 +237,23 @@ fn validate_revoke(
 /// 1. domain_hash = keccak256(localDomain || mailboxAddress || "HYPERLANE_ANNOUNCEMENT")
 /// 2. inner_hash = keccak256(domain_hash || storage_location)
 /// 3. announcement_digest = keccak256("\x19Ethereum Signed Message:\n32" || inner_hash)
+///
+/// The mailbox address is the CANONICAL Hyperlane H256 form — the 28-byte
+/// mailbox script hash left-padded with four zero bytes — because that is
+/// what the stock validator agent signs (`Announcement.mailbox_address` =
+/// the configured mailbox H256). Any other encoding here makes agent
+/// self-announcements unverifiable (the pre-2026-07-28 bug: the policy id
+/// right-padded was used instead).
 fn compute_announcement_digest(
-  mailbox_policy_id: PolicyId,
+  mailbox_script_hash: ByteArray,
   mailbox_domain: Domain,
   storage_location: ByteArray,
 ) -> ByteArray {
   // Step 1: domain_hash
   // Encode domain as 4-byte big-endian
   let domain_bytes = encode_u32_be(mailbox_domain)
-  // Mailbox address as 32 bytes (policy ID padded with zeros on right)
-  let mailbox_address = bytearray.concat(mailbox_policy_id, #"00000000")
+  // Mailbox address as canonical H256: 0x00000000 || script hash (28 bytes)
+  let mailbox_address = bytearray.concat(#"00000000", mailbox_script_hash)
   // "HYPERLANE_ANNOUNCEMENT" as bytes
   let announcement_string = #"48595045524c414e455f414e4e4f554e43454d454e54"
 
@@ -288,4 +308,16 @@ fn find_input(tx: Transaction, ref: OutputReference) {
     tx.inputs,
     fn(input) { input.output_reference == ref },
   )
+}
+
+/// Pin the announcement digest to the canonical Hyperlane form the stock
+/// validator agent signs: keccak(domain_be4 || 0x00000000 || script_hash ||
+/// "HYPERLANE_ANNOUNCEMENT") -> keccak(domain_hash || location) -> EIP-191.
+/// Expected value computed independently with `cast keccak` (foundry).
+/// If this test breaks, agent self-announcements break with it.
+test announcement_digest_matches_canonical_agent_form() {
+  let script_hash = #"11111111111111111111111111111111111111111111111111111111"
+  let location = #"73333a2f2f74657374"
+  // "s3://test"
+  compute_announcement_digest(script_hash, 2003, location) == #"d5443b17ecc4be774b77136454f415f0dca1ed09099672bb86c7bfe35c513096"
 }

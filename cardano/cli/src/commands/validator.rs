@@ -154,8 +154,11 @@ pub(crate) async fn announce_validator(
     let va_address = &parametrized.address;
 
     // Compute the announcement digest (matching contract's formula)
-    let announcement_digest =
-        compute_announcement_digest(mailbox_policy_id, local_domain, storage_location)?;
+    let announcement_digest = compute_announcement_digest(
+        &parametrized.mailbox_script_hash,
+        local_domain,
+        storage_location,
+    )?;
     println!("\n{}", "Announcement Digest:".green());
     println!("  Hash: 0x{}", hex::encode(&announcement_digest));
 
@@ -454,11 +457,12 @@ pub(crate) struct ParametrizedValidatorAnnounce {
     pub script_hash: String,
     pub address: String,
     pub mailbox_policy_id: String,
+    pub mailbox_script_hash: String,
     pub local_domain: u32,
 }
 
-/// Apply `(mailbox_policy_id, mailbox_domain)` to `validator_announce` and
-/// persist the result.
+/// Apply `(mailbox_policy_id, mailbox_domain, mailbox_script_hash)` to
+/// `validator_announce` and persist the result.
 ///
 /// The script is parameterized, so its hash only exists once a mailbox does.
 /// Persisting the applied script and the parameters behind it is what lets
@@ -479,6 +483,7 @@ pub(crate) async fn parametrize_validator_announce(
         .as_ref()
         .ok_or_else(|| anyhow!("Mailbox state NFT policy not found"))?
         .clone();
+    let mailbox_script_hash = mailbox.hash.clone();
 
     // The domain is read from the live mailbox datum rather than assumed from
     // the network, so a mailbox configured for a different domain cannot
@@ -496,13 +501,18 @@ pub(crate) async fn parametrize_validator_announce(
 
     let policy_id_cbor = encode_policy_id_param(&mailbox_policy_id)?;
     let domain_cbor = encode_int_param(local_domain);
+    let script_hash_cbor = encode_policy_id_param(&mailbox_script_hash)?;
 
     println!("\n{}", "Applying validator parameters...".cyan());
     let applied = apply_validator_params(
         &ctx.contracts_dir,
         "validator_announce",
         "validator_announce",
-        &[&hex::encode(&policy_id_cbor), &hex::encode(&domain_cbor)],
+        &[
+            &hex::encode(&policy_id_cbor),
+            &hex::encode(&domain_cbor),
+            &hex::encode(&script_hash_cbor),
+        ],
     )?;
 
     let script_hash = applied.policy_id.clone();
@@ -533,6 +543,16 @@ pub(crate) async fn parametrize_validator_announce(
                 value: local_domain.to_string(),
                 description: Some("Local Hyperlane domain of the mailbox".into()),
             },
+            AppliedParameter {
+                name: "mailbox_script_hash".to_string(),
+                param_type: "ScriptHash".to_string(),
+                value: mailbox_script_hash.clone(),
+                description: Some(
+                    "Mailbox script hash — the canonical H256 mailbox address \
+                     (0x00000000-prefixed) that announcement digests sign over"
+                        .into(),
+                ),
+            },
         ];
         ctx.save_deployment_info(&deployment)?;
         println!("{}", "✓ Deployment info updated".green());
@@ -543,6 +563,7 @@ pub(crate) async fn parametrize_validator_announce(
         script_hash,
         address,
         mailbox_policy_id,
+        mailbox_script_hash,
         local_domain,
     })
 }
@@ -662,7 +683,7 @@ fn pubkey_to_eth_address(uncompressed_pubkey: &[u8]) -> Vec<u8> {
 /// 2. inner_hash = keccak256(domain_hash || storage_location)
 /// 3. announcement_digest = keccak256("\x19Ethereum Signed Message:\n32" || inner_hash)
 fn compute_announcement_digest(
-    mailbox_policy_id: &str,
+    mailbox_script_hash: &str,
     mailbox_domain: u32,
     storage_location: &str,
 ) -> Result<[u8; 32]> {
@@ -670,10 +691,11 @@ fn compute_announcement_digest(
     // Domain as 4-byte big-endian
     let domain_bytes = mailbox_domain.to_be_bytes();
 
-    // Mailbox address as 32 bytes (policy ID padded with zeros on right)
-    let policy_bytes = hex::decode(mailbox_policy_id)?;
+    // Mailbox address in the canonical Hyperlane H256 form the validator
+    // agents sign over: 0x00000000 || 28-byte script hash (left-padded).
+    let hash_bytes = hex::decode(mailbox_script_hash)?;
     let mut mailbox_address = [0u8; 32];
-    mailbox_address[..policy_bytes.len()].copy_from_slice(&policy_bytes);
+    mailbox_address[32 - hash_bytes.len()..].copy_from_slice(&hash_bytes);
 
     // "HYPERLANE_ANNOUNCEMENT" as bytes
     let announcement_string = b"HYPERLANE_ANNOUNCEMENT";
@@ -1002,4 +1024,27 @@ async fn create_seed_utxo(
         spent_utxo_hash: fee_utxo.tx_hash.clone(),
         spent_utxo_index: fee_utxo.output_index as u64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_announcement_digest;
+
+    /// Same vector as the aiken test `announcement_digest_matches_canonical_agent_form`
+    /// in validator_announce.ak, computed independently with `cast keccak`.
+    /// Pins the CLI to the canonical Hyperlane announcement digest (mailbox
+    /// H256 = 0x00000000 || script hash) that the validator agents sign.
+    #[test]
+    fn announcement_digest_matches_canonical_agent_form() {
+        let digest = compute_announcement_digest(
+            "11111111111111111111111111111111111111111111111111111111",
+            2003,
+            "s3://test",
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(digest),
+            "d5443b17ecc4be774b77136454f415f0dca1ed09099672bb86c7bfe35c513096"
+        );
+    }
 }
