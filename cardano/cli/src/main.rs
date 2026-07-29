@@ -42,11 +42,21 @@ struct Cli {
     signing_key: Option<String>,
 
     /// Path to deployment directory
-    #[arg(long, global = true, default_value = "./deployments")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "./deployments",
+        env = "CARDANO_DEPLOYMENTS_DIR"
+    )]
     deployments_dir: String,
 
     /// Path to contracts directory (with plutus.json)
-    #[arg(long, global = true, default_value = "./contracts")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "./contracts",
+        env = "CARDANO_CONTRACTS_DIR"
+    )]
     contracts_dir: String,
 
     /// Verbose output
