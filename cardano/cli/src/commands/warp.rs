@@ -49,8 +49,11 @@ enum WarpCommands {
         #[arg(long)]
         token_policy: Option<String>,
 
-        /// Token asset name (for collateral type)
-        #[arg(long)]
+        /// Token name as text (e.g. "hNIGHT"), or raw bytes with a `hex:`
+        /// prefix (e.g. "hex:684e49474854"). Collateral: the existing
+        /// token's on-chain asset name. Synthetic: the name minted tokens
+        /// carry (stored in the route datum); omit for a nameless asset.
+        #[arg(long = "token-name", alias = "token-asset", value_name = "TOKEN_NAME")]
         token_asset: Option<String>,
 
         /// Local token decimals (Cardano side). Required for collateral/synthetic.
@@ -301,17 +304,38 @@ async fn deploy(
         TokenType::Collateral => {
             let policy = token_policy
                 .ok_or_else(|| anyhow!("--token-policy required for collateral type"))?;
-            let asset = token_asset.unwrap_or_default();
+            let asset = parse_asset_name_arg(&token_asset.unwrap_or_default())?;
             deploy_collateral_route(ctx, &policy, &asset, decimals, remote_decimals, dry_run).await
         }
         TokenType::Native => deploy_native_route(ctx, decimals, remote_decimals, dry_run).await,
         TokenType::Synthetic => {
-            // Same --token-asset flag as collateral (hex asset name); empty by
-            // default. The name becomes route state in the datum.
-            let asset = token_asset.unwrap_or_default();
+            // Same --token-asset flag as collateral. The name becomes route
+            // state in the datum; empty by default.
+            let asset = parse_asset_name_arg(&token_asset.unwrap_or_default())?;
             deploy_synthetic_route(ctx, &asset, decimals, remote_decimals, dry_run).await
         }
     }
+}
+
+/// Normalize the `--token-asset` flag to the hex asset name used on-chain.
+/// Plain input is UTF-8 text ("hNIGHT" -> "684e49474854"); a `hex:` prefix
+/// passes raw bytes through ("hex:684e49474854"). Cardano caps asset names
+/// at 32 bytes.
+fn parse_asset_name_arg(input: &str) -> Result<String> {
+    let hex_name = if let Some(raw) = input.strip_prefix("hex:") {
+        let raw = raw.to_lowercase();
+        hex::decode(&raw).map_err(|e| anyhow!("Invalid hex asset name '{raw}': {e}"))?;
+        raw
+    } else {
+        hex::encode(input.as_bytes())
+    };
+    if hex_name.len() > 64 {
+        return Err(anyhow!(
+            "Asset name is {} bytes; Cardano allows at most 32",
+            hex_name.len() / 2
+        ));
+    }
+    Ok(hex_name)
 }
 
 /// Context holding shared state prepared for warp route deployment
@@ -4113,6 +4137,23 @@ mod datum_roundtrip_tests {
         assert_eq!(parsed_owner, owner);
         assert_eq!(total, 7);
         assert!(parse_destination_gas(&json).expect("gas").is_empty());
+    }
+
+    #[test]
+    fn asset_name_arg_text_is_utf8_encoded() {
+        assert_eq!(parse_asset_name_arg("hNIGHT").unwrap(), "684e49474854");
+        assert_eq!(parse_asset_name_arg("").unwrap(), "");
+    }
+
+    #[test]
+    fn asset_name_arg_hex_prefix_passes_raw_bytes() {
+        assert_eq!(
+            parse_asset_name_arg("hex:684E49474854").unwrap(),
+            "684e49474854"
+        );
+        assert!(parse_asset_name_arg("hex:zz").is_err());
+        // 33 bytes exceeds Cardano's 32-byte asset name cap
+        assert!(parse_asset_name_arg(&"a".repeat(33)).is_err());
     }
 
     #[test]
