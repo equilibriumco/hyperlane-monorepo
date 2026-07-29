@@ -6,6 +6,7 @@ use colored::Colorize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+use crate::utils::blockfrost::BlockfrostClient;
 use crate::utils::context::CliContext;
 use crate::utils::plutus::{apply_validator_param_with_purpose, encode_script_hash_param};
 
@@ -830,11 +831,31 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
     lines.push("CARDANO_SIGNER_KEY=<path-to-signing-key>".to_string());
     lines.push(String::new());
 
+    // H256 contract addresses (0x00000000 + 28-byte script hash) — the forms
+    // the agent config templates consume. The merkle tree hook IS the mailbox.
+    lines.push("# Contract addresses (H256 form)".to_string());
+    if let Some(ref mailbox) = deployment.mailbox {
+        lines.push(format!("CARDANO_MAILBOX=0x00000000{}", mailbox.hash));
+        lines.push(format!(
+            "CARDANO_MERKLE_TREE_HOOK=0x00000000{}",
+            mailbox.hash
+        ));
+    }
+    if let Some(ref ism) = deployment.ism {
+        lines.push(format!("CARDANO_ISM=0x00000000{}", ism.hash));
+    }
+    if let Some(ref igp) = deployment.igp {
+        lines.push(format!("CARDANO_IGP=0x00000000{}", igp.hash));
+    }
+    if let Some(ref va) = deployment.validator_announce {
+        lines.push(format!("CARDANO_VALIDATOR_ANNOUNCE=0x00000000{}", va.hash));
+    }
+    lines.push(String::new());
+
     // Mailbox
     if let Some(ref mailbox) = deployment.mailbox {
         lines.push("# Mailbox".to_string());
         lines.push(format!("CARDANO_MAILBOX_SCRIPT_HASH={}", mailbox.hash));
-        lines.push(format!("CARDANO_MAILBOX_ADDRESS={}", mailbox.address));
         if let Some(ref nft) = mailbox.state_nft {
             lines.push(format!("CARDANO_MAILBOX_POLICY_ID={}", nft.policy_id));
         } else if let Some(ref pid) = mailbox.state_nft_policy {
@@ -853,9 +874,8 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
     if let Some(ref ism) = deployment.ism {
         lines.push("# ISM".to_string());
         lines.push(format!("CARDANO_ISM_SCRIPT_HASH={}", ism.hash));
-        lines.push(format!("CARDANO_ISM_ADDRESS={}", ism.address));
         if let Some(ref nft) = ism.state_nft {
-            lines.push(format!("CARDANO_ISM_POLICY_ID={}", nft.policy_id));
+            lines.push(format!("CARDANO_ISM_STATE_NFT_POLICY_ID={}", nft.policy_id));
         }
         if let Some(ref ref_utxo) = ism.reference_script_utxo {
             lines.push(format!(
@@ -876,11 +896,15 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
         lines.push(String::new());
     }
 
-    // Validator Announce
+    // Validator Announce (the agent config's "policy id" is the script hash)
     if let Some(ref va) = deployment.validator_announce {
         lines.push("# Validator Announce".to_string());
-        if let Some(ref nft) = va.state_nft {
-            lines.push(format!("CARDANO_VA_POLICY_ID={}", nft.policy_id));
+        lines.push(format!("CARDANO_VA_POLICY_ID={}", va.hash));
+        if let Some(ref ref_utxo) = va.reference_script_utxo {
+            lines.push(format!(
+                "CARDANO_VA_REF_UTXO={}#{}",
+                ref_utxo.tx_hash, ref_utxo.output_index
+            ));
         }
         lines.push(String::new());
     }
@@ -897,7 +921,8 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
             let param = encode_script_hash_param(pid)?;
             let param_hex = hex::encode(&param);
 
-            // Verified message NFT
+            // Verified message NFT (policy + full script CBOR — the relayer
+            // needs the CBOR to mint against 0x02 recipients)
             if let Ok(verified_applied) = apply_validator_param_with_purpose(
                 &ctx.contracts_dir,
                 "verified_message_nft",
@@ -907,52 +932,65 @@ async fn generate_env(ctx: &CliContext, output: Option<String>, dry_run: bool) -
             ) {
                 lines.push("# Verified Message NFT".to_string());
                 lines.push(format!(
-                    "CARDANO_VERIFIED_MSG_POLICY_ID={}",
+                    "CARDANO_VERIFIED_MSG_NFT_POLICY_ID={}",
                     verified_applied.policy_id
+                ));
+                lines.push(format!(
+                    "CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR={}",
+                    verified_applied.compiled_code
                 ));
                 lines.push(String::new());
             }
         }
     }
 
-    // Token redemption has been removed - no longer needed
-
-    // Warp routes
-    for (i, warp) in deployment.warp_routes.iter().enumerate() {
-        let label = warp.warp_type.to_uppercase();
-        let prefix = if deployment.warp_routes.len() > 1 {
-            format!("CARDANO_{}_WARP_{}", label, i)
-        } else {
-            format!("CARDANO_{}_WARP", label)
-        };
+    // Warp route reference script (shared by all routes; first one that has it)
+    if let Some(ref_utxo) = deployment
+        .warp_routes
+        .iter()
+        .find_map(|w| w.reference_script_utxo.as_ref())
+    {
+        lines.push("# Warp route reference script".to_string());
         lines.push(format!(
-            "# Warp Route: {} ({})",
-            warp.warp_type, warp.address
+            "CARDANO_WARP_ROUTE_REF_UTXO={}#{}",
+            ref_utxo.tx_hash, ref_utxo.output_index
         ));
-        lines.push(format!("{}_NFT_POLICY={}", prefix, warp.nft_policy));
-        lines.push(format!("{}_SCRIPT_HASH={}", prefix, warp.script_hash));
-        lines.push(format!("{}_ADDRESS={}", prefix, warp.address));
-        if let Some(ref ref_utxo) = warp.reference_script_utxo {
-            lines.push(format!(
-                "{}_REF_UTXO={}#{}",
-                prefix, ref_utxo.tx_hash, ref_utxo.output_index
-            ));
-        }
-        if let Some(ref tp) = warp.token_policy {
-            lines.push(format!("{}_TOKEN_POLICY={}", prefix, tp));
-        }
-        if let Some(ref ta) = warp.token_asset {
-            lines.push(format!("{}_TOKEN_ASSET={}", prefix, ta));
-        }
-        if let Some(ref mp) = warp.minting_policy {
-            lines.push(format!("{}_MINTING_POLICY={}", prefix, mp));
-        }
         lines.push(String::new());
     }
 
-    // Index from placeholder
+    // Per-route details (NFT policy, minting policy, addresses) stay in
+    // deployment_info.json only — no agent consumes them from the env.
+
+    // Index-from: the block of the mailbox init tx (must be <= the first
+    // dispatch ever — the merkle tree loader starts at leaf 0). Falls back
+    // to a placeholder when the block cannot be resolved.
     lines.push("# Indexing".to_string());
-    lines.push("CARDANO_INDEX_FROM=<block-number>".to_string());
+    let index_from = match (
+        ctx.require_api_key(),
+        deployment
+            .mailbox
+            .as_ref()
+            .and_then(|m| m.init_tx_hash.as_ref()),
+    ) {
+        (Ok(api_key), Some(init_tx)) => {
+            let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+            match client.get_tx_block_height(init_tx).await {
+                Ok(height) => Some(height),
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("  (could not resolve mailbox init block: {})", e).yellow()
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    match index_from {
+        Some(height) => lines.push(format!("CARDANO_INDEX_FROM={}", height)),
+        None => lines.push("CARDANO_INDEX_FROM=<block-of-mailbox-init-tx>".to_string()),
+    }
 
     let content = lines.join("\n") + "\n";
 

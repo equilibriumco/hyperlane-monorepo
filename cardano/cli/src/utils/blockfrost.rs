@@ -519,6 +519,16 @@ impl BlockfrostClient {
     /// Conway charges a fee per byte of every reference script a transaction
     /// uses, so the size has to be resolved from chain to price a transaction
     /// that reads one.
+    /// Block height the given transaction was included in.
+    pub async fn get_tx_block_height(&self, tx_hash: &str) -> Result<u64> {
+        #[derive(Deserialize)]
+        struct TxInfo {
+            block_height: u64,
+        }
+        let info: TxInfo = self.get(&format!("/txs/{}", tx_hash)).await?;
+        Ok(info.block_height)
+    }
+
     pub async fn reference_script_size(&self, tx_hash: &str, output_index: u32) -> Result<u64> {
         #[derive(Deserialize)]
         struct TxUtxos {
