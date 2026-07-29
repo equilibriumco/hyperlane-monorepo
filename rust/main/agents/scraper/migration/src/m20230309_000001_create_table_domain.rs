@@ -521,8 +521,8 @@ const DOMAINS: &[RawDomain] = &[
         is_test_net: true,
         is_deprecated: false,
     },
-    // Midnight (#34). `chain_id` mirrors the domain: Midnight has no EVM
-    // chain id, but a NULL here leaves `message_view.origin_chain_id` unset
+    // Midnight. `chain_id` mirrors the domain: Midnight has no EVM chain
+    // id, but a NULL here leaves `message_view.origin_chain_id` unset
     // and the Explorer's timeline never leaves its first stage. Domain 1234
     // is `KnownHyperlaneDomain::Midnight`, shared by the local devnet and
     // the stagenet deployment.
