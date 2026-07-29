@@ -247,7 +247,7 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
         WarpCommands::DeployMintingRef {
             warp_policy,
             dry_run,
-        } => deploy_minting_ref(ctx, &warp_policy, dry_run).await,
+        } => deploy_minting_ref(ctx, &warp_policy, None, dry_run).await,
         WarpCommands::Migrate {
             new_script_hash,
             warp_policy,
@@ -903,7 +903,13 @@ async fn deploy_synthetic_route(
         "\n{}",
         "Auto-deploying minting policy reference script...".cyan()
     );
-    deploy_minting_ref(ctx, &deploy_ctx.warp_nft_applied.policy_id, false).await?;
+    deploy_minting_ref(
+        ctx,
+        &deploy_ctx.warp_nft_applied.policy_id,
+        Some(&warp_tx_hash),
+        false,
+    )
+    .await?;
 
     Ok(())
 }
@@ -3255,7 +3261,49 @@ fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
 /// 2. Extract the warp route script hash from its address
 /// 3. Apply both parameters to the synthetic_token minting policy
 /// 4. Deploy the resulting script as a reference script UTXO with a marker NFT
-async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) -> Result<()> {
+/// Locate a confirmed tx's plain-ADA change output back to `payer_address`,
+/// as a spendable input for a follow-up tx. Queried by tx hash, so it is
+/// immune to the address-UTxO endpoint's indexing lag. Returns None if the
+/// tx made no suitable change output (caller falls back to a wallet scan).
+async fn find_change_output(
+    client: &BlockfrostClient,
+    tx_hash: &str,
+    payer_address: &str,
+    min_lovelace: u64,
+) -> Result<Option<crate::utils::types::Utxo>> {
+    let tx_utxos = client.get_tx_utxos(tx_hash).await?;
+    let change = tx_utxos.outputs.iter().find(|o| {
+        o.address == payer_address
+            && o.collateral != Some(true)
+            && o.data_hash.is_none()
+            && o.inline_datum.is_none()
+            && o.reference_script_hash.is_none()
+            && o.amount.len() == 1
+            && o.amount[0].unit == "lovelace"
+            && o.amount[0].quantity.parse::<u64>().unwrap_or(0) >= min_lovelace
+    });
+    Ok(change.map(|o| crate::utils::types::Utxo {
+        tx_hash: tx_hash.to_string(),
+        output_index: o.output_index,
+        address: o.address.clone(),
+        lovelace: o.amount[0].quantity.parse().unwrap_or(0),
+        assets: Vec::new(),
+        datum_hash: None,
+        inline_datum: None,
+        reference_script: None,
+    }))
+}
+
+/// `chained_from_tx`: the just-submitted warp deploy tx. Its change output is
+/// used as the deploy input instead of a Blockfrost wallet scan, which lags
+/// 25-40s behind and can return already-spent UTxOs (the tx-by-hash endpoint
+/// has no such lag once the tx is confirmed).
+async fn deploy_minting_ref(
+    ctx: &CliContext,
+    warp_policy: &str,
+    chained_from_tx: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
     println!(
         "\n{}",
         "═══════════════════════════════════════════════════════════════".cyan()
@@ -3434,31 +3482,43 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
 
     // Step 5: Find UTXOs for deployment
     println!("\n{}", "Step 5: Finding UTXOs for deployment...".cyan());
-    let utxos = client.get_utxos(&payer_address).await?;
-    println!("  Found {} UTXOs", utxos.len());
-
-    // Need one UTXO for the reference script deployment
-    // Exclude UTXOs with assets, reference scripts, or inline datums
     let min_ada = 15_000_000u64; // 15 ADA to cover reference script UTXO
-    let suitable_utxos: Vec<_> = utxos
-        .iter()
-        .filter(|u| {
-            u.lovelace >= min_ada
-                && u.assets.is_empty()
-                && u.reference_script.is_none()
-                && u.inline_datum.is_none()
-                && u.datum_hash.is_none()
-        })
-        .collect();
 
-    if suitable_utxos.is_empty() {
-        return Err(anyhow!(
-            "Need at least 1 UTXO with >= 15 ADA. Found none. \
-             Please fund the wallet with more ADA."
-        ));
-    }
+    let chained_utxo = match chained_from_tx {
+        Some(tx_hash) => find_change_output(&client, tx_hash, &payer_address, min_ada).await?,
+        None => None,
+    };
 
-    let deploy_input = suitable_utxos[0];
+    let deploy_input = if let Some(utxo) = chained_utxo {
+        println!("  Chained from warp deploy change output");
+        utxo
+    } else {
+        let utxos = client.get_utxos(&payer_address).await?;
+        println!("  Found {} UTXOs", utxos.len());
+
+        // Need one UTXO for the reference script deployment
+        // Exclude UTXOs with assets, reference scripts, or inline datums
+        let suitable_utxos: Vec<_> = utxos
+            .iter()
+            .filter(|u| {
+                u.lovelace >= min_ada
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && u.inline_datum.is_none()
+                    && u.datum_hash.is_none()
+            })
+            .cloned()
+            .collect();
+
+        if suitable_utxos.is_empty() {
+            return Err(anyhow!(
+                "Need at least 1 UTXO with >= 15 ADA. Found none. \
+                 Please fund the wallet with more ADA."
+            ));
+        }
+
+        suitable_utxos[0].clone()
+    };
     println!(
         "  Deploy Input: {}#{}",
         deploy_input.tx_hash, deploy_input.output_index
