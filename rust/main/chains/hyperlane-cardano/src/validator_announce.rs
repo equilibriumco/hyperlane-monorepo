@@ -42,6 +42,25 @@ const VA_DEFAULT_STEPS: u64 = 10_000_000_000;
 /// purpose: submitting above the real limit is a hard ledger rejection.
 const VA_FALLBACK_MAX_MEM: u64 = 14_000_000;
 const VA_FALLBACK_MAX_STEPS: u64 = 10_000_000_000;
+/// Conway reference-script price used when the parameters cannot be read.
+const VA_FALLBACK_REF_SCRIPT_COST_PER_BYTE: u64 = 15;
+
+/// Epoch parameters the announce transaction must satisfy.
+struct AnnounceParams {
+    max_tx_mem: u64,
+    max_tx_steps: u64,
+    ref_script_cost_per_byte: u64,
+}
+
+impl AnnounceParams {
+    fn fallback() -> Self {
+        Self {
+            max_tx_mem: VA_FALLBACK_MAX_MEM,
+            max_tx_steps: VA_FALLBACK_MAX_STEPS,
+            ref_script_cost_per_byte: VA_FALLBACK_REF_SCRIPT_COST_PER_BYTE,
+        }
+    }
+}
 
 /// The ExUnits to declare for the announce transaction, given what evaluating
 /// it reported.
@@ -82,15 +101,15 @@ pub struct CardanoValidatorAnnounce {
 }
 
 impl CardanoValidatorAnnounce {
-    /// This epoch's `maxTxExecutionUnits`, falling back to conservative
-    /// constants when the parameters cannot be read or parsed. Blockfrost
-    /// reports both as decimal strings.
-    async fn max_tx_ex_units(&self) -> (u64, u64) {
+    /// The epoch parameters the announce transaction has to satisfy, falling
+    /// back to conservative constants when they cannot be read. Blockfrost
+    /// reports numbers as decimal strings.
+    async fn announce_params(&self) -> AnnounceParams {
         let params = match self.provider.get_protocol_parameters().await {
             Ok(params) => params,
             Err(e) => {
-                warn!("Could not read protocol parameters ({e}), using fallback ExUnits ceiling");
-                return (VA_FALLBACK_MAX_MEM, VA_FALLBACK_MAX_STEPS);
+                warn!("Could not read protocol parameters ({e}), using fallback limits");
+                return AnnounceParams::fallback();
             }
         };
         let field = |name: &str| -> Option<u64> {
@@ -99,11 +118,30 @@ impl CardanoValidatorAnnounce {
                 .as_u64()
                 .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
         };
-        match (field("max_tx_ex_mem"), field("max_tx_ex_steps")) {
-            (Some(mem), Some(steps)) => (mem, steps),
-            _ => {
-                warn!("Protocol parameters missing max_tx_ex_*, using fallback ExUnits ceiling");
-                (VA_FALLBACK_MAX_MEM, VA_FALLBACK_MAX_STEPS)
+        AnnounceParams {
+            max_tx_mem: field("max_tx_ex_mem").unwrap_or(VA_FALLBACK_MAX_MEM),
+            max_tx_steps: field("max_tx_ex_steps").unwrap_or(VA_FALLBACK_MAX_STEPS),
+            ref_script_cost_per_byte: field("min_fee_ref_script_cost_per_byte")
+                .unwrap_or(VA_FALLBACK_REF_SCRIPT_COST_PER_BYTE),
+        }
+    }
+
+    /// Conway charges for the reference script a transaction reads, on top of
+    /// size and execution units. Omitting it puts the declared fee below
+    /// `minFee` and the ledger rejects the transaction with `FeeTooSmallUTxO`.
+    ///
+    /// Linear pricing, which holds below the 25 600 byte tier boundary; the
+    /// validator announce script is an order of magnitude smaller than that.
+    async fn ref_script_fee(&self, cost_per_byte: u64) -> u64 {
+        match self
+            .provider
+            .get_script_size(&self.conf.validator_announce_policy_id)
+            .await
+        {
+            Ok(size) => size.saturating_mul(cost_per_byte),
+            Err(e) => {
+                warn!("Could not read validator announce script size ({e}), fee may be too low");
+                0
             }
         }
     }
@@ -618,7 +656,8 @@ impl CardanoValidatorAnnounce {
         // The ledger rejects a transaction whose declared ExUnits exceed
         // maxTxExecutionUnits, so the evaluated budget has to be clamped to what
         // this epoch actually allows rather than to a compiled-in guess.
-        let (max_tx_mem, max_tx_steps) = self.max_tx_ex_units().await;
+        let params = self.announce_params().await;
+        let ref_script_fee = self.ref_script_fee(params.ref_script_cost_per_byte).await;
 
         // Build initial TX with placeholder ExUnits and fee
         let build_tx = |fee: u64, ex_units: ExUnits| -> ChainResult<Vec<u8>> {
@@ -703,8 +742,11 @@ impl CardanoValidatorAnnounce {
             Ok(eval_result) => {
                 match parse_per_redeemer_ex_units(&eval_result) {
                     Ok(ex_units_map) => {
-                        let ExUnits { mem, steps } =
-                            declared_ex_units(&ex_units_map, max_tx_mem, max_tx_steps);
+                        let ExUnits { mem, steps } = declared_ex_units(
+                            &ex_units_map,
+                            params.max_tx_mem,
+                            params.max_tx_steps,
+                        );
                         // Compute real fee (rough estimate based on TX size)
                         let tx_size = signed_tx.len() as u64;
                         let fee = std::cmp::max(
@@ -712,7 +754,8 @@ impl CardanoValidatorAnnounce {
                             44 * tx_size
                                 + 155_381
                                 + ((mem as f64 * 0.0577) as u64)
-                                + ((steps as f64 * 0.0000721) as u64),
+                                + ((steps as f64 * 0.0000721) as u64)
+                                + ref_script_fee,
                         );
                         info!("Evaluated VA TX: mem={mem}, steps={steps}, fee={fee}");
                         (fee, ExUnits { mem, steps })
