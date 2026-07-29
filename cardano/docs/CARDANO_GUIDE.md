@@ -930,7 +930,7 @@ hyperlane-cardano warp deploy --token-type native --decimals 6 \
 
 # Collateral
 hyperlane-cardano warp deploy --token-type collateral \
-  --token-policy <POLICY_ID> --token-asset <ASSET_NAME> --decimals 6 \
+  --token-policy <POLICY_ID> --token-name <ASSET_NAME> --decimals 6 \
   --signing-key /path/to/payment.skey --contracts-dir ./contracts
 
 # Synthetic
