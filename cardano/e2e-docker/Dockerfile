@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile for Cardano E2E testing agents
 # Builds on the hyperlane-agent base image
 
@@ -33,8 +34,16 @@ COPY rust/main/Cargo.lock ./
 # Copy sealevel workspace
 COPY rust/sealevel ../sealevel
 
-# Build release binaries
-RUN RUSTFLAGS="--cfg tokio_unstable" \
+# Build release binaries.
+#
+# The registry, git checkouts and target directory are cache mounts, so editing
+# one crate recompiles that crate rather than the whole dependency graph. The
+# binaries must be copied out inside this same instruction: a cache mount is not
+# part of the image, so `target/` is gone by the next one.
+RUN --mount=type=cache,id=hyperlane-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=hyperlane-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=hyperlane-cargo-target,target=/usr/src/rust/main/target \
+    RUSTFLAGS="--cfg tokio_unstable" \
     cargo build --release --bin validator --bin relayer --bin scraper --bin init-db && \
     mkdir -p /release && \
     cp target/release/validator /release && \
