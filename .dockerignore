@@ -14,6 +14,10 @@ pnpm-debug.log*
 rust
 !rust/main
 !rust/sealevel
+# Cargo build output is never copied into the image, but without this the
+# daemon walks it on every build -- it reaches tens of gigabytes locally.
+rust/main/target
+rust/sealevel/target
 docs
 tools
 vectors

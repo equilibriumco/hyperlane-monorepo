@@ -184,6 +184,16 @@ services:
       CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR: ${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}
       CARDANO_IGP_SCRIPT_HASH: ${CARDANO_IGP_SCRIPT_HASH}
       CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+
+      # Sepolia. Deliveries are recorded on the destination chain, so both
+      # sides must be scraped for a message to ever show as delivered.
+      SEPOLIA_MAILBOX: ${SEPOLIA_MAILBOX}
+      SEPOLIA_VALIDATOR_ANNOUNCE: ${SEPOLIA_VALIDATOR_ANNOUNCE}
+      SEPOLIA_MERKLE_TREE_HOOK: ${SEPOLIA_MERKLE_TREE_HOOK}
+      SEPOLIA_IGP: ${SEPOLIA_IGP}
+      SEPOLIA_ISM: ${SEPOLIA_ISM}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL}
+      SEPOLIA_INDEX_FROM: ${SEPOLIA_INDEX_FROM:-10292190}
     volumes:
       - ./config:/app/config-templates:ro
     ports:
