@@ -427,8 +427,11 @@ pub enum WarpTokenType {
         asset_name: String,
         vault_locator: UtxoLocator,
     },
-    /// Mint synthetic tokens
-    Synthetic { minting_policy: ScriptHash },
+    /// Mint synthetic tokens under `asset_name` (hex; empty for legacy routes)
+    Synthetic {
+        minting_policy: ScriptHash,
+        asset_name: String,
+    },
     /// Native ADA
     Native { vault_locator: UtxoLocator },
 }

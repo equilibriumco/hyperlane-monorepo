@@ -857,7 +857,7 @@ TOKEN_POLICY="908d51752e4c76fe1404a92b1276b1c1093dae0c7f302c5442f0177e"
 # Asset name must be HEX-encoded, not ASCII. An ASCII name fails with
 # "Invalid hex: Odd number of digits" (odd length) or is silently misread
 # (e.g. "CAFE" is valid hex). Encode it first:
-TOKEN_ASSET=$(printf 'WARPTEST' | xxd -p)  # -> 5741525054455354
+TOKEN_NAME=WARPTEST  # plain text; the CLI hex-encodes it (hex: prefix for raw bytes)
 
 BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
 ./cli/target/release/hyperlane-cardano \
@@ -866,7 +866,7 @@ BLOCKFROST_API_KEY=$BLOCKFROST_API_KEY \
   warp deploy \
   --token-type collateral \
   --token-policy $TOKEN_POLICY \
-  --token-asset $TOKEN_ASSET \
+  --token-name $TOKEN_NAME \
   --decimals 6 \
   --remote-decimals 18
 ```

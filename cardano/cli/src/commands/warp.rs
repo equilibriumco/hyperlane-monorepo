@@ -49,8 +49,11 @@ enum WarpCommands {
         #[arg(long)]
         token_policy: Option<String>,
 
-        /// Token asset name (for collateral type)
-        #[arg(long)]
+        /// Token name as text (e.g. "hNIGHT"), or raw bytes with a `hex:`
+        /// prefix (e.g. "hex:684e49474854"). Collateral: the existing
+        /// token's on-chain asset name. Synthetic: the name minted tokens
+        /// carry (stored in the route datum); omit for a nameless asset.
+        #[arg(long = "token-name", alias = "token-asset", value_name = "TOKEN_NAME")]
         token_asset: Option<String>,
 
         /// Local token decimals (Cardano side). Required for collateral/synthetic.
@@ -244,7 +247,7 @@ pub async fn execute(ctx: &CliContext, args: WarpArgs) -> Result<()> {
         WarpCommands::DeployMintingRef {
             warp_policy,
             dry_run,
-        } => deploy_minting_ref(ctx, &warp_policy, dry_run).await,
+        } => deploy_minting_ref(ctx, &warp_policy, None, dry_run).await,
         WarpCommands::Migrate {
             new_script_hash,
             warp_policy,
@@ -301,14 +304,38 @@ async fn deploy(
         TokenType::Collateral => {
             let policy = token_policy
                 .ok_or_else(|| anyhow!("--token-policy required for collateral type"))?;
-            let asset = token_asset.unwrap_or_default();
+            let asset = parse_asset_name_arg(&token_asset.unwrap_or_default())?;
             deploy_collateral_route(ctx, &policy, &asset, decimals, remote_decimals, dry_run).await
         }
         TokenType::Native => deploy_native_route(ctx, decimals, remote_decimals, dry_run).await,
         TokenType::Synthetic => {
-            deploy_synthetic_route(ctx, decimals, remote_decimals, dry_run).await
+            // Same --token-asset flag as collateral. The name becomes route
+            // state in the datum; empty by default.
+            let asset = parse_asset_name_arg(&token_asset.unwrap_or_default())?;
+            deploy_synthetic_route(ctx, &asset, decimals, remote_decimals, dry_run).await
         }
     }
+}
+
+/// Normalize the `--token-asset` flag to the hex asset name used on-chain.
+/// Plain input is UTF-8 text ("hNIGHT" -> "684e49474854"); a `hex:` prefix
+/// passes raw bytes through ("hex:684e49474854"). Cardano caps asset names
+/// at 32 bytes.
+fn parse_asset_name_arg(input: &str) -> Result<String> {
+    let hex_name = if let Some(raw) = input.strip_prefix("hex:") {
+        let raw = raw.to_lowercase();
+        hex::decode(&raw).map_err(|e| anyhow!("Invalid hex asset name '{raw}': {e}"))?;
+        raw
+    } else {
+        hex::encode(input.as_bytes())
+    };
+    if hex_name.len() > 64 {
+        return Err(anyhow!(
+            "Asset name is {} bytes; Cardano allows at most 32",
+            hex_name.len() / 2
+        ));
+    }
+    Ok(hex_name)
 }
 
 /// Context holding shared state prepared for warp route deployment
@@ -785,6 +812,7 @@ fn print_deployment_summary(
 /// Deploy a Synthetic warp route (mints synthetic tokens)
 async fn deploy_synthetic_route(
     ctx: &CliContext,
+    asset_name: &str,
     decimals: u8,
     remote_decimals: u8,
     dry_run: bool,
@@ -824,6 +852,7 @@ async fn deploy_synthetic_route(
     println!("\n{}", "Step 3: Preparing warp route deployment...".cyan());
     let warp_datum = build_warp_route_synthetic_datum(
         synthetic_policy_id,
+        asset_name,
         decimals as u32,
         remote_decimals as u32,
         &deploy_ctx.owner_pkh,
@@ -855,6 +884,7 @@ async fn deploy_synthetic_route(
         "decimals": decimals,
         "synthetic_policy": synthetic_policy_id,
         "minting_policy": synthetic_policy_id,
+        "token_asset": asset_name,
     });
     let warp_tx_hash =
         finalize_warp_deployment(ctx, &deploy_ctx, &warp_datum, "synthetic", extra_info).await?;
@@ -873,7 +903,13 @@ async fn deploy_synthetic_route(
         "\n{}",
         "Auto-deploying minting policy reference script...".cyan()
     );
-    deploy_minting_ref(ctx, &deploy_ctx.warp_nft_applied.policy_id, false).await?;
+    deploy_minting_ref(
+        ctx,
+        &deploy_ctx.warp_nft_applied.policy_id,
+        Some(&warp_tx_hash),
+        false,
+    )
+    .await?;
 
     Ok(())
 }
@@ -1041,9 +1077,13 @@ async fn enroll_router(
             total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &new_routes,
@@ -1289,9 +1329,13 @@ async fn set_destination_gas(
             total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &new_routes,
@@ -1436,6 +1480,8 @@ enum WarpTokenTypeInfo {
     },
     Synthetic {
         minting_policy: String,
+        /// Hex asset name from the route datum (empty for legacy routes).
+        asset_name: String,
     },
     Native,
 }
@@ -1519,7 +1565,7 @@ fn parse_warp_datum(
             }
         }
         1 => {
-            // Synthetic { minting_policy }
+            // Synthetic { minting_policy, asset_name }
             let tt_fields = token_type_data
                 .get("fields")
                 .and_then(|f| f.as_array())
@@ -1532,7 +1578,19 @@ fn parse_warp_datum(
                 .ok_or_else(|| anyhow!("Invalid Synthetic: missing minting_policy"))?
                 .to_string();
 
-            WarpTokenTypeInfo::Synthetic { minting_policy }
+            // Legacy datums have no asset_name field; missing means the
+            // empty name, which is exactly what those routes mint.
+            let asset_name = tt_fields
+                .get(1)
+                .and_then(|f| f.get("bytes"))
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            WarpTokenTypeInfo::Synthetic {
+                minting_policy,
+                asset_name,
+            }
         }
         2 => {
             // Native (no fields - ADA is held directly in warp route UTXO)
@@ -2008,9 +2066,13 @@ async fn transfer(
             new_total_bridged,
             &destination_gas,
         )?,
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
             build_warp_route_synthetic_datum_with_routes(
                 minting_policy,
+                asset_name,
                 decimals,
                 remote_decimals,
                 &remote_routes,
@@ -2207,15 +2269,20 @@ async fn transfer(
                 })
                 .cloned()
         }
-        WarpTokenTypeInfo::Synthetic { minting_policy } => {
-            // Find UTXO with synthetic tokens to burn
-            // Synthetic tokens use empty asset name
+        WarpTokenTypeInfo::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
+            // Find UTXO holding the route's synthetic asset (policy + the
+            // asset name recorded in the route datum) to burn from
             payer_utxos
                 .iter()
                 .find(|u| {
-                    u.assets
-                        .iter()
-                        .any(|a| a.policy_id == *minting_policy && a.quantity >= amount)
+                    u.assets.iter().any(|a| {
+                        a.policy_id == *minting_policy
+                            && a.asset_name == *asset_name
+                            && a.quantity >= amount
+                    })
                 })
                 .cloned()
         }
@@ -2411,7 +2478,7 @@ async fn transfer(
     // If a token change output is created, it absorbs the token UTXO's lovelace; otherwise
     // the excess goes into the main change output.
     let token_utxo_extra = match (&token_utxo, &token_type) {
-        (Some(tu), WarpTokenTypeInfo::Synthetic { minting_policy }) => {
+        (Some(tu), WarpTokenTypeInfo::Synthetic { minting_policy, .. }) => {
             let qty = tu
                 .assets
                 .iter()
@@ -2637,7 +2704,7 @@ async fn transfer(
     }
 
     // Add synthetic token burning if needed
-    if let (WarpTokenTypeInfo::Synthetic { minting_policy }, Some(ref tu)) =
+    if let (WarpTokenTypeInfo::Synthetic { minting_policy, .. }, Some(ref tu)) =
         (&token_type, &token_utxo)
     {
         println!("  Adding synthetic token burn...");
@@ -3194,7 +3261,49 @@ fn extract_bytes_hex_for_transfer(data: &PlutusData) -> Result<String> {
 /// 2. Extract the warp route script hash from its address
 /// 3. Apply both parameters to the synthetic_token minting policy
 /// 4. Deploy the resulting script as a reference script UTXO with a marker NFT
-async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) -> Result<()> {
+/// Locate a confirmed tx's plain-ADA change output back to `payer_address`,
+/// as a spendable input for a follow-up tx. Queried by tx hash, so it is
+/// immune to the address-UTxO endpoint's indexing lag. Returns None if the
+/// tx made no suitable change output (caller falls back to a wallet scan).
+async fn find_change_output(
+    client: &BlockfrostClient,
+    tx_hash: &str,
+    payer_address: &str,
+    min_lovelace: u64,
+) -> Result<Option<crate::utils::types::Utxo>> {
+    let tx_utxos = client.get_tx_utxos(tx_hash).await?;
+    let change = tx_utxos.outputs.iter().find(|o| {
+        o.address == payer_address
+            && o.collateral != Some(true)
+            && o.data_hash.is_none()
+            && o.inline_datum.is_none()
+            && o.reference_script_hash.is_none()
+            && o.amount.len() == 1
+            && o.amount[0].unit == "lovelace"
+            && o.amount[0].quantity.parse::<u64>().unwrap_or(0) >= min_lovelace
+    });
+    Ok(change.map(|o| crate::utils::types::Utxo {
+        tx_hash: tx_hash.to_string(),
+        output_index: o.output_index,
+        address: o.address.clone(),
+        lovelace: o.amount[0].quantity.parse().unwrap_or(0),
+        assets: Vec::new(),
+        datum_hash: None,
+        inline_datum: None,
+        reference_script: None,
+    }))
+}
+
+/// `chained_from_tx`: the just-submitted warp deploy tx. Its change output is
+/// used as the deploy input instead of a Blockfrost wallet scan, which lags
+/// 25-40s behind and can return already-spent UTxOs (the tx-by-hash endpoint
+/// has no such lag once the tx is confirmed).
+async fn deploy_minting_ref(
+    ctx: &CliContext,
+    warp_policy: &str,
+    chained_from_tx: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
     println!(
         "\n{}",
         "═══════════════════════════════════════════════════════════════".cyan()
@@ -3373,31 +3482,43 @@ async fn deploy_minting_ref(ctx: &CliContext, warp_policy: &str, dry_run: bool) 
 
     // Step 5: Find UTXOs for deployment
     println!("\n{}", "Step 5: Finding UTXOs for deployment...".cyan());
-    let utxos = client.get_utxos(&payer_address).await?;
-    println!("  Found {} UTXOs", utxos.len());
-
-    // Need one UTXO for the reference script deployment
-    // Exclude UTXOs with assets, reference scripts, or inline datums
     let min_ada = 15_000_000u64; // 15 ADA to cover reference script UTXO
-    let suitable_utxos: Vec<_> = utxos
-        .iter()
-        .filter(|u| {
-            u.lovelace >= min_ada
-                && u.assets.is_empty()
-                && u.reference_script.is_none()
-                && u.inline_datum.is_none()
-                && u.datum_hash.is_none()
-        })
-        .collect();
 
-    if suitable_utxos.is_empty() {
-        return Err(anyhow!(
-            "Need at least 1 UTXO with >= 15 ADA. Found none. \
-             Please fund the wallet with more ADA."
-        ));
-    }
+    let chained_utxo = match chained_from_tx {
+        Some(tx_hash) => find_change_output(&client, tx_hash, &payer_address, min_ada).await?,
+        None => None,
+    };
 
-    let deploy_input = suitable_utxos[0];
+    let deploy_input = if let Some(utxo) = chained_utxo {
+        println!("  Chained from warp deploy change output");
+        utxo
+    } else {
+        let utxos = client.get_utxos(&payer_address).await?;
+        println!("  Found {} UTXOs", utxos.len());
+
+        // Need one UTXO for the reference script deployment
+        // Exclude UTXOs with assets, reference scripts, or inline datums
+        let suitable_utxos: Vec<_> = utxos
+            .iter()
+            .filter(|u| {
+                u.lovelace >= min_ada
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && u.inline_datum.is_none()
+                    && u.datum_hash.is_none()
+            })
+            .cloned()
+            .collect();
+
+        if suitable_utxos.is_empty() {
+            return Err(anyhow!(
+                "Need at least 1 UTXO with >= 15 ADA. Found none. \
+                 Please fund the wallet with more ADA."
+            ));
+        }
+
+        suitable_utxos[0].clone()
+    };
     println!(
         "  Deploy Input: {}#{}",
         deploy_input.tx_hash, deploy_input.output_index
@@ -4079,11 +4200,31 @@ mod datum_roundtrip_tests {
     }
 
     #[test]
+    fn asset_name_arg_text_is_utf8_encoded() {
+        assert_eq!(parse_asset_name_arg("hNIGHT").unwrap(), "684e49474854");
+        assert_eq!(parse_asset_name_arg("").unwrap(), "");
+    }
+
+    #[test]
+    fn asset_name_arg_hex_prefix_passes_raw_bytes() {
+        assert_eq!(
+            parse_asset_name_arg("hex:684E49474854").unwrap(),
+            "684e49474854"
+        );
+        assert!(parse_asset_name_arg("hex:zz").is_err());
+        // 33 bytes exceeds Cardano's 32-byte asset name cap
+        assert!(parse_asset_name_arg(&"a".repeat(33)).is_err());
+    }
+
+    #[test]
     fn synthetic_warp_datum_survives_encode_decode_parse() {
         let owner = "0f".repeat(28);
         let minting = "1f".repeat(28);
+        // "hNIGHT" — a non-empty asset name must round-trip through the datum
+        let asset = "684e49474854";
         let cbor = build_warp_route_synthetic_datum_with_routes(
             &minting,
+            asset,
             6,
             18,
             &routes(),
@@ -4096,8 +4237,12 @@ mod datum_roundtrip_tests {
         let (token_type, _, _, _, parsed_owner, _) = parse_warp_datum(&json).expect("parse");
 
         match token_type {
-            WarpTokenTypeInfo::Synthetic { minting_policy } => {
-                assert_eq!(minting_policy, minting, "minting policy")
+            WarpTokenTypeInfo::Synthetic {
+                minting_policy,
+                asset_name,
+            } => {
+                assert_eq!(minting_policy, minting, "minting policy");
+                assert_eq!(asset_name, asset, "asset name");
             }
             other => panic!("expected synthetic, got {other:?}"),
         }

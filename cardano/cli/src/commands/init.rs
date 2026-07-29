@@ -51,8 +51,10 @@ enum InitCommands {
     /// ISM instance of that flavour and records it under `alt_isms` in
     /// deployment_info.json, so both ISM flavours can be live at once.
     Ism {
-        /// Origin domain IDs (comma-separated, e.g., "11155111,421614")
-        #[arg(long)]
+        /// Origin domain IDs (comma-separated, e.g., "11155111,421614").
+        /// May be omitted: origins can be added to a live ISM later via
+        /// `ism set-validators` / `ism set-threshold`.
+        #[arg(long, default_value = "")]
         domains: String,
 
         /// Initial validators per domain (format: "domain:addr1,addr2;domain2:addr3")
@@ -167,8 +169,10 @@ enum InitCommands {
         #[arg(long)]
         domain: u32,
 
-        /// Origin domains for ISM (comma-separated)
-        #[arg(long)]
+        /// Origin domains for ISM (comma-separated). May be omitted:
+        /// origins can be added to a live ISM later via
+        /// `ism set-validators` / `ism set-threshold`.
+        #[arg(long, default_value = "")]
         origin_domains: String,
 
         /// ISM validators per domain: "domain:addr1,addr2;domain2:addr3"
@@ -725,12 +729,16 @@ async fn init_ism_internal(
     let keypair = ctx.load_signing_key()?;
     let owner_pkh = keypair.verification_key_hash_hex();
 
-    // Parse domains
-    let domain_list: Vec<u32> = domains
-        .split(',')
-        .map(|s| s.trim().parse::<u32>())
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| "Invalid domain format")?;
+    // Parse domains (empty = no origins yet; add later via `ism set-validators`)
+    let domain_list: Vec<u32> = if domains.trim().is_empty() {
+        Vec::new()
+    } else {
+        domains
+            .split(',')
+            .map(|s| s.trim().parse::<u32>())
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| "Invalid domain format")?
+    };
 
     println!("  Domains: {:?}", domain_list);
     println!("  Owner: {}", owner_pkh);

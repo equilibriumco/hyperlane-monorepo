@@ -92,10 +92,10 @@ ref-script command is needed.
 $CLI warp deploy --token-type native --decimals 6 --remote-decimals 18
 
 # collateral (locks an existing Cardano token)
-#   --token-asset MUST be hex-encoded, not ASCII:  printf 'CTEST' | xxd -p
+#   --token-name is UTF-8 text; use a hex: prefix for raw bytes
 $CLI warp deploy --token-type collateral \
   --token-policy 4485fc4c31c80e7449dab7464bdcd19247ce29d74e1fe28de1044650 \
-  --token-asset 4354455354 \
+  --token-name CTEST \
   --decimals 6 --remote-decimals 18
 
 # synthetic (mints a wrapper for a remote asset)
@@ -108,16 +108,17 @@ everywhere else (`--warp-policy`, and the Sepolia router address).
 > **`--remote-decimals 18`, not 6.** The Sepolia routes are 6-decimal but expect
 > an 18-decimal wire amount. Setting `6` here makes inbound transfers mint 0.
 
-> **`--token-asset` is hex.** An ASCII name fails with
-> `Invalid hex: Odd number of digits` (odd length) or is silently misread
-> (`CAFE` is valid hex).
+> **`--token-name` is text.** The CLI hex-encodes plain input as UTF-8
+> (`CTEST` -> `4354455354`). To pass raw bytes, prefix with `hex:`
+> (`hex:4354455354`). Bare hex without the prefix is treated as literal text.
 
 ### Synthetic only: the minting reference script
 
 The relayer needs the minting policy on-chain to mint inbound. `warp deploy
---token-type synthetic` attempts this automatically, but the second transaction
-can lose a UTXO race. Confirm `mintingRefScriptUtxo` exists in
-`deployment_info.json`; if not, run it manually:
+--token-type synthetic` deploys it automatically, chaining off the route
+deploy's change output (immune to Blockfrost's address-index lag). Confirm
+`mintingRefScriptUtxo` exists in `deployment_info.json`; if it's missing
+(e.g. the deploy tx had no plain-ADA change output), run it manually:
 
 ```bash
 $CLI warp deploy-minting-ref --warp-policy <synthetic-nft-policy>

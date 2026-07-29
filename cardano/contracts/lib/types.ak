@@ -400,8 +400,10 @@ pub type IgpRedeemer {
 pub type WarpTokenType {
   /// Lock tokens in warp route UTXO, release on receive
   Collateral { policy_id: PolicyId, asset_name: AssetName }
-  /// Mint synthetic tokens on receive, burn on send
-  Synthetic { minting_policy: ScriptHash }
+  /// Mint synthetic tokens on receive, burn on send. The asset name is
+  /// route state: the route only validates mints of this exact name, and
+  /// off-chain builders read it from the datum (nothing is hardcoded).
+  Synthetic { minting_policy: ScriptHash, asset_name: AssetName }
   /// Native ADA (locked in warp route UTXO)
   Native
 }
