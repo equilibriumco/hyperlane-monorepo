@@ -167,6 +167,20 @@ docker compose up -d postgres scraper hasura
 ./hasura/track-tables.sh
 ```
 
+Both sides of the bridge are indexed. A message is only shown as delivered once
+the scraper sees the delivery, which happens on the *destination* chain, so
+scraping Cardano alone would leave every outbound message pending forever.
+
+**Set `CARDANO_INDEX_FROM` and `SEPOLIA_INDEX_FROM` just behind the current tips
+before starting.** The defaults replay a long history, and on Cardano every
+block costs Blockfrost credits.
+
+```bash
+curl -s -H "project_id: $BLOCKFROST_API_KEY" \
+  https://cardano-preview.blockfrost.io/api/v0/blocks/latest | jq .height
+cast block-number --rpc-url https://sepolia.gateway.tenderly.co
+```
+
 Then point the explorer at the API:
 
 ```bash

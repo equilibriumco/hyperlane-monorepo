@@ -43,9 +43,37 @@
         }
       ],
       "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}"
+    },
+    "sepolia": {
+      "blocks": {
+        "confirmations": 2,
+        "estimateBlockTime": 12,
+        "reorgPeriod": 2
+      },
+      "chainId": 11155111,
+      "domainId": 11155111,
+      "index": {
+        "from": ${SEPOLIA_INDEX_FROM},
+        "chunk": 9999
+      },
+      "interchainGasPaymaster": "${SEPOLIA_IGP}",
+      "interchainSecurityModule": "${SEPOLIA_ISM}",
+      "mailbox": "${SEPOLIA_MAILBOX}",
+      "merkleTreeHook": "${SEPOLIA_MERKLE_TREE_HOOK}",
+      "name": "sepolia",
+      "protocol": "ethereum",
+      "rpcUrls": [
+        {
+          "http": "https://sepolia.gateway.tenderly.co"
+        },
+        {
+          "http": "${SEPOLIA_RPC_URL}"
+        }
+      ],
+      "validatorAnnounce": "${SEPOLIA_VALIDATOR_ANNOUNCE}"
     }
   },
-  "chainsToScrape": "cardanopreview",
+  "chainsToScrape": "cardanopreview,sepolia",
   "db": "${DATABASE_URL}",
   "log": { "level": "info", "format": "pretty" },
   "metrics": { "port": 9090 }
