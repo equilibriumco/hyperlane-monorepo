@@ -256,14 +256,6 @@ const DOMAINS: &[RawDomain] = &[
         is_deprecated: false,
     },
     RawDomain {
-        name: "moonbeam",
-        token: "GLMR",
-        domain: 1284,
-        chain_id: 1284,
-        is_test_net: false,
-        is_deprecated: false,
-    },
-    RawDomain {
         name: "neutron",
         token: "NTRN",
         domain: 1853125230,
@@ -301,22 +293,6 @@ const DOMAINS: &[RawDomain] = &[
         domain: 80002,
         chain_id: 80002,
         is_test_net: true,
-        is_deprecated: false,
-    },
-    RawDomain {
-        name: "polygonzkevm",
-        token: "ETH",
-        domain: 1101,
-        chain_id: 1101,
-        is_test_net: false,
-        is_deprecated: false,
-    },
-    RawDomain {
-        name: "scroll",
-        token: "ETH",
-        domain: 534352,
-        chain_id: 534352,
-        is_test_net: false,
         is_deprecated: false,
     },
     RawDomain {
@@ -412,14 +388,6 @@ const DOMAINS: &[RawDomain] = &[
         token: "ETH",
         domain: 48900,
         chain_id: 48900,
-        is_test_net: false,
-        is_deprecated: false,
-    },
-    RawDomain {
-        name: "zoramainnet",
-        token: "ETH",
-        domain: 7777777,
-        chain_id: 7777777,
         is_test_net: false,
         is_deprecated: false,
     },
@@ -550,6 +518,30 @@ const DOMAINS: &[RawDomain] = &[
         token: "TRX",
         domain: 1212538671,
         chain_id: 1212538671,
+        is_test_net: true,
+        is_deprecated: false,
+    },
+    // Midnight. `chain_id` mirrors the domain: Midnight has no EVM chain
+    // id, but a NULL here leaves `message_view.origin_chain_id` unset,
+    // and the Explorer's message queries read that column as non-nullable.
+    // Domain 1234 is `KnownHyperlaneDomain::Midnight`, shared by the local
+    // devnet and the stagenet deployment.
+    RawDomain {
+        name: "midnight",
+        token: "NIGHT",
+        domain: 1234,
+        chain_id: 1234,
+        is_test_net: true,
+        is_deprecated: false,
+    },
+    // The Anvil chain the Midnight E2E environments pair with Midnight. It is
+    // scraped alongside it so `delivered_message` rows — and therefore the
+    // delivery half of `message_view` — resolve for Midnight-origin messages.
+    RawDomain {
+        name: "test4",
+        token: "ETH",
+        domain: 31337,
+        chain_id: 31337,
         is_test_net: true,
         is_deprecated: false,
     }, // ---------- End: E2E tests chains ----------------
