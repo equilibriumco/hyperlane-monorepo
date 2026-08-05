@@ -88,7 +88,11 @@ need doing:
 
 1. **`CARDANO_INDEX_FROM` must be at or before the mailbox deployment block.**
    Set it later and the relayer never sees the tree's first leaves: it sits at
-   merkle index 0 and delivers nothing, with no error.
+   merkle index 0 and delivers nothing, with no error. The same rule binds
+   `MIDNIGHT_INDEX_FROM` to the night contract's first dispatch — and it bites
+   harder when reusing an existing night deployment, whose merkle tree already
+   has leaves from earlier runs. Skipping ahead to avoid replaying old messages
+   is the one thing that cannot work; blacklist the undeliverable ones instead.
 2. **Wipe the agent volumes.** Validator databases and checkpoints from the old
    mailbox describe a different merkle tree:
    `docker compose down -v`
