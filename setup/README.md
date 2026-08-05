@@ -116,14 +116,29 @@ _contracts_ need, and they are needed at different times:
 
 `keys/load-into-env.sh` copies the key values into `../.env` in place.
 
-## Announce paths must be container paths
+## Checkpoints on S3
 
-Validators announce where their checkpoints can be read. With the local-storage
-syncer that is a `file://` path, and the relayer resolves it inside its own
-container. When pre-announcing the Midnight-origin validators out of band (worth
-doing — their own announce path proves in ZK and is slow), announce
-`file:///shared/checkpoints/midnight-1` and `.../midnight-2`, matching
-`HYP_CHECKPOINTSYNCER_PATH`, not a host directory.
+All four validators write checkpoints to S3, one folder per validator:
+`s3://$CHECKPOINT_S3_BUCKET/$CHECKPOINT_S3_REGION/$CHECKPOINT_S3_PREFIX/<name>`,
+where `<name>` is `cardano-1`, `cardano-2`, `midnight-1` or `midnight-2`. Note
+the region is a **path component** of a Hyperlane storage location, not just
+client config — `s3://bucket/region/folder` is how the agents parse it.
+
+**Writes are authenticated, reads are anonymous.** Validators write using
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, but the relayer fetches checkpoints
+with an anonymous client. A bucket without public read therefore produces the
+most confusing failure mode available: every validator looks healthy and signs,
+while the relayer never fetches metadata and nothing is ever delivered.
+
+Validators announce their own storage location on first start, derived from this
+config, so there is nothing to type. When pre-announcing the Midnight-origin
+validators out of band (worth doing — their own announce path proves in ZK and is
+slow), announce exactly the same URL the validator would have.
+
+**Bump `CHECKPOINT_S3_PREFIX` after redeploying a mailbox.** Checkpoints under the
+old prefix describe a different merkle tree; a validator that resumes onto them
+signs against the wrong history. This is the S3 counterpart to wiping the
+validator databases.
 
 ## Gas enforcement
 

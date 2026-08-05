@@ -26,7 +26,6 @@ x-agent: &agent
     - ${MIDNIGHT_REPO:?set MIDNIGHT_REPO to your midnight-hyperlane checkout}:/opt/midnight
     # Deploy addresses and the private-state DB the submitter reads and writes.
     - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-    - checkpoints:/shared/checkpoints
   environment: &agent-env
     RUST_LOG: ${RUST_LOG:-info}
     # In-container paths and service DNS. The submitter defaults its proof
@@ -53,6 +52,10 @@ services:
   # Two validators per origin, threshold 2. The Cardano ISM is origin-scoped,
   # so the midnight-origin set must be registered for domain 1234 separately
   # (`ism set-validators --domain 1234`).
+  #
+  # Checkpoints go to S3, one folder per validator. Each validator writes with
+  # the AWS credentials from .env and announces its own
+  # `s3://<bucket>/<region>/<prefix>/<name>` automatically.
   validator-cardano-1:
     <<: *agent
     container_name: cm-validator-cardano-1
@@ -62,15 +65,16 @@ services:
       HYP_ORIGINCHAINNAME: cardanopreview
       HYP_VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY_1}
       HYP_VALIDATOR_TYPE: hexKey
-      HYP_CHECKPOINTSYNCER_TYPE: localStorage
-      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/cardano-1
+      HYP_CHECKPOINTSYNCER_TYPE: s3
+      HYP_CHECKPOINTSYNCER_BUCKET: ${CHECKPOINT_S3_BUCKET:?set CHECKPOINT_S3_BUCKET}
+      HYP_CHECKPOINTSYNCER_REGION: ${CHECKPOINT_S3_REGION:?set CHECKPOINT_S3_REGION}
+      HYP_CHECKPOINTSYNCER_FOLDER: ${CHECKPOINT_S3_PREFIX:?set CHECKPOINT_S3_PREFIX}/cardano-1
       HYP_DB: /data/validator-cardano-1
       HYP_METRICSPORT: 9080
       HYP_INTERVAL: 5
     volumes:
       - ${MIDNIGHT_REPO}:/opt/midnight
       - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-      - checkpoints:/shared/checkpoints
       - validator-cardano-1-data:/data
     ports:
       - '127.0.0.1:9080:9080'
@@ -87,23 +91,24 @@ services:
       HYP_ORIGINCHAINNAME: cardanopreview
       HYP_VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY_2}
       HYP_VALIDATOR_TYPE: hexKey
-      HYP_CHECKPOINTSYNCER_TYPE: localStorage
-      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/cardano-2
+      HYP_CHECKPOINTSYNCER_TYPE: s3
+      HYP_CHECKPOINTSYNCER_BUCKET: ${CHECKPOINT_S3_BUCKET:?set CHECKPOINT_S3_BUCKET}
+      HYP_CHECKPOINTSYNCER_REGION: ${CHECKPOINT_S3_REGION:?set CHECKPOINT_S3_REGION}
+      HYP_CHECKPOINTSYNCER_FOLDER: ${CHECKPOINT_S3_PREFIX:?set CHECKPOINT_S3_PREFIX}/cardano-2
       HYP_DB: /data/validator-cardano-2
       HYP_METRICSPORT: 9081
       HYP_INTERVAL: 5
     volumes:
       - ${MIDNIGHT_REPO}:/opt/midnight
       - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-      - checkpoints:/shared/checkpoints
       - validator-cardano-2-data:/data
     ports:
       - '127.0.0.1:9081:9081'
 
   # Midnight-origin validators. Pre-announce these on the Midnight validator
   # announce contract before first run — their own announce path proves in ZK
-  # and is far slower than doing it once out of band. The storage location you
-  # announce must be the in-container path below, not a host path.
+  # and is far slower than doing it once out of band. Announce the same
+  # s3://<bucket>/<region>/<prefix>/<name> the validator would announce itself.
   validator-midnight-1:
     <<: *agent
     container_name: cm-validator-midnight-1
@@ -114,15 +119,16 @@ services:
       HYP_ORIGINCHAINNAME: midnight
       HYP_VALIDATOR_KEY: ${MIDNIGHT_VALIDATOR_KEY_1}
       HYP_VALIDATOR_TYPE: hexKey
-      HYP_CHECKPOINTSYNCER_TYPE: localStorage
-      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/midnight-1
+      HYP_CHECKPOINTSYNCER_TYPE: s3
+      HYP_CHECKPOINTSYNCER_BUCKET: ${CHECKPOINT_S3_BUCKET:?set CHECKPOINT_S3_BUCKET}
+      HYP_CHECKPOINTSYNCER_REGION: ${CHECKPOINT_S3_REGION:?set CHECKPOINT_S3_REGION}
+      HYP_CHECKPOINTSYNCER_FOLDER: ${CHECKPOINT_S3_PREFIX:?set CHECKPOINT_S3_PREFIX}/midnight-1
       HYP_DB: /data/validator-midnight-1
       HYP_METRICSPORT: 9082
       HYP_INTERVAL: 5
     volumes:
       - ${MIDNIGHT_REPO}:/opt/midnight
       - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-      - checkpoints:/shared/checkpoints
       - validator-midnight-1-data:/data
     ports:
       - '127.0.0.1:9082:9082'
@@ -137,15 +143,16 @@ services:
       HYP_ORIGINCHAINNAME: midnight
       HYP_VALIDATOR_KEY: ${MIDNIGHT_VALIDATOR_KEY_2}
       HYP_VALIDATOR_TYPE: hexKey
-      HYP_CHECKPOINTSYNCER_TYPE: localStorage
-      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/midnight-2
+      HYP_CHECKPOINTSYNCER_TYPE: s3
+      HYP_CHECKPOINTSYNCER_BUCKET: ${CHECKPOINT_S3_BUCKET:?set CHECKPOINT_S3_BUCKET}
+      HYP_CHECKPOINTSYNCER_REGION: ${CHECKPOINT_S3_REGION:?set CHECKPOINT_S3_REGION}
+      HYP_CHECKPOINTSYNCER_FOLDER: ${CHECKPOINT_S3_PREFIX:?set CHECKPOINT_S3_PREFIX}/midnight-2
       HYP_DB: /data/validator-midnight-2
       HYP_METRICSPORT: 9083
       HYP_INTERVAL: 5
     volumes:
       - ${MIDNIGHT_REPO}:/opt/midnight
       - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-      - checkpoints:/shared/checkpoints
       - validator-midnight-2-data:/data
     ports:
       - '127.0.0.1:9083:9083'
@@ -158,13 +165,11 @@ services:
       <<: *agent-env
       AGENT_TYPE: relayer
       HYP_RELAYCHAINS: cardanopreview,midnight
-      HYP_ALLOWLOCALCHECKPOINTSYNCERS: 'true'
       HYP_DB: /data/relayer
       HYP_METRICSPORT: 9089
     volumes:
       - ${MIDNIGHT_REPO}:/opt/midnight
       - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
-      - checkpoints:/shared/checkpoints
       - relayer-data:/data
     ports:
       - '127.0.0.1:9089:9089'
@@ -249,7 +254,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  checkpoints:
   validator-cardano-1-data:
   validator-cardano-2-data:
   validator-midnight-1-data:
