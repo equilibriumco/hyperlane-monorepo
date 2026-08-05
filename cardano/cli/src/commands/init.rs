@@ -1721,35 +1721,38 @@ async fn init_all(
         step += 1;
     }
 
-    // Optional: set ISM thresholds for domains not covered by validators
+    // Optional: set ISM thresholds.
+    //
+    // Unconditional: the SetValidators redeemer cannot touch thresholds (the
+    // contract's continuation check requires them unchanged), so passing
+    // --validators does not set them and a threshold left at 0 rejects every
+    // checkpoint.
     if let Some(ref thresholds_str) = thresholds {
-        if validators.is_none() {
-            println!(
-                "\n{}",
-                format!("{}. Setting ISM thresholds...", step).cyan()
-            );
-            for threshold_block in thresholds_str.split(';') {
-                let parts: Vec<&str> = threshold_block.splitn(2, ':').collect();
-                if parts.len() != 2 {
-                    return Err(anyhow!(
-                        "Invalid thresholds format: '{}'. Expected 'domain:threshold'",
-                        threshold_block
-                    ));
-                }
-                let d: u32 = parts[0]
-                    .parse()
-                    .with_context(|| format!("Invalid domain in thresholds: '{}'", parts[0]))?;
-                let t: u32 = parts[1]
-                    .parse()
-                    .with_context(|| format!("Invalid threshold: '{}'", parts[1]))?;
-                if let Some(spent) =
-                    super::ism::set_threshold(ctx, d, t, None, None, dry_run, &spent_utxos).await?
-                {
-                    spent_utxos.push(spent);
-                }
+        println!(
+            "\n{}",
+            format!("{}. Setting ISM thresholds...", step).cyan()
+        );
+        for threshold_block in thresholds_str.split(';') {
+            let parts: Vec<&str> = threshold_block.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!(
+                    "Invalid thresholds format: '{}'. Expected 'domain:threshold'",
+                    threshold_block
+                ));
             }
-            step += 1;
+            let d: u32 = parts[0]
+                .parse()
+                .with_context(|| format!("Invalid domain in thresholds: '{}'", parts[0]))?;
+            let t: u32 = parts[1]
+                .parse()
+                .with_context(|| format!("Invalid threshold: '{}'", parts[1]))?;
+            if let Some(spent) =
+                super::ism::set_threshold(ctx, d, t, None, None, dry_run, &spent_utxos).await?
+            {
+                spent_utxos.push(spent);
+            }
         }
+        step += 1;
     }
 
     // Optional: IGP (only when gas oracles are supplied).

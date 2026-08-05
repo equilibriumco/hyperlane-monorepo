@@ -58,7 +58,9 @@ enum IsmCommands {
         #[arg(long, value_delimiter = ',')]
         validators: Vec<String>,
 
-        /// Also set the threshold for this domain
+        /// Threshold to validate against the new validator set. NOT applied:
+        /// the SetValidators redeemer cannot change thresholds, so a separate
+        /// `set-threshold` call is still required.
         #[arg(long)]
         threshold: Option<u32>,
 
