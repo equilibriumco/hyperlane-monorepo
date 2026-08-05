@@ -16,6 +16,7 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/ism';
 
 import { bytesToHex } from '../utils/conversion.js';
+import { unsupportedOnMidnight } from '../utils/errors.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 
 const MODULE_TYPE_MESSAGE_ID_MULTISIG = 5n;
@@ -91,23 +92,28 @@ export class MidnightIsmArtifactManager implements IRawIsmArtifactManager {
         `unexpected ISM module type ${moduleType} at ${address}, only messageIdMultisigIsm (5) exists on Midnight`,
       );
     }
-    return this.createReader('messageIdMultisigIsm').read(
-      address,
-    ) as Promise<DeployedRawIsmArtifact>;
+    return this.createReader('messageIdMultisigIsm').read(address);
   }
 
   createReader<T extends IsmType>(
     type: T,
   ): ArtifactReader<RawIsmArtifactConfigs[T], DeployedIsmAddress> {
-    if (type !== 'messageIdMultisigIsm') {
-      throw new Error(`unsupported ISM type on Midnight: ${type}`);
-    }
-    return new MidnightMultisigIsmReader(
-      this.client,
-    ) as unknown as ArtifactReader<
-      RawIsmArtifactConfigs[T],
-      DeployedIsmAddress
-    >;
+    const readers: {
+      [K in IsmType]: () => ArtifactReader<
+        RawIsmArtifactConfigs[K],
+        DeployedIsmAddress
+      >;
+    } = {
+      messageIdMultisigIsm: () => new MidnightMultisigIsmReader(this.client),
+      merkleRootMultisigIsm: unsupportedOnMidnight(
+        'ISM',
+        'merkleRootMultisigIsm',
+      ),
+      domainRoutingIsm: unsupportedOnMidnight('ISM', 'domainRoutingIsm'),
+      testIsm: unsupportedOnMidnight('ISM', 'testIsm'),
+      compositeIsm: unsupportedOnMidnight('ISM', 'compositeIsm'),
+    };
+    return readers[type]();
   }
 
   createWriter<T extends IsmType>(

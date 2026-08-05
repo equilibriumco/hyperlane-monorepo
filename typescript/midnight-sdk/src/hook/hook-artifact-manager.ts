@@ -14,6 +14,7 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/hook';
 
 import { bytesToHex } from '../utils/conversion.js';
+import { unsupportedOnMidnight } from '../utils/errors.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { readRemoteGasData, topLevelArity } from '../clients/state.js';
 
@@ -113,13 +114,9 @@ export class MidnightHookArtifactManager implements IRawHookArtifactManager {
     const arity = topLevelArity(state.data);
     switch (arity) {
       case NIGHT_STATE_ARITY:
-        return this.createReader('merkleTreeHook').read(
-          address,
-        ) as Promise<DeployedHookArtifact>;
+        return this.createReader('merkleTreeHook').read(address);
       case IGP_STATE_ARITY:
-        return this.createReader('interchainGasPaymaster').read(
-          address,
-        ) as Promise<DeployedHookArtifact>;
+        return this.createReader('interchainGasPaymaster').read(address);
       default:
         throw new Error(
           `contract at ${address} is neither the night monolith nor the igp (top-level state arity ${arity})`,
@@ -130,22 +127,18 @@ export class MidnightHookArtifactManager implements IRawHookArtifactManager {
   createReader<T extends HookType>(
     type: T,
   ): ArtifactReader<RawHookArtifactConfigs[T], DeployedHookAddress> {
-    switch (type) {
-      case 'merkleTreeHook':
-        return new MidnightMerkleTreeHookReader() as unknown as ArtifactReader<
-          RawHookArtifactConfigs[T],
-          DeployedHookAddress
-        >;
-      case 'interchainGasPaymaster':
-        return new MidnightIgpHookReader(
-          this.client,
-        ) as unknown as ArtifactReader<
-          RawHookArtifactConfigs[T],
-          DeployedHookAddress
-        >;
-      default:
-        throw new Error(`unsupported hook type on Midnight: ${type}`);
-    }
+    const readers: {
+      [K in HookType]: () => ArtifactReader<
+        RawHookArtifactConfigs[K],
+        DeployedHookAddress
+      >;
+    } = {
+      merkleTreeHook: () => new MidnightMerkleTreeHookReader(),
+      interchainGasPaymaster: () => new MidnightIgpHookReader(this.client),
+      protocolFee: unsupportedOnMidnight('hook', 'protocolFee'),
+      unknownHook: unsupportedOnMidnight('hook', 'unknownHook'),
+    };
+    return readers[type]();
   }
 
   createWriter<T extends HookType>(

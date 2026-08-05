@@ -14,6 +14,7 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/warp';
 
 import { bytesToHex } from '../utils/conversion.js';
+import { unsupportedOnMidnight } from '../utils/errors.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { readRemoteRouters } from '../clients/state.js';
 
@@ -77,9 +78,7 @@ export class MidnightWarpArtifactManager implements IRawWarpArtifactManager {
   }
 
   async readWarpToken(address: string): Promise<DeployedRawWarpArtifact> {
-    return this.createReader('native').read(
-      address,
-    ) as Promise<DeployedRawWarpArtifact>;
+    return this.createReader('native').read(address);
   }
 
   supportsHookUpdates(): boolean {
@@ -89,18 +88,19 @@ export class MidnightWarpArtifactManager implements IRawWarpArtifactManager {
   createReader<T extends WarpType>(
     type: T,
   ): ArtifactReader<RawWarpArtifactConfigs[T], DeployedWarpAddress> {
-    if (type !== 'native') {
-      throw new Error(
-        `unsupported warp token type on Midnight: ${type}, only native NIGHT exists`,
-      );
-    }
-    return new MidnightNativeWarpReader(
-      this.client,
-      this.chainMetadata,
-    ) as unknown as ArtifactReader<
-      RawWarpArtifactConfigs[T],
-      DeployedWarpAddress
-    >;
+    const readers: {
+      [K in WarpType]: () => ArtifactReader<
+        RawWarpArtifactConfigs[K],
+        DeployedWarpAddress
+      >;
+    } = {
+      native: () =>
+        new MidnightNativeWarpReader(this.client, this.chainMetadata),
+      collateral: unsupportedOnMidnight('warp token', 'collateral'),
+      synthetic: unsupportedOnMidnight('warp token', 'synthetic'),
+      crossCollateral: unsupportedOnMidnight('warp token', 'crossCollateral'),
+    };
+    return readers[type]();
   }
 
   createWriter<T extends WarpType>(
