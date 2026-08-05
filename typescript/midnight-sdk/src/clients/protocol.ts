@@ -29,6 +29,7 @@ import { MidnightValidatorAnnounceArtifactManager } from '../validator-announce/
 import { MidnightWarpArtifactManager } from '../warp/warp-artifact-manager.js';
 
 import { MidnightProvider } from './provider.js';
+import { MidnightSigner } from './signer.js';
 
 export class MidnightProtocolProvider implements ProtocolProvider {
   createProvider(chainMetadata: ChainMetadataForAltVM): Promise<IProvider> {
@@ -36,12 +37,10 @@ export class MidnightProtocolProvider implements ProtocolProvider {
   }
 
   async createSigner(
-    _chainMetadata: ChainMetadataForAltVM,
-    _config: SignerConfig,
+    chainMetadata: ChainMetadataForAltVM,
+    config: SignerConfig,
   ): Promise<AltVM.ISigner<AnnotatedTx, TxReceipt>> {
-    throw new Error(
-      'MidnightProtocolProvider.createSigner: not implemented yet (#105)',
-    );
+    return MidnightSigner.connectWithSigner(chainMetadata, config.privateKey);
   }
 
   createSubmitter<TConfig extends TransactionSubmitterConfig>(
@@ -61,9 +60,9 @@ export class MidnightProtocolProvider implements ProtocolProvider {
 
   createHookArtifactManager(
     chainMetadata: ChainMetadataForAltVM,
-    _context?: { mailbox?: string },
+    context?: { mailbox?: string },
   ): IRawHookArtifactManager {
-    return new MidnightHookArtifactManager(chainMetadata);
+    return new MidnightHookArtifactManager(chainMetadata, context);
   }
 
   createWarpArtifactManager(

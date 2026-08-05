@@ -14,6 +14,10 @@ export type ContractModule = {
       (ctx: unknown, ...args: unknown[]) => Promise<{ result: unknown }>
     >;
   };
+  pureCircuits: {
+    // ZOwnablePK commitment: computeOwnerId(pkEither, secretNonce).
+    computeOwnerId(pk: unknown, nonce: Uint8Array): Uint8Array;
+  } & Record<string, unknown>;
 };
 
 export type MidnightContractName = 'night' | 'igp' | 'validator-announce';

@@ -1,9 +1,15 @@
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
+import type { ISigner } from '@hyperlane-xyz/provider-sdk/altvm';
 import {
   ArtifactState,
+  type ArtifactNew,
   type ArtifactReader,
   type ArtifactWriter,
 } from '@hyperlane-xyz/provider-sdk/artifact';
+import type {
+  AnnotatedTx,
+  TxReceipt,
+} from '@hyperlane-xyz/provider-sdk/module';
 import type {
   DeployedRawValidatorAnnounceArtifact,
   DeployedValidatorAnnounceAddress,
@@ -14,6 +20,7 @@ import type {
 
 import { hexToBytes } from '../utils/conversion.js';
 import { MidnightReadClient } from '../clients/read-client.js';
+import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
 import { readVaMailboxAddress } from '../clients/state.js';
 
 function decodeLocation(buffer: Uint8Array): string {
@@ -39,10 +46,63 @@ class MidnightValidatorAnnounceReader implements ArtifactReader<
   }
 }
 
+// Seals localDomain + the night (mailbox) address into the announcement
+// domain hash at construction; nothing is mutable afterwards.
+class MidnightValidatorAnnounceWriter
+  extends MidnightValidatorAnnounceReader
+  implements
+    ArtifactWriter<
+      RawValidatorAnnounceArtifactConfigs['validatorAnnounce'],
+      DeployedValidatorAnnounceAddress
+    >
+{
+  constructor(
+    client: MidnightReadClient,
+    private readonly metadata: ChainMetadataForAltVM,
+    private readonly signer: MidnightSigner,
+  ) {
+    super(client);
+  }
+
+  async create(
+    artifact: ArtifactNew<
+      RawValidatorAnnounceArtifactConfigs['validatorAnnounce']
+    >,
+  ): Promise<[DeployedRawValidatorAnnounceArtifact, TxReceipt[]]> {
+    const mailboxBytes = hexToBytes(artifact.config.mailboxAddress);
+    if (mailboxBytes.length !== 32) {
+      throw new Error(
+        `mailbox address must be 32 bytes, got ${artifact.config.mailboxAddress}`,
+      );
+    }
+    const { address, receipts } = await this.signer.deployMidnightContract({
+      name: 'validator-announce',
+      buildArgs: ({ ownerId, instanceSalt }) => [
+        ownerId,
+        instanceSalt,
+        BigInt(this.metadata.domainId),
+        mailboxBytes,
+      ],
+    });
+    return [
+      {
+        artifactState: ArtifactState.DEPLOYED,
+        config: artifact.config,
+        deployed: { address },
+      },
+      receipts,
+    ];
+  }
+
+  async update(): Promise<AnnotatedTx[]> {
+    return [];
+  }
+}
+
 export class MidnightValidatorAnnounceArtifactManager implements IRawValidatorAnnounceArtifactManager {
   private readonly client: MidnightReadClient;
 
-  constructor(chainMetadata: ChainMetadataForAltVM) {
+  constructor(private readonly chainMetadata: ChainMetadataForAltVM) {
     this.client = MidnightReadClient.fromMetadata(chainMetadata);
   }
 
@@ -109,12 +169,15 @@ export class MidnightValidatorAnnounceArtifactManager implements IRawValidatorAn
 
   createWriter<T extends ValidatorAnnounceType>(
     _type: T,
+    signer: ISigner<AnnotatedTx, TxReceipt>,
   ): ArtifactWriter<
     RawValidatorAnnounceArtifactConfigs[T],
     DeployedValidatorAnnounceAddress
   > {
-    throw new Error(
-      'MidnightValidatorAnnounceArtifactManager.createWriter: not implemented yet (#105)',
+    return new MidnightValidatorAnnounceWriter(
+      this.client,
+      this.chainMetadata,
+      requireMidnightSigner(signer),
     );
   }
 }

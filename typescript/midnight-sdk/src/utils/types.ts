@@ -1,7 +1,9 @@
 // Circuit calls are proven and balanced at submission time, so the
-// transaction descriptor carries intent, not raw bytes.
+// transaction descriptor carries intent, not raw bytes. `contract` names
+// the compiled artifact the signer joins to prove the call.
 export type MidnightTransaction = {
   annotation?: string;
+  contract: 'night' | 'igp' | 'validator-announce';
   contractAddress: string;
   circuit: string;
   args: unknown[];

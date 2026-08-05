@@ -1,26 +1,42 @@
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
+import type { ISigner } from '@hyperlane-xyz/provider-sdk/altvm';
 import {
   ArtifactState,
+  type ArtifactNew,
   type ArtifactReader,
   type ArtifactWriter,
 } from '@hyperlane-xyz/provider-sdk/artifact';
+import type { RawIsmArtifactConfigs } from '@hyperlane-xyz/provider-sdk/ism';
 import type {
   DeployedMailboxAddress,
   DeployedRawMailboxArtifact,
   IRawMailboxArtifactManager,
+  MailboxOnChain,
   MailboxType,
   RawMailboxArtifactConfigs,
 } from '@hyperlane-xyz/provider-sdk/mailbox';
+import type {
+  AnnotatedTx,
+  TxReceipt,
+} from '@hyperlane-xyz/provider-sdk/module';
 import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
-import { bytesToHex } from '../utils/conversion.js';
+import { bytesToHex, hexToBytes } from '../utils/conversion.js';
+import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
+import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
+import { resolveValidatorSet } from '../ism/validators.js';
+
+// Wire-format precision of warp transfer amounts (the max decimals in the
+// route), NOT the remote chain's local token decimals. See the Scale
+// module in hyperlane-midnight before changing this.
+const MESSAGE_DECIMALS = 18n;
 
 class MidnightMailboxReader implements ArtifactReader<
   RawMailboxArtifactConfigs['mailbox'],
   DeployedMailboxAddress
 > {
-  constructor(private readonly client: MidnightReadClient) {}
+  constructor(protected readonly client: MidnightReadClient) {}
 
   async read(address: string): Promise<DeployedRawMailboxArtifact> {
     const state = await this.client.requireContractState(address);
@@ -54,10 +70,129 @@ class MidnightMailboxReader implements ArtifactReader<
   }
 }
 
+class MidnightMailboxWriter
+  extends MidnightMailboxReader
+  implements ArtifactWriter<MailboxOnChain, DeployedMailboxAddress>
+{
+  constructor(
+    client: MidnightReadClient,
+    private readonly metadata: ChainMetadataForAltVM,
+    private readonly signer: MidnightSigner,
+  ) {
+    super(client);
+  }
+
+  // Deploys the night monolith (mailbox + ISM + native warp route in one
+  // contract). The multisig ISM config is consumed here: validators,
+  // threshold, and decimals are night constructor args, sealed at deploy
+  // time. Hook placeholders from the orchestrator are ignored — Midnight
+  // has no dispatch-coupled hooks to attach.
+  async create(
+    artifact: ArtifactNew<MailboxOnChain>,
+  ): Promise<[DeployedRawMailboxArtifact, TxReceipt[]]> {
+    const config = artifact.config;
+    const ismConfig = this.extractMultisigConfig(config.defaultIsm);
+    const validatorSet = resolveValidatorSet(ismConfig);
+
+    const localDecimals = this.metadata.nativeToken?.decimals;
+    if (localDecimals === undefined) {
+      throw new Error(
+        `chain metadata for ${this.metadata.name} has no nativeToken.decimals — ` +
+          `required to seal the night contract's local decimals`,
+      );
+    }
+    const domainId = BigInt(this.metadata.domainId);
+
+    const { address, ownerId, receipts } =
+      await this.signer.deployMidnightContract({
+        name: 'night',
+        chunked: true,
+        buildArgs: ({ ownerId, instanceSalt }) => [
+          ownerId,
+          instanceSalt,
+          domainId,
+          validatorSet.paddedPubkeys,
+          validatorSet.count,
+          validatorSet.threshold,
+          BigInt(localDecimals),
+          MESSAGE_DECIMALS,
+        ],
+      });
+
+    return [
+      {
+        artifactState: ArtifactState.DEPLOYED,
+        config: {
+          ...config,
+          owner: bytesToHex(ownerId),
+          defaultIsm: {
+            artifactState: ArtifactState.DEPLOYED,
+            config: ismConfig,
+            deployed: { address },
+          },
+        },
+        deployed: { address, domainId: Number(domainId) },
+      },
+      receipts,
+    ];
+  }
+
+  // The monolith's ISM/hook pointers are sealed at construction; the only
+  // mailbox-level mutable state is ownership. Validator rotation goes
+  // through the ISM writer.
+  async update(
+    artifact: DeployedRawMailboxArtifact,
+  ): Promise<MidnightTransaction[]> {
+    const address = artifact.deployed.address;
+    const expectedOwner = artifact.config.owner;
+    if (!expectedOwner || expectedOwner === ZERO_ADDRESS_HEX_32) {
+      return [];
+    }
+    const ownerBytes = hexToBytes(expectedOwner);
+    if (ownerBytes.length !== 32) {
+      throw new Error(
+        `night owner must be a 32-byte ZOwnablePK commitment, got ${expectedOwner}`,
+      );
+    }
+    const current = await this.read(address);
+    if (current.config.owner.toLowerCase() === expectedOwner.toLowerCase()) {
+      return [];
+    }
+    return [
+      {
+        annotation: `Transfer night ownership to ${expectedOwner}`,
+        contract: 'night',
+        contractAddress: address,
+        circuit: 'transferOwnership',
+        args: [ownerBytes],
+      },
+    ];
+  }
+
+  private extractMultisigConfig(
+    defaultIsm: MailboxOnChain['defaultIsm'],
+  ): RawIsmArtifactConfigs['messageIdMultisigIsm'] {
+    if (!('config' in defaultIsm) || !defaultIsm.config) {
+      throw new Error(
+        `night deploy needs the multisig ISM config inline (validators, ` +
+          `threshold, validatorPubkeys) — a pre-deployed ISM address cannot ` +
+          `be sealed into a new night instance`,
+      );
+    }
+    const config = defaultIsm.config;
+    if (config.type !== 'messageIdMultisigIsm') {
+      throw new Error(
+        `night's ISM is messageIdMultisigIsm, got ${config.type}`,
+      );
+    }
+    return config;
+  }
+}
+
 export class MidnightMailboxArtifactManager implements IRawMailboxArtifactManager {
   private readonly client: MidnightReadClient;
 
-  constructor(chainMetadata: ChainMetadataForAltVM) {
+  constructor(private readonly chainMetadata: ChainMetadataForAltVM) {
     this.client = MidnightReadClient.fromMetadata(chainMetadata);
   }
 
@@ -73,9 +208,12 @@ export class MidnightMailboxArtifactManager implements IRawMailboxArtifactManage
 
   createWriter<T extends MailboxType>(
     _type: T,
+    signer: ISigner<AnnotatedTx, TxReceipt>,
   ): ArtifactWriter<RawMailboxArtifactConfigs[T], DeployedMailboxAddress> {
-    throw new Error(
-      'MidnightMailboxArtifactManager.createWriter: not implemented yet (#105)',
+    return new MidnightMailboxWriter(
+      this.client,
+      this.chainMetadata,
+      requireMidnightSigner(signer),
     );
   }
 }
