@@ -18,6 +18,11 @@ import { unsupportedOnMidnight } from '../utils/errors.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { readRemoteGasData, topLevelArity } from '../clients/state.js';
 
+// Midnight has no dispatch-coupled hooks. This manager exists because the
+// CLI's data model carries two things as "hooks": the checkpoint format's
+// merkle_tree_hook identity (the night address — the tree itself is rebuilt
+// off-chain by validators) and the IGP config (the IGP is a standalone
+// contract here; gas payment is a separate, decoupled transaction).
 const NIGHT_STATE_ARITY = 2;
 const IGP_STATE_ARITY = 8;
 

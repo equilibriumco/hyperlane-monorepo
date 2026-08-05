@@ -28,8 +28,12 @@ class MidnightMailboxReader implements ArtifactReader<
       this.client.runCircuit<Uint8Array>('night', state.data, 'owner'),
       this.client.runCircuit<bigint>('night', state.data, 'localDomain'),
     ]);
-    // The night contract is a monolith: it is its own default ISM and its
-    // own merkle-tree hook. There is no required hook.
+    // The night contract is a monolith and is its own default ISM. Midnight
+    // has no dispatch-coupled hooks: the merkle tree lives off-chain
+    // (validators rebuild it from dispatched_messages), and the night
+    // address fills the checkpoint format's merkle_tree_hook slot — so the
+    // "defaultHook" here is that protocol identity, not a contract. There
+    // is no required hook.
     const self = {
       artifactState: ArtifactState.UNDERIVED,
       deployed: { address },
