@@ -38,6 +38,9 @@ yalc.lock
 
 **/keys
 !typescript/infra/scripts/keys
+# Throwaway validator keys for the Cardano<->Midnight test bridge, committed
+# deliberately so the same set works on every machine. Test-only, no value.
+!setup/keys
 **/warp-route-deployer-key.json
 **/key.json
 **/deployer-key.json

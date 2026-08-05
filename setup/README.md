@@ -98,6 +98,24 @@ need doing:
 4. **Enroll the route both ways** — the Cardano route enrolls Midnight's mailbox
    at domain 1234, and Midnight's side needs `enrollRemoteRouter(2003, route)`.
 
+## Validator keys
+
+`keys/` holds four throwaway secp256k1 keypairs — two per origin — **committed on
+purpose**, because this bridge is a test deployment and having the same keys
+across machines is worth more here than secrecy. They must never hold value or be
+reused anywhere else. Regenerate with `cast wallet new` if that ever stops being
+true.
+
+Each `validator-<name>.key` has a matching `.addr`. The addresses are what the
+_contracts_ need, and they are needed at different times:
+
+| Address used for                                                   | When                                                                                                   |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Cardano ISM entry for domain 1234 (the two `midnight-*` addresses) | after Midnight is deployed, via `ism set-validators --domain 1234`                                     |
+| Midnight's own validator set (the two `cardano-*` addresses)       | **at Midnight deploy time** — `VALIDATOR_i_PUBKEY` is baked in, so changing it later means redeploying |
+
+`keys/load-into-env.sh` copies the key values into `../.env` in place.
+
 ## Announce paths must be container paths
 
 Validators announce where their checkpoints can be read. With the local-storage
