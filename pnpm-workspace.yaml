@@ -179,6 +179,11 @@ catalog:
   prisma: ^7.8.0
 overrides:
   async: ^2.6.4
+  # Collapse bn.js 5.x to one copy: @polkadot/util tags node results with its
+  # BN class and @midnightntwrk/wallet-sdk-node-client instanceof-checks them
+  # with its own; two physical copies fail the check (ethers' 4.x pins are
+  # untouched by the range selector).
+  'bn.js@^5': 5.2.5
   fetch-ponyfill: ^7.1
   flat: ^5.0.2
   globals: ^16.3.0
@@ -199,6 +204,7 @@ allowBuilds:
   '@trufflesuite/bigint-buffer': true
   bigint-buffer: true
   bufferutil: true
+  classic-level: true
   core-js: true
   core-js-pure: true
   cpu-features: true
