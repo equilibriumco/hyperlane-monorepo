@@ -1,0 +1,95 @@
+{
+  "allowContractCallCaching": false,
+  "allowLocalCheckpointSyncers": true,
+  "chains": {
+    "cardanopreview": {
+      "blocks": {
+        "confirmations": 1,
+        "estimateBlockTime": 20,
+        "reorgPeriod": 5
+      },
+      "chainId": 2003,
+      "connection": {
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "confirmationBlockDelay": 5,
+        "igpScriptHash": "${CARDANO_IGP_SCRIPT_HASH}",
+        "ismAssetNameHex": "49534d205374617465",
+        "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
+        "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
+        "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",
+        "mailboxAssetNameHex": "4d61696c626f78205374617465",
+        "mailboxPolicyId": "${CARDANO_MAILBOX_POLICY_ID}",
+        "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
+        "mailboxScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "maxBatchSize": 10,
+        "network": "preview",
+        "url": "${CARDANO_BLOCKFROST_URL}",
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
+        "validatorAnnounceReferenceScriptUtxo": "${CARDANO_VA_REF_UTXO}",
+        "verifiedMessageNftPolicyId": "${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}",
+        "verifiedMessageNftScriptCbor": "${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}",
+        "warpRouteReferenceScriptUtxo": "${CARDANO_WARP_ROUTE_REF_UTXO}"
+      },
+      "domainId": 2003,
+      "index": {
+        "from": ${CARDANO_INDEX_FROM}
+      },
+      "interchainGasPaymaster": "${CARDANO_IGP}",
+      "interchainSecurityModule": "${CARDANO_ISM}",
+      "mailbox": "${CARDANO_MAILBOX}",
+      "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
+      "name": "cardanopreview",
+      "protocol": "cardano",
+      "rpcUrls": [
+        {
+          "http": "${CARDANO_BLOCKFROST_URL}"
+        }
+      ],
+      "signer": {
+        "key": "${CARDANO_SIGNER_KEY}",
+        "type": "hexKey"
+      },
+      "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}"
+    },
+    "midnight": {
+      "blocks": {
+        "confirmations": 0,
+        "estimateBlockTime": 6,
+        "reorgPeriod": 1
+      },
+      "chainId": 1234,
+      "domainId": 1234,
+      "index": {
+        "from": ${MIDNIGHT_INDEX_FROM},
+        "mode": "block"
+      },
+      "indexerGraphqlUrl": "${MIDNIGHT_INDEXER_URL}",
+      "interchainGasPaymaster": "${MIDNIGHT_IGP}",
+      "mailbox": "${MIDNIGHT_MAILBOX}",
+      "merkleTreeHook": "${MIDNIGHT_MERKLE_TREE_HOOK}",
+      "name": "midnight",
+      "nativeToken": {
+        "decimals": 6,
+        "name": "NIGHT",
+        "symbol": "NIGHT"
+      },
+      "protocol": "midnight",
+      "rpcUrls": [
+        {
+          "http": "${MIDNIGHT_NODE_RPC_URL}"
+        }
+      ],
+      "toolkitPath": "${MIDNIGHT_TOOLKIT_PATH}",
+      "validatorAnnounce": "${MIDNIGHT_VALIDATOR_ANNOUNCE}"
+    }
+  },
+  "chainsToScrape": "cardanopreview,midnight",
+  "destinationChainNames": "cardanopreview,midnight",
+  "gasPaymentEnforcement": ${GAS_ENFORCEMENT},
+  "log": {
+    "format": "pretty",
+    "level": "${LOG_LEVEL}"
+  },
+  "originChainNames": "cardanopreview,midnight",
+  "relayChains": "cardanopreview,midnight"
+}

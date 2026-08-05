@@ -1,0 +1,258 @@
+# Cardano preview <-> Midnight stagenet bridge, plus the scraper stack the
+# explorer reads.
+#
+# Everything in .env is handed to the agents wholesale via `env_file`, so
+# adding a contract address is a one-line .env edit rather than a change here.
+# Only values that are container-specific (service DNS names, in-container
+# paths) are set below, where .env cannot get them wrong.
+#
+#   docker compose up -d --build
+#   docker compose logs -f relayer
+#
+# Midnight runs against stagenet: its node and indexer are remote, so the only
+# local Midnight piece is the proof server (proving is client-side and stagenet
+# exposes no public prover).
+
+x-agent: &agent
+  build:
+    context: ..
+    dockerfile: setup/Dockerfile
+  image: hyperlane-cardano-midnight:latest
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    # The Midnight submitter is `npx tsx` over sources in this repo, so the repo
+    # itself has to be present. Writable because npx/tsx cache under it.
+    - ${MIDNIGHT_REPO:?set MIDNIGHT_REPO to your midnight-hyperlane checkout}:/opt/midnight
+    # Deploy addresses and the private-state DB the submitter reads and writes.
+    - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+    - checkpoints:/shared/checkpoints
+  environment: &agent-env
+    RUST_LOG: ${RUST_LOG:-info}
+    # In-container paths and service DNS. The submitter defaults its proof
+    # server to 127.0.0.1, which inside a container is the container itself.
+    MIDNIGHT_TOOLKIT_PATH: /opt/midnight/relayer/bin/submit-handle
+    MIDNIGHT_STATE_DIR: /opt/midnight-state
+    MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+
+services:
+  # Client-side prover for Midnight transactions. Handle calls are the heavy
+  # ones (~12 GiB, minutes); the job TTL must exceed the slowest proof or the
+  # worker GCs the job and the caller sees a 500 after the proof succeeded.
+  proof-server:
+    container_name: cm-proof-server
+    image: midnightntwrk/proof-server:9.0.0-rc.5_experimental
+    command: ['midnight-proof-server -v']
+    ports:
+      - '127.0.0.1:6300:6300'
+    environment:
+      RUST_BACKTRACE: full
+      MIDNIGHT_PROOF_SERVER_JOB_TIMEOUT: ${PROOF_SERVER_JOB_TIMEOUT:-14400}
+    restart: unless-stopped
+
+  # Two validators per origin, threshold 2. The Cardano ISM is origin-scoped,
+  # so the midnight-origin set must be registered for domain 1234 separately
+  # (`ism set-validators --domain 1234`).
+  validator-cardano-1:
+    <<: *agent
+    container_name: cm-validator-cardano-1
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: validator
+      HYP_ORIGINCHAINNAME: cardanopreview
+      HYP_VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY_1}
+      HYP_VALIDATOR_TYPE: hexKey
+      HYP_CHECKPOINTSYNCER_TYPE: localStorage
+      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/cardano-1
+      HYP_DB: /data/validator-cardano-1
+      HYP_METRICSPORT: 9080
+      HYP_INTERVAL: 5
+    volumes:
+      - ${MIDNIGHT_REPO}:/opt/midnight
+      - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+      - checkpoints:/shared/checkpoints
+      - validator-cardano-1-data:/data
+    ports:
+      - '127.0.0.1:9080:9080'
+
+  # Both Cardano-origin validators announce from the same wallet, so their
+  # announce transactions collide on its collateral UTxOs. Stagger the second.
+  validator-cardano-2:
+    <<: *agent
+    container_name: cm-validator-cardano-2
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: validator
+      START_DELAY_SECS: ${CARDANO_VALIDATOR_STAGGER_SECS:-90}
+      HYP_ORIGINCHAINNAME: cardanopreview
+      HYP_VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY_2}
+      HYP_VALIDATOR_TYPE: hexKey
+      HYP_CHECKPOINTSYNCER_TYPE: localStorage
+      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/cardano-2
+      HYP_DB: /data/validator-cardano-2
+      HYP_METRICSPORT: 9081
+      HYP_INTERVAL: 5
+    volumes:
+      - ${MIDNIGHT_REPO}:/opt/midnight
+      - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+      - checkpoints:/shared/checkpoints
+      - validator-cardano-2-data:/data
+    ports:
+      - '127.0.0.1:9081:9081'
+
+  # Midnight-origin validators. Pre-announce these on the Midnight validator
+  # announce contract before first run — their own announce path proves in ZK
+  # and is far slower than doing it once out of band. The storage location you
+  # announce must be the in-container path below, not a host path.
+  validator-midnight-1:
+    <<: *agent
+    container_name: cm-validator-midnight-1
+    depends_on: [proof-server]
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: validator
+      HYP_ORIGINCHAINNAME: midnight
+      HYP_VALIDATOR_KEY: ${MIDNIGHT_VALIDATOR_KEY_1}
+      HYP_VALIDATOR_TYPE: hexKey
+      HYP_CHECKPOINTSYNCER_TYPE: localStorage
+      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/midnight-1
+      HYP_DB: /data/validator-midnight-1
+      HYP_METRICSPORT: 9082
+      HYP_INTERVAL: 5
+    volumes:
+      - ${MIDNIGHT_REPO}:/opt/midnight
+      - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+      - checkpoints:/shared/checkpoints
+      - validator-midnight-1-data:/data
+    ports:
+      - '127.0.0.1:9082:9082'
+
+  validator-midnight-2:
+    <<: *agent
+    container_name: cm-validator-midnight-2
+    depends_on: [proof-server]
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: validator
+      HYP_ORIGINCHAINNAME: midnight
+      HYP_VALIDATOR_KEY: ${MIDNIGHT_VALIDATOR_KEY_2}
+      HYP_VALIDATOR_TYPE: hexKey
+      HYP_CHECKPOINTSYNCER_TYPE: localStorage
+      HYP_CHECKPOINTSYNCER_PATH: /shared/checkpoints/midnight-2
+      HYP_DB: /data/validator-midnight-2
+      HYP_METRICSPORT: 9083
+      HYP_INTERVAL: 5
+    volumes:
+      - ${MIDNIGHT_REPO}:/opt/midnight
+      - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+      - checkpoints:/shared/checkpoints
+      - validator-midnight-2-data:/data
+    ports:
+      - '127.0.0.1:9083:9083'
+
+  relayer:
+    <<: *agent
+    container_name: cm-relayer
+    depends_on: [proof-server]
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: relayer
+      HYP_RELAYCHAINS: cardanopreview,midnight
+      HYP_ALLOWLOCALCHECKPOINTSYNCERS: 'true'
+      HYP_DB: /data/relayer
+      HYP_METRICSPORT: 9089
+    volumes:
+      - ${MIDNIGHT_REPO}:/opt/midnight
+      - ${MIDNIGHT_STATE_DIR_HOST:-${HOME}/.midnight-stagenet-test}:/opt/midnight-state
+      - checkpoints:/shared/checkpoints
+      - relayer-data:/data
+    ports:
+      - '127.0.0.1:9089:9089'
+
+  postgres:
+    container_name: cm-postgres
+    image: postgres:14
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-47221c18c610}
+      POSTGRES_DB: postgres
+    volumes:
+      - scraper-db-data:/var/lib/postgresql/data
+    ports:
+      - '127.0.0.1:5432:5432'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Indexes both chains into Postgres. Both sides must be scraped for a message
+  # to ever show as delivered — deliveries are recorded on the destination.
+  scraper:
+    <<: *agent
+    container_name: cm-scraper
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *agent-env
+      AGENT_TYPE: scraper
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+      HYP_METRICSPORT: 9092
+    ports:
+      - '127.0.0.1:9092:9092'
+
+  # GraphQL over the scraper database. Point the explorer's NEXT_PUBLIC_API_URL
+  # at http://localhost:8080/v1/graphql.
+  hasura:
+    container_name: cm-hasura
+    image: hasura/graphql-engine:v2.42.0
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+      HASURA_GRAPHQL_ENABLE_CONSOLE: 'true'
+      HASURA_GRAPHQL_DEV_MODE: 'true'
+      HASURA_GRAPHQL_UNAUTHORIZED_ROLE: public
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-hyperlane}
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The explorer UI. Opt-in, because it lives in its own repository:
+  #   docker compose --profile explorer up -d
+  # Mounted rather than built — hyperlane-explorer ships no Dockerfile, and
+  # corepack picks up the pnpm version its package.json pins. Runs `next dev`,
+  # which reads NEXT_PUBLIC_* at request time; a production build would bake
+  # them in at build time instead.
+  explorer:
+    profiles: [explorer]
+    container_name: cm-explorer
+    image: node:24-bookworm-slim
+    working_dir: /app
+    volumes:
+      - ${EXPLORER_REPO:?set EXPLORER_REPO to your hyperlane-explorer checkout}:/app
+    command: sh -c "corepack enable && pnpm dev -p 3000 -H 0.0.0.0"
+    environment:
+      # Fetched by the BROWSER, so this has to be the host-visible URL. The
+      # compose DNS name `hasura` does not resolve outside this network.
+      NEXT_PUBLIC_API_URL: ${EXPLORER_API_URL:-http://localhost:8080/v1/graphql}
+      NEXT_PUBLIC_REGISTRY_URL: ${NEXT_PUBLIC_REGISTRY_URL:-https://github.com/equilibriumco/hyperlane-registry}
+      NEXT_PUBLIC_REGISTRY_BRANCH: ${NEXT_PUBLIC_REGISTRY_BRANCH:-midnight-cardano}
+      # Read only in the /api/cardano-warp-route-balance route, so it stays
+      # server-side and never reaches the browser bundle.
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on: [hasura]
+    restart: unless-stopped
+
+volumes:
+  checkpoints:
+  validator-cardano-1-data:
+  validator-cardano-2-data:
+  validator-midnight-1-data:
+  validator-midnight-2-data:
+  relayer-data:
+  scraper-db-data:
