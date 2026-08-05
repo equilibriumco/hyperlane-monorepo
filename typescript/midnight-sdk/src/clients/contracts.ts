@@ -65,6 +65,29 @@ export function buildIgpWitnesses(
   };
 }
 
+export function buildVaWitnesses(): Record<string, unknown> {
+  return {
+    wit_secretNonce(ctx: {
+      privateState: { secretNonce: Uint8Array };
+    }): [{ secretNonce: Uint8Array }, Uint8Array] {
+      return [ctx.privateState, ctx.privateState.secretNonce];
+    },
+  };
+}
+
+export function witnessesFor(
+  name: MidnightContractName,
+): Record<string, unknown> {
+  switch (name) {
+    case 'night':
+      return buildNightWitnesses();
+    case 'igp':
+      return buildIgpWitnesses();
+    case 'validator-announce':
+      return buildVaWitnesses();
+  }
+}
+
 // Executes a circuit locally against fetched contract state — no proof
 // server, no wallet, no transaction.
 export async function runReadCircuit<T>(

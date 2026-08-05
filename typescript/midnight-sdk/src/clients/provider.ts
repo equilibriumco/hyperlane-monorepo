@@ -1,5 +1,3 @@
-import { getPublicStates } from '@midnight-ntwrk/midnight-js-contracts';
-import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { nativeToken } from '@midnightntwrk/ledger-v9';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
@@ -20,22 +18,13 @@ import {
   TokenType,
 } from '@hyperlane-xyz/provider-sdk/altvm';
 import type { WarpArtifactConfig } from '@hyperlane-xyz/provider-sdk/warp';
-import { assert } from '@hyperlane-xyz/utils';
 
 import { bytesToHex, hexToBytes } from '../utils/conversion.js';
-import type { MidnightEndpoints, MidnightTransaction } from '../utils/types.js';
+import type { MidnightTransaction } from '../utils/types.js';
 
-import {
-  buildIgpWitnesses,
-  buildNightWitnesses,
-  loadContractModule,
-  runReadCircuit,
-} from './contracts.js';
 import { MidnightIndexerClient } from './indexer.js';
+import { MidnightReadClient } from './read-client.js';
 import { readRemoteRouters } from './state.js';
-
-const CONTRACT_NOT_FOUND_RE =
-  /not found|no contract|unknown contract|no public state/i;
 
 // Matches the destinationGas the live warp route is configured with; callers
 // override via customHookMetadata.
@@ -44,88 +33,35 @@ const DEFAULT_TRANSFER_GAS_LIMIT = 200_000n;
 export class MidnightProvider implements IProvider<MidnightTransaction> {
   protected constructor(
     protected readonly metadata: ChainMetadataForAltVM,
-    protected readonly endpoints: MidnightEndpoints,
+    protected readonly client: MidnightReadClient,
     protected readonly indexer: MidnightIndexerClient,
   ) {}
 
   static async connect(
     metadata: ChainMetadataForAltVM,
   ): Promise<MidnightProvider> {
-    const endpoints = MidnightProvider.resolveEndpoints(metadata);
+    const client = MidnightReadClient.fromMetadata(metadata);
     return new MidnightProvider(
       metadata,
-      endpoints,
-      new MidnightIndexerClient(endpoints.indexerGraphqlUrl),
+      client,
+      new MidnightIndexerClient(client.endpoints.indexerGraphqlUrl),
     );
   }
 
-  // rpcUrls carry the node endpoint; gatewayUrls carry the indexer GraphQL
-  // endpoint, the read path for all chain state.
-  protected static resolveEndpoints(
-    metadata: ChainMetadataForAltVM,
-  ): MidnightEndpoints {
-    const [nodeUrl] = metadata.rpcUrls?.map(({ http }) => http) ?? [];
-    assert(nodeUrl, `no rpcUrls in chain metadata for ${metadata.name}`);
-    const [indexerGraphqlUrl] =
-      metadata.gatewayUrls?.map(({ http }) => http) ?? [];
-    assert(
-      indexerGraphqlUrl,
-      `no gatewayUrls (indexer GraphQL endpoint) in chain metadata for ${metadata.name}`,
-    );
-    const indexerWsUrl = `${indexerGraphqlUrl.replace(/^http/, 'ws')}/ws`;
-    return { nodeUrl, indexerGraphqlUrl, indexerWsUrl };
+  protected fetchContractState(contractAddress: string) {
+    return this.client.fetchContractState(contractAddress);
   }
 
-  protected async fetchContractState(
-    contractAddress: string,
-  ): Promise<{ data: unknown; balance: unknown } | null> {
-    const publicDataProvider = indexerPublicDataProvider(
-      this.endpoints.indexerGraphqlUrl,
-      this.endpoints.indexerWsUrl,
-    );
-    try {
-      const publicStates = await getPublicStates(
-        publicDataProvider,
-        contractAddress,
-      );
-      return publicStates.contractState as unknown as {
-        data: unknown;
-        balance: unknown;
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (CONTRACT_NOT_FOUND_RE.test(message)) {
-        return null;
-      }
-      throw err;
-    }
+  protected requireContractState(contractAddress: string) {
+    return this.client.requireContractState(contractAddress);
   }
 
-  protected async requireContractState(
-    contractAddress: string,
-  ): Promise<{ data: unknown; balance: unknown }> {
-    const state = await this.fetchContractState(contractAddress);
-    if (!state) {
-      throw new Error(
-        `Midnight contract ${contractAddress} not found on ${this.metadata.name}`,
-      );
-    }
-    return state;
-  }
-
-  protected async runNightCircuit<T>(
+  protected runNightCircuit<T>(
     stateData: unknown,
     circuitId: string,
     args: unknown[] = [],
   ): Promise<T> {
-    const module = await loadContractModule('night');
-    return runReadCircuit<T>(
-      module,
-      buildNightWitnesses(),
-      stateData,
-      circuitId,
-      args,
-    );
+    return this.client.runCircuit<T>('night', stateData, circuitId, args);
   }
 
   async isHealthy(): Promise<boolean> {
@@ -247,12 +183,9 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
       );
     }
     const state = await this.requireContractState(igpAddress);
-    const module = await loadContractModule('igp');
-    const witnesses = buildIgpWitnesses();
     const destination = BigInt(req.destinationDomainId);
-    const registered = await runReadCircuit<boolean>(
-      module,
-      witnesses,
+    const registered = await this.client.runCircuit<boolean>(
+      'igp',
       state.data,
       'isRegistered',
       [destination],
@@ -265,9 +198,8 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     const gasLimit = req.customHookMetadata
       ? BigInt(req.customHookMetadata)
       : DEFAULT_TRANSFER_GAS_LIMIT;
-    const amount = await runReadCircuit<bigint>(
-      module,
-      witnesses,
+    const amount = await this.client.runCircuit<bigint>(
+      'igp',
       state.data,
       'quoteDispatch',
       [destination, gasLimit],

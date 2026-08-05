@@ -1783,6 +1783,9 @@ importers:
       '@midnightntwrk/ledger-v9':
         specifier: 1.0.0-rc.3
         version: 1.0.0-rc.3
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
     devDependencies:
       '@hyperlane-xyz/tsconfig':
         specifier: workspace:^

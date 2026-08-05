@@ -22,6 +22,12 @@ import type {
 import type { IRawValidatorAnnounceArtifactManager } from '@hyperlane-xyz/provider-sdk/validator-announce';
 import type { IRawWarpArtifactManager } from '@hyperlane-xyz/provider-sdk/warp';
 
+import { MidnightHookArtifactManager } from '../hook/hook-artifact-manager.js';
+import { MidnightIsmArtifactManager } from '../ism/ism-artifact-manager.js';
+import { MidnightMailboxArtifactManager } from '../mailbox/mailbox-artifact-manager.js';
+import { MidnightValidatorAnnounceArtifactManager } from '../validator-announce/validator-announce-artifact-manager.js';
+import { MidnightWarpArtifactManager } from '../warp/warp-artifact-manager.js';
+
 import { MidnightProvider } from './provider.js';
 
 export class MidnightProtocolProvider implements ProtocolProvider {
@@ -48,45 +54,35 @@ export class MidnightProtocolProvider implements ProtocolProvider {
   }
 
   createIsmArtifactManager(
-    _chainMetadata: ChainMetadataForAltVM,
+    chainMetadata: ChainMetadataForAltVM,
   ): IRawIsmArtifactManager {
-    throw new Error(
-      'MidnightProtocolProvider.createIsmArtifactManager: not implemented yet (#105)',
-    );
+    return new MidnightIsmArtifactManager(chainMetadata);
   }
 
   createHookArtifactManager(
-    _chainMetadata: ChainMetadataForAltVM,
+    chainMetadata: ChainMetadataForAltVM,
     _context?: { mailbox?: string },
   ): IRawHookArtifactManager {
-    throw new Error(
-      'MidnightProtocolProvider.createHookArtifactManager: not implemented yet (#105)',
-    );
+    return new MidnightHookArtifactManager(chainMetadata);
   }
 
   createWarpArtifactManager(
-    _chainMetadata: ChainMetadataForAltVM,
+    chainMetadata: ChainMetadataForAltVM,
     _context?: { mailbox?: string },
   ): IRawWarpArtifactManager {
-    throw new Error(
-      'MidnightProtocolProvider.createWarpArtifactManager: not implemented yet (#105)',
-    );
+    return new MidnightWarpArtifactManager(chainMetadata);
   }
 
   createMailboxArtifactManager(
-    _chainMetadata: ChainMetadataForAltVM,
+    chainMetadata: ChainMetadataForAltVM,
   ): IRawMailboxArtifactManager {
-    throw new Error(
-      'MidnightProtocolProvider.createMailboxArtifactManager: not implemented yet (#105)',
-    );
+    return new MidnightMailboxArtifactManager(chainMetadata);
   }
 
   createValidatorAnnounceArtifactManager(
-    _chainMetadata: ChainMetadataForAltVM,
+    chainMetadata: ChainMetadataForAltVM,
   ): IRawValidatorAnnounceArtifactManager | null {
-    throw new Error(
-      'MidnightProtocolProvider.createValidatorAnnounceArtifactManager: not implemented yet (#105)',
-    );
+    return new MidnightValidatorAnnounceArtifactManager(chainMetadata);
   }
 
   createFeeArtifactManager(
