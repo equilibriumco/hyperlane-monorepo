@@ -109,10 +109,10 @@ true.
 Each `validator-<name>.key` has a matching `.addr`. The addresses are what the
 _contracts_ need, and they are needed at different times:
 
-| Address used for                                                   | When                                                                                                   |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| Cardano ISM entry for domain 1234 (the two `midnight-*` addresses) | after Midnight is deployed, via `ism set-validators --domain 1234`                                     |
-| Midnight's own validator set (the two `cardano-*` addresses)       | **at Midnight deploy time** — `VALIDATOR_i_PUBKEY` is baked in, so changing it later means redeploying |
+| Address used for                                                   | When                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cardano ISM entry for domain 1234 (the two `midnight-*` addresses) | after Midnight is deployed, via `ism set-validators --domain 1234`                                                                                                                                                                    |
+| Midnight's own validator set (the two `cardano-*` keys)            | at Midnight deploy time via `VALIDATOR_i_PUBKEY`, or later on a live contract via the owner-gated `setValidatorsAndThreshold` — that circuit takes the **64-byte uncompressed pubkeys** (`cast wallet public-key`), not the addresses |
 
 `keys/load-into-env.sh` copies the key values into `../.env` in place.
 
