@@ -102,9 +102,20 @@ export class IsmWriter
   }
 
   /**
+   * Whether this protocol's "static" ISM types can be updated in place
+   * instead of redeployed on config changes (e.g. an on-chain validator
+   * rotation entry point). Callers use this to steer mergeIsmArtifacts.
+   */
+  supportsInPlaceStaticUpdates(): boolean {
+    return this.artifactManager.supportsInPlaceStaticIsmUpdates?.() ?? false;
+  }
+
+  /**
    * Updates an existing ISM to match the desired configuration.
-   * Only routing ISMs support updates (domain enrollment/unenrollment, owner changes).
-   * Multisig and test ISMs are immutable - returns empty array.
+   * Routing ISMs support updates (domain enrollment/unenrollment, owner
+   * changes). Multisig and test ISMs are immutable - returns empty array -
+   * unless the artifact manager reports in-place static updates, in which
+   * case the typed writer diffs current state and emits update transactions.
    *
    * @param artifact The desired ISM state (must include deployed address)
    * @returns Array of transactions needed to perform the update
@@ -122,6 +133,14 @@ export class IsmWriter
     // directly rather than routed through RoutingIsmWriter's nested-artifact
     // recursion.
     if (config.type === AltVM.IsmType.COMPOSITE) {
+      const writer = this.artifactManager.createWriter(
+        config.type,
+        this.signer,
+      );
+      return writer.update({ artifactState, config, deployed });
+    }
+
+    if (this.supportsInPlaceStaticUpdates()) {
       const writer = this.artifactManager.createWriter(
         config.type,
         this.signer,
