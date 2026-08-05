@@ -715,6 +715,9 @@ importers:
       '@hyperlane-xyz/http-registry-server':
         specifier: workspace:*
         version: link:../http-registry-server
+      '@hyperlane-xyz/midnight-sdk':
+        specifier: workspace:*
+        version: link:../midnight-sdk
       '@hyperlane-xyz/provider-sdk':
         specifier: workspace:*
         version: link:../provider-sdk
