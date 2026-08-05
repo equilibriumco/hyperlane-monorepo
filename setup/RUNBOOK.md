@@ -198,14 +198,167 @@ given).
 `gasPaymentEnforcement` entries carry a matching list, so enforcement can be
 relaxed for one direction while the other enforces.
 
+### 5.1 What "gas" means on each side — get this wrong and nothing adds up
+
+The two chains do not agree on what a unit of gas is, and the oracle values only
+make sense per destination.
+
+| Destination       | Estimate the relayer demands                                                             | Unit          |
+| ----------------- | ---------------------------------------------------------------------------------------- | ------------- |
+| Cardano (`2003`)  | **dynamic** — a real Blockfrost tx evaluation                                            | lovelace, 1:1 |
+| Midnight (`1234`) | **fixed 1,000,000** — `handle` is dry-run for validity only, then a constant is returned | abstract      |
+
+Cardano's `gasLimit` **is lovelace** (`hyperlane-cardano::mailbox`: "gas is
+denominated 1:1 in lovelace"). So an oracle pricing Cardano as a destination
+must use `gasPrice = 1`. Setting it to anything else multiplies every quote by
+that factor and, worse, makes the gas amount you register incomparable with the
+~1.4 M lovelace the relayer expects.
+
+Measured 2026-08-05: a Cardano delivery estimates **1,420,435 lovelace** against
+an actual cost of 1,414,400 — 0.4% apart.
+
+### 5.2 Cardano IGP — pricing Midnight as a destination
+
+```sh
+cd cardano
+export BLOCKFROST_API_KEY=... CARDANO_SIGNING_KEY=$PWD/testnet-keys/payment.skey
+
+# owner-gated. gas-price 2 uNIGHT/gas, exchange-rate 0.098 ADA per NIGHT x 1e12
+./cli/target/release/hyperlane-cardano --network preview \
+  igp set-oracle --domain 1234 --gas-price 2 --exchange-rate 98000000000
+
+./cli/target/release/hyperlane-cardano --network preview \
+  igp quote --destination 1234 --gas-limit 600000     # -> 0.1176 ADA
+```
+
+`payment = (gas_limit + overhead) * gas_price * exchange_rate / 1e12`, in
+lovelace. Midnight's fixed 1,000,000 estimate means `gasFraction 1/2` wants
+**500,000** gas registered, so `--gas-limit 600000` clears it with margin.
+
+The IGP validator checks `paid == required_lovelace` **exactly** — not `>=`.
+Overpaying is impossible by construction (there is no refund path, only `claim`
+to the beneficiary), so a quote that drifts from the oracle fails the script.
+
+### 5.3 Midnight IGP — pricing Cardano as a destination
+
+```sh
+cd tests/e2e     # in the hyperlane-midnight clone
+set -a; . ~/.midnight-stagenet-test/secrets.env; set +a
+export MIDNIGHT_NETWORK=stagenet MIDNIGHT_NETWORK_ID=stagenet \
+       MIDNIGHT_STATE_DIR=~/.midnight-stagenet-test \
+       MIDNIGHT_PROOF_SERVER_URL=http://127.0.0.1:6300
+
+# gasPrice MUST be 1 — Cardano gasLimit is already lovelace (5.1)
+GAS_PRICE=1 EXCHANGE_RATE=102040816326 npx tsx scripts/set-cardano-gas-data.ts
+```
+
+`quote = gasLimit * gasPrice * exchangeRate / 1e10`, in uNIGHT.
+`102040816326` is `1 / 0.098 * 1e10` — lovelace to uNIGHT at 1 NIGHT = 0.098 ADA
+(Kraken, 2026-08-05). Both tokens have 6 decimals, so it is the price ratio
+directly. Against the 1,420,435 estimate, `gasFraction 1/2` wants **710,218**
+gas registered; 750,000 costs 7.65 NIGHT.
+
+### 5.4 Enforcement values in `.env`
+
+```sh
+# refuse anything underpaid, both directions
+GAS_ENFORCEMENT='[{"type": "onChainFeeQuoting", "gasFraction": "1/2"}]'
+# or, to prove wiring first
+GAS_ENFORCEMENT='[{"type": "none"}]'
+```
+
+Single-quote it: the JSON contains `{}` and `source .env` otherwise mangles it.
+
+Enforcement is working when the relayer logs, per undelivered message:
+
+```
+Message does not meet the gas payment requirement preflight check   # no payment at all
+Message does not meet the gas payment requirement after gas estimation  # paid, but short
+```
+
+The wording distinguishes the two — the second means the payment was seen and
+attributed, which is the useful signal that indexing works.
+
 ---
 
-## 6. First transfer
+## 6. Sending transfers
 
 Over a synthetic route, the first transfer must **mint before it can burn** —
 into Cardano first. The Midnight side of this pairing is a collateral route: it
 releases NIGHT it already holds and outbound locks replenish it, so read
 `vaultBalance()` rather than trusting a recorded figure.
+
+### 6.1 Midnight -> Cardano
+
+Recipient is the Cardano payment credential in Hyperlane's 32-byte form: kind
+byte (`0x00` key, `0x02` script), three zero bytes, then the 28-byte credential.
+
+```sh
+cd tests/e2e     # hyperlane-midnight clone
+set -a; . ~/.midnight-stagenet-test/secrets.env; set +a
+export MIDNIGHT_NETWORK=stagenet MIDNIGHT_NETWORK_ID=stagenet \
+       MIDNIGHT_STATE_DIR=~/.midnight-stagenet-test \
+       MIDNIGHT_PROOF_SERVER_URL=http://127.0.0.1:6300
+
+CARDANO_RECIPIENT=0x00000000<28-byte-credential> \
+AMOUNT=500000 \
+GAS_LIMIT=750000 GAS_PRICE=1 EXCHANGE_RATE=102040816326 \
+  npx tsx scripts/transfer-to-cardano.ts
+```
+
+`GAS_LIMIT=0` skips the payment — use it to watch enforcement refuse, then pay
+the dispatched id separately (the same `payForGas` the script calls):
+
+```sh
+MESSAGE_ID=0x<id> GAS_LIMIT=750000 npx tsx scripts/pay-one.ts
+```
+
+`night` has no post-dispatch hook, so the payment **cannot** ride along with the
+dispatch — it references a messageId that only exists once the dispatch lands.
+Two proofs, and the `transferRemote` one is the heavy one (>12 GB).
+
+### 6.2 Cardano -> Midnight
+
+Recipient is the raw 32-byte Midnight address, hex.
+
+```sh
+cd cardano
+export BLOCKFROST_API_KEY=... CARDANO_SIGNING_KEY=$PWD/testnet-keys/payment.skey
+CLI="./cli/target/release/hyperlane-cardano --network preview"
+
+# atomic: transfer pays the IGP in the same tx, priced off the route's own
+# destination_gas. Set it once.
+$CLI warp set-destination-gas --domain 1234 --gas 600000 \
+  --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
+
+$CLI warp transfer --domain 1234 \
+  --recipient 0x<32-byte-midnight-address> \
+  --amount 200000 \
+  --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
+```
+
+**Any** `destination_gas` on the route — including `0` — forces the atomic IGP
+path. To dispatch underpaid on purpose, set a small value (`--gas 1000` pays 196
+lovelace) and top up afterwards:
+
+```sh
+$CLI igp pay-for-gas --message-id 0x<id> --destination 1234 --gas-limit 600000
+```
+
+Payments **accumulate per message**: the relayer sums `gas_amount` across them,
+so a short dispatch plus a top-up delivers once the total clears the fraction.
+
+### 6.3 Checking a message
+
+```sh
+curl -s -X POST http://localhost:8080/v1/graphql -H 'Content-Type: application/json' \
+  -d '{"query":"{ message_view(where: {msg_id: {_eq: \"\\\\x<id-no-0x>\"}}) { is_delivered total_gas_amount num_payments destination_tx_hash } }"}'
+```
+
+`total_gas_amount` is what enforcement compares — not `total_payment`. Trust it
+over the relayer logs: the relayer re-checks on a widening backoff, so it can
+already have delivered while the last log line still says the requirement is
+unmet.
 
 ---
 
@@ -276,6 +429,38 @@ already spent.
 **Before a heavy Midnight leg:** restart the proof server if it has been up a
 long time. Handle proofs have been measured around 12 GiB, and a long-lived
 prover is where the memory has gone.
+
+**Keep the Midnight paying wallet consolidated to one coin.** A contract call
+built from two unshielded inputs exceeds stagenet's time-to-dismiss budget and
+is rejected at submission with:
+
+```
+1010: Invalid Transaction: Custom error: 231
+```
+
+That is `FeeCalculationError::OutsideTimeToDismiss`. Substrate flattens the
+error struct, so nothing in the message mentions inputs, size or time — it looks
+random, and it is not. The ZK proof verify already consumes most of the 15 ms
+`min_time_to_dismiss` floor; each extra input's signature check tips it over.
+
+The trap is self-inflicted: a **successful** payment splits its change into two
+coins, so the next payment fails at a size that worked minutes earlier. Merge
+them with a self-send (a plain transfer carries no circuit proof, so two inputs
+fit fine):
+
+```sh
+AMOUNT=<balance minus headroom> npx tsx scripts/consolidate.ts
+```
+
+Observed 2026-08-05: 21 consecutive failures across 0.7–21 NIGHT, then success
+on the first attempt after consolidating. Raising
+`time_to_dismiss_per_byte` / `min_time_to_dismiss` is the real fix, but on a
+public chain that is a governance change, not a config one.
+
+**When Blockfrost returns `402 Project Over Limit`:** the daily cap is spent, not
+the burst limit. Every agent and CLI call fails until it resets — swap in another
+project id or wait. (`429` is different: that is the 10 req/s burst limit under
+five agents, and they retry through it.)
 
 **When the explorer serves `MODULE_UNPARSABLE` or `Cannot find module for
 page`:** its `.next` dev cache is inconsistent — restarting the container while
