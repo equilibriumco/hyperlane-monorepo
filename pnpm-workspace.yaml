@@ -204,6 +204,7 @@ allowBuilds:
   cpu-features: true
   esbuild: true
   keccak: true
+  msgpackr-extract: true
   node-hid: true
   prisma: true
   protobufjs: true

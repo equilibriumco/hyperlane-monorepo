@@ -1,9 +1,5 @@
-/**
- * Minimal GraphQL client for the Midnight indexer. The indexer is the read
- * path for chain state (the node RPC exposes no query surface comparable to
- * EVM JSON-RPC); the query shapes mirror the Rust agent adapter's
- * `indexer_client.rs`.
- */
+// The indexer is the read path for chain state; the node RPC exposes no
+// query surface comparable to EVM JSON-RPC.
 export class MidnightIndexerClient {
   constructor(private readonly graphqlUrl: string) {}
 

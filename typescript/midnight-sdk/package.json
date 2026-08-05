@@ -12,7 +12,8 @@
   "license": "Apache-2.0",
   "repository": "https://github.com/hyperlane-xyz/hyperlane-monorepo",
   "files": [
-    "/dist"
+    "/dist",
+    "/artifacts"
   ],
   "type": "module",
   "types": "dist/index.d.ts",
@@ -23,7 +24,8 @@
     }
   },
   "scripts": {
-    "build": "rm -rf ./dist && tsc",
+    "prebuild": "node scripts/generate-artifacts.js",
+    "build": "pnpm prebuild && rm -rf ./dist && tsc",
     "format": "oxfmt --write ./src",
     "lint": "oxlint -c ../../oxlint.json",
     "clean": "rm -rf ./dist ./cache",
@@ -32,7 +34,11 @@
   },
   "dependencies": {
     "@hyperlane-xyz/provider-sdk": "workspace:*",
-    "@hyperlane-xyz/utils": "workspace:*"
+    "@hyperlane-xyz/utils": "workspace:*",
+    "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.4",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3"
   },
   "devDependencies": {
     "@hyperlane-xyz/tsconfig": "workspace:^",
