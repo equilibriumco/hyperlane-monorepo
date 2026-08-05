@@ -18,6 +18,11 @@ x-agent: &agent
     context: ..
     dockerfile: setup/Dockerfile
   image: hyperlane-cardano-midnight:latest
+  # The Midnight toolkit creates its LevelDB as ./midnight-level-db, relative to
+  # the process's working directory. /app is root-owned and shared by every
+  # agent, so run from /data instead: it is writable and each agent mounts its
+  # own volume there, which also keeps their databases from colliding.
+  working_dir: /data
   env_file: .env
   restart: unless-stopped
   volumes:
@@ -202,7 +207,11 @@ services:
     environment:
       <<: *agent-env
       AGENT_TYPE: scraper
+      # Two names for one value: init-db reads DATABASE_URL, while the scraper
+      # agent's `db` setting is the Postgres URL rather than the rocksdb path
+      # the relayer and validators use.
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+      HYP_DB: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
       HYP_METRICSPORT: 9092
     ports:
       - '127.0.0.1:9092:9092'

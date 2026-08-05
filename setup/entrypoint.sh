@@ -40,6 +40,10 @@ if [ "${START_DELAY_SECS:-0}" -gt 0 ]; then
     sleep "$START_DELAY_SECS"
 fi
 
+# The agent also opens a `config` directory relative to its working directory,
+# which is /data so the Midnight toolkit has somewhere writable for its LevelDB.
+mkdir -p "$PWD/config"
+
 CONFIG=/tmp/agent-config.json
 envsubst < /app/config/agent-config.json.tmpl > "$CONFIG"
 node -e "JSON.parse(require('fs').readFileSync('$CONFIG','utf8'))" 2>/dev/null \

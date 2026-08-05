@@ -8,6 +8,10 @@ Everything is driven by `.env` and one config template. There is no config
 assembly step — `entrypoint.sh` renders `config/agent-config.json.tmpl` with
 `envsubst` and hands the result to the agent.
 
+Setting the two chains up in the first place — what must be deployed,
+configured and enrolled before any of this delivers a message — is
+[RUNBOOK.md](RUNBOOK.md).
+
 ## Prerequisites
 
 - Docker with BuildKit (the Rust build uses cache mounts)
