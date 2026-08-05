@@ -638,6 +638,7 @@ async function executeDelivery({
       case ProtocolType.Starknet:
       case ProtocolType.Radix:
       case ProtocolType.Aleo:
+      case ProtocolType.Midnight:
       case ProtocolType.Unknown:
         throw new Error(
           `Fee quoting is not supported for ${originProtocol} origins yet; remove --fee-quoting-url to send on the unquoted path`,

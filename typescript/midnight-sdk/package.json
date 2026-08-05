@@ -1,0 +1,43 @@
+{
+  "name": "@hyperlane-xyz/midnight-sdk",
+  "version": "40.0.0",
+  "description": "Hyperlane TypeScript SDK for the Midnight protocol",
+  "keywords": [
+    "blockchain",
+    "hyperlane",
+    "midnight",
+    "sdk"
+  ],
+  "homepage": "https://www.hyperlane.xyz",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/hyperlane-xyz/hyperlane-monorepo",
+  "files": [
+    "/dist"
+  ],
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf ./dist && tsc",
+    "format": "oxfmt --write ./src",
+    "lint": "oxlint -c ../../oxlint.json",
+    "clean": "rm -rf ./dist ./cache",
+    "test": "exit 0",
+    "test:ci": "exit 0"
+  },
+  "dependencies": {
+    "@hyperlane-xyz/provider-sdk": "workspace:*",
+    "@hyperlane-xyz/utils": "workspace:*"
+  },
+  "devDependencies": {
+    "@hyperlane-xyz/tsconfig": "workspace:^",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "typescript": "catalog:"
+  }
+}

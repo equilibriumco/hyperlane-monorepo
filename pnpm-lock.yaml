@@ -975,6 +975,9 @@ importers:
       '@hyperlane-xyz/cosmos-sdk':
         specifier: workspace:*
         version: link:../cosmos-sdk
+      '@hyperlane-xyz/midnight-sdk':
+        specifier: workspace:*
+        version: link:../midnight-sdk
       '@hyperlane-xyz/provider-sdk':
         specifier: workspace:*
         version: link:../provider-sdk
@@ -1756,6 +1759,28 @@ importers:
       tsx:
         specifier: 'catalog:'
         version: 4.19.1
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.2
+
+  typescript/midnight-sdk:
+    dependencies:
+      '@hyperlane-xyz/provider-sdk':
+        specifier: workspace:*
+        version: link:../provider-sdk
+      '@hyperlane-xyz/utils':
+        specifier: workspace:*
+        version: link:../utils
+    devDependencies:
+      '@hyperlane-xyz/tsconfig':
+        specifier: workspace:^
+        version: link:../tsconfig
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.10.9
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.42.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.2
