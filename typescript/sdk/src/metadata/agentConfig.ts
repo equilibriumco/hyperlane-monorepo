@@ -774,12 +774,30 @@ export function buildAgentConfig(
         ? formatAleoAddress(addresses[chain])
         : addresses[chain];
 
+    // Midnight agents read chain state via the indexer GraphQL endpoint,
+    // which travels in the metadata's gatewayUrls.
+    const midnightConfig =
+      metadata?.protocol === ProtocolType.Midnight
+        ? {
+            indexerGraphqlUrl: (
+              metadata as { gatewayUrls?: { http: string }[] }
+            ).gatewayUrls?.[0]?.http,
+          }
+        : {};
+
+    // Registry metadata may carry agent index settings beyond `from`
+    // (e.g. `mode`); preserve them when stamping the start block.
+    const metadataIndex = (metadata as { index?: Record<string, unknown> })
+      ?.index;
+
     const chainConfig: AgentChainMetadata = {
       ...metadata,
       ...coreAddresses,
+      ...midnightConfig,
       ...(additionalConfig ? additionalConfig[chain] : {}),
       ...(startBlocks[chain] !== undefined && {
         index: {
+          ...metadataIndex,
           from: startBlocks[chain],
         },
       }),
