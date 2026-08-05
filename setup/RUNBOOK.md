@@ -235,9 +235,15 @@ already spent.
 long time. Handle proofs have been measured around 12 GiB, and a long-lived
 prover is where the memory has gone.
 
-**When the explorer serves `MODULE_UNPARSABLE`:** its `.next` cache is stale or
-was written by another user. Stop the container first — it holds the directory
-open — then delete `.next` and start it again.
+**When the explorer serves `MODULE_UNPARSABLE` or `Cannot find module for
+page`:** its `.next` dev cache is inconsistent — restarting the container while
+it is mid-compile is enough to cause it, and static assets start 404ing too.
+Stop the container first (it holds the directory open), delete `.next`, start it
+again, and give the first request ~15s to compile.
+
+**Do not restart the explorer for registry changes.** It re-fetches the registry
+on its own cache expiry, so a restart buys nothing and is the main way the build
+cache above gets corrupted.
 
 **Stagenet resets quarterly.** Contracts vanish and everything in §2 and §3 is
 redone. `owner-state.json` is what you cannot regenerate.
