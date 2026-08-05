@@ -209,7 +209,42 @@ releases NIGHT it already holds and outbound locks replenish it, so read
 
 ---
 
-## 7. Container quirks
+## 7. Recurring operations
+
+Not one-time setup — these come back.
+
+**After wiping the database** (`docker compose down -v`, or any fresh Postgres
+volume): re-run `./hasura/track-tables.sh`. Hasura tracks nothing by default, so
+the explorer loads normally and shows an empty message list with no error. The
+script is idempotent, so running it when unsure costs nothing.
+
+**After redeploying either mailbox:**
+
+1. `CARDANO_INDEX_FROM` / `MIDNIGHT_INDEX_FROM` to the new deployment's first block
+2. `docker compose down -v` — validator databases describe the old merkle tree
+3. bump `CHECKPOINT_S3_PREFIX` — checkpoints under the old prefix describe that
+   same old tree, and a validator resuming onto them signs the wrong history
+4. re-run the §3 wiring: ISM validators + threshold, both router enrollments
+5. re-run `./hasura/track-tables.sh` if the database went with it
+
+**Between chained Cardano CLI operations:** wait ~90s. Blockfrost's UTxO view
+lags 25–40s, and back-to-back transactions select inputs the previous one
+already spent.
+
+**Before a heavy Midnight leg:** restart the proof server if it has been up a
+long time. Handle proofs have been measured around 12 GiB, and a long-lived
+prover is where the memory has gone.
+
+**When the explorer serves `MODULE_UNPARSABLE`:** its `.next` cache is stale or
+was written by another user. Stop the container first — it holds the directory
+open — then delete `.next` and start it again.
+
+**Stagenet resets quarterly.** Contracts vanish and everything in §2 and §3 is
+redone. `owner-state.json` is what you cannot regenerate.
+
+---
+
+## 8. Container quirks
 
 Hit while containerising the agents; all fixed in this directory, listed so the
 symptoms are searchable.

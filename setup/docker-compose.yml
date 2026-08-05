@@ -247,7 +247,12 @@ services:
     working_dir: /app
     volumes:
       - ${EXPLORER_REPO:?set EXPLORER_REPO to your hyperlane-explorer checkout}:/app
-    command: sh -c "corepack enable && pnpm dev -p 3000 -H 0.0.0.0"
+    # Next directly, not via pnpm: pnpm verifies dependencies before running a
+    # script and re-installs into the mounted repo when its view disagrees with
+    # the host's. Same uid as the host owner so nothing it writes (.next) lands
+    # as root.
+    user: '1000:1000'
+    command: sh -c "node_modules/.bin/next dev -p 3000 -H 0.0.0.0"
     environment:
       # Fetched by the BROWSER, so this has to be the host-visible URL. The
       # compose DNS name `hasura` does not resolve outside this network.
