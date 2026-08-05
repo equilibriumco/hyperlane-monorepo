@@ -27,6 +27,9 @@ const TRON_ADDRESS_REGEX = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 // Length varies with the address type (enterprise carries only a payment
 // credential, base addresses also carry a staking one).
 const CARDANO_ADDRESS_REGEX = /^addr(_test)?1[02-9ac-hj-np-z]{50,110}$/;
+// Midnight addresses in Hyperlane contexts are the raw 32-byte value,
+// hex-encoded (Midnight contract/user addresses are natively 32 bytes).
+const MIDNIGHT_ADDRESS_REGEX = /^(0x)?[0-9a-fA-F]{64}$/;
 
 const HEX_BYTES32_REGEX = /^0x[a-fA-F0-9]{64}$/;
 
@@ -48,6 +51,8 @@ const RADIX_TX_HASH_REGEX = /^txid_(rdx|sim|tdx_[\d]_)[a-z0-9]{59}$/;
 const ALEO_TX_HASH_REGEX = /^at1[a-z0-9]{58}$/;
 const TRON_TX_HASH_REGEX = /^0x([A-Fa-f0-9]{64})$/;
 const CARDANO_TX_HASH_REGEX = /^(0x)?[A-Fa-f0-9]{64}$/;
+const MIDNIGHT_TX_HASH_REGEX = /^(0x)?[A-Fa-f0-9]{64}$/;
+const MIDNIGHT_ZEROISH_ADDRESS_REGEX = /^(0x)?0*$/;
 
 const EVM_ZEROISH_ADDRESS_REGEX = /^(0x)?0*$/;
 const SEALEVEL_ZEROISH_ADDRESS_REGEX = /^1+$/;
@@ -112,6 +117,10 @@ export function isAddressCardano(address: Address) {
   return CARDANO_ADDRESS_REGEX.test(address);
 }
 
+export function isAddressMidnight(address: Address) {
+  return MIDNIGHT_ADDRESS_REGEX.test(address);
+}
+
 export function getAddressProtocolType(address: Address) {
   if (!address) return undefined;
   if (isAddressEvm(address)) {
@@ -132,6 +141,11 @@ export function getAddressProtocolType(address: Address) {
     return ProtocolType.Radix;
   } else if (isAddressCardano(address)) {
     return ProtocolType.Cardano;
+  } else if (isAddressMidnight(address)) {
+    // Unreachable for 0x-prefixed input: CosmosNative shares the 32-byte hex
+    // shape and is checked first (Starknet has the same shadowing). Explicit
+    // protocol dispatch is the supported path for Midnight addresses.
+    return ProtocolType.Midnight;
   } else {
     return undefined;
   }
@@ -238,6 +252,15 @@ export function isValidAddressCardano(address: Address) {
   }
 }
 
+export function isValidAddressMidnight(address: Address) {
+  try {
+    const isValid = address && MIDNIGHT_ADDRESS_REGEX.test(address);
+    return !!isValid;
+  } catch {
+    return false;
+  }
+}
+
 export function isValidAddress(address: Address, protocol?: ProtocolType) {
   return routeAddressUtil(
     {
@@ -250,6 +273,7 @@ export function isValidAddress(address: Address, protocol?: ProtocolType) {
       [ProtocolType.Aleo]: isValidAddressAleo,
       [ProtocolType.Tron]: isValidAddressTron,
       [ProtocolType.Cardano]: isValidAddressCardano,
+      [ProtocolType.Midnight]: isValidAddressMidnight,
     },
     address,
     false,
@@ -314,6 +338,11 @@ export function normalizeAddressCardano(address: Address) {
   return address.toLowerCase();
 }
 
+export function normalizeAddressMidnight(address: Address) {
+  if (isZeroishAddress(address)) return address;
+  return ensure0x(address.toLowerCase());
+}
+
 export function normalizeAddress(address: Address, protocol?: ProtocolType) {
   return routeAddressUtil(
     {
@@ -326,6 +355,7 @@ export function normalizeAddress(address: Address, protocol?: ProtocolType) {
       [ProtocolType.Aleo]: normalizeAddressAleo,
       [ProtocolType.Tron]: normalizeAddressTron,
       [ProtocolType.Cardano]: normalizeAddressCardano,
+      [ProtocolType.Midnight]: normalizeAddressMidnight,
     },
     address,
     address,
@@ -364,6 +394,10 @@ export function eqAddressCardano(a1: Address, a2: Address) {
   return normalizeAddressCardano(a1) === normalizeAddressCardano(a2);
 }
 
+export function eqAddressMidnight(a1: Address, a2: Address) {
+  return normalizeAddressMidnight(a1) === normalizeAddressMidnight(a2);
+}
+
 export function eqAddress(a1: Address, a2: Address) {
   const p1 = getAddressProtocolType(a1);
   const p2 = getAddressProtocolType(a2);
@@ -379,6 +413,7 @@ export function eqAddress(a1: Address, a2: Address) {
       [ProtocolType.Aleo]: (_a1) => eqAddressAleo(_a1, a2),
       [ProtocolType.Tron]: (_a1) => eqAddressTron(_a1, a2),
       [ProtocolType.Cardano]: (_a1) => eqAddressCardano(_a1, a2),
+      [ProtocolType.Midnight]: (_a1) => eqAddressMidnight(_a1, a2),
     },
     a1,
     false,
@@ -418,6 +453,10 @@ export function isValidTransactionHashCardano(input: string) {
   return CARDANO_TX_HASH_REGEX.test(input);
 }
 
+export function isValidTransactionHashMidnight(input: string) {
+  return MIDNIGHT_TX_HASH_REGEX.test(input);
+}
+
 export function isValidTransactionHash(input: string, protocol: ProtocolType) {
   if (protocol === ProtocolType.Ethereum) {
     return isValidTransactionHashEvm(input);
@@ -437,6 +476,8 @@ export function isValidTransactionHash(input: string, protocol: ProtocolType) {
     return isValidTransactionHashTron(input);
   } else if (protocol === ProtocolType.Cardano) {
     return isValidTransactionHashCardano(input);
+  } else if (protocol === ProtocolType.Midnight) {
+    return isValidTransactionHashMidnight(input);
   } else {
     return false;
   }
@@ -458,7 +499,8 @@ export function isZeroishAddress(address: Address) {
     STARKNET_ZEROISH_ADDRESS_REGEX.test(address) ||
     RADIX_ZEROISH_ADDRESS_REGEX.test(address) ||
     ALEO_ZEROISH_ADDRESS_REGEX.test(address) ||
-    TRON_ZEROISH_ADDRESS_REGEX.test(address)
+    TRON_ZEROISH_ADDRESS_REGEX.test(address) ||
+    MIDNIGHT_ZEROISH_ADDRESS_REGEX.test(address)
   );
 }
 
@@ -641,6 +683,14 @@ export function bytesToAddressCardano(
   return bech32.encode(prefix, bech32.toWords(raw), CARDANO_BECH32_LIMIT);
 }
 
+export function addressToBytesMidnight(address: Address): Uint8Array {
+  return new Uint8Array(Buffer.from(strip0x(address), 'hex'));
+}
+
+export function bytesToAddressMidnight(bytes: Uint8Array): Address {
+  return ensure0x(Buffer.from(bytes).toString('hex'));
+}
+
 export function addressToBytes(
   address: Address,
   protocol?: ProtocolType,
@@ -656,6 +706,7 @@ export function addressToBytes(
       [ProtocolType.Aleo]: addressToBytesAleo,
       [ProtocolType.Tron]: addressToBytesTron,
       [ProtocolType.Cardano]: addressToBytesCardano,
+      [ProtocolType.Midnight]: addressToBytesMidnight,
     },
     address,
     new Uint8Array(),
@@ -823,6 +874,8 @@ export function bytesToProtocolAddress(
     return bytesToAddressTron(bytes);
   } else if (toProtocol === ProtocolType.Cardano) {
     return bytesToAddressCardano(bytes, prefix);
+  } else if (toProtocol === ProtocolType.Midnight) {
+    return bytesToAddressMidnight(bytes);
   } else {
     throw new Error(`Unsupported protocol for address ${toProtocol}`);
   }

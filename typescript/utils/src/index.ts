@@ -72,6 +72,13 @@ export {
   padBytesToLength,
   shortenAddress,
   strip0x,
+  addressToBytesMidnight,
+  bytesToAddressMidnight,
+  eqAddressMidnight,
+  isAddressMidnight,
+  isValidAddressMidnight,
+  isValidTransactionHashMidnight,
+  normalizeAddressMidnight,
   ZERO_ADDRESS_HEX_32,
 } from './addresses.js';
 export {

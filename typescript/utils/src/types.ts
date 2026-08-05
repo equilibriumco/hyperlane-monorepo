@@ -11,6 +11,7 @@ export enum ProtocolType {
   Aleo = 'aleo',
   Tron = 'tron',
   Cardano = 'cardano',
+  Midnight = 'midnight',
   Unknown = 'unknown',
 }
 // A type that also allows for literal values of the enum
@@ -51,6 +52,7 @@ export const ProtocolSmallestUnit = {
   [ProtocolType.Aleo]: 'microcredits',
   [ProtocolType.Tron]: 'SUN',
   [ProtocolType.Cardano]: 'lovelace',
+  [ProtocolType.Midnight]: 'STARs',
   [ProtocolType.Unknown]: 'unknown',
 };
 
