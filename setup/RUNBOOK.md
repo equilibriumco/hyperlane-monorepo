@@ -209,6 +209,48 @@ releases NIGHT it already holds and outbound locks replenish it, so read
 
 ---
 
+## 6b. Handing the stack to someone else
+
+Most of `.env` is derivable, so only a few values actually have to be passed
+between people.
+
+**Regenerate rather than copy.** The Cardano half comes straight from the
+committed deployment:
+
+```sh
+cd cardano && ./cli/target/release/hyperlane-cardano --network preview config generate-env
+```
+
+That fills every address, policy id, script hash and reference UTxO from
+`deployments/preview/deployment_info.json`. Note it writes a **placeholder** for
+`CARDANO_SIGNER_KEY` — non-empty, so a naive "use it if set" check accepts it and
+the agent then dies with `Expected a valid private key in hex`.
+
+The Midnight half comes from whoever owns that deployment, in their
+`addresses.json` and `secrets.env`.
+
+**Must be shared out of band** (none are in git):
+
+| Value                                         | Notes                                                                                                                                                                                                     |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BLOCKFROST_API_KEY`                          | any preview project id; it is metered, so prefer one per person                                                                                                                                           |
+| `CARDANO_SIGNER_KEY`                          | a funded preview wallet. Delivering messages only needs ADA — but the **owner-gated** operations (`ism set-*`, `warp enroll-router`, `igp set-oracle`) only work with the key that deployed the contracts |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | write access to the checkpoint bucket. A different bucket is fine; it must allow **anonymous read** (§8)                                                                                                  |
+| Midnight seeds + validator keys               | from the Midnight deployment owner's `secrets.env`                                                                                                                                                        |
+
+**Not in any file, and not derivable** — record these per deployment:
+
+| Value                 | Current   | Meaning                                                 |
+| --------------------- | --------- | ------------------------------------------------------- |
+| `CARDANO_INDEX_FROM`  | `4542207` | block of the ISM init tx; the mailbox landed at 4542208 |
+| `MIDNIGHT_INDEX_FROM` | `200000`  | before the reused `night`'s deploy (~206,170)           |
+
+Committed validator keys in `keys/` are throwaway and shared deliberately, but
+only the `midnight-*` pair is used against a _shared_ `night`: the Cardano-origin
+validators must sign with keys that contract already enrols (§4).
+
+---
+
 ## 7. Recurring operations
 
 Not one-time setup — these come back.
