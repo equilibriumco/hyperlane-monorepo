@@ -560,6 +560,9 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
         Some("cosmosKey") => parse_signer!(cosmosKey),
         Some("starkKey") => parse_signer!(starkKey),
         Some("radixKey") => parse_signer!(radixKey),
+        // The TS SDK's AgentSignerNodeSchema emits an explicit
+        // `{"type": "node"}`; accept it alongside the bare `{}` form.
+        Some("node") => Ok(SignerConf::Node),
         Some(t) => {
             Err(eyre!("Unknown signer type `{t}`")).into_config_result(|| (&signer.cwp).add("type"))
         }
