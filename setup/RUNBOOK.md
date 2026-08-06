@@ -292,16 +292,17 @@ into Cardano first. The Midnight side of this pairing is a collateral route: it
 releases NIGHT it already holds and outbound locks replenish it, so read
 `vaultBalance()` rather than trusting a recorded figure.
 
-Two throwaway wallets in `setup/recipients/` give transfers somewhere to land
-other than the deployer that already holds everything: **Alice** on Midnight and
-**Bob** on Cardano. Each `.recipient` file holds the address already in
-Hyperlane's 32-byte form, so it can be pasted straight in.
+Two throwaway wallets in `setup/recipients/` stand in for real users: **Alice**
+on Midnight and **Bob** on Cardano. Both directions below run between them
+rather than deployer-to-deployer, because the deployer hides what a user pays —
+it already holds every token, so its transfers never cover the cost of a fresh
+output or an empty fee balance.
 
-By default both directions **send from the deployer** — the wallet that owns the
-contracts and holds the balances. Sending _from_ Alice or Bob is possible but
-needs them funded first (§6.3).
+Each `.recipient` file holds the address in Hyperlane's 32-byte form, ready to
+paste. Both wallets must be funded first (§6.3); an unfunded one fails at
+dispatch, before anything reaches a chain.
 
-### 6.1 Midnight -> Cardano, to Bob
+### 6.1 Midnight -> Cardano: Alice to Bob
 
 Recipient is the Cardano payment credential in Hyperlane's 32-byte form: kind
 byte (`0x00` key, `0x02` script), three zero bytes, then the 28-byte credential.
@@ -314,18 +315,22 @@ export MIDNIGHT_NETWORK=stagenet MIDNIGHT_NETWORK_ID=stagenet \
        MIDNIGHT_STATE_DIR=~/.midnight-stagenet-test \
        MIDNIGHT_PROOF_SERVER_URL=http://127.0.0.1:6300
 
-CARDANO_RECIPIENT=$(cat <monorepo>/setup/recipients/bob-cardano.recipient) \
+R=<monorepo>/setup/recipients
+SEED=$(cat $R/alice-midnight.seed) \
+CARDANO_RECIPIENT=$(cat $R/bob-cardano.recipient) \
 AMOUNT=500000 \
-GAS_LIMIT=750000 GAS_PRICE=1 EXCHANGE_RATE=102040816326 \
+GAS_LIMIT=1050000 GAS_PRICE=1 EXCHANGE_RATE=102040816326 \
   npx tsx scripts/transfer-to-cardano.ts
 ```
 
-Bob's sNIGHT afterwards:
+`SEED` picks the sending wallet and covers the gas payment too; omit it to send
+as the deployer.
 
-```sh
-curl -s -H "project_id: $BLOCKFROST_API_KEY" \
-  "https://cardano-preview.blockfrost.io/api/v0/addresses/$(cat setup/recipients/bob-cardano.addr)"
-```
+`GAS_LIMIT=1050000` rather than 750000 because Bob is a real recipient: see
+§6.4 on reading the live estimate, and raise it further the first time you mint
+to an address that holds no sNIGHT yet.
+
+Bob's sNIGHT afterwards — §6.5.
 
 `GAS_LIMIT=0` skips the payment — use it to watch enforcement refuse, then pay
 the dispatched id separately (the same `payForGas` the script calls):
@@ -338,27 +343,33 @@ MESSAGE_ID=0x<id> GAS_LIMIT=750000 npx tsx scripts/pay-one.ts
 dispatch — it references a messageId that only exists once the dispatch lands.
 Two proofs, and the `transferRemote` one is the heavy one (>12 GB).
 
-### 6.2 Cardano -> Midnight, to Alice
+### 6.2 Cardano -> Midnight: Bob to Alice
 
 Recipient is the raw 32-byte Midnight address, hex — Alice's unshielded address
-is already exactly that.
+is already exactly that. Bob signs, so he spends the sNIGHT §6.1 minted him.
 
 ```sh
 cd cardano
-export BLOCKFROST_API_KEY=... CARDANO_SIGNING_KEY=$PWD/testnet-keys/payment.skey
 # A function, not CLI="..." — zsh does not word-split unquoted variables, so a
 # string holding a command plus flags is read as one long filename.
 cli() { ./cli/target/release/hyperlane-cardano --network preview "$@"; }
 
-# atomic: transfer pays the IGP in the same tx, priced off the route's own
-# destination_gas. Owner-gated, and only needed once.
-cli warp set-destination-gas --domain 1234 --gas 600000 \
-  --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
+export BLOCKFROST_API_KEY=...
+export CARDANO_SIGNING_KEY=../setup/recipients/bob-cardano.skey
 
 cli warp transfer --domain 1234 \
   --recipient $(cat ../setup/recipients/alice-midnight.recipient) \
   --amount 200000 \
   --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
+```
+
+The route's `destination_gas` prices the IGP payment that rides along, and it is
+**owner-gated** — so it is set once by the deployer, not by Bob:
+
+```sh
+CARDANO_SIGNING_KEY=$PWD/testnet-keys/payment.skey \
+  cli warp set-destination-gas --domain 1234 --gas 600000 \
+    --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
 ```
 
 **Any** `destination_gas` on the route — including `0` — forces the atomic IGP
@@ -372,47 +383,33 @@ cli igp pay-for-gas --message-id 0x<id> --destination 1234 --gas-limit 600000
 Payments **accumulate per message**: the relayer sums `gas_amount` across them,
 so a short dispatch plus a top-up delivers once the total clears the fraction.
 
-### 6.3 Sending _from_ Alice and Bob
+### 6.3 Funding Alice and Bob
 
-Both are unfunded on creation, and neither chain lets an empty wallet dispatch —
-the sender pays fees and provides the tokens being bridged. Fund first, then
-point the sender at them.
+Both are empty on creation, and a sender pays the fees as well as providing the
+tokens — so each needs funding before it can dispatch. One-time, per wallet.
 
-**Bob, on Cardano.** Needs ADA for fees and the IGP payment, plus sNIGHT to
-burn (a §6.1 transfer gives him that). Then swap the signer:
+**Bob, on Cardano.** ADA for fees and the IGP payment: ~10 ADA, from the
+deployer with `utxo send`, or the Cardano testnet faucet
+(<https://docs.cardano.org/cardano-testnets/tools/faucet>). The sNIGHT he burns
+comes from a §6.1 transfer.
 
-```sh
-export CARDANO_SIGNING_KEY=<monorepo>/setup/recipients/bob-cardano.skey
-cli warp transfer --domain 1234 \
-  --recipient $(cat ../setup/recipients/alice-midnight.recipient) \
-  --amount 100000 --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
-```
+The min-UTxO ADA that arrives locked alongside his sNIGHT does **not** count —
+it cannot be spent without moving the tokens, so a wallet showing ~1.2 ADA next
+to its tokens still has nothing to pay with.
 
-Send him ~10 ADA from the deployer with `utxo send`, or from the Cardano
-testnet faucet (<https://docs.cardano.org/cardano-testnets/tools/faucet>).
+**Alice, on Midnight.** Two things, and the second is the one that bites:
 
-**Alice, on Midnight.** `SEED` picks the sending wallet, defaulting to the
-deployer:
-
-```sh
-SEED=$(cat <monorepo>/setup/recipients/alice-midnight.seed) \
-CARDANO_RECIPIENT=$(cat <monorepo>/setup/recipients/bob-cardano.recipient) \
-AMOUNT=500000 GAS_LIMIT=1050000 GAS_PRICE=1 \
-  npx tsx scripts/transfer-to-cardano.ts
-```
-
-It covers the gas payment as well as the dispatch, so the same wallet does both.
-`pay-one.ts` and `balance.ts` take `SEED` too.
-
-Two prerequisites, and the second is the one that bites:
-
-1. **NIGHT to lock** — from the stagenet faucet
-   (<https://faucet.stagenet.shielded.tools>), captcha and a daily limit, so
-   claim before you need it.
+1. **NIGHT to lock** — the stagenet faucet
+   (<https://faucet.stagenet.shielded.tools>) wants her bech32m address from
+   `alice-midnight.addr`, not the hex; captcha and a daily limit, so claim
+   before you need it.
 2. **Registered DUST for fees** — `register-dust.ts` for that wallet, then ~25
    min for DUST to accrue. The faucet pays tNIGHT only; DUST comes from
    registering that NIGHT. A wallet with a full NIGHT balance and no DUST cannot
-   pay for anything, which does not look like a funding problem.
+   pay for anything, which reads as a broken script rather than a funding gap.
+
+`SEED` works the same way in `pay-one.ts` and `balance.ts`, so a top-up or a
+balance check can be aimed at whichever wallet sent.
 
 This is the more interesting round trip — deployer -> Bob (M->C), then Bob ->
 Alice (C->M) — but the funding and DUST wait make it a deliberate exercise
