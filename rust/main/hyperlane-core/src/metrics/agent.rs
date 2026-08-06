@@ -8,6 +8,7 @@ const ETHEREUM_DECIMALS: u8 = 18;
 const COSMOS_DECIMALS: u8 = 6;
 const SOLANA_DECIMALS: u8 = 9;
 const ALEO_DECIMALS: u8 = 6;
+const NIGHT_DECIMALS: u8 = 6;
 
 /// Interval for querying the prometheus metrics endpoint.
 /// This should be whatever the prometheus scrape interval is
@@ -34,6 +35,7 @@ pub fn decimals_by_protocol(protocol: HyperlaneDomainProtocol) -> u8 {
         HyperlaneDomainProtocol::Cosmos | HyperlaneDomainProtocol::CosmosNative => COSMOS_DECIMALS,
         HyperlaneDomainProtocol::Sealevel => SOLANA_DECIMALS,
         HyperlaneDomainProtocol::Aleo => ALEO_DECIMALS,
+        HyperlaneDomainProtocol::Midnight => NIGHT_DECIMALS,
         _ => ETHEREUM_DECIMALS,
     }
 }

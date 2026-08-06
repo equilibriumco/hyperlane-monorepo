@@ -69,6 +69,13 @@ impl AdapterFactory {
                 let adapter = TronAdapter::from_conf(conf, core_metrics, &connection_conf).await?;
                 Arc::new(adapter)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => todo!(
+                "Issue #20: Midnight uses the Classic submitter by default. \
+                 This arm is only reached if a chain config explicitly sets `submitter: lander`. \
+                 If Lander support becomes desirable, implement `AdaptsChain` for Midnight here \
+                 (spawning `midnight-node-toolkit` as a subprocess)."
+            ),
         };
         Ok(adapter)
     }

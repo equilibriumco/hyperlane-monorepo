@@ -30,6 +30,8 @@ use hyperlane_ethereum::{
     EthereumReorgPeriod, EthereumValidatorAnnounceAbi,
 };
 use hyperlane_fuel as h_fuel;
+#[cfg(feature = "midnight")]
+use hyperlane_midnight::{self as h_midnight, MidnightSigner};
 use hyperlane_radix::{self as h_radix, RadixProvider};
 use hyperlane_sealevel::{
     self as h_sealevel, fallback::SealevelFallbackRpcClient, SealevelProvider, TransactionSubmitter,
@@ -196,6 +198,9 @@ pub enum ChainConnectionConf {
     Aleo(h_aleo::ConnectionConf),
     /// Tron configuration
     Tron(h_tron::ConnectionConf),
+    /// Midnight configuration
+    #[cfg(feature = "midnight")]
+    Midnight(h_midnight::ConnectionConf),
 }
 
 impl ChainConnectionConf {
@@ -212,6 +217,8 @@ impl ChainConnectionConf {
             Self::Tron(_) => HyperlaneDomainProtocol::Tron,
             #[cfg(feature = "aleo")]
             Self::Aleo(_) => HyperlaneDomainProtocol::Aleo,
+            #[cfg(feature = "midnight")]
+            Self::Midnight(_) => HyperlaneDomainProtocol::Midnight,
         }
     }
 
@@ -325,6 +332,11 @@ impl ChainConf {
                 h_aleo::application::AleoApplicationOperationVerifier::new(),
             )
                 as Box<dyn ApplicationOperationVerifier>),
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => Ok(Box::new(
+                h_midnight::application::MidnightApplicationOperationVerifier::new(),
+            )
+                as Box<dyn ApplicationOperationVerifier>),
         };
 
         result.context(ctx)
@@ -379,6 +391,13 @@ impl ChainConf {
             #[cfg(feature = "aleo")]
             ChainConnectionConf::Aleo(conf) => {
                 let provider = build_aleo_provider(self, conf, metrics, &locator, None)?;
+                Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
         }
@@ -475,6 +494,11 @@ impl ChainConf {
                 let mailbox = h_aleo::AleoMailbox::new(provider, &locator, conf);
                 Ok(Box::new(mailbox) as Box<dyn Mailbox>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let mailbox = h_midnight::MidnightMailbox::new(&locator, conf).context(ctx)?;
+                Ok(Box::new(mailbox) as Box<dyn Mailbox>)
+            }
         }
         .context(ctx)
     }
@@ -543,6 +567,20 @@ impl ChainConf {
 
                 Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The monolithic WarpRoute embeds the merkle tree; read its
+                // count / current_root from chain state via the indexer (#14).
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn MerkleTreeHook>)
+            }
         }
         .context(ctx)
     }
@@ -553,7 +591,7 @@ impl ChainConf {
         metrics: &CoreMetrics,
         advanced_log_meta: bool,
     ) -> Result<Box<dyn SequenceAwareIndexer<HyperlaneMessage>>> {
-        let ctx = "Building delivery indexer";
+        let ctx = "Building message indexer";
         let locator = self.locator(self.addresses.mailbox);
 
         match &self.connection {
@@ -630,6 +668,16 @@ impl ChainConf {
                 let provider = build_aleo_provider(self, conf, metrics, &locator, None)?;
                 let indexer = h_aleo::AleoDispatchIndexer::new(provider, &locator, conf);
 
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the WarpRoute contract's HYP_DISPATCH events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); the `nonce` counter is the sequence tip.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDispatchIndexer::new(client, &locator);
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<HyperlaneMessage>>)
             }
         }
@@ -717,6 +765,17 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<H256>>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the WarpRoute contract's HYP_PROCESS events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); driven by the rate-limited (watermark) cursor
+                // like EVM deliveries.
+                let client =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let indexer = h_midnight::MidnightDeliveryIndexer::new(client, &locator);
+                Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<H256>>)
+            }
         }
         .context(ctx)
     }
@@ -793,6 +852,23 @@ impl ChainConf {
                 let indexer = h_aleo::AleoInterchainGasIndexer::new(provider, &locator, conf)?;
 
                 Ok(Box::new(indexer) as Box<dyn InterchainGasPaymaster>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The IGP indexer struct doubles as the paymaster marker
+                // (the Aleo/Radix/CosmosNative pattern). It reads the IGP
+                // contract's `gas_payments` state via the indexer client
+                // (#14); the relayer never calls the paymaster trait itself,
+                // but every configured chain must supply the boxed object.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let paymaster = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(paymaster) as Box<dyn InterchainGasPaymaster>)
             }
         }
         .context(ctx)
@@ -873,6 +949,22 @@ impl ChainConf {
                 let indexer = h_aleo::AleoInterchainGasIndexer::new(provider, &locator, conf)?;
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Replays the IGP contract's HYP_GAS_PAYMENT events over
+                // block ranges via the Midnight indexer's `contractEvents`
+                // query (#95); no sequence, matching EVM. Same struct as
+                // build_interchain_gas_paymaster above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let igp = h_midnight::MidnightInterchainGasPaymaster::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(igp) as Box<dyn SequenceAwareIndexer<InterchainGasPayment>>)
             }
         }
         .context(ctx)
@@ -1003,6 +1095,21 @@ impl ChainConf {
 
                 Ok(Box::new(indexer) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Derives leaf insertions from the WarpRoute contract's
+                // HYP_DISPATCH events over block ranges (#95). Same struct as
+                // build_merkle_tree_hook above.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let hook = h_midnight::MidnightMerkleTreeHook::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(hook) as Box<dyn SequenceAwareIndexer<MerkleTreeInsertion>>)
+            }
         }
         .context(ctx)
     }
@@ -1091,6 +1198,12 @@ impl ChainConf {
                     h_aleo::AleoValidatorAnnounce::new(provider, &locator, conf);
                 Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                let validator_announce =
+                    h_midnight::MidnightValidatorAnnounce::new(&locator, conf)?;
+                Ok(Box::new(validator_announce) as Box<dyn ValidatorAnnounce>)
+            }
         }
         .context("Building ValidatorAnnounce")
     }
@@ -1165,6 +1278,20 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // The ISM reads its module type from chain state (via the
+                // indexer) on each `module_type` call, not from config.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let ism = h_midnight::ism::MidnightInterchainSecurityModule::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
+                Ok(Box::new(ism) as Box<dyn InterchainSecurityModule>)
+            }
         }
         .context(ctx)
     }
@@ -1228,6 +1355,20 @@ impl ChainConf {
             ChainConnectionConf::Aleo(conf) => {
                 let provider = build_aleo_provider(self, conf, metrics, &locator, None)?;
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
+                Ok(Box::new(ism) as Box<dyn MultisigIsm>)
+            }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(conf) => {
+                // Validators + threshold are read from chain state by the ISM
+                // itself (via the indexer), not sourced from config.
+                let indexer =
+                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let ism = h_midnight::ism::MidnightMultisigIsm::new(
+                    locator.address,
+                    locator.domain.clone(),
+                    provider,
+                );
                 Ok(Box::new(ism) as Box<dyn MultisigIsm>)
             }
         }
@@ -1318,6 +1459,10 @@ impl ChainConf {
                 let ism = h_aleo::AleoIsm::new(provider, &locator, conf)?;
                 Ok(Box::new(ism) as Box<dyn RoutingIsm>)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support routing ISM")).context(ctx)
+            }
         }
         .context(ctx)
     }
@@ -1374,6 +1519,10 @@ impl ChainConf {
             }
             #[cfg(feature = "aleo")]
             ChainConnectionConf::Aleo(_) => Err(eyre!("Aleo support missing")).context(ctx),
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support aggregation ISM")).context(ctx)
+            }
         }
         .context(ctx)
     }
@@ -1418,6 +1567,10 @@ impl ChainConf {
             }
             #[cfg(feature = "aleo")]
             ChainConnectionConf::Aleo(_) => Err(eyre!("Aleo support missing")).context(ctx),
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => {
+                Err(eyre!("Midnight does not support CCIP read ISM")).context(ctx)
+            }
         }
         .context(ctx)
     }
@@ -1454,6 +1607,8 @@ impl ChainConf {
                 ChainConnectionConf::Tron(_) => Box::new(conf.build::<h_tron::TronSigner>().await?),
                 #[cfg(feature = "aleo")]
                 ChainConnectionConf::Aleo(_) => Box::new(conf.build::<h_aleo::AleoSigner>().await?),
+                #[cfg(feature = "midnight")]
+                ChainConnectionConf::Midnight(_) => Box::new(conf.build::<MidnightSigner>().await?),
             };
             Ok(Some(chain_signer))
         } else {
@@ -1509,6 +1664,12 @@ impl ChainConf {
     }
 
     async fn tron_signer(&self) -> Result<Option<h_tron::TronSigner>> {
+        self.signer().await
+    }
+
+    #[cfg(feature = "midnight")]
+    #[allow(dead_code)]
+    async fn midnight_signer(&self) -> Result<Option<MidnightSigner>> {
         self.signer().await
     }
 
