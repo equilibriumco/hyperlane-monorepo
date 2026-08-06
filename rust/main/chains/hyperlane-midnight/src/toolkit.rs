@@ -9,9 +9,10 @@ use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512};
 
 use crate::HyperlaneMidnightError;
 
-/// How long the relayer waits for the submitter subprocess to build the handle
-/// proof and land the tx. A real handle proof (multisig + ZK verify) can take
-/// many minutes on a RAM-constrained host, so this is overridable via
+/// How long an agent waits for the submitter subprocess to build a proof and
+/// land the tx — the relayer's `handle` submissions and the validator's
+/// self-announce alike. A real proof (multisig + ZK verify) can take many
+/// minutes on a RAM-constrained host, so this is overridable via
 /// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` (default 120s) — mirrors the proof server's
 /// own `MIDNIGHT_PROOF_SERVER_JOB_TIMEOUT`.
 fn submit_timeout() -> Duration {
@@ -23,7 +24,6 @@ fn submit_timeout() -> Duration {
     )
 }
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
-const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(120);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
 // Dry-run fetches state and executes `handle` locally (keccak/ecrecover
 // witnesses, no proving, no broadcast) — heavier than the `isDelivered`
@@ -411,7 +411,7 @@ pub async fn announce_tx(
         pubkey: format!("0x{}", hex::encode(pubkey)),
     };
 
-    let raw = run_submitter(ctx, &request, ANNOUNCE_TIMEOUT).await?;
+    let raw = run_submitter(ctx, &request, submit_timeout()).await?;
     let response: SubmitResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),
