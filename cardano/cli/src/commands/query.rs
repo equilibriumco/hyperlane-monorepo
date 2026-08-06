@@ -270,19 +270,29 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
             println!("{}", "-".repeat(100));
 
             for utxo in &utxos {
+                // Same shape as the assets below and the total: the raw
+                // on-chain amount, then what it means in brackets.
                 println!(
-                    "{}#{} - {} lovelace",
+                    "{}#{} - {} lovelace ({} ADA)",
                     &utxo.tx_hash[..16],
                     utxo.output_index,
-                    utxo.lovelace
+                    utxo.lovelace,
+                    scale_amount(utxo.lovelace, 6)
                 );
                 for asset in &utxo.assets {
-                    println!(
-                        "  + {} {} ({}...)",
-                        display_quantity(asset.quantity, decimals.get(&asset.policy_id).copied()),
-                        display_asset_name(&asset.asset_name),
-                        &asset.policy_id[..16]
-                    );
+                    let name = display_asset_name(&asset.asset_name);
+                    let amount = match decimals.get(&asset.policy_id) {
+                        Some(&d) if d > 0 => {
+                            format!(
+                                "{} ({} {})",
+                                asset.quantity,
+                                scale_amount(asset.quantity, d),
+                                name
+                            )
+                        }
+                        _ => format!("{} {}", asset.quantity, name),
+                    };
+                    println!("  + {} policy {}...", amount, &asset.policy_id[..16]);
                 }
                 if utxo.inline_datum.is_some() {
                     println!("  [has inline datum]");
@@ -291,9 +301,9 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
 
             let total: u64 = utxos.iter().map(|u| u.lovelace).sum();
             println!(
-                "\nTotal: {} lovelace ({:.2} ADA)",
+                "\nTotal: {} lovelace ({} ADA)",
                 total,
-                total as f64 / 1_000_000.0
+                scale_amount(total, 6)
             );
         }
         OutputFormat::Json => {
@@ -787,27 +797,21 @@ fn warp_route_decimals(ctx: &CliContext) -> std::collections::HashMap<String, u3
         .collect()
 }
 
-/// Render a token quantity, scaled when the decimals are known.
-///
-/// Keeps the raw amount alongside: it is what every other tool reports and
-/// what the on-chain value actually is, so dropping it would make outputs
-/// impossible to reconcile.
-fn display_quantity(quantity: u64, decimals: Option<u32>) -> String {
-    let Some(decimals) = decimals else {
-        return quantity.to_string();
-    };
+/// Divide a raw on-chain amount by its decimals, for display beside the raw
+/// value — never instead of it, since the raw amount is what every other tool
+/// reports and what the datum holds.
+fn scale_amount(quantity: u64, decimals: u32) -> String {
     if decimals == 0 {
         return quantity.to_string();
     }
     let scale = 10u64.pow(decimals);
     let whole = quantity / scale;
-    let frac = quantity % scale;
-    let frac = format!("{:0width$}", frac, width = decimals as usize);
+    let frac = format!("{:0width$}", quantity % scale, width = decimals as usize);
     let frac = frac.trim_end_matches('0');
     if frac.is_empty() {
-        format!("{} ({})", whole, quantity)
+        whole.to_string()
     } else {
-        format!("{}.{} ({})", whole, frac, quantity)
+        format!("{}.{}", whole, frac)
     }
 }
 
@@ -998,24 +1002,24 @@ fn parse_json_recipient_datum(
 
 #[cfg(test)]
 mod tests {
-    use super::{display_asset_name, display_quantity};
+    use super::{display_asset_name, scale_amount};
 
     #[test]
-    fn quantities_scale_by_the_route_decimals() {
+    fn amounts_scale_by_the_route_decimals() {
         // the sNIGHT case: 6 decimals
-        assert_eq!(display_quantity(500_000, Some(6)), "0.5 (500000)");
-        assert_eq!(display_quantity(1_500_000, Some(6)), "1.5 (1500000)");
+        assert_eq!(scale_amount(500_000, 6), "0.5");
+        assert_eq!(scale_amount(1_500_000, 6), "1.5");
         // whole amounts do not grow a trailing ".0"
-        assert_eq!(display_quantity(2_000_000, Some(6)), "2 (2000000)");
+        assert_eq!(scale_amount(2_000_000, 6), "2");
         // sub-unit dust keeps every digit that matters
-        assert_eq!(display_quantity(1, Some(6)), "0.000001 (1)");
+        assert_eq!(scale_amount(1, 6), "0.000001");
+        // the same helper renders lovelace as ADA
+        assert_eq!(scale_amount(10_001_200_000, 6), "10001.2");
     }
 
     #[test]
-    fn quantities_stay_raw_without_known_decimals() {
-        // another deployment's token, or an NFT
-        assert_eq!(display_quantity(500_000, None), "500000");
-        assert_eq!(display_quantity(1, Some(0)), "1");
+    fn zero_decimals_leave_the_amount_alone() {
+        assert_eq!(scale_amount(1, 0), "1");
     }
 
     #[test]
