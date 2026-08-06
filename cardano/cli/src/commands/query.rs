@@ -259,6 +259,10 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
     let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
 
     let utxos = client.get_utxos(address).await?;
+    // Decimals are a property of the route that minted an asset, not of the
+    // asset on-chain, so they are only known for routes in this deployment.
+    // Anything else prints raw rather than guessing a scale.
+    let decimals = warp_route_decimals(ctx);
 
     match format {
         OutputFormat::Table => {
@@ -275,7 +279,7 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
                 for asset in &utxo.assets {
                     println!(
                         "  + {} {} ({}...)",
-                        asset.quantity,
+                        display_quantity(asset.quantity, decimals.get(&asset.policy_id).copied()),
                         display_asset_name(&asset.asset_name),
                         &asset.policy_id[..16]
                     );
@@ -761,6 +765,52 @@ async fn query_recipient(
     Ok(())
 }
 
+/// Map each policy this deployment mints or escrows to its token decimals.
+///
+/// Best-effort: a missing or unreadable `deployment_info.json` just means no
+/// asset gets scaled, which is the same outcome as querying an address holding
+/// somebody else's tokens.
+fn warp_route_decimals(ctx: &CliContext) -> std::collections::HashMap<String, u32> {
+    let Ok(deployment) = ctx.load_deployment_info() else {
+        return std::collections::HashMap::new();
+    };
+    deployment
+        .warp_routes
+        .iter()
+        .flat_map(|route| {
+            route
+                .minting_policy
+                .iter()
+                .chain(route.token_policy.iter())
+                .map(|policy| (policy.clone(), route.decimals))
+        })
+        .collect()
+}
+
+/// Render a token quantity, scaled when the decimals are known.
+///
+/// Keeps the raw amount alongside: it is what every other tool reports and
+/// what the on-chain value actually is, so dropping it would make outputs
+/// impossible to reconcile.
+fn display_quantity(quantity: u64, decimals: Option<u32>) -> String {
+    let Some(decimals) = decimals else {
+        return quantity.to_string();
+    };
+    if decimals == 0 {
+        return quantity.to_string();
+    }
+    let scale = 10u64.pow(decimals);
+    let whole = quantity / scale;
+    let frac = quantity % scale;
+    let frac = format!("{:0width$}", frac, width = decimals as usize);
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() {
+        format!("{} ({})", whole, quantity)
+    } else {
+        format!("{}.{} ({})", whole, frac, quantity)
+    }
+}
+
 /// Render an on-chain asset name for display.
 ///
 /// Blockfrost returns the name hex-encoded, but names are conventionally ASCII
@@ -948,7 +998,25 @@ fn parse_json_recipient_datum(
 
 #[cfg(test)]
 mod tests {
-    use super::display_asset_name;
+    use super::{display_asset_name, display_quantity};
+
+    #[test]
+    fn quantities_scale_by_the_route_decimals() {
+        // the sNIGHT case: 6 decimals
+        assert_eq!(display_quantity(500_000, Some(6)), "0.5 (500000)");
+        assert_eq!(display_quantity(1_500_000, Some(6)), "1.5 (1500000)");
+        // whole amounts do not grow a trailing ".0"
+        assert_eq!(display_quantity(2_000_000, Some(6)), "2 (2000000)");
+        // sub-unit dust keeps every digit that matters
+        assert_eq!(display_quantity(1, Some(6)), "0.000001 (1)");
+    }
+
+    #[test]
+    fn quantities_stay_raw_without_known_decimals() {
+        // another deployment's token, or an NFT
+        assert_eq!(display_quantity(500_000, None), "500000");
+        assert_eq!(display_quantity(1, Some(0)), "1");
+    }
 
     #[test]
     fn asset_names_decode_to_text_when_printable() {
