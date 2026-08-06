@@ -346,14 +346,16 @@ is already exactly that.
 ```sh
 cd cardano
 export BLOCKFROST_API_KEY=... CARDANO_SIGNING_KEY=$PWD/testnet-keys/payment.skey
-CLI="./cli/target/release/hyperlane-cardano --network preview"
+# A function, not CLI="..." — zsh does not word-split unquoted variables, so a
+# string holding a command plus flags is read as one long filename.
+cli() { ./cli/target/release/hyperlane-cardano --network preview "$@"; }
 
 # atomic: transfer pays the IGP in the same tx, priced off the route's own
-# destination_gas. Set it once.
-$CLI warp set-destination-gas --domain 1234 --gas 600000 \
+# destination_gas. Owner-gated, and only needed once.
+cli warp set-destination-gas --domain 1234 --gas 600000 \
   --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
 
-$CLI warp transfer --domain 1234 \
+cli warp transfer --domain 1234 \
   --recipient $(cat ../setup/recipients/alice-midnight.recipient) \
   --amount 200000 \
   --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
@@ -364,7 +366,7 @@ path. To dispatch underpaid on purpose, set a small value (`--gas 1000` pays 196
 lovelace) and top up afterwards:
 
 ```sh
-$CLI igp pay-for-gas --message-id 0x<id> --destination 1234 --gas-limit 600000
+cli igp pay-for-gas --message-id 0x<id> --destination 1234 --gas-limit 600000
 ```
 
 Payments **accumulate per message**: the relayer sums `gas_amount` across them,
@@ -381,7 +383,7 @@ burn (a §6.1 transfer gives him that). Then swap the signer:
 
 ```sh
 export CARDANO_SIGNING_KEY=<monorepo>/setup/recipients/bob-cardano.skey
-$CLI warp transfer --domain 1234 \
+cli warp transfer --domain 1234 \
   --recipient $(cat ../setup/recipients/alice-midnight.recipient) \
   --amount 100000 --warp-policy ed08f892a125915b483cd7547a2f9dfbf0531b21ec7389110bedfc2f
 ```
