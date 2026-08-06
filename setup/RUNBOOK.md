@@ -470,17 +470,17 @@ query, and fails on the key rather than on anything to do with the address.
 Reading the output:
 
 ```
-2d2ca1489bec5a2f#2 - 1200000 lovelace
-  + 0.5 (500000) sNIGHT (82b02f24862d5e48...)
-a6aa4c9ee00c011f#0 - 10000000000 lovelace     <- the spendable ADA
+2d2ca1489bec5a2f#2 - 1200000 lovelace (1.2 ADA)
+  + 500000 (0.5 sNIGHT) policy 82b02f24862d5e48...
+a6aa4c9ee00c011f#0 - 10000000000 lovelace (10000 ADA)   <- the spendable ADA
 
-Total: 10001200000 lovelace (10001.20 ADA)
+Total: 10001200000 lovelace (10001.2 ADA)
 ```
 
-Names are decoded from hex when printable, and quantities are scaled by the
-route's decimals with the raw amount in brackets. Both only apply to routes in
-this deployment: decimals belong to the minting route, not to the asset
-on-chain, so another deployment's token prints raw and un-named.
+Every line reads the same way: the raw on-chain amount, then what it means in
+brackets. Scaling only applies to routes in this deployment — decimals belong
+to the minting route, not to the asset on-chain — so another deployment's token
+prints raw, and its name stays hex if it is not printable text.
 
 The split matters: the 1.2 ADA on the first line is min-UTxO pinned to the token
 output and cannot pay a fee (§6.3). The total tells you nothing about what is
