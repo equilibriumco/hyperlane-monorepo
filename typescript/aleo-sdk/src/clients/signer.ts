@@ -1,8 +1,9 @@
 import { type AltVM } from '@hyperlane-xyz/provider-sdk';
+import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk/chain';
 import { TokenType } from '@hyperlane-xyz/provider-sdk/warp';
 import { assert, isNullish, retryAsync } from '@hyperlane-xyz/utils';
 
-import { type AleoProgram } from '../artifacts.js';
+import { type AleoProgram } from '../programs.js';
 import {
   getFileOverrideProgramId,
   loadProgramsInDeployOrder,
@@ -16,7 +17,7 @@ import {
 import { type AleoReceipt, type AleoTransaction } from '../utils/types.js';
 
 import { type AnyProgramManager } from './base.js';
-import { AleoProvider } from './provider.js';
+import { AleoProvider } from './provider.node.js';
 
 export class AleoSigner
   extends AleoProvider
@@ -27,30 +28,24 @@ export class AleoSigner
   private readonly programManager: AnyProgramManager;
 
   static async connectWithSigner(
-    rpcUrls: string[],
+    metadata: ChainMetadataForAltVM,
     privateKey: string,
-    extraParams?: Record<string, any>,
   ): Promise<AleoSigner> {
-    assert(extraParams, `extra params not defined`);
-
-    const metadata = extraParams.metadata as Record<string, unknown>;
-    assert(metadata, `metadata not defined in extra params`);
     assert(
       !isNullish(metadata.chainId),
-      `chainId not defined in metadata extra params`,
+      `chainId not defined in chain metadata`,
     );
+    const rpcUrls = (metadata.rpcUrls ?? []).map((rpc) => rpc.http);
 
-    const chainId = parseInt(metadata.chainId!.toString());
-
-    return new AleoSigner(rpcUrls, chainId, privateKey);
+    return new AleoSigner(rpcUrls, metadata, privateKey);
   }
 
   protected constructor(
     rpcUrls: string[],
-    chainId: string | number,
+    chainMetadata: ChainMetadataForAltVM,
     privateKey: string,
   ) {
-    super(rpcUrls, chainId);
+    super(rpcUrls, chainMetadata.chainId, chainMetadata);
     this.programManager = this.getProgramManager(privateKey);
   }
 

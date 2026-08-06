@@ -87,11 +87,14 @@ fn generate_test_chain_conf(
         metrics_conf: PrometheusMiddlewareConf {
             contracts: HashMap::new(),
             chain: None,
+            rpc_role: Default::default(),
         },
         index: IndexSettings {
             from: 0,
             chunk_size: 1,
             mode: IndexMode::Block,
+            idle_sleep_duration: Duration::from_secs(5),
+            configured_interval: None,
         },
         confirmations: Default::default(),
         chain_id: Default::default(),

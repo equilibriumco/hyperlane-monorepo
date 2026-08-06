@@ -19,7 +19,6 @@ import {
   OPStackHook,
   OPStackIsm__factory,
   Ownable__factory,
-  PackageVersioned__factory,
   PausableHook,
   PausableHook__factory,
   ProxyAdmin__factory,
@@ -72,7 +71,7 @@ import { MultiProvider } from '../providers/MultiProvider.js';
 import { AnnotatedEV5Transaction } from '../providers/ProviderType.js';
 import { ChainName, ChainNameOrId } from '../types.js';
 import { normalizeConfig } from '../utils/ism.js';
-import { isMissingSelectorRevert } from '../utils/contract.js';
+import { fetchPackageVersion } from '../utils/contract.js';
 
 import {
   VERSION_ERROR_MESSAGE,
@@ -241,11 +240,21 @@ export class EvmHookModule extends HyperlaneModule<
       return [];
     }
 
+    // Special case: RATE_LIMITED duration is immutable (set in the
+    // constructor) — must redeploy a fresh hook if it changes.
+    const rateLimitedDurationChanged =
+      typeof normalizedCurrentConfig !== 'string' &&
+      normalizedCurrentConfig.type === HookType.RATE_LIMITED &&
+      normalizedTargetConfig.type === HookType.RATE_LIMITED &&
+      normalizedCurrentConfig.duration !== normalizedTargetConfig.duration;
+
     // Conditions for deploying a new hook:
     // - If updating from an address/custom config to a proper hook config.
     // - If updating a proper hook config whose types are different.
     // - If it is not a mutable Hook.
+    // - If an immutable RATE_LIMITED field (duration) changed.
     if (
+      rateLimitedDurationChanged ||
       typeof normalizedCurrentConfig === 'string' ||
       normalizedCurrentConfig.type !== normalizedTargetConfig.type ||
       !MUTABLE_HOOK_TYPE.includes(normalizedTargetConfig.type)
@@ -461,6 +470,8 @@ export class EvmHookModule extends HyperlaneModule<
   }): Promise<AnnotatedEV5Transaction[]> {
     const updateTxs: AnnotatedEV5Transaction[] = [];
 
+    // Duration changes are handled upstream in `update()` by redeploying a
+    // fresh hook (duration is immutable), so it never differs here.
     if (currentConfig.maxCapacity !== targetConfig.maxCapacity) {
       updateTxs.push({
         annotation: `Setting refill rate on RateLimitedHook on chain "${this.chain}" and address "${this.args.addresses.deployedHook}"`,
@@ -487,20 +498,11 @@ export class EvmHookModule extends HyperlaneModule<
     const igpAddress = this.args.addresses.deployedHook;
     const igpInterface = InterchainGasPaymaster__factory.createInterface();
     const provider = this.multiProvider.getProvider(this.domainId);
-    let currentVersion: string | undefined;
-    try {
-      currentVersion = await PackageVersioned__factory.connect(
-        igpAddress,
-        provider,
-      ).PACKAGE_VERSION();
-    } catch (error) {
-      if (!isMissingSelectorRevert(error)) {
-        throw error;
-      }
-      this.logger.debug(
-        `IGP ${igpAddress} on ${this.chain} does not expose PACKAGE_VERSION`,
-      );
-    }
+    const currentVersion = await fetchPackageVersion(
+      provider,
+      igpAddress,
+      this.logger,
+    );
 
     // Upgrade IGP proxy implementation only if contractVersion is specified in config
     if (targetConfig.contractVersion && (await isProxy(provider, igpAddress))) {
@@ -509,12 +511,9 @@ export class EvmHookModule extends HyperlaneModule<
         VERSION_ERROR_MESSAGE,
       );
 
-      if (
-        !currentVersion ||
-        compareVersions(targetConfig.contractVersion, currentVersion) > 0
-      ) {
+      if (compareVersions(targetConfig.contractVersion, currentVersion) > 0) {
         this.logger.info(
-          `Upgrading IGP implementation from ${currentVersion ?? 'unknown'} to ${targetConfig.contractVersion}`,
+          `Upgrading IGP implementation from ${currentVersion} to ${targetConfig.contractVersion}`,
         );
         const newImpl = await this.deployer.deployContractFromFactory(
           this.chain,
@@ -597,7 +596,7 @@ export class EvmHookModule extends HyperlaneModule<
     // update quote signers only if explicitly specified in target config
     // and IGP supports them (detected from on-chain read or version upgrade)
     const offchainFeeQuotingVersion =
-      targetConfig.contractVersion ?? currentVersion ?? undefined;
+      targetConfig.contractVersion ?? currentVersion;
     const supportsOffchainFeeQuoting = igpSupportsOffchainFeeQuoting({
       igpVersion: targetConfig.igpVersion,
       contractVersion: offchainFeeQuotingVersion,
@@ -1134,7 +1133,12 @@ export class EvmHookModule extends HyperlaneModule<
     const hook = await deployer.deployContract(
       this.chain,
       HookType.RATE_LIMITED,
-      [this.args.addresses.mailbox, config.maxCapacity, sender],
+      [
+        this.args.addresses.mailbox,
+        config.maxCapacity,
+        config.duration,
+        sender,
+      ],
     );
 
     if (config.owner) {

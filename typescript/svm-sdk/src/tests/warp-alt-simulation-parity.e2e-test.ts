@@ -53,7 +53,7 @@ import {
 } from '../pda.js';
 import { createRpc } from '../rpc.js';
 import { TEST_SVM_CHAIN_METADATA } from '../testing/constants.js';
-import { ethAddressHexFromPrivateKey } from '../testing/quote-signer.js';
+import { ethAddressHexFromPrivateKey } from '../quote-signing.js';
 import {
   TEST_ATA_PAYER_FUNDING_AMOUNT,
   TEST_PROGRAM_IDS,
@@ -171,7 +171,7 @@ describe('SVM warp ALT simulation parity — cross-collateral', function () {
   before(async () => {
     rpc = createRpc(TEST_SVM_CHAIN_METADATA.rpcUrl);
     signer = await SvmSigner.connectWithSigner(
-      [TEST_SVM_CHAIN_METADATA.rpcUrl],
+      TEST_SVM_CHAIN_METADATA,
       TEST_PRIVATE_KEY,
     );
     const senderWallet = address(signer.getSignerAddress());

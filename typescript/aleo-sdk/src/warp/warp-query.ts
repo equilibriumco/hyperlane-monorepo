@@ -2,10 +2,10 @@ import { Plaintext } from '@provablehq/sdk';
 
 import {
   assert,
-  ensure0x,
   isNullish,
   isZeroishAddress,
   retryAsync,
+  rootLogger,
 } from '@hyperlane-xyz/utils';
 
 import type { AnyAleoNetworkClient } from '../clients/base.js';
@@ -15,97 +15,25 @@ import {
   U128ToString,
   fromAleoAddress,
   isV2WarpToken,
-  toAleoAddress,
 } from '../utils/helper.js';
+import { toAleoAddress } from '../utils/helper.crypto.js';
 import {
   type AleoCollateralWarpTokenConfig,
   type AleoNativeWarpTokenConfig,
   type AleoSyntheticWarpTokenConfig,
   AleoTokenType,
 } from '../utils/types.js';
+import * as providerQuery from './provider-query.js';
 
-/**
- * Returns the ARC-20 token program ID imported by an ARC-20-based warp token.
- * The arc20 token import is the one that contains 'arc20' but not 'multisig'.
- */
-export async function getArc20ProgramId(
-  aleoClient: AnyAleoNetworkClient,
-  warpProgramId: string,
-): Promise<string> {
-  const imports = await aleoClient.getProgramImportNames(warpProgramId);
-  const arc20ProgramId = imports.find(
-    (i) => i.includes('arc20') && !i.includes('multisig'),
-  );
-  assert(
-    arc20ProgramId,
-    `Could not find ARC-20 token import in program ${warpProgramId}`,
-  );
-  return arc20ProgramId;
-}
+const logger = rootLogger.child({ module: 'aleo-warp-query' });
 
-/**
- * Validates and extracts the first output from a view function response body.
- * Expects a JSON array of wire-format strings (e.g. ["6u8"], ["'USDC'"]).
- */
-export function parseViewFunctionOutputs(
-  outputs: unknown,
-  programId: string,
-  viewName: string,
-): string {
-  assert(
-    Array.isArray(outputs) &&
-      outputs.length > 0 &&
-      typeof outputs[0] === 'string',
-    `View function ${programId}/${viewName} returned an unexpected response shape: ${JSON.stringify(outputs)}`,
-  );
-  return outputs[0];
-}
-
-/**
- * Calls a view function on an Aleo program via the Explorer REST API.
- * POST {host}/program/{programId}/view/{viewName}
- * No-input functions use an empty object body `{}`; functions with inputs use a JSON array.
- * Returns the raw wire-format string of the first output (e.g. "6u8", "'USDC'", "1000000u128").
- */
-export async function callViewFunction(
-  aleoClient: AnyAleoNetworkClient,
-  programId: string,
-  viewName: string,
-  inputs: string[] = [],
-): Promise<string> {
-  const url = `${aleoClient.host}/program/${programId}/view/${viewName}`;
-  const body = inputs.length === 0 ? '{}' : JSON.stringify(inputs);
-  return retryAsync(
-    async () => {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-      assert(res.ok, `View function call failed (${res.status}): ${url}`);
-      const outputs: unknown = await res.json();
-      return parseViewFunctionOutputs(outputs, programId, viewName);
-    },
-    RETRY_ATTEMPTS,
-    RETRY_DELAY_MS,
-  );
-}
-
-/**
- * Parse a raw Aleo uint literal (e.g. "1000000u128", "6u8") to BigInt.
- */
-export function parseAleoUint(raw: string): bigint {
-  const match = raw.match(/^(\d+)/);
-  assert(match, `Expected numeric Aleo literal, got: ${raw}`);
-  return BigInt(match[1]);
-}
-
-/**
- * Parse a raw Aleo identifier literal (e.g. "'USDC'") to a plain string.
- */
-function parseAleoIdentifier(raw: string): string {
-  return raw.replace(/^'|'$/g, '');
-}
+export {
+  callViewFunction,
+  getArc20ProgramId,
+  getArc20TokenMetadata,
+  parseAleoUint,
+  parseViewFunctionOutputs,
+} from './provider-query.js';
 
 /**
  * Converts the v2 ARC-20 warp token standard's on-chain local_decimals/
@@ -136,28 +64,21 @@ export function nativeScaleExponentToMultiplier(
 }
 
 /**
- * Query token metadata from an ARC-20 token program via its view functions.
+ * Thrown when a `registered_tokens` read for a tokenId yields no value — either
+ * the token was never registered (legacy v1 synthetics) or it was just
+ * registered and has not finalized/indexed yet. Both cases look identical at
+ * read time, so this stays recoverable: retryAsync retries it, and only after
+ * the retries are exhausted does resolveTokenMetadata treat it as a genuine
+ * miss and fall back. Any other error (RPC/transport, plaintext decode) is a
+ * distinct failure that must propagate.
  */
-export async function getArc20TokenMetadata(
-  aleoClient: AnyAleoNetworkClient,
-  arc20ProgramId: string,
-): Promise<{ name: string; symbol: string; decimals: number }> {
-  const [nameRaw, symbolRaw, decimalsRaw] = await Promise.all([
-    callViewFunction(aleoClient, arc20ProgramId, 'name'),
-    callViewFunction(aleoClient, arc20ProgramId, 'symbol'),
-    callViewFunction(aleoClient, arc20ProgramId, 'decimals'),
-  ]);
-  const decimals = parseInt(decimalsRaw, 10);
-  assert(
-    !Number.isNaN(decimals),
-    `Expected numeric decimals from ${arc20ProgramId}, got: ${decimalsRaw}`,
-  );
-
-  return {
-    name: parseAleoIdentifier(nameRaw),
-    symbol: parseAleoIdentifier(symbolRaw),
-    decimals,
-  };
+export class TokenRegistryEntryNotFoundError extends Error {
+  constructor(tokenId: string) {
+    super(
+      `Expected token metadata to be registered in token_registry.aleo but none found for tokenId: ${tokenId}`,
+    );
+    this.name = 'TokenRegistryEntryNotFoundError';
+  }
 }
 
 /**
@@ -166,13 +87,18 @@ export async function getArc20TokenMetadata(
 export async function getTokenMetadata(
   aleoClient: AnyAleoNetworkClient,
   tokenId: string,
+  retryAttempts: number = RETRY_ATTEMPTS,
+  retryDelayMs: number = RETRY_DELAY_MS,
 ): Promise<{
   name: string;
   symbol: string;
   decimals: number;
 }> {
-  // Wrap the read + assert together so a mapping that hasn't finalized/indexed
-  // yet (e.g. immediately after registration) is retried, not treated as absent.
+  // An empty read may be a genuine legacy miss or a just-registered mapping
+  // that has not finalized/indexed yet, so retry the bounded budget before
+  // giving up. After exhaustion retryAsync rethrows TokenRegistryEntryNotFound-
+  // Error, which resolveTokenMetadata catches to fall back; transient RPC/
+  // transport errors surface as plain (recoverable) errors and are retried too.
   const mappingValue = await retryAsync(
     async () => {
       const value = await aleoClient.getProgramMappingValue(
@@ -180,14 +106,13 @@ export async function getTokenMetadata(
         'registered_tokens',
         tokenId,
       );
-      assert(
-        value,
-        `Expected token metadata to be registered in token_registry.aleo but none found for tokenId: ${tokenId}`,
-      );
+      if (isNullish(value) || value === '') {
+        throw new TokenRegistryEntryNotFoundError(tokenId);
+      }
       return value;
     },
-    RETRY_ATTEMPTS,
-    RETRY_DELAY_MS,
+    retryAttempts,
+    retryDelayMs,
   );
 
   const tokenMetadata = Plaintext.fromString(mappingValue).toObject();
@@ -263,64 +188,11 @@ export async function getRemoteRouters(
   aleoClient: AnyAleoNetworkClient,
   tokenAddress: string,
 ): Promise<Record<number, { address: string; gas: string }>> {
-  const { programId } = fromAleoAddress(tokenAddress);
-
-  const remoteRouters: Record<number, { address: string; gas: string }> = {};
-
-  const routerLengthRes = await aleoClient.getProgramMappingValue(
-    programId,
-    'remote_router_length',
-    'true',
+  return providerQuery.getRemoteRouters(
+    { Plaintext },
+    aleoClient,
+    tokenAddress,
   );
-
-  if (!routerLengthRes) {
-    return remoteRouters;
-  }
-
-  const routerLength = parseInt(routerLengthRes);
-  assert(
-    !isNaN(routerLength) && routerLength >= 0,
-    `Expected remote_router_length to be a non-negative number for token ${tokenAddress} but got ${routerLengthRes}`,
-  );
-
-  for (let i = 0; i < routerLength; i++) {
-    const routerKey = await aleoClient.getProgramMappingPlaintext(
-      programId,
-      'remote_router_iter',
-      `${i}u32`,
-    );
-
-    if (!routerKey) continue;
-
-    const remoteRouterValue = await aleoClient.getProgramMappingValue(
-      programId,
-      'remote_routers',
-      routerKey,
-    );
-
-    if (!remoteRouterValue) continue;
-
-    const remoteRouter = Plaintext.fromString(remoteRouterValue).toObject();
-
-    const domainId = Number(remoteRouter['domain']);
-
-    // Skip duplicates (defensive: shouldn't occur in normal operation)
-    if (remoteRouters[domainId]) {
-      continue;
-    }
-
-    assert(
-      Array.isArray(remoteRouter['recipient']),
-      `Expected recipient to be an array in remote router for domain ${domainId} but got ${typeof remoteRouter['recipient']}`,
-    );
-
-    remoteRouters[domainId] = {
-      address: ensure0x(Buffer.from(remoteRouter['recipient']).toString('hex')),
-      gas: remoteRouter['gas'].toString(),
-    };
-  }
-
-  return remoteRouters;
 }
 
 /**
@@ -536,17 +408,69 @@ export async function getNativeWarpTokenConfig(
 
 /**
  * Resolve token name/symbol/decimals for a warp token — ARC-20 for v2, token_registry for v1.
+ *
+ * name/symbol/decimals live in the ARC-20 token program (v2) or token_registry.aleo (v1).
+ * v1 tokens that were never registered in token_registry.aleo (e.g. legacy synthetics) make
+ * that lookup throw after its bounded retries are exhausted, but decimals are also carried
+ * authoritatively in app_metadata.local_decimals and name/symbol are not compared by
+ * check-warp-deploy, so a registry miss is non-fatal: fall back to local_decimals for decimals
+ * and empty strings for name/symbol.
  */
-async function resolveTokenMetadata(
+export async function resolveTokenMetadata(
   aleoClient: AnyAleoNetworkClient,
   programId: string,
   tokenId: string,
+  localDecimals: number | undefined,
+  retryAttempts: number = RETRY_ATTEMPTS,
+  retryDelayMs: number = RETRY_DELAY_MS,
 ): Promise<{ name: string; symbol: string; decimals: number }> {
+  // v2 ARC-20 tokens carry authoritative name/symbol/decimals in their token
+  // program; any failure reading it is a real error and must propagate.
   if (isV2WarpToken(programId)) {
-    const arc20ProgramId = await getArc20ProgramId(aleoClient, programId);
-    return getArc20TokenMetadata(aleoClient, arc20ProgramId);
+    const arc20ProgramId = await providerQuery.getArc20ProgramId(
+      aleoClient,
+      programId,
+    );
+    return providerQuery.getArc20TokenMetadata(aleoClient, arc20ProgramId);
   }
-  return getTokenMetadata(aleoClient, tokenId);
+
+  // v1 tokens read name/symbol/decimals from token_registry.aleo. Legacy
+  // synthetics were never registered there, so a registry miss that persists
+  // across the bounded retries is non-fatal (decimals are also in
+  // app_metadata.local_decimals; name/symbol aren't compared by
+  // check-warp-deploy). Any OTHER failure — RPC/transport, plaintext decode —
+  // is a real error and must propagate.
+  let registryMetadata:
+    | { name: string; symbol: string; decimals: number }
+    | undefined;
+  try {
+    registryMetadata = await getTokenMetadata(
+      aleoClient,
+      tokenId,
+      retryAttempts,
+      retryDelayMs,
+    );
+  } catch (error: unknown) {
+    if (!(error instanceof TokenRegistryEntryNotFoundError)) {
+      throw error;
+    }
+    logger.warn(
+      { programId, tokenId, err: error },
+      'token_registry.aleo has no entry for this v1 token; falling back to app_metadata.local_decimals for decimals and empty name/symbol',
+    );
+  }
+
+  const decimals = registryMetadata?.decimals ?? localDecimals;
+  assert(
+    decimals != null,
+    `Unable to resolve decimals for token ${programId} (tokenId ${tokenId}): token registry lookup failed and app_metadata.local_decimals is missing`,
+  );
+
+  return {
+    name: registryMetadata?.name ?? '',
+    symbol: registryMetadata?.symbol ?? '',
+    decimals,
+  };
 }
 
 /**
@@ -601,6 +525,7 @@ export async function getCollateralWarpTokenConfig(
     aleoClient,
     programId,
     tokenId,
+    metadata.local_decimals,
   );
 
   const scale = localRemoteDecimalsToScale(
@@ -675,6 +600,7 @@ export async function getSyntheticWarpTokenConfig(
     aleoClient,
     programId,
     tokenId,
+    metadata.local_decimals,
   );
 
   const scale = localRemoteDecimalsToScale(
