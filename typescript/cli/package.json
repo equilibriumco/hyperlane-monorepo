@@ -38,6 +38,7 @@
     "test:cosmosnative:e2e": "./src/tests/cosmosnative/run-e2e-test.sh",
     "test:radix:e2e": "./src/tests/radix/run-e2e-test.sh",
     "test:aleo:e2e": "./src/tests/aleo/run-e2e-test.sh",
+    "test:midnight:e2e": "./src/tests/midnight/run-e2e-test.sh",
     "test:sealevel:e2e": "./src/tests/sealevel/run-e2e-test.sh",
     "test:starknet:e2e": "./src/tests/starknet/run-e2e-test.sh",
     "test:tron:e2e": "./src/tests/ethereum/run-tron-e2e-test.sh",
