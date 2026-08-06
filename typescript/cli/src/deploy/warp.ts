@@ -806,6 +806,13 @@ async function updateExistingWarpRoute(
 
   await promiseObjAll(
     objMap(expandedWarpDeployConfig, async (chain, config) => {
+      // Chains marked foreignDeployment supply reference data only (the
+      // router address and gas for remote enrollment); their deployment is
+      // managed elsewhere and must not be updated from this route.
+      if (warpDeployConfig[chain]?.foreignDeployment) {
+        logBlue(`Skipping foreign deployment chain ${chain}`);
+        return;
+      }
       await retryAsync(async () => {
         const protocolType = multiProvider.getProtocol(chain);
         if (!isEVMLike(protocolType) && !altVmSigners[chain]) {

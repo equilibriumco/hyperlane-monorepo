@@ -319,9 +319,14 @@ export class MidnightSigner
   // machine the persisted owner-state nonce restores the owner identity.
   private joinContract(
     name: MidnightContractName,
-    contractAddress: string,
+    rawContractAddress: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any> {
+    // Registry configs carry 0x-prefixed addresses; the ledger's address
+    // parser rejects the prefix.
+    const contractAddress = rawContractAddress.startsWith('0x')
+      ? rawContractAddress.slice(2)
+      : rawContractAddress;
     const key = `${name}:${contractAddress}`;
     let cached = this.joinedContracts.get(key);
     if (!cached) {
