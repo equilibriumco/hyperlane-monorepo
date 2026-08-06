@@ -456,19 +456,38 @@ SEED=$(cat <monorepo>/setup/recipients/alice-midnight.seed) \
 Omit `SEED` for the deployer. The first sync on a public network takes a minute
 or so.
 
-**Bob, on Cardano** — one Blockfrost call, filtered to the route's minting
-policy (not its state NFT):
+**Bob, on Cardano** — the CLI reads it through Blockfrost:
 
 ```sh
-curl -s -H "project_id: $BLOCKFROST_API_KEY" \
-  "https://cardano-preview.blockfrost.io/api/v0/addresses/$(cat setup/recipients/bob-cardano.addr)" \
-  | jq -r '.amount[] | "\(.unit[0:20])  \(.quantity)"'
+cd cardano
+cli query utxos $(cat ../setup/recipients/bob-cardano.addr)
 ```
 
-`{"error": ..., "message": "The requested component has not been found."}` is a
-**404 for an address that has never been used** — not a failure. An untouched
-wallet has no on-chain footprint for Blockfrost to return, so this is the
-expected answer until the first transfer lands.
+The address is positional, not `--address`. And **unset `CARDANO_SIGNING_KEY`
+first** if it points anywhere unreadable — the CLI loads it even for a read-only
+query, and fails on the key rather than on anything to do with the address.
+
+Reading the output:
+
+```
+2d2ca1489bec5a2f#2 - 1200000 lovelace
+  + 500000 734e49474854 (82b02f24862d5e48...)     <- 0.5 sNIGHT, name in hex
+a6aa4c9ee00c011f#0 - 10000000000 lovelace         <- the spendable ADA
+
+Total: 10001200000 lovelace (10001.20 ADA)
+```
+
+The split matters: the 1.2 ADA on the first line is min-UTxO pinned to the token
+output and cannot pay a fee (§6.3). The total tells you nothing about what is
+actually spendable.
+
+`cardano-cli query utxo` is **not** an option here — it needs a local node
+socket, and this stack has none. It is still the right tool for the offline
+work (`address key-gen`, `key-hash`, `build`).
+
+A never-used address returns no UTXOs — via raw Blockfrost that surfaces as a
+404, `"The requested component has not been found."`, which is the expected
+answer before the first transfer rather than a failure.
 
 Or on the explorer:
 `https://preview.cardanoscan.io/address/<contents of bob-cardano.addr>`
