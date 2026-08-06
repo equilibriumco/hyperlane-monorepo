@@ -76,6 +76,7 @@ const SUPPORTED_PROTOCOLS = new Set<ProtocolType>([
   ProtocolType.Starknet,
   ProtocolType.Radix,
   ProtocolType.Aleo,
+  ProtocolType.Midnight,
 ]);
 
 const EXPLORER_GRAPHQL_URL =
@@ -108,6 +109,7 @@ function toTypedAltVmReceipt(
     case ProviderType.Starknet:
     case ProviderType.Radix:
     case ProviderType.Aleo:
+    case ProviderType.Midnight:
       // CAST: Provider SDK receipts are the correct protocol-specific shape at runtime,
       // but TxReceipt is typed as { [key: string]: any } so the union cast is unavoidable.
       return {
@@ -534,11 +536,17 @@ async function executeDelivery({
   const isCosmosOrigin =
     originProtocol === ProtocolType.Cosmos ||
     originProtocol === ProtocolType.CosmosNative;
+  const isMidnightOrigin = originProtocol === ProtocolType.Midnight;
   const skippedByUser = !!skipValidation;
-  const shouldSkipTransferValidation = skippedByUser || isCosmosOrigin;
+  const shouldSkipTransferValidation =
+    skippedByUser || isCosmosOrigin || isMidnightOrigin;
   if (isCosmosOrigin) {
     log(
       `Skipping transfer validation for ${origin} because Cosmos-origin validation is currently unsupported (CosmJS gas estimation requires sender public key).`,
+    );
+  } else if (isMidnightOrigin) {
+    log(
+      `Skipping transfer validation for ${origin} because Midnight wallet balances are not readable without a synced wallet (the indexer exposes no balance-by-address query).`,
     );
   } else if (skippedByUser) {
     log(

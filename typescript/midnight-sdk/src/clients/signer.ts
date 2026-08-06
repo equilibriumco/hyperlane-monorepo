@@ -32,6 +32,7 @@ import {
   type WalletContext,
   type WalletEndpoints,
 } from '../deploy/wallet.js';
+import { bytesToHex, hexToBytes } from '../utils/conversion.js';
 import type { MidnightTransaction, MidnightTxReceipt } from '../utils/types.js';
 
 import {
@@ -161,10 +162,39 @@ export class MidnightSigner
       );
     }
     const txData = await call(...transaction.args);
-    return {
+    const receipt: MidnightTxReceipt = {
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
     };
+
+    // transferRemote returns the dispatched messageId as its circuit
+    // result; the payForGas follow-up needs it, and core adapters read it
+    // off the receipt (there is no dispatch log to parse).
+    const result = txData.private?.result;
+    if (result instanceof Uint8Array && result.length === 32) {
+      receipt.messageId = bytesToHex(result);
+      if (transaction.circuit === 'transferRemote') {
+        receipt.destinationDomainId = Number(transaction.args[0]);
+      }
+    }
+
+    if (transaction.payForGas) {
+      if (!receipt.messageId) {
+        throw new Error(
+          `${transaction.circuit} returned no messageId; cannot run the payForGas follow-up`,
+        );
+      }
+      const gas = transaction.payForGas;
+      const igp = await this.joinContract('igp', gas.igpAddress);
+      await igp.callTx.payForGas(
+        hexToBytes(receipt.messageId),
+        BigInt(gas.destinationDomainId),
+        BigInt(gas.gasLimit),
+        BigInt(gas.amount),
+      );
+    }
+
+    return receipt;
   }
 
   async sendAndConfirmBatchTransactions(

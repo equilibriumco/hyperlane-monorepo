@@ -2291,6 +2291,9 @@ importers:
       '@hyperlane-xyz/deploy-sdk':
         specifier: workspace:*
         version: link:../deploy-sdk
+      '@hyperlane-xyz/midnight-sdk':
+        specifier: workspace:*
+        version: link:../midnight-sdk
       '@hyperlane-xyz/provider-sdk':
         specifier: workspace:*
         version: link:../provider-sdk

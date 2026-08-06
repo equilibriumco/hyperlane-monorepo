@@ -18,6 +18,7 @@ import { TokenConnection, TokenConnectionType } from './TokenConnection.js';
 import { TokenStandard } from './TokenStandard.js';
 import { TokenMetadata } from './TokenMetadata.js';
 import { AleoNativeTokenAdapter } from './adapters/AleoTokenAdapter.js';
+import { MidnightNativeTokenAdapter } from './adapters/MidnightTokenAdapter.js';
 import {
   CwNativeTokenAdapter,
   CwTokenAdapter,
@@ -47,6 +48,7 @@ import {
 } from './adapters/SealevelTokenAdapter.js';
 import { StarknetTokenAdapter } from './adapters/StarknetTokenAdapter.js';
 import { createAleoHypAdapter } from './adapters/aleoHyp.js';
+import { createMidnightHypAdapter } from './adapters/midnightHyp.js';
 import { createCosmosHypAdapter } from './adapters/cosmosHyp.js';
 import { createEvmHypAdapter } from './adapters/evmHyp.js';
 import { hasOnlyHyperlaneConnections } from './adapters/hypTokenAdapterUtils.js';
@@ -153,6 +155,10 @@ export class Token extends TokenMetadata implements IToken {
       return new AleoNativeTokenAdapter(chainName, multiProvider, {
         token: addressOrDenom,
       });
+    } else if (standard === TokenStandard.MidnightNative) {
+      return new MidnightNativeTokenAdapter(chainName, multiProvider, {
+        token: addressOrDenom,
+      });
     } else if (this.isHypToken()) {
       return this.getHypAdapter(multiProvider);
     } else if (this.isIbcToken()) {
@@ -204,7 +210,8 @@ export class Token extends TokenMetadata implements IToken {
       createCosmosHypAdapter(multiProvider, this) ||
       createStarknetHypAdapter(multiProvider, this) ||
       createRadixHypAdapter(multiProvider, this) ||
-      createAleoHypAdapter(multiProvider, this);
+      createAleoHypAdapter(multiProvider, this) ||
+      createMidnightHypAdapter(multiProvider, this);
 
     if (hypAdapter) {
       return hypAdapter;

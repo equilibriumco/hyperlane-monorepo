@@ -11,6 +11,7 @@ import {
   type ReqGetTotalSupply,
   type ReqIsMessageDelivered,
   type ReqQuoteRemoteTransfer,
+  type ReqRemoteTransfer,
   type ResEstimateTransactionFee,
   type ResGetRemoteRouters,
   type ResGetToken,
@@ -37,15 +38,21 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     protected readonly indexer: MidnightIndexerClient,
   ) {}
 
-  static async connect(
-    metadata: ChainMetadataForAltVM,
-  ): Promise<MidnightProvider> {
+  // Construction never dials the network, so a sync factory is safe; the
+  // async connect stays for the ProtocolProvider interface.
+  static fromMetadata(metadata: ChainMetadataForAltVM): MidnightProvider {
     const client = MidnightReadClient.fromMetadata(metadata);
     return new MidnightProvider(
       metadata,
       client,
       new MidnightIndexerClient(client.endpoints.indexerGraphqlUrl),
     );
+  }
+
+  static async connect(
+    metadata: ChainMetadataForAltVM,
+  ): Promise<MidnightProvider> {
+    return MidnightProvider.fromMetadata(metadata);
   }
 
   protected fetchContractState(contractAddress: string) {
@@ -215,6 +222,44 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     _warpConfig: WarpArtifactConfig,
   ): Promise<bigint> {
     return 0n;
+  }
+
+  // Not part of IProvider; consumed by the SDK token adapter (aleo
+  // precedent). Builds the transferRemote call plus the payForGas
+  // follow-up the signer runs once the messageId is known.
+  async getRemoteTransferTransaction(
+    req: ReqRemoteTransfer,
+  ): Promise<MidnightTransaction> {
+    const recipient = hexToBytes(req.recipient);
+    if (recipient.length !== 32) {
+      throw new Error(
+        `recipient must be 32 bytes (bytes32-padded), got ${req.recipient}`,
+      );
+    }
+    if (!req.customHookAddress) {
+      throw new Error(
+        'Midnight remote transfers need the IGP contract address as customHook ' +
+          '(set igpTokenAddressOrDenom on the warp route token)',
+      );
+    }
+    const gasLimit = req.gasLimit
+      ? BigInt(req.gasLimit)
+      : DEFAULT_TRANSFER_GAS_LIMIT;
+    return {
+      annotation:
+        `Transfer ${req.amount} to domain ${req.destinationDomainId} ` +
+        `and pay for ${gasLimit} gas`,
+      contract: 'night',
+      contractAddress: req.tokenAddress,
+      circuit: 'transferRemote',
+      args: [BigInt(req.destinationDomainId), recipient, BigInt(req.amount)],
+      payForGas: {
+        igpAddress: req.customHookAddress,
+        destinationDomainId: req.destinationDomainId,
+        gasLimit: gasLimit.toString(),
+        amount: req.maxFee.amount,
+      },
+    };
   }
 }
 

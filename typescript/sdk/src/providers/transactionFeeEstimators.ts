@@ -434,6 +434,13 @@ export function estimateTransactionFee({
       provider,
     });
   } else if (
+    transaction.type === ProviderType.Midnight &&
+    provider.type === ProviderType.Midnight
+  ) {
+    // Midnight fees are paid in DUST, generated from held NIGHT rather
+    // than spent from the transferred balance.
+    return Promise.resolve({ gasUnits: 0n, gasPrice: 0, fee: 0n });
+  } else if (
     transaction.type === ProviderType.Tron &&
     provider.type === ProviderType.Tron
   ) {

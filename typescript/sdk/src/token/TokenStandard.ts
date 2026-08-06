@@ -447,6 +447,21 @@ export const tokenTypeToStandard = (
       );
       return starknetTokenStandard;
     }
+    case ProtocolType.Midnight: {
+      if (
+        MIDNIGHT_SUPPORTED_TOKEN_TYPES.includes(
+          tokenType as MidnightSupportedTokenTypes,
+        )
+      ) {
+        return MIDNIGHT_TOKEN_TYPE_TO_STANDARD[
+          tokenType as MidnightSupportedTokenTypes
+        ];
+      }
+
+      throw new Error(
+        `token type ${tokenType} not available on protocol ${protocolType}`,
+      );
+    }
     default: {
       throw new Error(
         `no token standard available for protocol type ${protocolType}`,
@@ -568,6 +583,18 @@ export const ALEO_TOKEN_TYPE_TO_STANDARD: Record<
   [TokenType.native]: TokenStandard.AleoHypNative,
   [TokenType.collateral]: TokenStandard.AleoHypCollateral,
   [TokenType.synthetic]: TokenStandard.AleoHypSynthetic,
+};
+
+export const MIDNIGHT_SUPPORTED_TOKEN_TYPES = [TokenType.native] as const;
+
+type MidnightSupportedTokenTypes =
+  (typeof MIDNIGHT_SUPPORTED_TOKEN_TYPES)[number];
+
+export const MIDNIGHT_TOKEN_TYPE_TO_STANDARD: Record<
+  MidnightSupportedTokenTypes,
+  TokenStandard
+> = {
+  [TokenType.native]: TokenStandard.MidnightHypNative,
 };
 
 export const TRON_TOKEN_TYPE_TO_STANDARD: Record<

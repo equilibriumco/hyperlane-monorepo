@@ -7,11 +7,23 @@ export type MidnightTransaction = {
   contractAddress: string;
   circuit: string;
   args: unknown[];
+  // Midnight has no dispatch-coupled hooks, so paying the relayer is a
+  // second transaction needing the messageId that transferRemote returns.
+  // The signer runs it as a follow-up inside the same logical submission.
+  payForGas?: {
+    igpAddress: string;
+    destinationDomainId: number;
+    gasLimit: string;
+    amount: string;
+  };
 };
 
 export type MidnightTxReceipt = {
   txId: string;
   blockHeight: number;
+  // Set when the submission dispatched a message (transferRemote).
+  messageId?: string;
+  destinationDomainId?: number;
 };
 
 export type MidnightEndpoints = {

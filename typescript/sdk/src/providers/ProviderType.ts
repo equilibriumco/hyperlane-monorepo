@@ -40,6 +40,11 @@ import type {
   AleoReceipt as AleoSDKReceipt,
   AleoTransaction as AleoSDKTransaction,
 } from '@hyperlane-xyz/aleo-sdk/runtime';
+import type {
+  MidnightProvider as MidnightSDKProvider,
+  MidnightTransaction as MidnightSDKTransaction,
+  MidnightTxReceipt as MidnightSDKReceipt,
+} from '@hyperlane-xyz/midnight-sdk/runtime';
 import type { CosmosNativeProvider } from '@hyperlane-xyz/cosmos-sdk/runtime';
 import type {
   RadixProvider as RadixSDKProvider,
@@ -148,14 +153,11 @@ type ProtocolTypesMapping = {
     contract: null;
     receipt: EthersV5TransactionReceipt;
   };
-  // Midnight has no RPC-style provider: contract interaction happens through
-  // its GraphQL indexer and proof-server pipeline, so the provider only
-  // carries the endpoint config and transactions are not representable here.
   [ProtocolType.Midnight]: {
-    transaction: never;
+    transaction: MidnightTransaction;
     provider: MidnightProvider;
     contract: null;
-    receipt: never;
+    receipt: MidnightTransactionReceipt;
   };
   [ProtocolType.Unknown]: {
     transaction: never;
@@ -264,18 +266,9 @@ export interface TronProvider extends TypedProviderBase<EV5Providers.Provider> {
   provider: EV5Providers.Provider;
 }
 
-/**
- * Midnight exposes no JSON-RPC provider; chain access goes through its
- * GraphQL indexer. The provider wraps the indexer endpoint so protocol-aware
- * consumers can construct their own clients from it.
- */
-export interface MidnightIndexerEndpoint {
-  url: string;
-}
-
-export interface MidnightProvider extends TypedProviderBase<MidnightIndexerEndpoint> {
+export interface MidnightProvider extends TypedProviderBase<MidnightSDKProvider> {
   type: ProviderType.Midnight;
-  provider: MidnightIndexerEndpoint;
+  provider: MidnightSDKProvider;
 }
 
 export interface ZKSyncProvider extends TypedProviderBase<ZKSyncBaseProvider> {
@@ -425,6 +418,11 @@ export interface TronTransaction extends TypedTransactionBase<EV5Transaction> {
   transaction: EV5Transaction;
 }
 
+export interface MidnightTransaction extends TypedTransactionBase<MidnightSDKTransaction> {
+  type: ProviderType.Midnight;
+  transaction: MidnightSDKTransaction;
+}
+
 export type TypedTransaction =
   | EthersV5Transaction
   // | EthersV6Transaction
@@ -437,7 +435,8 @@ export type TypedTransaction =
   | ZKSyncTransaction
   | RadixTransaction
   | AleoTransaction
-  | TronTransaction;
+  | TronTransaction
+  | MidnightTransaction;
 
 export type AnnotatedEV5Transaction = Annotated<EV5Transaction>;
 
@@ -536,6 +535,11 @@ export interface TronTransactionReceipt extends TypedTransactionReceiptBase<EV5P
   receipt: EV5Providers.TransactionReceipt;
 }
 
+export interface MidnightTransactionReceipt extends TypedTransactionReceiptBase<MidnightSDKReceipt> {
+  type: ProviderType.Midnight;
+  receipt: MidnightSDKReceipt;
+}
+
 export type TypedTransactionReceipt =
   | EthersV5TransactionReceipt
   | ViemTransactionReceipt
@@ -547,4 +551,5 @@ export type TypedTransactionReceipt =
   | ZKSyncTransactionReceipt
   | RadixTransactionReceipt
   | AleoTransactionReceipt
-  | TronTransactionReceipt;
+  | TronTransactionReceipt
+  | MidnightTransactionReceipt;
