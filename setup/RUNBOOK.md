@@ -77,6 +77,10 @@ hundreds of UTxOs. It got through one script and died on the next.
   ADA sits in one output. The CLI prints the exact `utxo split` remedy.
 - Synthetic routes need `warp deploy-minting-ref --warp-policy <state-nft>` as a
   separate step, or the relayer cannot mint inbound.
+- **Pass `--token-name` on a synthetic deploy.** The name is carried in the
+  route datum, and omitting it is valid — you get a nameless asset, which is
+  only visible later when a wallet or explorer shows the minted token with a
+  blank name. `--token-name sNIGHT` takes text (`hex:` prefix for raw bytes).
 - `deploy extract` clears every `initialized` flag but leaves stale
   `warp_routes` / `recipients` entries pointing at superseded scripts. Prune by
   hand.
