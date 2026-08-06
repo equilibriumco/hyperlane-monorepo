@@ -86,6 +86,7 @@ export interface SyntheticWarpConfig extends BaseWarpConfig {
   symbol?: string;
   decimals?: number;
   metadataUri?: string;
+  token?: string;
 }
 
 export interface NativeWarpConfig extends BaseWarpConfig {
@@ -130,6 +131,8 @@ export interface DerivedSyntheticWarpConfig extends BaseDerivedWarpConfig {
   symbol?: string;
   decimals?: number;
   metadataUri?: string;
+  /** Address of the token the adapter deployed (populated post-deploy). */
+  token?: string;
 }
 
 export interface DerivedNativeWarpConfig extends BaseDerivedWarpConfig {
@@ -192,6 +195,12 @@ export interface SyntheticWarpArtifactConfig extends BaseWarpArtifactConfig {
   symbol: string;
   decimals: number;
   metadataUri?: string;
+  /**
+   * Address of the token the hyp adapter deployed alongside the synthetic
+   * warp. Populated by the protocol-specific reader/writer after deploy.
+   * Undefined before the warp is deployed.
+   */
+  token?: string;
 }
 
 export interface NativeWarpArtifactConfig extends BaseWarpArtifactConfig {
@@ -426,6 +435,7 @@ export function warpConfigToArtifact(
           symbol: config.symbol,
           decimals: config.decimals,
           metadataUri: config.metadataUri,
+          token: config.token,
         },
       };
 
@@ -549,7 +559,7 @@ export function warpArtifactToDerivedConfig(
     feeConfig = feeArtifactToDerivedConfig(
       config.fee,
       chainLookup,
-      getCollateralToken(config),
+      resolveFeeTokenFromWarpArtifactConfig(config) ?? ZERO_ADDRESS,
     );
   }
 
@@ -581,6 +591,7 @@ export function warpArtifactToDerivedConfig(
         ...baseDerivedConfig,
         type: TokenType.synthetic,
         metadataUri: config.metadataUri,
+        token: config.token,
       };
 
     case 'native':
@@ -611,28 +622,6 @@ export function warpArtifactToDerivedConfig(
 // Warp Config Utilities
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-
-/**
- * Returns the collateral token address from a warp artifact config.
- * Collateral and crossCollateral types have a token field;
- * native and synthetic use the zero address (no collateral token).
- */
-function getCollateralToken(config: WarpArtifactConfig): string {
-  switch (config.type) {
-    case TokenType.collateral:
-    case TokenType.crossCollateral:
-      return config.token;
-    case TokenType.native:
-    case TokenType.synthetic:
-      return ZERO_ADDRESS;
-    default: {
-      const _exhaustive: never = config;
-      throw new Error(
-        `Unhandled warp token type: ${JSON.stringify(_exhaustive)}`,
-      );
-    }
-  }
-}
 
 // Cross-Collateral Router Utilities
 
@@ -729,6 +718,36 @@ export function buildFeeReadContextFromWarpArtifactConfig(
   return { knownRoutersPerDomain };
 }
 
+/**
+ * Returns the settlement asset address the warp route operates against, when
+ * applicable. Used by the warp orchestrator to populate the paired fee
+ * config's `token` field at deploy/update time.
+ *
+ * - `collateral` / `crossCollateral`: the configured collateral token.
+ * - `synthetic`: the token the adapter deployed (populated post-deploy by the
+ *   protocol-specific writer/reader; undefined before deploy).
+ * - `native`: undefined.
+ */
+export function resolveFeeTokenFromWarpArtifactConfig(
+  config: WarpArtifactConfig,
+): string | undefined {
+  switch (config.type) {
+    case TokenType.collateral:
+    case TokenType.crossCollateral:
+      return config.token;
+    case TokenType.synthetic:
+      return config.token;
+    case TokenType.native:
+      return undefined;
+    default: {
+      const invalidConfig: never = config;
+      throw new Error(
+        `Unsupported warp type for resolveFeeTokenFromWarpArtifactConfig: ${JSON.stringify(invalidConfig)}`,
+      );
+    }
+  }
+}
+
 // Warp Router Update Utilities
 
 export interface WarpRouterDiff {
@@ -783,12 +802,6 @@ export function computeRemoteRoutersUpdates(
     expectedRoutersConfig.remoteRouters,
   )) {
     const domainId = parseInt(domainIdStr);
-    const expectedDestinationGas =
-      expectedRoutersConfig.destinationGas[domainId];
-    assert(
-      !isNullish(expectedDestinationGas),
-      `Missing destination gas for domain ${domainId} in expected router configuration`,
-    );
     const currentRouterAddress = Object.prototype.hasOwnProperty.call(
       currentRoutersConfig.remoteRouters,
       domainId,
@@ -797,6 +810,13 @@ export function computeRemoteRoutersUpdates(
       : undefined;
     const currentDestinationGas =
       currentRoutersConfig.destinationGas[domainId] ?? '0';
+    // When the expected config omits gas for an existing router, keep the
+    // current on-chain value instead of zeroing it. For a new router — or a
+    // domain that only has an orphaned gas entry and no enrolled router — fall
+    // back to '0' rather than reusing a stale value, matching EVM behavior.
+    const expectedDestinationGas =
+      expectedRoutersConfig.destinationGas[domainId] ??
+      (currentRouterAddress ? currentDestinationGas : '0');
 
     const needsUpdate =
       !currentRouterAddress ||
@@ -867,6 +887,90 @@ export function computeCrossCollateralRouterUpdates(
   }
 
   return { toEnroll, toUnenroll };
+}
+
+// Warp Deploy Gas Composition
+
+/**
+ * Per-protocol breakdown of the additive deltas that
+ * {@link composeWarpDeployGas} sums into a total warp-deploy cost. Every
+ * field is in the protocol-defined unit: gas units for gas-metered protocols
+ * (Cosmos), native denom for rent/fee-metered protocols (lamports on Sealevel,
+ * sun on Tron, etc.).
+ */
+export interface WarpDeployGasBreakdown {
+  /** Base router deploy cost. */
+  base: bigint;
+  /** Extra cost when the warp type is `crossCollateral`. */
+  crossCollateralExtra: bigint;
+  /** Cost of deploying a fresh fee program. */
+  feeProgram: bigint;
+  /** Cost of deploying a fresh custom ISM. */
+  customIsm: bigint;
+  /** Cost of deploying a fresh custom hook / IGP. */
+  customHook: bigint;
+}
+
+/**
+ * Composes the per-chain warp-deploy cost from a per-protocol breakdown of
+ * constants and the shape of the {@link WarpArtifactConfig}.
+ *
+ * Uses {@link isArtifactNew} to detect fresh deploys: an ism/hook/fee whose
+ * `artifactState` is DEPLOYED or UNDERIVED contributes nothing (the contract
+ * already exists on-chain and no deploy cost is incurred); a NEW artifact
+ * contributes its protocol-specific delta.
+ *
+ * Return value uses the protocol-defined unit: gas units for gas-metered
+ * protocols (Cosmos), native denom for rent/fee-metered protocols (lamports
+ * on Sealevel, sun on Tron, etc.).
+ */
+export function composeWarpDeployGas(
+  warpConfig: WarpArtifactConfig,
+  breakdown: WarpDeployGasBreakdown,
+): bigint {
+  let total = breakdown.base;
+
+  if (warpConfig.type === TokenType.crossCollateral) {
+    total += breakdown.crossCollateralExtra;
+  }
+
+  if (warpConfig.fee !== undefined && isArtifactNew(warpConfig.fee)) {
+    total += breakdown.feeProgram;
+  }
+
+  if (
+    warpConfig.interchainSecurityModule !== undefined &&
+    isArtifactNew(warpConfig.interchainSecurityModule)
+  ) {
+    total += breakdown.customIsm;
+  }
+
+  if (warpConfig.hook !== undefined && isArtifactNew(warpConfig.hook)) {
+    total += breakdown.customHook;
+  }
+
+  return total;
+}
+
+/**
+ * Converts a gas-unit amount into the chain's native denom by multiplying by a
+ * (possibly fractional) gas price, rounding the result UP. The gas price
+ * `amount` is a decimal string (e.g. "0.025"); the multiplication is done with
+ * integer math to avoid floating-point precision loss on large gas-unit values.
+ *
+ * Rounds up because CosmJS rounds broadcast fees up: a floored minimum could
+ * undershoot the fee actually charged and leave a preflight balance check too
+ * low.
+ */
+export function nativeAmountFromGasUnits(
+  gasUnits: bigint,
+  gasPrice: { amount: string },
+): bigint {
+  const [whole, fraction = ''] = gasPrice.amount.split('.');
+  const scale = BigInt(fraction.length);
+  const scaledPrice = BigInt(`${whole}${fraction}` || '0');
+  const denominator = 10n ** scale;
+  return (gasUnits * scaledPrice + denominator - 1n) / denominator;
 }
 
 export interface CCGasConfigDiff {
