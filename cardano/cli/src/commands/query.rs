@@ -276,11 +276,7 @@ async fn query_utxos(ctx: &CliContext, address: &str, format: OutputFormat) -> R
                     println!(
                         "  + {} {} ({}...)",
                         asset.quantity,
-                        if asset.asset_name.is_empty() {
-                            "(no name)"
-                        } else {
-                            &asset.asset_name
-                        },
+                        display_asset_name(&asset.asset_name),
                         &asset.policy_id[..16]
                     );
                 }
@@ -765,6 +761,27 @@ async fn query_recipient(
     Ok(())
 }
 
+/// Render an on-chain asset name for display.
+///
+/// Blockfrost returns the name hex-encoded, but names are conventionally ASCII
+/// (`warp deploy --token-name` encodes text the same way), so a raw hex string
+/// is unreadable for exactly the assets an operator is most likely to be
+/// looking at. Decode when the bytes are printable text, and keep the hex when
+/// they are not — some names are genuinely binary, and mangling those into
+/// replacement characters would be worse than leaving them encoded.
+fn display_asset_name(asset_name_hex: &str) -> String {
+    if asset_name_hex.is_empty() {
+        return "(no name)".to_string();
+    }
+    let Ok(bytes) = hex::decode(asset_name_hex) else {
+        return asset_name_hex.to_string();
+    };
+    match std::str::from_utf8(&bytes) {
+        Ok(name) if !name.is_empty() && name.chars().all(|c| !c.is_control()) => name.to_string(),
+        _ => asset_name_hex.to_string(),
+    }
+}
+
 /// Parse an Option type from Plutus datum JSON
 /// Option is represented as:
 /// - None: { "constructor": 1, "fields": [] }
@@ -927,4 +944,26 @@ fn parse_json_recipient_datum(
         parse_option_bytes(inner_fields.get(1)).and_then(|hex_str| hex::decode(&hex_str).ok());
 
     Some((ism, nonce, messages_received, last_message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_asset_name;
+
+    #[test]
+    fn asset_names_decode_to_text_when_printable() {
+        // sNIGHT, as the warp route mints it
+        assert_eq!(display_asset_name("734e49474854"), "sNIGHT");
+        assert_eq!(display_asset_name(""), "(no name)");
+    }
+
+    #[test]
+    fn unprintable_and_malformed_names_stay_hex() {
+        // valid UTF-8 but control characters — decoding would corrupt the line
+        assert_eq!(display_asset_name("0001020304"), "0001020304");
+        // not UTF-8 at all
+        assert_eq!(display_asset_name("fffe"), "fffe");
+        // not even hex
+        assert_eq!(display_asset_name("zzzz"), "zzzz");
+    }
 }
