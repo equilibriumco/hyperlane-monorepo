@@ -471,11 +471,14 @@ Reading the output:
 
 ```
 2d2ca1489bec5a2f#2 - 1200000 lovelace
-  + 500000 734e49474854 (82b02f24862d5e48...)     <- 0.5 sNIGHT, name in hex
-a6aa4c9ee00c011f#0 - 10000000000 lovelace         <- the spendable ADA
+  + 500000 sNIGHT (82b02f24862d5e48...)     <- 0.5 sNIGHT, 6 decimals
+a6aa4c9ee00c011f#0 - 10000000000 lovelace   <- the spendable ADA
 
 Total: 10001200000 lovelace (10001.20 ADA)
 ```
+
+Asset names are decoded from hex when printable (`c3e2af9f5`); a name that is
+genuinely binary still prints as hex.
 
 The split matters: the 1.2 ADA on the first line is min-UTxO pinned to the token
 output and cannot pay a fee (§6.3). The total tells you nothing about what is
