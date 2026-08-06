@@ -938,6 +938,9 @@ importers:
       ts-node:
         specifier: 'catalog:'
         version: 10.9.2(@types/node@24.10.9)(typescript@6.0.2)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.19.1
       typescript:
         specifier: 'catalog:'
         version: 6.0.2
@@ -1039,12 +1042,18 @@ importers:
       '@google-cloud/pino-logging-gcp-config':
         specifier: 'catalog:'
         version: 1.3.0
+      '@hyperlane-xyz/provider-sdk':
+        specifier: workspace:*
+        version: link:../provider-sdk
       '@hyperlane-xyz/registry':
         specifier: 'catalog:'
         version: 24.3.0
       '@hyperlane-xyz/sdk':
         specifier: workspace:*
         version: link:../sdk
+      '@hyperlane-xyz/sealevel-sdk':
+        specifier: workspace:*
+        version: link:../svm-sdk
       '@hyperlane-xyz/utils':
         specifier: workspace:*
         version: link:../utils
@@ -1364,6 +1373,9 @@ importers:
         specifier: 'catalog:'
         version: 3.3.3(bufferutil@4.0.9)(ethers@5.8.0(bufferutil@4.0.9)(utf-8-validate@5.0.10))(utf-8-validate@5.0.10)
       '@ethersproject/abi':
+        specifier: '*'
+        version: 5.8.0
+      '@ethersproject/abstract-signer':
         specifier: '*'
         version: 5.8.0
       '@ethersproject/experimental':
@@ -2408,6 +2420,9 @@ importers:
       '@hyperlane-xyz/utils':
         specifier: workspace:*
         version: link:../utils
+      '@noble/curves':
+        specifier: ^1.9.0
+        version: 1.9.7
       '@noble/hashes':
         specifier: ^1.7.1
         version: 1.8.0
@@ -2433,9 +2448,6 @@ importers:
       '@hyperlane-xyz/tsconfig':
         specifier: workspace:^
         version: link:../tsconfig
-      '@noble/curves':
-        specifier: ^1.9.0
-        version: 1.9.7
       '@types/chai':
         specifier: ^4.3.14
         version: 4.3.20

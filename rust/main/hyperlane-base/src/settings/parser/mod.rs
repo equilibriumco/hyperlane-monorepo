@@ -247,6 +247,22 @@ fn parse_chain(
                 })
                 .unwrap_or_default()
         });
+    // Defaults to 5s; overridable via `index.interval` (seconds).
+    let interval_secs = chain
+        .chain(&mut err)
+        .get_opt_key("index")
+        .get_opt_key("interval")
+        .parse_u64()
+        .end();
+    if interval_secs == Some(0) {
+        err.push(
+            chain.cwp.clone(),
+            eyre!("`index.interval` must be greater than zero, or omitted for the 5s default"),
+        );
+    }
+    let idle_sleep_duration = interval_secs
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(5));
 
     let mailbox = chain
         .chain(&mut err)
@@ -404,6 +420,8 @@ fn parse_chain(
             from,
             chunk_size,
             mode,
+            idle_sleep_duration,
+            configured_interval: interval_secs.map(Duration::from_secs),
         },
         confirmations,
         chain_id,
@@ -501,6 +519,15 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
                 .unwrap_or_default()
                 .to_owned();
             err.into_result(SignerConf::Aws { id, region })
+        }};
+        (gcp) => {{
+            let key_version_name = signer
+                .chain(&mut err)
+                .get_key("keyVersionName")
+                .parse_string()
+                .unwrap_or("")
+                .to_owned();
+            err.into_result(SignerConf::Gcp { key_version_name })
         }};
         (cosmosKey) => {{
             let key = signer
@@ -639,10 +666,14 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
     match signer_type {
         Some("hexKey") => parse_signer!(hexKey),
         Some("aws") => parse_signer!(aws),
+        Some("gcp") => parse_signer!(gcp),
         Some("cosmosKey") => parse_signer!(cosmosKey),
         Some("starkKey") => parse_signer!(starkKey),
         Some("radixKey") => parse_signer!(radixKey),
         Some("cardanoKey") => parse_signer!(cardanoKey),
+        // The TS SDK's AgentSignerNodeSchema emits an explicit
+        // `{"type": "node"}`; accept it alongside the bare `{}` form.
+        Some("node") => Ok(SignerConf::Node),
         Some(t) => {
             Err(eyre!("Unknown signer type `{t}`")).into_config_result(|| (&signer.cwp).add("type"))
         }
