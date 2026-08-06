@@ -1,5 +1,35 @@
 # @hyperlane-xyz/starknet-core
 
+## 40.0.0
+
+## 39.1.0
+
+### Minor Changes
+
+- 086ec59: Kept Starknet deployment artifacts out of browser runtime paths by publishing ABI and class-hash data through dedicated runtime exports.
+
+## 39.0.0
+
+## 38.0.0
+
+## 37.0.0
+
+## 36.0.0
+
+## 35.2.0
+
+## 35.1.0
+
+## 35.0.1
+
+## 35.0.0
+
+## 34.0.0
+
+## 33.1.1
+
+## 33.1.0
+
 ## 33.0.2
 
 ## 33.0.1

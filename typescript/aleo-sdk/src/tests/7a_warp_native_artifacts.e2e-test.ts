@@ -3,6 +3,7 @@ import chaiAsPromised from 'chai-as-promised';
 
 import { AltVM } from '@hyperlane-xyz/provider-sdk';
 import { ArtifactState } from '@hyperlane-xyz/provider-sdk/artifact';
+import type { DeployedRawWarpArtifact } from '@hyperlane-xyz/provider-sdk/warp';
 
 import { isNullish } from '@hyperlane-xyz/utils';
 
@@ -35,6 +36,7 @@ describe('7a. Aleo Warp Native Token Artifact API (e2e)', function () {
   let hookArtifactManager: AleoHookArtifactManager;
   let mailboxAddress: string;
   let savedWarpSuffix: string | undefined;
+  let preDeployedNativeToken: DeployedRawWarpArtifact;
 
   before(async () => {
     savedWarpSuffix = process.env['ALEO_WARP_SUFFIX'];
@@ -42,9 +44,8 @@ describe('7a. Aleo Warp Native Token Artifact API (e2e)', function () {
 
     const domainId = 1234;
     aleoSigner = await AleoSigner.connectWithSigner(
-      [TEST_ALEO_CHAIN_METADATA.rpcUrl],
+      TEST_ALEO_CHAIN_METADATA,
       TEST_ALEO_PRIVATE_KEY,
-      { metadata: { chainId: 1 } },
     );
 
     const aleoClient = aleoSigner.getAleoClient();
@@ -102,6 +103,22 @@ describe('7a. Aleo Warp Native Token Artifact API (e2e)', function () {
       ismManagerAddress: ismManagerProgramId,
       hookManagerAddress: hookManagerProgramId,
     });
+
+    // Deploy native token once — it always uses the fixed program name
+    // test_hyp_warp_token_credits.aleo, so all tests share it.
+    const nativeWriter = artifactManager.createWriter(
+      AltVM.TokenType.native,
+      aleoSigner,
+    );
+    [preDeployedNativeToken] = await nativeWriter.create({
+      config: {
+        type: AltVM.TokenType.native,
+        owner: aleoSigner.getSignerAddress(),
+        mailbox: mailboxAddress,
+        remoteRouters: {},
+        destinationGas: {},
+      },
+    });
   });
 
   after(() => {
@@ -118,6 +135,7 @@ describe('7a. Aleo Warp Native Token Artifact API (e2e)', function () {
       ismArtifactManager,
       hookArtifactManager,
       mailboxAddress,
+      preDeployedToken: preDeployedNativeToken,
     }),
     {
       type: AltVM.TokenType.native,

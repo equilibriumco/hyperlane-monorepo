@@ -2,7 +2,7 @@ use std::{env, path::PathBuf};
 
 use aws_config::Region;
 use core::str::FromStr;
-use eyre::{eyre, Context, Report, Result};
+use eyre::{eyre, Report, Result};
 use prometheus::IntGauge;
 use tracing::error;
 use ya_gcp::{AuthFlow, ServiceAccountAuth};
@@ -42,6 +42,9 @@ pub enum CheckpointSyncerConf {
         /// Path to oauth user secrets, like those created by
         /// `gcloud auth application-default login`
         user_secrets: Option<String>,
+        /// Use ambient Application Default Credentials (e.g. GKE Workload
+        /// Identity) instead of a key file or user secrets.
+        use_application_default: bool,
     },
 }
 
@@ -79,15 +82,7 @@ impl FromStr for CheckpointSyncerConf {
                 Ok(CheckpointSyncerConf::S3 {
                     bucket: bucket.into(),
                     folder,
-                    // Wildly, aws_config doesn't provide any client-side way to validate a region string, so while
-                    // we still have Rusoto around we just use that to validate the region string :)
-                    region: aws_config::Region::new(
-                        region
-                            .parse::<rusoto_core::Region>()
-                            .context("Invalid region when parsing storage location")?
-                            .name()
-                            .to_owned(),
-                    ),
+                    region: aws_config::Region::new(region.to_owned()),
                 })
             }
             "file" => Ok(CheckpointSyncerConf::LocalStorage {
@@ -110,12 +105,14 @@ impl FromStr for CheckpointSyncerConf {
                         folder: None,
                         service_account_key,
                         user_secrets,
+                        use_application_default: false,
                     }),
                     Some(folder) => Ok(CheckpointSyncerConf::Gcs {
                         bucket: bucket.into(),
                         folder: Some(folder),
                         service_account_key,
                         user_secrets,
+                        use_application_default: false,
                     }),
                 }
             }
@@ -172,8 +169,11 @@ impl CheckpointSyncerConf {
                 folder,
                 service_account_key,
                 user_secrets,
+                use_application_default,
             } => {
-                let auth = if let Some(path) = service_account_key {
+                let auth = if *use_application_default {
+                    AuthFlow::ServiceAccount(ServiceAccountAuth::ApplicationDefault)
+                } else if let Some(path) = service_account_key {
                     AuthFlow::ServiceAccount(ServiceAccountAuth::Path(path.into()))
                 } else if let Some(path) = user_secrets {
                     AuthFlow::UserAccount(path.into())
@@ -288,6 +288,24 @@ mod test {
                 );
             }
             _ => panic!("Expected a reorg event error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_s3_storage_location_with_new_region() {
+        use super::*;
+        let conf = CheckpointSyncerConf::from_str("s3://my-bucket/eu-central-2/folder").unwrap();
+        match conf {
+            CheckpointSyncerConf::S3 {
+                bucket,
+                folder,
+                region,
+            } => {
+                assert_eq!(bucket, "my-bucket");
+                assert_eq!(folder.as_deref(), Some("folder"));
+                assert_eq!(region.as_ref(), "eu-central-2");
+            }
+            _ => panic!("Expected S3 checkpoint syncer"),
         }
     }
 }

@@ -24,6 +24,7 @@ interface AgentDockerTags {
   relayerFastPath: string;
   validator: string;
   validatorRC: string;
+  validatorFastPath: string;
   scraper: string;
 }
 
@@ -33,6 +34,7 @@ interface BaseDockerTags extends AgentDockerTags {
 
 interface MainnetDockerTags extends BaseDockerTags {
   checkWarpDeploy: string;
+  validatorMonitor: string;
   warpMonitor: string;
   rebalancer: string;
   feeQuoting: string;
@@ -40,29 +42,32 @@ interface MainnetDockerTags extends BaseDockerTags {
 
 export const mainnetDockerTags: MainnetDockerTags = {
   // rust agents
-  relayer: '7eb690c-20260406-142107',
-  relayerRC: '7eb690c-20260406-142107',
-  relayerFastPath: '7eb690c-20260406-142107',
-  validator: '7eb690c-20260406-142107',
-  validatorRC: '7eb690c-20260406-142107',
-  scraper: 'caa8162-20260409-132508',
+  relayer: '14646bd-20260805-072134',
+  relayerRC: '14646bd-20260805-072134',
+  relayerFastPath: '14646bd-20260805-072134',
+  validator: '14646bd-20260805-072134',
+  validatorRC: '14646bd-20260805-072134',
+  validatorFastPath: '14646bd-20260805-072134',
+  scraper: 'c1678d0-20260728-164228',
   // monorepo services
   checkWarpDeploy: 'main',
+  validatorMonitor: '2c47a33-20260724-134609',
   // standalone services
-  keyFunder: '3b17358-20260315-183126',
-  warpMonitor: '3b17358-20260315-183126',
-  rebalancer: '1a19513-20260413-090011',
+  keyFunder: '5af351e-20260728-162402',
+  warpMonitor: '744b3bb-20260521-215958',
+  rebalancer: 'da26d9a-20260703-122943',
   feeQuoting: '12d899d-20260325-184337',
 };
 
 export const testnetDockerTags: BaseDockerTags = {
   // rust agents
-  relayer: '7eb690c-20260406-142107',
-  relayerRC: '7eb690c-20260406-142107',
-  relayerFastPath: '7eb690c-20260406-142107',
-  validator: '7eb690c-20260406-142107',
-  validatorRC: '7eb690c-20260406-142107',
-  scraper: 'caa8162-20260409-132508',
+  relayer: '14646bd-20260805-072134',
+  relayerRC: '14646bd-20260805-072134',
+  relayerFastPath: '14646bd-20260805-072134',
+  validator: '14646bd-20260805-072134',
+  validatorRC: '14646bd-20260805-072134',
+  validatorFastPath: '14646bd-20260805-072134',
+  scraper: '4ef51c4-20260717-113727',
   // standalone services
-  keyFunder: '3b17358-20260315-183126',
+  keyFunder: '5dc6aa4-20260714-184449',
 };

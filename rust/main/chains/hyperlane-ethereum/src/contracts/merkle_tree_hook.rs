@@ -11,9 +11,10 @@ use hyperlane_core::rpc_clients::call_and_retry_indefinitely;
 use tracing::instrument;
 
 use hyperlane_core::{
-    ChainResult, Checkpoint, CheckpointAtBlock, ContractLocator, HyperlaneChain, HyperlaneContract,
-    HyperlaneDomain, HyperlaneProvider, IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta,
-    MerkleTreeHook, MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512,
+    ChainCommunicationError, ChainResult, Checkpoint, CheckpointAtBlock, ContractLocator,
+    HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider,
+    IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook, MerkleTreeInsertion,
+    ReorgPeriod, SequenceAwareIndexer, H256, H512,
 };
 
 use crate::interfaces::merkle_tree_hook::{
@@ -158,7 +159,12 @@ where
             let contract = self.contract.address();
             Box::pin(async move {
                 fetch_raw_logs_and_meta::<InsertedIntoTreeFilter, M>(tx_hash, provider, contract)
-                    .await
+                    .await?
+                    .ok_or_else(|| {
+                        ChainCommunicationError::CustomError(format!(
+                            "No receipt found for tx hash {tx_hash:?}"
+                        ))
+                    })
             })
         })
         .await;
@@ -316,6 +322,19 @@ where
             call_with_reorg_period(self.contract.count(), &self.provider, reorg_period).await?;
         let count = call.call().await?;
         Ok(count)
+    }
+
+    #[instrument(skip(self))]
+    async fn tree_at_block(&self, height: u64) -> ChainResult<IncrementalMerkleAtBlock> {
+        let call = self
+            .contract
+            .tree()
+            .block(BlockId::Number(BlockNumber::Number(height.into())));
+        let tree = call.call().await?;
+        Ok(IncrementalMerkleAtBlock {
+            tree: tree.into(),
+            block_height: Some(height),
+        })
     }
 }
 

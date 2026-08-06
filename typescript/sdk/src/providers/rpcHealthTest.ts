@@ -25,8 +25,11 @@ export async function isRpcHealthy(
   if (!isSdkSupportedProtocol(metadata.protocol)) {
     return false;
   }
+  // No cast needed: isSdkSupportedProtocol above already narrows the protocol.
   const builder = protocolToDefaultProviderBuilder[metadata.protocol];
-  const provider = builder([rpc], metadata.chainId);
+  // Build against only the RPC under test so the health check targets the
+  // specific endpoint at `rpcIndex` rather than the metadata's first RPC.
+  const provider = builder({ ...metadata, rpcUrls: [rpc] });
   if (provider.type === ProviderType.EthersV5)
     return isEthersV5ProviderHealthy(provider.provider, metadata);
   else if (provider.type === ProviderType.SolanaWeb3)

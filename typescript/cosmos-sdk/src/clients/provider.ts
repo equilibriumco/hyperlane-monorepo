@@ -5,13 +5,19 @@ import {
   type BankExtension,
   type MsgSendEncodeObject,
   QueryClient,
-  StargateClient,
+  type StargateClient,
   defaultRegistryTypes,
   setupBankExtension,
 } from '@cosmjs/stargate';
 import { type CometClient, connectComet } from '@cosmjs/tendermint-rpc';
 
 import { type AltVM } from '@hyperlane-xyz/provider-sdk';
+import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk/chain';
+import {
+  composeWarpDeployGas,
+  nativeAmountFromGasUnits,
+  type WarpArtifactConfig,
+} from '@hyperlane-xyz/provider-sdk/warp';
 import { assert, strip0x } from '@hyperlane-xyz/utils';
 
 import { type MsgRemoteTransferEncodeObject } from '../hyperlane/warp/messages.js';
@@ -26,6 +32,26 @@ import {
 import { COSMOS_MODULE_MESSAGE_REGISTRY as R } from '../registry.js';
 import { getWarpTokenType } from '../warp/warp-query.js';
 
+import {
+  StargateClientCache,
+  disconnectStargateClient,
+  shouldCacheStargateClient,
+} from './stargate.js';
+
+// Warp-deploy cost breakdown for Cosmos-native. Composed additively in
+// getMinGasForWarpDeploy() based on the WarpConfig shape. Unlike rent-metered
+// protocols, these are gas UNITS (ugas) that get multiplied by the chain's
+// gas price to yield a native-denom amount.
+//
+// TODO: fill from observed deploy — we don't have a measured breakdown for
+// feature-heavy warp deploys on Cosmos-native yet, so all extras currently
+// contribute nothing.
+const WARP_DEPLOY_BASE_UGAS = BigInt(3e6); // base router deploy
+const WARP_DEPLOY_CROSS_COLLATERAL_EXTRA_UGAS = 0n; // + crossCollateral router extras
+const WARP_DEPLOY_FEE_PROGRAM_UGAS = 0n; // + fee program (config.fee object)
+const WARP_DEPLOY_CUSTOM_ISM_UGAS = 0n; // + custom ISM (config.interchainSecurityModule object)
+const WARP_DEPLOY_CUSTOM_HOOK_UGAS = 0n; // + custom hook / IGP (config.hook object)
+
 export class CosmosNativeProvider implements AltVM.IProvider<EncodeObject> {
   private readonly query: QueryClient &
     BankExtension &
@@ -34,18 +60,24 @@ export class CosmosNativeProvider implements AltVM.IProvider<EncodeObject> {
   private readonly registry: Registry;
   private readonly cometClient: CometClient;
   private readonly rpcUrls: string[];
+  protected readonly chainMetadata: ChainMetadataForAltVM;
+  private readonly stargateClients = new StargateClientCache(1);
 
   static async connect(
-    rpcUrls: string[],
-    _chainId: string | number,
+    metadata: ChainMetadataForAltVM,
   ): Promise<CosmosNativeProvider> {
+    const rpcUrls = (metadata.rpcUrls ?? []).map((rpc) => rpc.http);
     assert(rpcUrls.length > 0, `got no rpcUrls`);
 
     const client = await connectComet(rpcUrls[0]);
-    return new CosmosNativeProvider(client, rpcUrls);
+    return new CosmosNativeProvider(client, rpcUrls, metadata);
   }
 
-  protected constructor(cometClient: CometClient, rpcUrls: string[]) {
+  protected constructor(
+    cometClient: CometClient,
+    rpcUrls: string[],
+    chainMetadata: ChainMetadataForAltVM,
+  ) {
     this.query = QueryClient.withExtensions(
       cometClient,
       setupBankExtension,
@@ -62,6 +94,24 @@ export class CosmosNativeProvider implements AltVM.IProvider<EncodeObject> {
 
     this.cometClient = cometClient;
     this.rpcUrls = rpcUrls;
+    this.chainMetadata = chainMetadata;
+  }
+
+  async getMinGasForWarpDeploy(
+    warpConfig: WarpArtifactConfig,
+  ): Promise<bigint> {
+    const units = composeWarpDeployGas(warpConfig, {
+      base: WARP_DEPLOY_BASE_UGAS,
+      crossCollateralExtra: WARP_DEPLOY_CROSS_COLLATERAL_EXTRA_UGAS,
+      feeProgram: WARP_DEPLOY_FEE_PROGRAM_UGAS,
+      customIsm: WARP_DEPLOY_CUSTOM_ISM_UGAS,
+      customHook: WARP_DEPLOY_CUSTOM_HOOK_UGAS,
+    });
+    assert(
+      this.chainMetadata.gasPrice,
+      `gasPrice not defined on chain ${this.chainMetadata.name}`,
+    );
+    return nativeAmountFromGasUnits(units, this.chainMetadata.gasPrice);
   }
 
   // ### QUERY BASE ###
@@ -109,33 +159,57 @@ export class CosmosNativeProvider implements AltVM.IProvider<EncodeObject> {
       req.senderPubKey,
       `Cosmos Native requires a sender public key to estimate the transaction fee`,
     );
-    const stargateClient = await StargateClient.connect(this.rpcUrls[0]);
+    const stargateClientPromise = this.getStargateClient();
+    let stargateClient: StargateClient | undefined;
 
-    const message = this.registry.encodeAsAny(req.transaction);
-    const pubKey = encodeSecp256k1Pubkey(
-      new Uint8Array(Buffer.from(strip0x(req.senderPubKey), 'hex')),
-    );
+    try {
+      stargateClient = await stargateClientPromise;
 
-    const queryClient = stargateClient['getQueryClient']();
-    assert(queryClient, `queryClient could not be found on stargate client`);
+      const message = this.registry.encodeAsAny(req.transaction);
+      const pubKey = encodeSecp256k1Pubkey(
+        new Uint8Array(Buffer.from(strip0x(req.senderPubKey), 'hex')),
+      );
 
-    const { sequence } = await stargateClient.getSequence(req.senderAddress);
-    const { gasInfo } = await queryClient.tx.simulate(
-      [message],
-      undefined,
-      pubKey,
-      sequence,
-    );
-    const gasUnits = Uint53.fromString(
-      gasInfo?.gasUsed.toString() ?? '0',
-    ).toNumber();
+      const queryClient = stargateClient
+        // @ts-ignore force access to protected method
+        .forceGetQueryClient();
 
-    const gasPrice = parseFloat(req.estimatedGasPrice.toString());
-    return {
-      gasUnits: BigInt(gasUnits),
-      gasPrice,
-      fee: BigInt(Math.floor(gasUnits * gasPrice)),
-    };
+      const { sequence } = await stargateClient.getSequence(req.senderAddress);
+      const { gasInfo } = await queryClient.tx.simulate(
+        [message],
+        undefined,
+        pubKey,
+        sequence,
+      );
+      const gasUnits = Uint53.fromString(
+        gasInfo?.gasUsed.toString() ?? '0',
+      ).toNumber();
+
+      const gasPrice = parseFloat(req.estimatedGasPrice.toString());
+      return {
+        gasUnits: BigInt(gasUnits),
+        gasPrice,
+        fee: BigInt(Math.floor(gasUnits * gasPrice)),
+      };
+    } catch (error) {
+      this.stargateClients.evict(this.rpcUrls[0], stargateClientPromise);
+      throw error;
+    } finally {
+      if (shouldCacheStargateClient(this.rpcUrls[0])) {
+        this.stargateClients.release(stargateClientPromise);
+      } else if (stargateClient) {
+        disconnectStargateClient(Promise.resolve(stargateClient));
+      }
+    }
+  }
+
+  private getStargateClient(): Promise<StargateClient> {
+    return this.stargateClients.get(this.rpcUrls[0]);
+  }
+
+  disconnect(): void {
+    this.cometClient.disconnect();
+    this.stargateClients.clear();
   }
 
   async isMessageDelivered(req: AltVM.ReqIsMessageDelivered): Promise<boolean> {

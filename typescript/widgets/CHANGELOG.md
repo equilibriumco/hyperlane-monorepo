@@ -1,5 +1,287 @@
 # @hyperlane-xyz/widgets
 
+## 40.0.0
+
+### Patch Changes
+
+- Updated dependencies [745fb77]
+- Updated dependencies [469da6d]
+- Updated dependencies [745fb77]
+- Updated dependencies [57b1e14]
+- Updated dependencies [1cac66f]
+- Updated dependencies [a7f757b]
+- Updated dependencies [745fb77]
+- Updated dependencies [4acd9a6]
+- Updated dependencies [c6a2f61]
+  - @hyperlane-xyz/sdk@40.0.0
+  - @hyperlane-xyz/tron-sdk@24.1.0
+  - @hyperlane-xyz/aleo-sdk@40.0.0
+  - @hyperlane-xyz/cosmos-sdk@40.0.0
+  - @hyperlane-xyz/radix-sdk@40.0.0
+  - @hyperlane-xyz/utils@40.0.0
+  - @hyperlane-xyz/provider-sdk@8.0.2
+
+## 39.1.0
+
+### Patch Changes
+
+- Updated dependencies [4976bb1]
+- Updated dependencies [6c9210b]
+- Updated dependencies [086ec59]
+  - @hyperlane-xyz/sdk@39.1.0
+  - @hyperlane-xyz/utils@39.1.0
+  - @hyperlane-xyz/radix-sdk@39.1.0
+  - @hyperlane-xyz/aleo-sdk@39.1.0
+  - @hyperlane-xyz/cosmos-sdk@39.1.0
+  - @hyperlane-xyz/provider-sdk@8.0.1
+  - @hyperlane-xyz/tron-sdk@24.0.1
+
+## 39.0.0
+
+### Patch Changes
+
+- f41f9fd: Removed Aleo deployment artifacts, the Provable runtime, and the Shield wallet adapter from eager browser bundles. Lightweight constants and program metadata stayed synchronous, while browser providers and wallet integrations loaded their protocol runtimes on first use. Aleo mainnet and testnet runtimes were split so browser providers only downloaded the configured network.
+- Updated dependencies [f41f9fd]
+- Updated dependencies [ba0e9c1]
+- Updated dependencies [4ef1fde]
+- Updated dependencies [43eb24a]
+- Updated dependencies [406b5c7]
+- Updated dependencies [11e215e]
+- Updated dependencies [bf7c658]
+- Updated dependencies [4bebbbf]
+- Updated dependencies [6f61265]
+- Updated dependencies [1a31d04]
+- Updated dependencies [735793b]
+- Updated dependencies [2d398b9]
+- Updated dependencies [15b249c]
+- Updated dependencies [6967bef]
+- Updated dependencies [213f626]
+- Updated dependencies [3811ba9]
+- Updated dependencies [6c2ca1d]
+- Updated dependencies [1a31d04]
+- Updated dependencies [9997aee]
+  - @hyperlane-xyz/aleo-sdk@39.0.0
+  - @hyperlane-xyz/sdk@39.0.0
+  - @hyperlane-xyz/provider-sdk@8.0.0
+  - @hyperlane-xyz/tron-sdk@24.0.0
+  - @hyperlane-xyz/cosmos-sdk@39.0.0
+  - @hyperlane-xyz/radix-sdk@39.0.0
+  - @hyperlane-xyz/utils@39.0.0
+
+## 38.0.0
+
+### Patch Changes
+
+- Updated dependencies [961a89d]
+- Updated dependencies [2208b91]
+- Updated dependencies [2208b91]
+- Updated dependencies [2208b91]
+- Updated dependencies [197b1e0]
+- Updated dependencies [293abdc]
+  - @hyperlane-xyz/sdk@38.0.0
+  - @hyperlane-xyz/provider-sdk@7.2.0
+  - @hyperlane-xyz/aleo-sdk@38.0.0
+  - @hyperlane-xyz/cosmos-sdk@38.0.0
+  - @hyperlane-xyz/radix-sdk@38.0.0
+  - @hyperlane-xyz/tron-sdk@23.1.4
+  - @hyperlane-xyz/utils@38.0.0
+
+## 37.0.0
+
+### Patch Changes
+
+- Updated dependencies [92909f8]
+- Updated dependencies [262073e]
+- Updated dependencies [df34a68]
+- Updated dependencies [262073e]
+- Updated dependencies [af8e1f6]
+- Updated dependencies [cc4bdb6]
+- Updated dependencies [3771b2b]
+- Updated dependencies [c7895b6]
+- Updated dependencies [262073e]
+- Updated dependencies [6e803be]
+- Updated dependencies [cb0c7c9]
+- Updated dependencies [a82c918]
+- Updated dependencies [262073e]
+- Updated dependencies [351cf01]
+- Updated dependencies [5122e71]
+- Updated dependencies [262073e]
+- Updated dependencies [262073e]
+- Updated dependencies [262073e]
+- Updated dependencies [31f8b51]
+- Updated dependencies [97e8ca1]
+- Updated dependencies [955281d]
+- Updated dependencies [9c8b435]
+  - @hyperlane-xyz/sdk@37.0.0
+  - @hyperlane-xyz/provider-sdk@7.1.0
+  - @hyperlane-xyz/aleo-sdk@37.0.0
+  - @hyperlane-xyz/cosmos-sdk@37.0.0
+  - @hyperlane-xyz/radix-sdk@37.0.0
+  - @hyperlane-xyz/tron-sdk@23.1.3
+  - @hyperlane-xyz/utils@37.0.0
+
+## 36.0.0
+
+### Minor Changes
+
+- 70586aa: Added aleo ARC20 token support
+
+### Patch Changes
+
+- Updated dependencies [d288e7b]
+- Updated dependencies [d288e7b]
+- Updated dependencies [d288e7b]
+- Updated dependencies [019201a]
+- Updated dependencies [cc722b8]
+- Updated dependencies [9cd7606]
+- Updated dependencies [2821252]
+- Updated dependencies [a6a3a33]
+- Updated dependencies [2821252]
+- Updated dependencies [d288e7b]
+- Updated dependencies [d288e7b]
+- Updated dependencies [aa41ce4]
+- Updated dependencies [2f9d783]
+- Updated dependencies [9bdab1d]
+- Updated dependencies [d288e7b]
+- Updated dependencies [cf6857e]
+- Updated dependencies [823eca3]
+- Updated dependencies [70586aa]
+- Updated dependencies [32b87ad]
+- Updated dependencies [cf6857e]
+  - @hyperlane-xyz/sdk@36.0.0
+  - @hyperlane-xyz/utils@36.0.0
+  - @hyperlane-xyz/provider-sdk@7.0.0
+  - @hyperlane-xyz/aleo-sdk@36.0.0
+  - @hyperlane-xyz/cosmos-sdk@36.0.0
+  - @hyperlane-xyz/radix-sdk@36.0.0
+  - @hyperlane-xyz/tron-sdk@23.1.2
+
+## 35.2.0
+
+### Patch Changes
+
+- Updated dependencies [88e51ed]
+- Updated dependencies [fb63f5f]
+- Updated dependencies [889c68a]
+- Updated dependencies [fb63f5f]
+- Updated dependencies [92ef474]
+- Updated dependencies [f0b325a]
+- Updated dependencies [6db4aee]
+- Updated dependencies [babb3d0]
+- Updated dependencies [867ce3c]
+- Updated dependencies [b77faf4]
+- Updated dependencies [fb63f5f]
+- Updated dependencies [fb63f5f]
+  - @hyperlane-xyz/sdk@35.2.0
+  - @hyperlane-xyz/aleo-sdk@35.2.0
+  - @hyperlane-xyz/cosmos-sdk@35.2.0
+  - @hyperlane-xyz/radix-sdk@35.2.0
+  - @hyperlane-xyz/utils@35.2.0
+  - @hyperlane-xyz/provider-sdk@6.1.1
+  - @hyperlane-xyz/tron-sdk@23.1.1
+
+## 35.1.0
+
+### Patch Changes
+
+- Updated dependencies [d1b6f0a]
+- Updated dependencies [830ce1d]
+- Updated dependencies [9cdf9eb]
+  - @hyperlane-xyz/provider-sdk@6.1.0
+  - @hyperlane-xyz/cosmos-sdk@35.1.0
+  - @hyperlane-xyz/radix-sdk@35.1.0
+  - @hyperlane-xyz/aleo-sdk@35.1.0
+  - @hyperlane-xyz/tron-sdk@23.1.0
+  - @hyperlane-xyz/sdk@35.1.0
+  - @hyperlane-xyz/utils@35.1.0
+
+## 35.0.1
+
+### Patch Changes
+
+- Updated dependencies [06a5b6b]
+- Updated dependencies [da1cfb1]
+- Updated dependencies [4bb1c3e]
+- Updated dependencies [93c2290]
+  - @hyperlane-xyz/sdk@35.0.1
+  - @hyperlane-xyz/utils@35.0.1
+  - @hyperlane-xyz/aleo-sdk@35.0.1
+  - @hyperlane-xyz/cosmos-sdk@35.0.1
+  - @hyperlane-xyz/provider-sdk@6.0.4
+  - @hyperlane-xyz/radix-sdk@35.0.1
+  - @hyperlane-xyz/tron-sdk@23.0.9
+
+## 35.0.0
+
+### Patch Changes
+
+- Updated dependencies [38479d0]
+- Updated dependencies [4adf279]
+- Updated dependencies [7089676]
+- Updated dependencies [44aa432]
+- Updated dependencies [631d7e7]
+- Updated dependencies [6c687ee]
+- Updated dependencies [a8c9430]
+- Updated dependencies [f3851a3]
+  - @hyperlane-xyz/sdk@35.0.0
+  - @hyperlane-xyz/aleo-sdk@35.0.0
+  - @hyperlane-xyz/cosmos-sdk@35.0.0
+  - @hyperlane-xyz/radix-sdk@35.0.0
+  - @hyperlane-xyz/utils@35.0.0
+  - @hyperlane-xyz/provider-sdk@6.0.3
+  - @hyperlane-xyz/tron-sdk@23.0.8
+
+## 34.0.0
+
+### Patch Changes
+
+- Updated dependencies [9a1ce26]
+- Updated dependencies [f758a70]
+- Updated dependencies [2151352]
+- Updated dependencies [b8a600c]
+  - @hyperlane-xyz/cosmos-sdk@34.0.0
+  - @hyperlane-xyz/sdk@34.0.0
+  - @hyperlane-xyz/aleo-sdk@34.0.0
+  - @hyperlane-xyz/radix-sdk@34.0.0
+  - @hyperlane-xyz/utils@34.0.0
+  - @hyperlane-xyz/provider-sdk@6.0.2
+  - @hyperlane-xyz/tron-sdk@23.0.7
+
+## 33.1.1
+
+### Patch Changes
+
+- Updated dependencies [9ad1bd0]
+- Updated dependencies [530f02e]
+- Updated dependencies [9670e43]
+- Updated dependencies [cc90a8f]
+  - @hyperlane-xyz/sdk@33.1.1
+  - @hyperlane-xyz/aleo-sdk@33.1.1
+  - @hyperlane-xyz/cosmos-sdk@33.1.1
+  - @hyperlane-xyz/radix-sdk@33.1.1
+  - @hyperlane-xyz/utils@33.1.1
+  - @hyperlane-xyz/provider-sdk@6.0.1
+  - @hyperlane-xyz/tron-sdk@23.0.6
+
+## 33.1.0
+
+### Patch Changes
+
+- Updated dependencies [6f4b790]
+- Updated dependencies [bfe4d2e]
+- Updated dependencies [6929388]
+- Updated dependencies [47649b7]
+- Updated dependencies [bfe4d2e]
+- Updated dependencies [0b1c1d1]
+- Updated dependencies [d9dec53]
+  - @hyperlane-xyz/sdk@33.1.0
+  - @hyperlane-xyz/provider-sdk@6.0.0
+  - @hyperlane-xyz/aleo-sdk@33.1.0
+  - @hyperlane-xyz/cosmos-sdk@33.1.0
+  - @hyperlane-xyz/radix-sdk@33.1.0
+  - @hyperlane-xyz/tron-sdk@23.0.5
+  - @hyperlane-xyz/utils@33.1.0
+
 ## 33.0.2
 
 ### Patch Changes

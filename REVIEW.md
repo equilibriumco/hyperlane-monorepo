@@ -26,10 +26,12 @@
 - Edge cases that should be tested
 - **New utility functions need unit tests**
 - **CLI changes need e2e tests** - `test:ethereum:e2e`, `test:cosmosnative:e2e`
+- **New CLI subcommands need e2e coverage** - A new command (e.g. `hook deploy`) should add at least one EVM e2e test AND one altVM e2e test to prove both deploy paths work. If a PR adds a command with no e2e test, flag the gap explicitly — green unit/codecov coverage does not satisfy this.
 
 ## Performance
 
 - Unnecessary allocations or computations
+- **Hoist invariant constants out of function bodies** - Arrays, objects, and regexes that don't depend on arguments should be module-level `const`s, not recreated on every call (e.g. a fixed `unsupportedTypes` list).
 
 ## Changesets
 
@@ -39,7 +41,7 @@
 
 ## Type Cast Audit (MANDATORY PASS)
 
-**Do a dedicated pass over the diff looking for every `as` keyword and `any` type.** Flag each one. This is the most common source of bugs in this codebase.
+**Do a dedicated pass over the diff looking for every type-assertion `as` and `any` type.** Flag each one. This is the most common source of bugs in this codebase.
 
 - **`as X`** — flag it. The fix is almost always to fix the function signature, add a type guard, or restructure the code
 - **`as unknown as X`** — always flag. This completely bypasses type checking
@@ -49,6 +51,8 @@
 - **`!` (non-null assertion)** — flag unless the value is provably non-null on the preceding line
 
 The only acceptable cast is one with a `// CAST:` comment explaining why it's unavoidable.
+
+> **`as const` is exempt** — it is a _const assertion_, not a type assertion. It only narrows a literal to its readonly literal type and cannot widen or reinterpret a value, so it is not a type-safety escape. It is the endorsed idiom for the `const { … } as const` object + `type X = (typeof X)[keyof typeof X]` derived-union pattern used throughout the codebase. Do **not** flag it and do **not** require a `// CAST:` comment for it.
 
 ## TypeScript/SDK Patterns
 
@@ -90,3 +94,8 @@ The only acceptable cast is one with a `// CAST:` comment explaining why it's un
 - **Interface changes** - Deprecate before removing; add new methods alongside old
 - **Storage layout** - Document migration path for upgradeable contracts
 - **Config schema changes** - Ensure backward compatibility or migration scripts
+
+## Validation Gaps to Watch For
+
+- **Recursive/nested configs bypass top-level guards** - If a command rejects unsupported types by checking only the top-level discriminant (e.g. `hookConfig.type`), verify nested configs can't smuggle an unsupported type through. Aggregation/routing hooks and ISMs recurse into `hooks`/`domains`/`fallback`/sub-ISMs; a guard that only inspects the root lets a nested unsupported type fail deep in the deploy instead of up front.
+- **Partial provisioning** - A command that provisions only the origin `--chain` (signer/preflight/balances) but accepts config referencing other chains (destination, remote domains) will fail partway. Confirm the accepted config schema can't require resources the command never sets up.

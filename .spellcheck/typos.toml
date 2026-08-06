@@ -24,6 +24,7 @@ extend-exclude = [
   "rust/main/chains/hyperlane-sealevel/src/provider/recipient/*.json",
   "rust/main/chains/hyperlane-aleo/src/indexer/mock_responses/",
   "rust/main/chains/hyperlane-aleo/src/provider/mock_responses/",
+  "rust/main/chains/hyperlane-radix/src/utils.rs",
   "rust/main/chains/hyperlane-starknet/abis/",
   "rust/main/lander/src/adapter/chains/aleo/adapter/status/test_fixtures/",
   "rust/sealevel/environments/",
@@ -76,6 +77,8 @@ ful = "ful"
 afe = "afe"
 # Short Rust variable names / destructuring
 ba = "ba"
+# Commit SHA substring in an immutable Docker image tag
+daa = "daa"
 # "unparseable" is acceptable English (variant of "unparsable")
 unparseable = "unparseable"
 # "writeable" is acceptable English (variant of "writable")

@@ -4,10 +4,10 @@ import chaiAsPromised from 'chai-as-promised';
 import { ethers } from 'ethers';
 import hre from 'hardhat';
 import sinon from 'sinon';
-import { UINT_256_MAX } from 'starknet';
 
 import {
   CONTRACTS_PACKAGE_VERSION,
+  CrossCollateralRoutingFee__factory,
   CrossCollateralRouter__factory,
   ERC20Test,
   ERC20Test__factory,
@@ -64,7 +64,12 @@ import { randomAddress } from '../test/testUtils.js';
 import { ChainMap } from '../types.js';
 import { normalizeConfig } from '../utils/ism.js';
 
-import { EvmWarpModule } from './EvmWarpModule.js';
+import { EvmTokenFeeModule } from '../fee/EvmTokenFeeModule.js';
+import { DEFAULT_ROUTER_KEY } from '../fee/types.js';
+import {
+  EvmWarpModule,
+  MAX_LEGACY_BRIDGE_APPROVAL_VERSION,
+} from './EvmWarpModule.js';
 import {
   EverclearTokenBridgeTokenType,
   MovableTokenType,
@@ -1236,6 +1241,41 @@ describe('EvmWarpModule', async () => {
       expect(updatedConfig.destinationGas![domain]).to.equal('5000');
     });
 
+    it('should update the feeHook', async () => {
+      const config: HypTokenRouterConfig = {
+        ...baseConfig,
+        type: TokenType.synthetic,
+        name: TOKEN_NAME,
+        symbol: TOKEN_NAME,
+        decimals: TOKEN_DECIMALS,
+      };
+
+      const evmERC20WarpModule = await EvmWarpModule.create({
+        chain,
+        config,
+        multiProvider,
+        proxyFactoryFactories: ismFactoryAddresses,
+      });
+
+      // Verify no feeHook initially
+      const initialConfig = await evmERC20WarpModule.read();
+      expect(initialConfig.feeHook).to.be.undefined;
+
+      // Set feeHook to a random address
+      const feeHookAddress = randomAddress();
+      const txs = await evmERC20WarpModule.update({
+        ...config,
+        feeHook: feeHookAddress,
+      });
+      expect(txs.length).to.equal(1);
+      await sendTxs(txs);
+
+      // Verify feeHook was set
+      const updatedConfig = await evmERC20WarpModule.read();
+      assert(updatedConfig.feeHook != null, 'feeHook should be set');
+      expect(eqAddress(updatedConfig.feeHook, feeHookAddress)).to.be.true;
+    });
+
     for (const tokenType of movableCollateralTypes) {
       it(`should add a new rebalancer on the deployed token if it is of type "${tokenType}"`, async () => {
         const initialRebalancer = randomAddress();
@@ -1328,6 +1368,12 @@ describe('EvmWarpModule', async () => {
           proxyFactoryFactories: ismFactoryAddresses,
         });
 
+        // Spoof a new (post-legacy) impl so `approvedTokens` are ignored: the new
+        // router grants allowances per rebalance, so only the addBridge tx is emitted.
+        const versionStub = sinon
+          .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+          .resolves('12.0.0');
+
         const txs = await evmERC20WarpModule.update(
           HypTokenRouterConfigSchema.parse({
             ...config,
@@ -1342,8 +1388,9 @@ describe('EvmWarpModule', async () => {
           }),
         );
 
-        // 1 tx to allow the bridge and another to approve the token
-        expect(txs.length).to.equal(2);
+        versionStub.restore();
+
+        expect(txs.length).to.equal(1);
         await sendTxs(txs);
 
         const warpTokenInstance = MovableCollateralRouter__factory.connect(
@@ -1358,7 +1405,7 @@ describe('EvmWarpModule', async () => {
           evmERC20WarpModule.serialize().deployedTokenRoute,
           allowedBridgeToAdd,
         );
-        expect(allowance.toBigInt() === UINT_256_MAX).to.be.true;
+        expect(allowance.toBigInt()).to.equal(0n);
       });
 
       it(`should remove rebalancing bridges for tokens of type "${tokenType}"`, async () => {
@@ -1374,7 +1421,6 @@ describe('EvmWarpModule', async () => {
             [domainId]: [
               {
                 bridge: allowedBridgeToAdd,
-                approvedTokens: [feeToken.address],
               },
             ],
           },
@@ -1410,6 +1456,556 @@ describe('EvmWarpModule', async () => {
         expect(allowedBridges).to.be.empty;
       });
 
+      // Only collateral routes back the router with an ERC20 that could carry a
+      // legacy standing allowance; native routes never had approvals.
+      if (tokenType === TokenType.collateral) {
+        // Plants a legacy type(uint256).max standing allowance from the router to
+        // `bridge`, mimicking the pre-upgrade on-chain state left by `_addBridge`
+        // (collateral token) or the legacy approvedTokens grant path (any token).
+        const plantLegacyAllowance = async (
+          router: Address,
+          bridge: Address,
+          erc20: ERC20Test = token,
+        ): Promise<void> => {
+          await hre.network.provider.request({
+            method: 'hardhat_impersonateAccount',
+            params: [router],
+          });
+          await hre.network.provider.request({
+            method: 'hardhat_setBalance',
+            params: [router, '0xDE0B6B3A7640000'],
+          });
+          const routerSigner = hre.ethers.provider.getSigner(router);
+          await erc20
+            .connect(routerSigner)
+            .approve(bridge, ethers.constants.MaxUint256);
+          await hre.network.provider.request({
+            method: 'hardhat_stopImpersonatingAccount',
+            params: [router],
+          });
+        };
+
+        it(`should revoke a legacy standing bridge allowance during an in-place upgrade for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          await plantLegacyAllowance(router, allowedBridge);
+          expect(
+            (
+              await token.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(ethers.constants.MaxUint256.toBigInt());
+
+          // Spoof an old (pre-revoke-semantics) impl so update() generates an
+          // upgrade tx and the revoke gate opens. fetchScale is stubbed because
+          // old contracts (< 11.0.0) default scale to 1.
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves('11.3.0');
+          const scaleStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchScale')
+            .resolves(undefined);
+
+          const txs = await evmERC20WarpModule.update({
+            ...config,
+            contractVersion: CONTRACTS_PACKAGE_VERSION,
+          });
+          await sendTxs(txs);
+
+          versionStub.restore();
+          scaleStub.restore();
+
+          // The revoke runs against the new impl after the upgrade tx.
+          expect(
+            (
+              await token.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(0n);
+        });
+
+        it(`should revoke a legacy approvedTokens allowance during an in-place upgrade for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                  approvedTokens: [feeToken.address],
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          // Plant legacy max allowances on BOTH the collateral token and the
+          // approvedToken, mimicking the pre-upgrade grants for a remaining bridge.
+          await plantLegacyAllowance(router, allowedBridge);
+          await plantLegacyAllowance(router, allowedBridge, feeToken);
+
+          // Spoof an old impl so update() generates an upgrade and the revoke gate opens.
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves('11.3.0');
+          const scaleStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchScale')
+            .resolves(undefined);
+
+          const txs = await evmERC20WarpModule.update({
+            ...config,
+            contractVersion: CONTRACTS_PACKAGE_VERSION,
+          });
+          await sendTxs(txs);
+
+          versionStub.restore();
+          scaleStub.restore();
+
+          // Both the collateral and the approvedToken allowance are cleared post-upgrade.
+          expect(
+            (
+              await token.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(0n);
+          expect(
+            (
+              await feeToken.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(0n);
+        });
+
+        it(`should not emit a revoke tx when no upgrade is generated for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          // Plant a legacy allowance so a stray revoke would be visible.
+          await plantLegacyAllowance(router, allowedBridge);
+
+          // Keep the fixture on a legacy version. With no contractVersion bump,
+          // update() generates no upgrade tx and the revoke gate stays closed.
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves(MAX_LEGACY_BRIDGE_APPROVAL_VERSION);
+
+          const txs = await evmERC20WarpModule.update(config);
+          await sendTxs(txs);
+
+          versionStub.restore();
+
+          // The legacy allowance is untouched (revoke must run only post-upgrade).
+          expect(
+            (
+              await token.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(ethers.constants.MaxUint256.toBigInt());
+        });
+
+        it(`should revoke a stale allowance on an already-upgraded impl with no scheduled upgrade for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          // A stale legacy allowance left by a prior run that upgraded the impl but
+          // whose revoke txs never executed.
+          await plantLegacyAllowance(router, allowedBridge);
+
+          // Spoof the on-chain version above the legacy bound (already upgraded).
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves('12.0.0');
+          const scaleStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchScale')
+            .resolves(undefined);
+
+          const actualConfig = await evmERC20WarpModule.read();
+
+          versionStub.restore();
+          scaleStub.restore();
+
+          // No upgrade scheduled this run, but the stale allowance must still be
+          // cleaned up — the revoke runs against the already-new impl. This keeps
+          // cleanup retryable after a partially-executed upgrade.
+          const revokeTxs =
+            await evmERC20WarpModule.createRevokeStaleBridgeAllowancesTxs(
+              actualConfig,
+              config,
+              false,
+            );
+          expect(revokeTxs.length).to.equal(1);
+          await sendTxs(revokeTxs);
+
+          expect(
+            (
+              await token.callStatic.allowance(router, allowedBridge)
+            ).toBigInt(),
+          ).to.equal(0n);
+        });
+
+        it(`should not emit a revoke tx on an already-upgraded impl with no stale allowance for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          // No allowance is planted: a clean already-upgraded router has nothing
+          // stale, so the non-zero allowance filter emits no revoke tx.
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves('12.0.0');
+          const scaleStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchScale')
+            .resolves(undefined);
+
+          const actualConfig = await evmERC20WarpModule.read();
+
+          versionStub.restore();
+          scaleStub.restore();
+
+          const revokeTxs =
+            await evmERC20WarpModule.createRevokeStaleBridgeAllowancesTxs(
+              actualConfig,
+              config,
+              false,
+            );
+          expect(revokeTxs).to.be.empty;
+        });
+
+        it(`should not emit a revoke tx for a removed bridge (handled on-chain by _removeBridge) for a route of type "${tokenType}"`, async () => {
+          const removedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: removedBridge,
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          // Give the bridge a legacy standing allowance so a stray revoke would be visible.
+          await plantLegacyAllowance(router, removedBridge);
+
+          // The bridge is dropped from the expected config: _removeBridge revokes it
+          // on-chain, so this method must not emit a revoke tx for it (intersection
+          // of actual and expected allowlisted bridges is empty).
+          const expectedConfig = HypTokenRouterConfigSchema.parse({
+            ...config,
+            allowedRebalancingBridges: {
+              [domainId]: [],
+            },
+          });
+
+          const actualConfig = await evmERC20WarpModule.read();
+          const revokeTxs =
+            await evmERC20WarpModule.createRevokeStaleBridgeAllowancesTxs(
+              actualConfig,
+              expectedConfig,
+              true,
+            );
+          expect(revokeTxs).to.be.empty;
+        });
+
+        it(`should not emit a revoke tx for a newly-added bridge for a route of type "${tokenType}"`, async () => {
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          // A bridge present in expected but not in actual is brand new; it never held
+          // a legacy allowance, so no revoke tx should be emitted for it.
+          const addedBridge = normalizeAddressEvm(randomAddress());
+          const expectedConfig = HypTokenRouterConfigSchema.parse({
+            ...config,
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: addedBridge,
+                },
+              ],
+            },
+          });
+
+          const actualConfig = await evmERC20WarpModule.read();
+          const revokeTxs =
+            await evmERC20WarpModule.createRevokeStaleBridgeAllowancesTxs(
+              actualConfig,
+              expectedConfig,
+              true,
+            );
+          expect(revokeTxs).to.be.empty;
+        });
+
+        it(`should revoke a stale allowance for a bridge moved between domains for a route of type "${tokenType}"`, async () => {
+          const movedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: movedBridge,
+                  approvedTokens: [feeToken.address],
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          const router = evmERC20WarpModule.serialize().deployedTokenRoute;
+
+          // Legacy allowances on both the collateral and the approvedToken.
+          await plantLegacyAllowance(router, movedBridge);
+          await plantLegacyAllowance(router, movedBridge, feeToken);
+
+          // Expected config keeps the same bridge but on a different domain. ERC20
+          // allowances are (router, bridge) and domain-agnostic, so the stale
+          // allowance must still be revoked despite the move.
+          const otherChain = TestChainName.test2;
+          const expectedConfig = HypTokenRouterConfigSchema.parse({
+            ...config,
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+              [otherChain]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [otherChain]: [
+                {
+                  bridge: movedBridge,
+                  approvedTokens: [feeToken.address],
+                },
+              ],
+            },
+          });
+
+          const actualConfig = await evmERC20WarpModule.read();
+          const revokeTxs =
+            await evmERC20WarpModule.createRevokeStaleBridgeAllowancesTxs(
+              actualConfig,
+              expectedConfig,
+              true,
+            );
+
+          const revokedTokens = revokeTxs.map((tx) => {
+            assert(tx.data, 'expected revoke calldata');
+            const [revokedToken] =
+              MovableCollateralRouter__factory.createInterface().decodeFunctionData(
+                'approveTokenForBridge(address,address)',
+                tx.data,
+              );
+            return normalizeAddressEvm(revokedToken);
+          });
+          expect(revokedTokens).to.have.members([
+            normalizeAddressEvm(token.address),
+            normalizeAddressEvm(feeToken.address),
+          ]);
+        });
+
+        it(`should emit an approval tx for approvedTokens on a legacy router for a route of type "${tokenType}"`, async () => {
+          const allowedBridge = normalizeAddressEvm(randomAddress());
+          const config = HypTokenRouterConfigSchema.parse({
+            ...getMovableTokenConfig()[tokenType],
+            remoteRouters: {
+              [domainId]: {
+                address: randomAddress(),
+              },
+            },
+            allowedRebalancingBridges: {
+              [domainId]: [
+                {
+                  bridge: allowedBridge,
+                  approvedTokens: [feeToken.address],
+                },
+              ],
+            },
+          });
+
+          const evmERC20WarpModule = await EvmWarpModule.create({
+            chain,
+            config,
+            multiProvider,
+            proxyFactoryFactories: ismFactoryAddresses,
+          });
+
+          // Spoof a legacy impl so `approveTokenForBridge` still grants max. The
+          // emitted tx isn't executed here: the real (new-semantics) impl would
+          // revoke instead of grant, so we assert on the SDK's intent — the grant
+          // selector targeting the configured token and bridge.
+          const versionStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchPackageVersion')
+            .resolves('11.3.0');
+          const scaleStub = sinon
+            .stub(evmERC20WarpModule.reader, 'fetchScale')
+            .resolves(undefined);
+
+          const actualConfig = await evmERC20WarpModule.read();
+
+          versionStub.restore();
+          scaleStub.restore();
+
+          const approvalTxs =
+            await evmERC20WarpModule.getAllowedBridgesApprovalTxs(
+              actualConfig,
+              config,
+            );
+
+          expect(approvalTxs.length).to.equal(1);
+          expect(approvalTxs[0].to).to.equal(
+            evmERC20WarpModule.serialize().deployedTokenRoute,
+          );
+
+          assert(approvalTxs[0].data, 'expected approval calldata');
+          const [token, bridge] =
+            MovableCollateralRouter__factory.createInterface().decodeFunctionData(
+              'approveTokenForBridge(address,address)',
+              approvalTxs[0].data,
+            );
+          expect(eqAddress(token, feeToken.address)).to.be.true;
+          expect(eqAddress(bridge, allowedBridge)).to.be.true;
+        });
+      }
+
       it(`should not generate update transactions for the allowed rebalancing bridges if the address is in a different casing when token is of type "${tokenType}"`, async () => {
         const movableTokenConfigs = getMovableTokenConfig();
 
@@ -1425,7 +2021,6 @@ describe('EvmWarpModule', async () => {
             [domainId]: [
               {
                 bridge: allowedBridgeToAdd,
-                approvedTokens: [feeToken.address],
               },
             ],
           },
@@ -1445,7 +2040,6 @@ describe('EvmWarpModule', async () => {
               [domainId]: [
                 {
                   bridge: allowedBridgeToAdd.toLowerCase(),
-                  approvedTokens: [feeToken.address],
                 },
               ],
             },
@@ -2163,6 +2757,113 @@ describe('EvmWarpModule', async () => {
       if (finalConfig.tokenFee?.type === TokenFeeType.OffchainQuotedLinearFee) {
         expect(finalConfig.tokenFee.quoteSigners).to.have.lengthOf(2);
       }
+    });
+
+    it('clears orphan CCR fee pointer without explicit tokenReaderParams (CLI path)', async () => {
+      // Simulates the production CLI path: EvmWarpModule.update() → createTokenFeeUpdateTxs()
+      // called without explicit tokenReaderParams. The fix derives crossCollateralRouters hints
+      // from actualConfig.crossCollateralRouters so orphan on-chain pointers are detected.
+
+      // 1. Deploy a CCR fee contract and wire a stale router key to a sub-fee
+      const ccrFactory = new CrossCollateralRoutingFee__factory(signer);
+      const ccrf = await ccrFactory.deploy(signer.address);
+      await ccrf.deployed();
+
+      const linearFeeConfig = await EvmTokenFeeModule.expandConfig({
+        multiProvider,
+        chainName: chain,
+        config: {
+          type: TokenFeeType.LinearFee,
+          token: token.address,
+          owner: signer.address,
+          bps: 100,
+        },
+      });
+      const staleSubFeeModule = await EvmTokenFeeModule.create({
+        multiProvider,
+        chain,
+        config: linearFeeConfig,
+      });
+      const staleSubFeeAddress = staleSubFeeModule.serialize().deployedFee;
+      const routingDomain = multiProvider.getDomainId(chain);
+      const staleRouterKey = hre.ethers.utils.hexZeroPad(signer.address, 32);
+
+      await ccrf.setCrossCollateralRouterFeeContracts(
+        [routingDomain],
+        [staleRouterKey],
+        [staleSubFeeAddress],
+      );
+
+      // 2. Build an EvmWarpModule with a fake token route address (not needed for this code path)
+      const warpModule = new EvmWarpModule(multiProvider, {
+        chain,
+        config: {
+          ...baseConfig,
+          type: TokenType.crossCollateral,
+          token: token.address,
+        } as HypTokenRouterConfig,
+        addresses: {
+          deployedTokenRoute: randomAddress(),
+          ...ismFactoryAddresses,
+        },
+      });
+
+      // 3. actualConfig: CCR token with the stale router enrolled in crossCollateralRouters
+      const actualConfig = {
+        ...baseConfig,
+        type: TokenType.crossCollateral,
+        token: token.address,
+        crossCollateralRouters: {
+          [routingDomain]: [staleRouterKey],
+        },
+        tokenFee: {
+          type: TokenFeeType.CrossCollateralRoutingFee,
+          owner: signer.address,
+          address: ccrf.address,
+          feeContracts: {},
+        },
+      } as unknown as DerivedTokenRouterConfig;
+
+      // 4. expectedConfig: CCR fee with only DEFAULT_ROUTER_KEY (stale key removed)
+      const expectedConfig: HypTokenRouterConfig = {
+        ...baseConfig,
+        type: TokenType.crossCollateral,
+        token: token.address,
+        tokenFee: {
+          type: TokenFeeType.CrossCollateralRoutingFee,
+          owner: signer.address,
+          feeContracts: {
+            [chain]: {
+              [DEFAULT_ROUTER_KEY]: {
+                ...linearFeeConfig,
+              },
+            },
+          },
+        },
+      };
+
+      // 5. Call createTokenFeeUpdateTxs WITHOUT explicit tokenReaderParams
+      const txs = await warpModule.createTokenFeeUpdateTxs(
+        actualConfig,
+        expectedConfig,
+      );
+
+      // Must include a clearing tx for the stale router key
+      const clearTx = txs.find((tx) =>
+        tx.annotation?.includes('Clearing removed CrossCollateralRoutingFee'),
+      );
+      expect(clearTx, 'expected orphan clearing tx').to.not.be.undefined;
+
+      // Verify the tx encodes AddressZero for the stale key
+      const iface = CrossCollateralRoutingFee__factory.createInterface();
+      const decoded = iface.decodeFunctionData(
+        'setCrossCollateralRouterFeeContracts',
+        clearTx!.data!,
+      );
+      expect(decoded[1].map((k: string) => k.toLowerCase())).to.deep.equal([
+        staleRouterKey.toLowerCase(),
+      ]);
+      expect(decoded[2]).to.deep.equal([hre.ethers.constants.AddressZero]);
     });
   });
 

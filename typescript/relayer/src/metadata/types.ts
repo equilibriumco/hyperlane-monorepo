@@ -119,7 +119,9 @@ export interface NullMetadataBuildResult extends BaseMetadataBuildResult {
     | typeof IsmType.TEST_ISM
     | typeof IsmType.OP_STACK
     | typeof IsmType.PAUSABLE
-    | typeof IsmType.CCIP;
+    | typeof IsmType.CCIP
+    | typeof IsmType.RATE_LIMITED
+    | typeof IsmType.BLACKLIST;
   /** Always present for null ISMs */
   metadata: string;
 }

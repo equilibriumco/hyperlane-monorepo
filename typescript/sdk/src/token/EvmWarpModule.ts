@@ -1,7 +1,6 @@
 // import { expect } from 'chai';
 import { compareVersions } from 'compare-versions';
 import { BigNumberish, constants, providers } from 'ethers';
-import { UINT_256_MAX } from 'starknet';
 
 import {
   CrossCollateralRouter__factory,
@@ -59,6 +58,8 @@ import {
 import { ContractVerifier } from '../deploy/verify/ContractVerifier.js';
 import { EvmTokenFeeModule } from '../fee/EvmTokenFeeModule.js';
 import { TokenFeeReaderParams } from '../fee/EvmTokenFeeReader.js';
+import { mergeCrossCollateralRouters } from '../fee/crossCollateralUtils.js';
+import { TokenFeeType } from '../fee/types.js';
 import { getEvmHookUpdateTransactions } from '../hook/updates.js';
 import { stripPredicateSubHook } from '../hook/utils.js';
 import { DerivedHookConfig, OnchainHookType } from '../hook/types.js';
@@ -69,7 +70,12 @@ import { AnnotatedEV5Transaction } from '../providers/ProviderType.js';
 import { RemoteRouters, resolveRouterMapConfig } from '../router/types.js';
 import { ChainName, ChainNameOrId } from '../types.js';
 import { scalesEqual } from '../utils/decimals.js';
-import { extractIsmAndHookFactoryAddresses } from '../utils/ism.js';
+import { IsmType } from '../ism/types.js';
+import {
+  extractIsmAndHookFactoryAddresses,
+  ismTreeContainsRateLimited,
+  setRateLimitedIsmRecipient,
+} from '../utils/ism.js';
 
 import {
   CCTP_PPM_STORAGE_VERSION,
@@ -104,6 +110,25 @@ type WarpRouteAddresses = HyperlaneAddresses<ProxyFactoryFactories> & {
   deployedTokenRoute: Address;
 };
 
+// The last contract version where `approveTokenForBridge` granted max allowance
+// instead of revoking it. Hardcoded (not CONTRACTS_PACKAGE_VERSION) because the
+// package version moves to the next major at release and would wrongly match the
+// new revoke-semantics implementations.
+export const MAX_LEGACY_BRIDGE_APPROVAL_VERSION = '11.3.1';
+
+/**
+ * Whether `approveTokenForBridge` GRANTS a standing max allowance on the given
+ * contract version (legacy impls) rather than REVOKING it (new impls). The
+ * selector is overloaded by implementation version.
+ */
+export function bridgeApprovalGrantsMaxAllowance(
+  contractVersion: string,
+): boolean {
+  return (
+    compareVersions(contractVersion, MAX_LEGACY_BRIDGE_APPROVAL_VERSION) <= 0
+  );
+}
+
 const getAllowedRebalancingBridgesByDomain = (
   allowedRebalancingBridgesByDomain: NonNullable<
     MovableTokenConfig['allowedRebalancingBridges']
@@ -120,6 +145,12 @@ const getAllowedRebalancingBridgesByDomain = (
     },
   );
 };
+export type WarpUpdateResult = {
+  txs: AnnotatedEV5Transaction[];
+  feeTxs: AnnotatedEV5Transaction[];
+  ownershipTxs: AnnotatedEV5Transaction[];
+};
+
 export class EvmWarpModule extends HyperlaneModule<
   ProtocolType.Ethereum,
   HypTokenRouterConfig,
@@ -160,9 +191,31 @@ export class EvmWarpModule extends HyperlaneModule<
    * @returns A promise that resolves to the token router configuration.
    */
   async read(): Promise<DerivedTokenRouterConfig> {
-    return this.reader.deriveWarpRouteConfig(
+    const config = await this.reader.deriveWarpRouteConfig(
       this.args.addresses.deployedTokenRoute,
     );
+    // recipient is always the token address itself — implicit in the warp
+    // context, so omit it from read() output to keep configs clean.
+    // Mutate in place to preserve the DerivedIsmConfig type (WithAddress<...>).
+    const stripRecipient = (node: unknown): void => {
+      if (typeof node !== 'object' || node === null) return;
+      const n = node as Record<string, unknown>;
+      if (n.type === IsmType.RATE_LIMITED) {
+        delete n.recipient;
+        return;
+      }
+      if (Array.isArray(n.modules)) n.modules.forEach(stripRecipient);
+      if (typeof n.domains === 'object' && n.domains !== null)
+        Object.values(n.domains as Record<string, unknown>).forEach(
+          stripRecipient,
+        );
+      if (n.lowerIsm) stripRecipient(n.lowerIsm);
+      if (n.upperIsm) stripRecipient(n.upperIsm);
+    };
+    const ism = config.interchainSecurityModule;
+    if (typeof ism !== 'string' && ismTreeContainsRateLimited(ism))
+      stripRecipient(ism);
+    return config;
   }
 
   /**
@@ -174,12 +227,12 @@ export class EvmWarpModule extends HyperlaneModule<
    * orphaned. See PredicateWrapperDeployer.deployAndConfigure for details.
    *
    * @param expectedConfig - The configuration for the token router to be updated.
-   * @returns An array of Ethereum transactions that were executed to update the contract, or an error if the update failed.
+   * @returns `{txs, feeTxs, ownershipTxs}` — main txs (includes router-owner `setFeeRecipient`), fee-contract-owner txs (safe to route to a dedicated feeSubmitter), and ownership/proxyAdmin txs that must execute last.
    */
-  async update(
+  async updateSplit(
     expectedConfig: HypTokenRouterConfig,
     tokenReaderParams?: Partial<TokenFeeReaderParams>,
-  ): Promise<AnnotatedEV5Transaction[]> {
+  ): Promise<WarpUpdateResult> {
     HypTokenRouterConfigSchema.parse(expectedConfig);
     const actualConfig = await this.read();
     const transactions = [];
@@ -195,6 +248,26 @@ export class EvmWarpModule extends HyperlaneModule<
       xerc20Txs = await module.update(config);
     }
 
+    const allFeeTxs = await this.createTokenFeeUpdateTxs(
+      actualConfig,
+      expectedConfig,
+      tokenReaderParams,
+    );
+
+    // Split feeTxs by authority: setFeeRecipient targets the token router (router
+    // owner gated) while all other fee txs target the fee contract (fee-contract
+    // owner gated).  Keeping them in the same bucket means a dedicated feeSubmitter
+    // (which owns the fee contract) would try to call setFeeRecipient — which reverts
+    // because it doesn't own the router.  Router-owner txs go into the main batch;
+    // only fee-contract-owner txs are returned as feeTxs for the feeSubmitter.
+    const routerAddress = this.args.addresses.deployedTokenRoute.toLowerCase();
+    const routerOwnerFeeTxs = allFeeTxs.filter(
+      (tx) => tx.to?.toLowerCase() === routerAddress,
+    );
+    const feeTxs = allFeeTxs.filter(
+      (tx) => tx.to?.toLowerCase() !== routerAddress,
+    );
+
     /**
      * @remark
      * The order of operations matter
@@ -204,21 +277,19 @@ export class EvmWarpModule extends HyperlaneModule<
      * 3. createHookAndPredicateUpdateTxs() handles hook + predicate wrapper together so the
      *    pending new hook address is threaded through without leaking into other method signatures
      */
+    const upgradeTxs = await this.upgradeWarpRouteImplementationTx(
+      actualConfig,
+      expectedConfig,
+    );
+
     transactions.push(
-      ...(await this.upgradeWarpRouteImplementationTx(
-        actualConfig,
-        expectedConfig,
-      )),
+      ...upgradeTxs,
       ...(await this.createIsmUpdateTxs(actualConfig, expectedConfig)),
       ...(await this.createHookAndPredicateUpdateTxs(
         actualConfig,
         expectedConfig,
       )),
-      ...(await this.createTokenFeeUpdateTxs(
-        actualConfig,
-        expectedConfig,
-        tokenReaderParams,
-      )),
+      ...this.createFeeHookUpdateTxs(actualConfig, expectedConfig),
       ...this.createUnenrollRemoteRoutersUpdateTxs(
         actualConfig,
         expectedConfig,
@@ -242,6 +313,11 @@ export class EvmWarpModule extends HyperlaneModule<
         expectedConfig,
       )),
       ...this.createRemoveBridgesTxs(actualConfig, expectedConfig),
+      ...(await this.createRevokeStaleBridgeAllowancesTxs(
+        actualConfig,
+        expectedConfig,
+        upgradeTxs.length > 0,
+      )),
 
       ...this.createAddRemoteOutputAssetsTxs(actualConfig, expectedConfig),
       ...this.createRemoveRemoteOutputAssetsTxs(actualConfig, expectedConfig),
@@ -250,7 +326,15 @@ export class EvmWarpModule extends HyperlaneModule<
       ...this.createRemoveEverclearFeeParamsTxs(actualConfig, expectedConfig),
       ...this.createSetMaxFeePpmTxs(actualConfig, expectedConfig),
       ...xerc20Txs,
+      // Router-owner fee txs (setFeeRecipient) belong in the main batch so they
+      // always execute under the router owner's authority — even when a dedicated
+      // feeSubmitter is configured for fee-contract-owner txs.
+      ...routerOwnerFeeTxs,
+    );
 
+    // Ownership/proxyAdmin must always execute last; returned separately so callers
+    // can place feeTxs between main txs and ownership (see update() below).
+    const ownershipTxs = [
       ...this.createOwnershipUpdateTxs(actualConfig, expectedConfig),
       ...proxyAdminUpdateTxs(
         this.chainId,
@@ -258,9 +342,26 @@ export class EvmWarpModule extends HyperlaneModule<
         actualConfig,
         expectedConfig,
       ),
-    );
+    ];
 
-    return transactions;
+    return { txs: transactions, feeTxs, ownershipTxs };
+  }
+
+  /**
+   * Backwards-compatible wrapper around `updateSplit`. Returns a flat, ordered
+   * transaction array suitable for a single submitter.
+   */
+  async update(
+    expectedConfig: HypTokenRouterConfig,
+    tokenReaderParams?: Partial<TokenFeeReaderParams>,
+  ): Promise<AnnotatedEV5Transaction[]> {
+    const { txs, feeTxs, ownershipTxs } = await this.updateSplit(
+      expectedConfig,
+      tokenReaderParams,
+    );
+    // feeTxs (fee-contract-owner calls) must come before ownershipTxs so they
+    // execute before the router owner changes.
+    return [...txs, ...feeTxs, ...ownershipTxs];
   }
 
   /**
@@ -590,6 +691,15 @@ export class EvmWarpModule extends HyperlaneModule<
     return lower;
   }
 
+  /**
+   * Grants standing ERC20 allowances declared in `allowedRebalancingBridges[].approvedTokens`.
+   *
+   * Only legacy (pre-atomic-rebalancing) routers need explicit grants: their
+   * `approveTokenForBridge` sets max allowance. New impls grant an exact temporary
+   * allowance per rebalance and the same selector REVOKES, so emitting grants there
+   * would be wrong. Gated on the on-chain version being legacy, mirroring
+   * `createRevokeStaleBridgeAllowancesTxs`.
+   */
   async getAllowedBridgesApprovalTxs(
     actualConfig: DerivedTokenRouterConfig,
     expectedConfig: HypTokenRouterConfig,
@@ -602,6 +712,15 @@ export class EvmWarpModule extends HyperlaneModule<
     }
 
     if (!expectedConfig.allowedRebalancingBridges) {
+      return [];
+    }
+
+    // Only routers on a legacy impl grant max via `approveTokenForBridge`; on a new
+    // impl the same selector revokes, so there is nothing to grant ahead of time.
+    if (
+      !actualConfig.contractVersion ||
+      !bridgeApprovalGrantsMaxAllowance(actualConfig.contractVersion)
+    ) {
       return [];
     }
 
@@ -634,7 +753,7 @@ export class EvmWarpModule extends HyperlaneModule<
             bridge,
           );
 
-          if (allowance.toBigInt() !== UINT_256_MAX) {
+          if (!allowance.eq(constants.MaxUint256)) {
             filteredApprovals.push(token);
           }
         }
@@ -768,6 +887,144 @@ export class EvmWarpModule extends HyperlaneModule<
         });
       },
     );
+  }
+
+  /**
+   * Revokes legacy standing ERC20 allowances for bridges that remain allowlisted
+   * after an in-place upgrade.
+   *
+   * Pre-atomic-rebalancing routers granted `type(uint256).max` to every enrolled
+   * bridge in `_addBridge` (the collateral token) and, via the legacy
+   * `approvedTokens` grant path, to arbitrary tokens. After upgrading, bridges that
+   * are removed have their allowance revoked on-chain by `_removeBridge`, and
+   * newly-added bridges never received a legacy allowance. Bridges that REMAIN
+   * allowlisted, however, keep those stale max allowances until the next rebalance.
+   * This method emits txs that set the collateral token AND any configured
+   * `approvedTokens` allowances back to zero so an allowlisted bridge has no
+   * out-of-band transferFrom power over the router balance.
+   *
+   * `approveTokenForBridge` only has revoke semantics on the new implementation;
+   * on legacy impls the same selector GRANTS max. Revoke txs are therefore emitted
+   * unless the router is on a legacy impl that is not being upgraded this run, so
+   * they always execute against the new revoke-semantics impl — whether this run
+   * upgrades it in place or it was already upgraded (which keeps cleanup retryable
+   * if an earlier run upgraded but its revoke txs never executed).
+   */
+  async createRevokeStaleBridgeAllowancesTxs(
+    actualConfig: DerivedTokenRouterConfig,
+    expectedConfig: HypTokenRouterConfig,
+    upgradeScheduled: boolean,
+  ): Promise<AnnotatedEV5Transaction[]> {
+    if (
+      !isMovableCollateralTokenConfig(expectedConfig) ||
+      !isMovableCollateralTokenConfig(actualConfig)
+    ) {
+      return [];
+    }
+
+    if (!expectedConfig.allowedRebalancingBridges) {
+      return [];
+    }
+
+    // `approveTokenForBridge` only revokes on the new implementation; on a legacy
+    // impl the same selector GRANTS max. Skip only when the router is on a legacy
+    // impl and is NOT being upgraded this run — emitting there would re-create the
+    // allowance. Otherwise the revoke executes against the new impl: either because
+    // this run upgrades it in place, or because it is already upgraded. The latter
+    // keeps cleanup retryable if a prior run upgraded but its revoke txs never
+    // executed; the non-zero on-chain allowance check below filters out routers
+    // with nothing stale left to clear.
+    if (
+      !actualConfig.contractVersion ||
+      (bridgeApprovalGrantsMaxAllowance(actualConfig.contractVersion) &&
+        !upgradeScheduled)
+    ) {
+      return [];
+    }
+
+    const provider = this.multiProvider.getProvider(this.chainId);
+
+    // The collateral token backing the router. Native routes (address(0)) have no
+    // ERC20 collateral, but may still carry stale `approvedTokens` grants.
+    const collateralToken = await MovableCollateralRouter__factory.connect(
+      this.args.addresses.deployedTokenRoute,
+      provider,
+    ).token();
+
+    // Bridge addresses currently allowlisted on-chain (across all domains).
+    // Allowances are keyed by (router, bridge) and are domain-agnostic, so we match
+    // bridges by address rather than per domain — this catches a bridge moved between
+    // domains, whose stale allowance a per-domain comparison would miss.
+    const actualBridges = new Set<Address>();
+    for (const bridges of Object.values(
+      getAllowedRebalancingBridgesByDomain(
+        resolveRouterMapConfig(
+          this.multiProvider,
+          actualConfig.allowedRebalancingBridges ?? {},
+        ),
+      ),
+    )) {
+      for (const bridge of bridges) {
+        actualBridges.add(bridge);
+      }
+    }
+
+    // For each bridge that remains allowlisted (present in both configs by address),
+    // the tokens whose stale legacy allowance must be revoked: the collateral token
+    // plus any `approvedTokens` the legacy grant path could have approved. Removed
+    // bridges are revoked on-chain by `_removeBridge`; newly added bridges never held
+    // a legacy allowance. `actualConfig` does not derive approvedTokens, so the
+    // expected config is the signal of what was granted; each candidate is gated on a
+    // non-zero on-chain allowance below.
+    const tokensByBridge = new Map<Address, Set<Address>>();
+    for (const bridgeConfigs of Object.values(
+      resolveRouterMapConfig(
+        this.multiProvider,
+        expectedConfig.allowedRebalancingBridges,
+      ),
+    )) {
+      for (const { bridge, approvedTokens } of bridgeConfigs) {
+        const normalizedBridge = normalizeAddressEvm(bridge);
+        if (!actualBridges.has(normalizedBridge)) {
+          continue;
+        }
+        const tokens =
+          tokensByBridge.get(normalizedBridge) ?? new Set<Address>();
+        if (!isZeroishAddress(collateralToken)) {
+          tokens.add(normalizeAddressEvm(collateralToken));
+        }
+        for (const token of approvedTokens ?? []) {
+          tokens.add(normalizeAddressEvm(token));
+        }
+        tokensByBridge.set(normalizedBridge, tokens);
+      }
+    }
+
+    const revokeTxs: AnnotatedEV5Transaction[] = [];
+    for (const [bridge, tokensToRevoke] of tokensByBridge) {
+      for (const token of tokensToRevoke) {
+        const allowance = await IERC20__factory.connect(
+          token,
+          provider,
+        ).allowance(this.args.addresses.deployedTokenRoute, bridge);
+
+        if (allowance.isZero()) {
+          continue;
+        }
+
+        revokeTxs.push({
+          chainId: this.chainId,
+          annotation: `Revoking legacy bridge allowance for token "${token}" and bridge "${bridge}" on "${this.args.addresses.deployedTokenRoute}" on chain "${this.chainName}"`,
+          to: this.args.addresses.deployedTokenRoute,
+          data: MovableCollateralRouter__factory.createInterface().encodeFunctionData(
+            'approveTokenForBridge(address,address)',
+            [token, bridge],
+          ),
+        });
+      }
+    }
+
+    return revokeTxs;
   }
 
   createAddRemoteOutputAssetsTxs(
@@ -1237,6 +1494,7 @@ export class EvmWarpModule extends HyperlaneModule<
           mailbox: actualConfig.mailbox,
           multiProvider: this.multiProvider,
           proxyAdminAddress,
+          rateLimitedSender: this.args.addresses.deployedTokenRoute,
         },
       );
       hookTransactions = result.transactions;
@@ -1569,12 +1827,53 @@ export class EvmWarpModule extends HyperlaneModule<
     };
   }
 
+  createFeeHookUpdateTxs(
+    actualConfig: DerivedTokenRouterConfig,
+    expectedConfig: HypTokenRouterConfig,
+  ): AnnotatedEV5Transaction[] {
+    if (isOftTokenConfig(expectedConfig)) return [];
+
+    const expectedFeeHook = expectedConfig.feeHook;
+    const actualFeeHook = actualConfig.feeHook;
+
+    // No change needed
+    if (!expectedFeeHook && !actualFeeHook) return [];
+    // Unset in expected config → leave the on-chain feeHook unchanged.
+    // Clearing an existing feeHook requires an explicit address(0) in the config.
+    if (!expectedFeeHook && actualFeeHook) return [];
+    if (
+      expectedFeeHook &&
+      actualFeeHook &&
+      eqAddress(expectedFeeHook, actualFeeHook)
+    )
+      return [];
+
+    const newFeeHook = expectedFeeHook ?? constants.AddressZero;
+    return [
+      {
+        chainId: this.chainId,
+        annotation: `Setting feeHook to ${newFeeHook}`,
+        to: this.args.addresses.deployedTokenRoute,
+        data: TokenRouter__factory.createInterface().encodeFunctionData(
+          'setFeeHook',
+          [newFeeHook],
+        ),
+      },
+    ];
+  }
+
   /**
    * Create transactions to update token fee configuration.
    *
    * @param actualConfig - The on-chain router configuration.
    * @param expectedConfig - The expected token router configuration.
    * @returns Ethereum transactions that need to be executed to update the token fee.
+   *
+   * @remarks
+   * The returned transactions may include both `setFeeRecipient` (gated by the
+   * token-router owner) and fee-contract config calls (gated by the fee-contract
+   * owner). When routing these to a dedicated `feeSubmitter`, that submitter
+   * must own both the token router and the fee contract.
    */
   async createTokenFeeUpdateTxs(
     actualConfig: DerivedTokenRouterConfig,
@@ -1582,6 +1881,19 @@ export class EvmWarpModule extends HyperlaneModule<
     tokenReaderParams?: Partial<TokenFeeReaderParams>,
   ): Promise<AnnotatedEV5Transaction[]> {
     if (!expectedConfig.tokenFee) {
+      if (actualConfig.tokenFee) {
+        return [
+          {
+            annotation: 'Removing fee recipient...',
+            chainId: this.chainId,
+            to: this.args.addresses.deployedTokenRoute,
+            data: TokenRouter__factory.createInterface().encodeFunctionData(
+              'setFeeRecipient(address)',
+              [constants.AddressZero],
+            ),
+          },
+        ];
+      }
       return [];
     }
 
@@ -1656,9 +1968,33 @@ export class EvmWarpModule extends HyperlaneModule<
       },
       this.contractVerifier,
     );
+
+    // For CCR fee updates, forward the on-chain enrolled router keys as hints so the
+    // reader can observe orphan feeContracts entries not present in the target config.
+    // Without these hints, the removal loop in EvmTokenFeeModule.update() never sees
+    // stale (dest, router) entries and the on-chain pointer stays wired.
+    let effectiveTokenReaderParams = tokenReaderParams;
+    if (
+      isCrossCollateralTokenConfig(actualConfig) &&
+      actualConfig.crossCollateralRouters &&
+      resolvedTokenFee.type === TokenFeeType.CrossCollateralRoutingFee
+    ) {
+      const onchainRoutersByDomain = resolveRouterMapConfig(
+        this.multiProvider,
+        actualConfig.crossCollateralRouters,
+      );
+      effectiveTokenReaderParams = {
+        ...tokenReaderParams,
+        crossCollateralRouters: mergeCrossCollateralRouters(
+          tokenReaderParams?.crossCollateralRouters,
+          onchainRoutersByDomain,
+        ),
+      };
+    }
+
     const updateTransactions = await tokenFeeModule.update(
       resolvedTokenFee,
-      tokenReaderParams,
+      effectiveTokenReaderParams,
     );
     const { deployedFee } = tokenFeeModule.serialize();
 
@@ -1721,6 +2057,35 @@ export class EvmWarpModule extends HyperlaneModule<
       };
     }
 
+    // Always override recipient for any RateLimitedIsm node — it must be the
+    // token address.  Any user-supplied value is silently wrong (it would wire
+    // the ISM to the wrong chain), so we always set it from the deployed token
+    // route.  Handles both top-level and nested (e.g. inside aggregation) nodes.
+    // Thread the owner through so that an omitted ism.owner in expectedConfig
+    // doesn't look like an owner diff to EvmIsmModule.update (which would redeploy
+    // the ISM and reset the rate-limit bucket).
+    // Primary default: the warp-route owner (matches deploy path in token/deploy.ts).
+    // Fallback: the current on-chain ISM owner (same-type, same-owner in-place update).
+    let expectedIsm = expectedConfig.interchainSecurityModule;
+    if (
+      typeof expectedIsm === 'object' &&
+      ismTreeContainsRateLimited(expectedIsm)
+    ) {
+      const actualIsm = actualConfig.interchainSecurityModule;
+      const onChainOwner =
+        typeof actualIsm === 'object' && 'owner' in actualIsm
+          ? actualIsm.owner
+          : undefined;
+      const defaultOwner =
+        expectedConfig.owner ??
+        (typeof onChainOwner === 'string' ? onChainOwner : undefined);
+      expectedIsm = setRateLimitedIsmRecipient(
+        expectedIsm,
+        this.args.addresses.deployedTokenRoute,
+        defaultOwner,
+      );
+    }
+
     const ismModule = new EvmIsmModule(
       this.multiProvider,
       {
@@ -1738,9 +2103,7 @@ export class EvmWarpModule extends HyperlaneModule<
     this.logger.info(
       `Comparing target ISM config with ${this.args.chain} chain`,
     );
-    const updateTransactions = await ismModule.update(
-      expectedConfig.interchainSecurityModule,
-    );
+    const updateTransactions = await ismModule.update(expectedIsm);
     const { deployedIsm } = ismModule.serialize();
 
     return { deployedIsm, updateTransactions };
@@ -1764,8 +2127,8 @@ export class EvmWarpModule extends HyperlaneModule<
       'Cannot upgrade warp route with unknown token type',
     );
 
-    // This should be impossible since we try catch the call to `PACKAGE_VERSION`
-    // in `EvmWarpRouteReader.fetchPackageVersion`
+    // Older contracts without PACKAGE_VERSION fall back to a legacy version in
+    // EvmWarpRouteReader.fetchPackageVersion.
     assert(
       actualConfig.contractVersion,
       'Actual contract version is undefined',

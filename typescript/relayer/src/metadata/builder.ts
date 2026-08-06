@@ -66,6 +66,8 @@ export class BaseMetadataBuilder implements MetadataBuilder {
       case IsmType.OP_STACK:
       case IsmType.PAUSABLE:
       case IsmType.CCIP:
+      case IsmType.RATE_LIMITED:
+      case IsmType.BLACKLIST:
         return this.nullMetadataBuilder.build({ ...context, ism });
 
       case IsmType.MERKLE_ROOT_MULTISIG:

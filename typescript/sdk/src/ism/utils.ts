@@ -3,6 +3,7 @@ import { ethers, utils } from 'ethers';
 import {
   AbstractStorageMultisigIsm__factory,
   AmountRoutingIsm__factory,
+  BlacklistIsm__factory,
   CCIPIsm__factory,
   DomainRoutingIsm__factory,
   IAggregationIsm__factory,
@@ -12,6 +13,7 @@ import {
   MailboxClient__factory,
   OPStackIsm__factory,
   PausableIsm__factory,
+  RateLimitedIsm__factory,
   StaticAggregationIsm__factory,
   TrustedRelayerIsm__factory,
 } from '@hyperlane-xyz/core';
@@ -20,6 +22,7 @@ import {
   deepEquals,
   eqAddress,
   formatMessage,
+  messageId,
   normalizeAddress,
   objMap,
   rootLogger,
@@ -98,11 +101,17 @@ export function calculateDomainRoutingDelta(
  * -----------------------------------------------------------------------------
  */
 
+// `addressToBytes` rejects the all-zero address, so the sample message used by
+// `moduleCanCertainlyVerify` uses this minimal non-zero placeholder for its
+// sender/recipient.
+export const SAMPLE_VERIFY_ADDRESS =
+  '0x0000000000000000000000000000000000000001';
+
 // Note that this function may return false negatives, but should
 // not return false positives.
 // This can happen if, for example, the module has sender, recipient, or
 // body specific logic, as the sample message used when querying the ISM
-// sets all of these to zero.
+// uses a placeholder sender/recipient and an empty body.
 export async function moduleCanCertainlyVerify(
   destModule: Address | IsmConfig,
   multiProvider: MultiProvider,
@@ -118,9 +127,9 @@ export async function moduleCanCertainlyVerify(
     0,
     0,
     originDomainId,
-    ethers.constants.AddressZero,
+    SAMPLE_VERIFY_ADDRESS,
     destinationDomainId,
-    ethers.constants.AddressZero,
+    SAMPLE_VERIFY_ADDRESS,
     '0x',
   );
   const provider = multiProvider.getSignerOrProvider(destination);
@@ -215,6 +224,15 @@ export async function moduleCanCertainlyVerify(
         return destModule.nativeBridge !== ethers.constants.AddressZero;
       case IsmType.TEST_ISM: {
         return true;
+      }
+      case IsmType.BLACKLIST: {
+        // BlacklistIsm.verify returns false for a blacklisted message ID, so
+        // this helper can only guarantee verification when the sample message
+        // is not itself blacklisted.
+        const sampleId = messageId(message).toLowerCase();
+        return !destModule.blacklistedIds.some(
+          (id) => id.toLowerCase() === sampleId,
+        );
       }
       default:
         throw new Error(`Unsupported module type: ${(destModule as any).type}`);
@@ -470,6 +488,45 @@ export async function moduleMatchesConfig(
           config.thresholdWeight,
         );
       matches = eqAddress(expectedAddress, module.address);
+      break;
+    }
+    case IsmType.RATE_LIMITED: {
+      const rateLimitedIsm = RateLimitedIsm__factory.connect(
+        moduleAddress,
+        provider,
+      );
+      const [onChainMaxCapacity, onChainRecipient] = await Promise.all([
+        rateLimitedIsm.maxCapacity(),
+        rateLimitedIsm.recipient(),
+      ]);
+      matches &&= onChainMaxCapacity.eq(config.maxCapacity);
+      if (config.recipient) {
+        matches &&= eqAddress(onChainRecipient, config.recipient);
+      }
+      if (config.owner) {
+        const onChainOwner = await rateLimitedIsm.owner();
+        matches &&= eqAddress(onChainOwner, config.owner);
+      }
+      break;
+    }
+    case IsmType.BLACKLIST: {
+      const blacklistIsm = BlacklistIsm__factory.connect(
+        moduleAddress,
+        provider,
+      );
+      const [owner, onChainIds] = await Promise.all([
+        blacklistIsm.owner(),
+        blacklistIsm.values(),
+      ]);
+      matches &&= eqAddress(owner, config.owner);
+      // Entries are append-only on-chain, so any on-chain ID missing from the
+      // config makes the config unreachable: require exact set equality.
+      const normalizeIds = (ids: readonly string[]) =>
+        [...new Set(ids.map((id) => id.toLowerCase()))].sort();
+      matches &&= deepEquals(
+        normalizeIds(onChainIds),
+        normalizeIds(config.blacklistedIds),
+      );
       break;
     }
     default: {

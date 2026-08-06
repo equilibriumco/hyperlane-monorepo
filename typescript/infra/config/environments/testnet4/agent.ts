@@ -29,7 +29,10 @@ import {
   supportedChainNames,
   testnet4SupportedChainNames,
 } from './supportedChainNames.js';
-import { validatorChainConfig } from './validators.js';
+import {
+  fastPathReorgPeriodOverrides,
+  validatorChainConfig,
+} from './validators.js';
 
 // The chains here must be consistent with the environment's supportedChainNames, which is
 // checked / enforced at runtime & in the CI pipeline.
@@ -44,24 +47,25 @@ export const hyperlaneContextAgentChainConfig: AgentChainConfig<
     arbitrumsepolia: true,
     basesepolia: true,
     bsctestnet: true,
-    celestiatestnet: true,
-    celosepolia: true,
-    cotitestnet: true,
+    celestiatestnet: false,
+    celosepolia: false, // disabled — deprecated dead testnet, no traffic (2026-07)
+    cotitestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     eclipsetestnet: false,
     fuji: true,
     hyperliquidevmtestnet: true,
-    incentivtestnet: false,
     kyvetestnet: false,
-    modetestnet: true,
+    modetestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     optimismsepolia: true,
-    paradexsepolia: true,
+    paradexsepolia: false, // disabled — Paradex Sepolia testnet reset; sole RPC 503, block sync frozen at 921055 (~27d)
     polygonamoy: true,
-    radixtestnet: true,
+    radixtestnet: false,
+    seismictestnet: true,
     sepolia: true,
+    solanadevnet: true,
     solanatestnet: true,
     somniatestnet: true,
     sonicsvmtestnet: false,
-    starknetsepolia: true,
+    starknetsepolia: false,
     tronshasta: true,
   },
   [Role.Relayer]: {
@@ -69,24 +73,25 @@ export const hyperlaneContextAgentChainConfig: AgentChainConfig<
     arbitrumsepolia: true,
     basesepolia: true,
     bsctestnet: true,
-    celestiatestnet: true,
-    celosepolia: true,
-    cotitestnet: true,
+    celestiatestnet: false,
+    celosepolia: false, // disabled — deprecated dead testnet, no traffic (2026-07)
+    cotitestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     eclipsetestnet: false,
     fuji: true,
     hyperliquidevmtestnet: true,
-    incentivtestnet: false,
     kyvetestnet: false,
-    modetestnet: true,
+    modetestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     optimismsepolia: true,
-    paradexsepolia: true,
+    paradexsepolia: false, // disabled — Paradex Sepolia testnet reset; sole RPC 503, block sync frozen at 921055 (~27d)
     polygonamoy: true,
-    radixtestnet: true,
+    radixtestnet: false,
+    seismictestnet: true,
     sepolia: true,
+    solanadevnet: true,
     solanatestnet: true,
     somniatestnet: true,
     sonicsvmtestnet: false,
-    starknetsepolia: true,
+    starknetsepolia: false,
     tronshasta: true,
   },
   [Role.Scraper]: {
@@ -94,24 +99,26 @@ export const hyperlaneContextAgentChainConfig: AgentChainConfig<
     arbitrumsepolia: true,
     basesepolia: true,
     bsctestnet: true,
-    celestiatestnet: true,
-    celosepolia: true,
-    cotitestnet: true,
+    celestiatestnet: false,
+    celosepolia: false, // disabled — deprecated dead testnet, no traffic (2026-07)
+    cotitestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     eclipsetestnet: false,
     fuji: true,
     hyperliquidevmtestnet: true,
-    incentivtestnet: false,
     kyvetestnet: false,
-    modetestnet: true,
+    modetestnet: false, // disabled — deprecated dead testnet, no traffic (2026-07)
     optimismsepolia: true,
-    paradexsepolia: true,
+    paradexsepolia: false, // disabled — Paradex Sepolia testnet reset; sole RPC 503, block sync frozen at 921055 (~27d)
     polygonamoy: true,
-    radixtestnet: true,
+    radixtestnet: false,
+    // disabled temporarily until timestamps change from ms to secs (soon)
+    seismictestnet: false,
     sepolia: true,
+    solanadevnet: true,
     solanatestnet: true,
     somniatestnet: true,
     sonicsvmtestnet: false,
-    starknetsepolia: true,
+    starknetsepolia: false,
     tronshasta: true,
   },
 };
@@ -127,6 +134,10 @@ const contextBase = {
   environmentChainNames: supportedChainNames,
   aws: {
     region: 'us-east-1',
+  },
+  gcp: {
+    project: 'abacus-labs-dev',
+    location: 'us-east1',
   },
 } as const;
 
@@ -324,6 +335,13 @@ const hyperlane: RootAgentConfig = {
     cache: {
       enabled: true,
     },
+    relayApi: {
+      enabled: true,
+      port: 8900,
+      rateLimitMaxRequests: 100,
+      rateLimitWindowSecs: 60,
+      corsOrigins: 'https://nexus.hyperlane.xyz',
+    },
     resources: relayerResources,
   },
   validators: {
@@ -369,6 +387,13 @@ const releaseCandidate: RootAgentConfig = {
     },
     cache: {
       enabled: true,
+    },
+    relayApi: {
+      enabled: true,
+      port: 8900,
+      rateLimitMaxRequests: 100,
+      rateLimitWindowSecs: 60,
+      corsOrigins: 'https://nexus.hyperlane.xyz,http://localhost:3000',
     },
     resources: relayerResources,
   },
@@ -436,11 +461,11 @@ const fastPath: RootAgentConfig = {
   ...contextBase,
   context: Contexts.FastPath,
   contextChainNames: {
-    [Role.Validator]: [],
+    [Role.Validator]: ['arbitrumsepolia', 'basesepolia', 'sepolia'],
     [Role.Relayer]: ['arbitrumsepolia', 'basesepolia', 'sepolia'],
     [Role.Scraper]: [],
   },
-  rolesWithKeys: [Role.Relayer],
+  rolesWithKeys: [Role.Relayer, Role.Validator],
   relayer: {
     rpcConsensusType: RpcConsensusType.Fallback,
     docker: {
@@ -448,13 +473,25 @@ const fastPath: RootAgentConfig = {
       tag: testnetDockerTags.relayerFastPath,
     },
     gasPaymentEnforcement,
-    reorgPeriodOverrides: { sepolia: 1 },
+    reorgPeriodOverrides: fastPathReorgPeriodOverrides,
     blacklist: relayBlacklist,
     ismCacheConfigs,
     cache: {
       enabled: true,
     },
+    // Halve steady-state index polling RPCs while keeping fastpath detection
+    // within one additional second (0.5s average).
+    interval: 2,
     resources: relayerResources,
+  },
+  validators: {
+    rpcConsensusType: RpcConsensusType.Fallback,
+    docker: {
+      repo: DockerImageRepos.AGENT,
+      tag: testnetDockerTags.validatorFastPath,
+    },
+    chains: validatorChainConfig(Contexts.FastPath),
+    resources: validatorResources,
   },
 };
 
