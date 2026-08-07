@@ -1,5 +1,4 @@
 import {
-  KnownProtocolType,
   Numberish,
   ProtocolType,
   assert,
@@ -7,6 +6,7 @@ import {
 } from '@hyperlane-xyz/utils';
 
 import type { ChainMetadata } from '../metadata/chainMetadataTypes.js';
+import { isSdkSupportedProtocol } from '../providers/ProviderType.js';
 import type { ChainName } from '../types.js';
 
 import type { ITokenMetadata, TokenArgs } from './ITokenMetadata.js';
@@ -97,19 +97,17 @@ export class TokenMetadata implements ITokenMetadata {
       gasCurrencyCoinGeckoId,
     } = chainMetadata;
     assert(
-      protocol !== ProtocolType.Unknown,
-      'Cannot create native token for unknown protocol',
+      isSdkSupportedProtocol(protocol),
+      `Cannot create native token for protocol ${protocol}`,
     );
-    const knownProtocol = protocol as KnownProtocolType;
     const nativeToken =
-      chainMetadata.nativeToken ||
-      PROTOCOL_TO_DEFAULT_NATIVE_TOKEN[knownProtocol];
+      chainMetadata.nativeToken || PROTOCOL_TO_DEFAULT_NATIVE_TOKEN[protocol];
 
     // CAST: TypeScript cannot infer that `new this(...)` returns InstanceType<T>
     // for a polymorphic static method bound via `this: T`.
     return new this({
       chainName,
-      standard: PROTOCOL_TO_NATIVE_STANDARD[knownProtocol],
+      standard: PROTOCOL_TO_NATIVE_STANDARD[protocol],
       addressOrDenom: nativeToken.denom ?? '',
       decimals: nativeToken.decimals,
       symbol: nativeToken.symbol,

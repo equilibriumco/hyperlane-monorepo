@@ -1,0 +1,282 @@
+# Docker Compose for Cardano <-> EVM E2E Testing
+# This sets up validators and a bidirectional relayer for cross-chain message testing
+# Set RELAYER_CONFIG env var to select the EVM chain relayer config:
+#   relayer-cardano-sepolia.json (default)
+
+services:
+  # Cardano Preview Validator
+  # Signs checkpoints for messages dispatched from Cardano
+  validator-cardano:
+    build:
+      context: ../../..
+      dockerfile: cardano/demo/docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-validator-cardano
+    environment:
+      AGENT_TYPE: validator
+      RUST_LOG: ${RUST_LOG:-info}
+
+      # Validator signing key (ECDSA secp256k1)
+      VALIDATOR_KEY: ${CARDANO_VALIDATOR_KEY}
+
+      # Cardano signer for on-chain announcements (Ed25519)
+      CARDANO_SIGNER_KEY: ${CARDANO_SIGNER_KEY}
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses (H256 format with 0x00000000 prefix)
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_VA_REF_UTXO: ${CARDANO_VA_REF_UTXO}
+      CARDANO_IGP_SCRIPT_HASH: ${CARDANO_IGP_SCRIPT_HASH}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+    volumes:
+      - validator-cardano-data:/data
+      # Signed checkpoints, shared read-only with the relayer. The validator
+      # announces this path on-chain as file:///data/checkpoints, so no S3 (and
+      # no AWS account) is needed to run the demo. The trade-off is that only a
+      # relayer with this volume mounted can verify Cardano-origin messages.
+      - checkpoints:/data/checkpoints
+      - ./config:/app/config-templates:ro
+    ports:
+      - "9090:9090"  # Metrics
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Bidirectional Relayer
+  # Relays messages between Cardano Preview and an EVM chain
+  relayer:
+    build:
+      context: ../../..
+      dockerfile: cardano/demo/docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-relayer
+    environment:
+      AGENT_TYPE: relayer
+      RELAYER_CONFIG: ${RELAYER_CONFIG:-relayer-cardano-sepolia.json}
+      RUST_LOG: ${RUST_LOG:-info}
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_WARP_ROUTE_REF_UTXO: ${CARDANO_WARP_ROUTE_REF_UTXO}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_POLICY_ID: ${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR: ${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}
+      CARDANO_IGP_SCRIPT_HASH: ${CARDANO_IGP_SCRIPT_HASH}
+      CARDANO_IGP: ${CARDANO_IGP}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+
+      # Cardano signer for EVM -> Cardano direction
+      CARDANO_SIGNER_KEY: ${CARDANO_SIGNER_KEY}
+
+      # Sepolia (Ethereum testnet) configuration
+      SEPOLIA_MAILBOX: ${SEPOLIA_MAILBOX}
+      SEPOLIA_VALIDATOR_ANNOUNCE: ${SEPOLIA_VALIDATOR_ANNOUNCE}
+      SEPOLIA_MERKLE_TREE_HOOK: ${SEPOLIA_MERKLE_TREE_HOOK}
+      SEPOLIA_IGP: ${SEPOLIA_IGP}
+      SEPOLIA_ISM: ${SEPOLIA_ISM}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL}
+      SEPOLIA_SIGNER_KEY: ${SEPOLIA_SIGNER_KEY}
+      SEPOLIA_INDEX_FROM: ${SEPOLIA_INDEX_FROM:-10292190}
+    volumes:
+      - relayer-data:/data
+      - checkpoints:/data/checkpoints:ro
+      - ./config:/app/config-templates:ro
+    ports:
+      - "9091:9090"  # Metrics (internal 9090)
+    depends_on:
+      validator-cardano:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Scraper database
+  # Backs both the scraper agent and the Hasura GraphQL API the explorer reads.
+  postgres:
+    image: postgres:14
+    container_name: hyperlane-scraper-db
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-47221c18c610}
+      POSTGRES_DB: postgres
+    volumes:
+      - scraper-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Cardano Scraper
+  # Indexes dispatches, deliveries and gas payments into Postgres.
+  # Applies the sea-orm migrations on startup before indexing.
+  scraper:
+    build:
+      context: ../../..
+      dockerfile: cardano/demo/docker/Dockerfile
+    image: hyperlane-cardano-e2e:latest
+    container_name: hyperlane-scraper-cardano
+    environment:
+      AGENT_TYPE: scraper
+      RUST_LOG: ${RUST_LOG:-info}
+
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+
+      # Blockfrost API
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+
+      # Cardano contract addresses
+      CARDANO_MAILBOX: ${CARDANO_MAILBOX}
+      CARDANO_VALIDATOR_ANNOUNCE: ${CARDANO_VALIDATOR_ANNOUNCE}
+      CARDANO_MERKLE_TREE_HOOK: ${CARDANO_MERKLE_TREE_HOOK}
+      CARDANO_ISM: ${CARDANO_ISM}
+      CARDANO_IGP: ${CARDANO_IGP}
+
+      # Cardano policy IDs and script hashes
+      CARDANO_MAILBOX_POLICY_ID: ${CARDANO_MAILBOX_POLICY_ID}
+      CARDANO_MAILBOX_SCRIPT_HASH: ${CARDANO_MAILBOX_SCRIPT_HASH}
+      CARDANO_MAILBOX_REF_UTXO: ${CARDANO_MAILBOX_REF_UTXO}
+      CARDANO_WARP_ROUTE_REF_UTXO: ${CARDANO_WARP_ROUTE_REF_UTXO}
+      CARDANO_ISM_SCRIPT_HASH: ${CARDANO_ISM_SCRIPT_HASH}
+      CARDANO_ISM_STATE_NFT_POLICY_ID: ${CARDANO_ISM_STATE_NFT_POLICY_ID}
+      CARDANO_ISM_REF_UTXO: ${CARDANO_ISM_REF_UTXO}
+      CARDANO_VA_POLICY_ID: ${CARDANO_VA_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_POLICY_ID: ${CARDANO_VERIFIED_MSG_NFT_POLICY_ID}
+      CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR: ${CARDANO_VERIFIED_MSG_NFT_SCRIPT_CBOR}
+      CARDANO_IGP_SCRIPT_HASH: ${CARDANO_IGP_SCRIPT_HASH}
+      CARDANO_INDEX_FROM: ${CARDANO_INDEX_FROM:-0}
+
+      # Sepolia. Deliveries are recorded on the destination chain, so both
+      # sides must be scraped for a message to ever show as delivered.
+      SEPOLIA_MAILBOX: ${SEPOLIA_MAILBOX}
+      SEPOLIA_VALIDATOR_ANNOUNCE: ${SEPOLIA_VALIDATOR_ANNOUNCE}
+      SEPOLIA_MERKLE_TREE_HOOK: ${SEPOLIA_MERKLE_TREE_HOOK}
+      SEPOLIA_IGP: ${SEPOLIA_IGP}
+      SEPOLIA_ISM: ${SEPOLIA_ISM}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL}
+      SEPOLIA_INDEX_FROM: ${SEPOLIA_INDEX_FROM:-10292190}
+    volumes:
+      - ./config:/app/config-templates:ro
+    ports:
+      - "9092:9090"  # Metrics (internal 9090)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # GraphQL API over the scraper database, for hyperlane-explorer.
+  # Point the explorer's NEXT_PUBLIC_API_URL at http://localhost:8080/v1/graphql.
+  hasura:
+    image: hasura/graphql-engine:v2.42.0
+    container_name: hyperlane-scraper-hasura
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-47221c18c610}@postgres:5432/postgres
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      # Read-only anonymous access, matching how the hosted explorer API is exposed.
+      HASURA_GRAPHQL_UNAUTHORIZED_ROLE: public
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-hyperlane}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # One-shot: expose the scraper tables through Hasura.
+  # Without this the explorer's GraphQL queries resolve against nothing and every
+  # message search comes back empty, which reads as a broken integration rather
+  # than as unconfigured metadata. Idempotent, so re-running the stack is safe.
+  hasura-init:
+    image: alpine:3.20
+    container_name: hyperlane-hasura-init
+    environment:
+      HASURA_URL: http://hasura:8080
+      HASURA_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-hyperlane}
+    volumes:
+      - ./hasura:/hasura:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - apk add --no-cache bash curl >/dev/null && bash /hasura/track-tables.sh
+    depends_on:
+      hasura:
+        condition: service_started
+      scraper:
+        condition: service_healthy
+    restart: on-failure
+
+  # Hyperlane Explorer, reading this stack's scraper rather than the hosted API.
+  # Browse to http://localhost:3000 and paste a message id to follow a transfer.
+  explorer:
+    build:
+      context: ./explorer
+      args:
+        EXPLORER_REF: ${EXPLORER_REF:-cardano}
+        NEXT_PUBLIC_API_URL: ${EXPLORER_API_URL:-http://localhost:8080/v1/graphql}
+        NEXT_PUBLIC_REGISTRY_URL: ${EXPLORER_REGISTRY_URL:-https://github.com/equilibriumco/hyperlane-registry}
+        NEXT_PUBLIC_REGISTRY_BRANCH: ${EXPLORER_REGISTRY_BRANCH:-cardano}
+    container_name: hyperlane-explorer
+    environment:
+      # Read at runtime by the Cardano warp-route balance API route, unlike the
+      # NEXT_PUBLIC_* values above which Next.js inlines at build time.
+      BLOCKFROST_API_KEY: ${BLOCKFROST_API_KEY}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - hasura
+    restart: unless-stopped
+
+volumes:
+  validator-cardano-data:
+    driver: local
+  checkpoints:
+    driver: local
+  relayer-data:
+    driver: local
+  scraper-db-data:
+    driver: local

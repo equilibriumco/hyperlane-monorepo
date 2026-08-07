@@ -18,19 +18,20 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
+use ethers::utils::hex;
 use hyperlane_core::matching_list::MatchingList;
 
 use h_cosmos::RawCosmosAmount;
 use hyperlane_core::{
     cfg_unwrap_all, config::*, HyperlaneDomain, HyperlaneDomainProtocol,
-    HyperlaneDomainTechnicalStack, IndexMode, NativeToken, ReorgPeriod, SubmitterType,
+    HyperlaneDomainTechnicalStack, IndexMode, NativeToken, ReorgPeriod, SubmitterType, H256,
 };
 
 use crate::settings::{
     chains::IndexSettings,
     parser::connection_parser::{build_connection_conf, is_protocol_supported},
     trace::TracingConfig,
-    ChainConf, CoreContractAddresses, Settings, SignerConf,
+    ChainConf, ChainConnectionConf, CoreContractAddresses, Settings, SignerConf,
 };
 
 pub use super::envs::*;
@@ -370,6 +371,16 @@ fn parse_chain(
 
     cfg_unwrap_all!(&chain.cwp, err: [connection, mailbox, interchain_gas_paymaster, validator_announce, merkle_tree_hook]);
 
+    // Enrich Cardano signer with network from connection config
+    let signer = signer.map(|mut s| {
+        if let (SignerConf::CardanoKey { is_mainnet, .. }, ChainConnectionConf::Cardano(ref conf)) =
+            (&mut s, &connection)
+        {
+            *is_mainnet = matches!(conf.network, hyperlane_cardano::CardanoNetwork::Mainnet);
+        }
+        s
+    });
+
     let submitter = chain
         .chain(&mut err)
         .get_opt_key("submitter")
@@ -576,6 +587,77 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
                 suffix: suffix.to_owned(),
             })
         }};
+        (cardanoKey) => {{
+            // Cardano signer: can provide key directly OR keyPath to a .skey file
+            let key = if let Some(key_path) = signer
+                .chain(&mut err)
+                .get_opt_key("keyPath")
+                .parse_string()
+                .end()
+            {
+                // Read the .skey file and extract the key from cborHex
+                match std::fs::read_to_string(key_path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(json) => {
+                                if let Some(cbor_hex) = json.get("cborHex").and_then(|v| v.as_str())
+                                {
+                                    // Skip the CBOR prefix (5820 = 32-byte bytestring)
+                                    let key_hex = if cbor_hex.len() >= 68 {
+                                        &cbor_hex[4..]
+                                    } else {
+                                        cbor_hex
+                                    };
+                                    match hex::decode(key_hex) {
+                                        Ok(key_bytes) if key_bytes.len() == 32 => {
+                                            H256::from_slice(&key_bytes)
+                                        }
+                                        _ => {
+                                            err.push(
+                                                (&signer.cwp).add("keyPath"),
+                                                eyre!("Invalid key in .skey file"),
+                                            );
+                                            H256::default()
+                                        }
+                                    }
+                                } else {
+                                    err.push(
+                                        (&signer.cwp).add("keyPath"),
+                                        eyre!("Missing cborHex in .skey file"),
+                                    );
+                                    H256::default()
+                                }
+                            }
+                            Err(e) => {
+                                err.push(
+                                    (&signer.cwp).add("keyPath"),
+                                    eyre!("Failed to parse .skey file: {}", e),
+                                );
+                                H256::default()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        err.push(
+                            (&signer.cwp).add("keyPath"),
+                            eyre!("Failed to read .skey file: {}", e),
+                        );
+                        H256::default()
+                    }
+                }
+            } else {
+                // Fall back to direct key
+                signer
+                    .chain(&mut err)
+                    .get_key("key")
+                    .parse_private_key()
+                    .unwrap_or_default()
+            };
+            err.into_result(SignerConf::CardanoKey {
+                key,
+                is_mainnet: false,
+            })
+        }};
     }
 
     match signer_type {
@@ -585,6 +667,7 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
         Some("cosmosKey") => parse_signer!(cosmosKey),
         Some("starkKey") => parse_signer!(starkKey),
         Some("radixKey") => parse_signer!(radixKey),
+        Some("cardanoKey") => parse_signer!(cardanoKey),
         Some(t) => {
             Err(eyre!("Unknown signer type `{t}`")).into_config_result(|| (&signer.cwp).add("type"))
         }

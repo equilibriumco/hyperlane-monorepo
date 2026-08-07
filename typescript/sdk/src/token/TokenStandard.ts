@@ -1,9 +1,9 @@
 import { ProtocolType, assert, objMap } from '@hyperlane-xyz/utils';
 
 import {
-  KnownProtocolType,
   PROTOCOL_TO_DEFAULT_PROVIDER_TYPE,
   ProviderType,
+  SdkSupportedProtocol,
 } from '../providers/ProviderType.js';
 
 import { DeployableTokenType, TokenType } from './config.js';
@@ -98,7 +98,7 @@ export enum TokenStandard {
 // Allows for omission of protocol field in token args
 export const TOKEN_STANDARD_TO_PROTOCOL: Record<
   TokenStandard,
-  KnownProtocolType
+  SdkSupportedProtocol
 > = {
   // EVM
   ERC20: ProtocolType.Ethereum,
@@ -580,7 +580,7 @@ export const TRON_TOKEN_TYPE_TO_STANDARD: Record<
 };
 
 export const PROTOCOL_TO_NATIVE_STANDARD: Record<
-  KnownProtocolType,
+  SdkSupportedProtocol,
   TokenStandard
 > = {
   [ProtocolType.Ethereum]: TokenStandard.EvmNative,
@@ -594,7 +594,7 @@ export const PROTOCOL_TO_NATIVE_STANDARD: Record<
 };
 
 export const PROTOCOL_TO_HYP_NATIVE_STANDARD: Record<
-  KnownProtocolType,
+  SdkSupportedProtocol,
   TokenStandard
 > = {
   [ProtocolType.Ethereum]: TokenStandard.EvmHypNative,

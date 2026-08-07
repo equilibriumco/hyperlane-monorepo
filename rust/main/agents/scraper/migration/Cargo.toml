@@ -19,6 +19,9 @@ serde.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = [
     "rt",
+    # The migration bins use a bare `#[tokio::main]`, which defaults to the
+    # multi-thread flavor and fails to compile without this.
+    "rt-multi-thread",
     "process",
     "macros",
     "parking_lot",

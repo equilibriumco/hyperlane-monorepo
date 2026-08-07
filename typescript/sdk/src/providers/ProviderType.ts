@@ -46,7 +46,12 @@ import type {
   RadixSDKReceipt,
   RadixSDKTransaction,
 } from '@hyperlane-xyz/radix-sdk/runtime';
-import type { Annotated, KnownProtocolType } from '@hyperlane-xyz/utils';
+import {
+  type Annotated,
+  type KnownProtocolType,
+  type SdkSupportedProtocol,
+  isSdkSupportedProtocol,
+} from '@hyperlane-xyz/utils';
 import { ProtocolType } from '@hyperlane-xyz/utils';
 
 /**
@@ -79,10 +84,11 @@ export enum ProviderType {
   Tron = 'tron',
 }
 
-export type { KnownProtocolType };
+export type { KnownProtocolType, SdkSupportedProtocol };
+export { isSdkSupportedProtocol };
 
 export const PROTOCOL_TO_DEFAULT_PROVIDER_TYPE: Record<
-  KnownProtocolType,
+  SdkSupportedProtocol,
   ProviderType
 > = {
   [ProtocolType.Ethereum]: ProviderType.EthersV5,
@@ -145,6 +151,12 @@ type ProtocolTypesMapping = {
     provider: TronProvider;
     contract: null;
     receipt: EthersV5TransactionReceipt;
+  };
+  [ProtocolType.Cardano]: {
+    transaction: never;
+    provider: never;
+    contract: never;
+    receipt: never;
   };
   [ProtocolType.Unknown]: {
     transaction: never;

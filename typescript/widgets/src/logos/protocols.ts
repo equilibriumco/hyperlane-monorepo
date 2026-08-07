@@ -3,6 +3,7 @@ import { FC, SVGProps } from 'react';
 import { KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { AleoLogo } from './Aleo.js';
+import { CardanoLogo } from './Cardano.js';
 import { CosmosLogo } from './Cosmos.js';
 import { EthereumLogo } from './Ethereum.js';
 import { RadixLogo } from './Radix.js';
@@ -22,4 +23,5 @@ export const PROTOCOL_TO_LOGO: Record<
   [ProtocolType.Radix]: RadixLogo,
   [ProtocolType.Aleo]: AleoLogo,
   [ProtocolType.Tron]: TronLogo,
+  [ProtocolType.Cardano]: CardanoLogo,
 };

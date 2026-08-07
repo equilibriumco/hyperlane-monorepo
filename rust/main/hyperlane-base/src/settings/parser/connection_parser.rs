@@ -13,6 +13,7 @@ use h_eth::TransactionOverrides;
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
 
+use hyperlane_cardano as h_cardano;
 use hyperlane_starknet as h_starknet;
 
 use crate::settings::envs::*;
@@ -872,6 +873,7 @@ pub fn build_connection_conf(
         HyperlaneDomainProtocol::Aleo => {
             build_aleo_connection_conf(rpcs, chain, err, operation_batch)
         }
+        HyperlaneDomainProtocol::Cardano => build_cardano_connection_conf(rpcs, chain, err),
         #[allow(unreachable_patterns)]
         _ => unreachable!("Unsupported protocol chains are pre-filtered"),
     }
@@ -882,8 +884,280 @@ pub fn build_connection_conf(
 pub fn is_protocol_supported(protocol: HyperlaneDomainProtocol) -> bool {
     use HyperlaneDomainProtocol::*;
     match protocol {
-        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron => true,
-        // Aleo is feature-gated - only supported when the "aleo" feature is enabled
+        Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron | Cardano => {
+            true
+        }
         Aleo => cfg!(feature = "aleo"),
     }
+}
+
+/// Build Cardano connection configuration
+pub fn build_cardano_connection_conf(
+    rpcs: &[Url],
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+) -> Option<ChainConnectionConf> {
+    let mut local_err = ConfigParsingError::default();
+
+    // Get the connection sub-object, or use the chain object itself
+    let conn = chain
+        .chain(&mut local_err)
+        .get_opt_key("connection")
+        .unwrap_or_else(|| chain.clone());
+
+    // URL - use first RPC if provided, otherwise get from connection config
+    let url = if !rpcs.is_empty() {
+        Some(rpcs[0].clone())
+    } else {
+        conn.chain(&mut local_err)
+            .get_key("url")
+            .parse_from_str("Invalid URL")
+            .end()
+    };
+
+    // API Key (required for Blockfrost)
+    let api_key = conn
+        .chain(&mut local_err)
+        .get_key("apiKey")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("api_key"),
+                eyre!("Missing api_key for Cardano chain"),
+            );
+            None
+        });
+
+    // Network (mainnet, preprod, preview)
+    let network_str = conn
+        .chain(&mut local_err)
+        .get_opt_key("network")
+        .parse_string()
+        .end()
+        .unwrap_or("mainnet");
+
+    let network = match network_str.to_lowercase().as_str() {
+        "mainnet" => h_cardano::CardanoNetwork::Mainnet,
+        "preprod" => h_cardano::CardanoNetwork::Preprod,
+        "preview" => h_cardano::CardanoNetwork::Preview,
+        _ => {
+            local_err.push(
+                (&chain.cwp).add("network"),
+                eyre!(
+                    "Invalid network: {}. Expected 'mainnet', 'preprod', or 'preview'",
+                    network_str
+                ),
+            );
+            h_cardano::CardanoNetwork::Mainnet // Default, will error anyway
+        }
+    };
+
+    // Policy IDs
+    let mailbox_policy_id = conn
+        .chain(&mut local_err)
+        .get_key("mailboxPolicyId")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            // Fallback to chain-level mailbox address
+            chain
+                .chain(&mut local_err)
+                .get_opt_key("mailbox")
+                .parse_string()
+                .end()
+        })
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("mailboxPolicyId"),
+                eyre!("Missing mailboxPolicyId (and no fallback mailbox address); using empty default"),
+            );
+            Default::default()
+        });
+
+    // Mailbox asset name hex for NFT lookup (defaults to empty for backwards compat)
+    let mailbox_asset_name_hex = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxAssetNameHex")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    let mailbox_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxScriptHash")
+        .parse_string()
+        .end()
+        .unwrap_or_default();
+
+    let warp_route_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("warpRouteReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    let ism_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismPolicyId")
+        .parse_string()
+        .end()
+        .or_else(|| {
+            chain
+                .chain(&mut local_err)
+                .get_opt_key("interchainSecurityModule")
+                .parse_string()
+                .end()
+        })
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("ismPolicyId"),
+                eyre!("Missing ismPolicyId (and no fallback interchainSecurityModule); using empty default"),
+            );
+            Default::default()
+        });
+
+    // ISM asset name hex for NFT lookup (defaults to empty for backwards compat)
+    let ism_asset_name_hex = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismAssetNameHex")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    let ism_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismScriptHash")
+        .parse_string()
+        .end()
+        .unwrap_or_default();
+
+    let igp_script_hash = conn
+        .chain(&mut local_err)
+        .get_opt_key("igpScriptHash")
+        .parse_string()
+        .end()
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("igpScriptHash"),
+                eyre!("Missing igpScriptHash; defaulting to zeros (IGP features will not work)"),
+            );
+            "00000000000000000000000000000000000000000000000000000000"
+        });
+
+    let validator_announce_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("validatorAnnouncePolicyId")
+        .parse_string()
+        .end()
+        .unwrap_or_else(|| {
+            local_err.push(
+                (&chain.cwp).add("validatorAnnouncePolicyId"),
+                eyre!("Missing validatorAnnouncePolicyId; defaulting to zeros (VA features will not work)"),
+            );
+            "00000000000000000000000000000000000000000000000000000000"
+        });
+
+    let validator_announce_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("validatorAnnounceReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    // Optional: Script CBOR hex for witness set (deprecated - use reference scripts)
+    let mailbox_script_cbor = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxScriptCbor")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    // Optional: Reference script UTXO (format: "tx_hash#output_index") - preferred method
+    let mailbox_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("mailboxReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    // Optional: ISM script CBOR hex for witness set (deprecated - use reference scripts)
+    let ism_script_cbor = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismScriptCbor")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    // Optional: ISM reference script UTXO (format: "tx_hash#output_index") - preferred method
+    let ism_reference_script_utxo = conn
+        .chain(&mut local_err)
+        .get_opt_key("ismReferenceScriptUtxo")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    let verified_message_nft_policy_id = conn
+        .chain(&mut local_err)
+        .get_opt_key("verifiedMessageNftPolicyId")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    let verified_message_nft_script_cbor = conn
+        .chain(&mut local_err)
+        .get_opt_key("verifiedMessageNftScriptCbor")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    let confirmation_block_delay = conn
+        .chain(&mut local_err)
+        .get_opt_key("confirmationBlockDelay")
+        .parse_u32()
+        .unwrap_or(5);
+
+    let max_batch_size = conn
+        .chain(&mut local_err)
+        .get_opt_key("maxBatchSize")
+        .parse_u32()
+        .unwrap_or(4);
+
+    if !local_err.is_ok() {
+        err.merge(local_err);
+        return None;
+    }
+
+    let url = url?;
+    let api_key = api_key?;
+
+    Some(ChainConnectionConf::Cardano(h_cardano::ConnectionConf {
+        url,
+        api_key: api_key.to_string(),
+        network,
+        mailbox_policy_id: mailbox_policy_id.to_string(),
+        mailbox_asset_name_hex,
+        mailbox_script_hash: mailbox_script_hash.to_string(),
+        mailbox_script_cbor,
+        mailbox_reference_script_utxo,
+        warp_route_reference_script_utxo,
+        ism_policy_id: ism_policy_id.to_string(),
+        ism_asset_name_hex,
+        ism_script_hash: ism_script_hash.to_string(),
+        ism_script_cbor,
+        ism_reference_script_utxo,
+        igp_script_hash: igp_script_hash.to_string(),
+        validator_announce_policy_id: validator_announce_policy_id.to_string(),
+        validator_announce_reference_script_utxo,
+        verified_message_nft_policy_id,
+        verified_message_nft_script_cbor,
+        confirmation_block_delay,
+        max_batch_size,
+        op_submission_config: OpSubmissionConfig {
+            max_batch_size,
+            ..Default::default()
+        },
+    }))
 }

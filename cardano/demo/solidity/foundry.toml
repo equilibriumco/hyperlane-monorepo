@@ -1,0 +1,34 @@
+# Standalone Foundry project for the Cardano demo's Sepolia-side scripts.
+#
+# The scripts import Hyperlane contracts and forge-std from the main `solidity/`
+# workspace rather than vendoring them, so `solidity/dependencies/` must exist
+# first (it is soldeer-fetched and gitignored):
+#
+#   cd ../../../solidity && forge soldeer install
+#
+# Settings below mirror solidity/foundry.toml so the bytecode matches what the
+# main workspace would produce.
+
+[profile.default]
+src = '.'
+script = '.'
+out = 'out'
+cache_path = 'forge-cache'
+solc_version = '0.8.33'
+evm_version = 'cancun'
+optimizer_runs = 10_000
+libs = []
+# The sources above live outside this project root; solc sandboxes that by default.
+allow_paths = ["../../../solidity"]
+remappings = [
+    "contracts/=../../../solidity/contracts/",
+    "@openzeppelin/contracts/=../../../solidity/dependencies/@openzeppelin-contracts-4.9.3/contracts/",
+    "@openzeppelin/contracts-upgradeable/=../../../solidity/dependencies/@openzeppelin-contracts-upgradeable-4.9.3/contracts/",
+    "@arbitrum/nitro-contracts/src/=../../../solidity/dependencies/@arbitrum-nitro-contracts-1.2.1/src/",
+    "@chainlink/contracts-ccip/src/v0.8/=../../../solidity/dependencies/@chainlink-contracts-ccip-1.5.0/contracts/src/v0.8/",
+    "@eth-optimism/contracts/=../../../solidity/dependencies/@eth-optimism-contracts-0.6.0/packages/contracts/contracts/",
+    "@predicate/=../../../solidity/dependencies/@predicate-contracts-2.2.2/src/",
+    "forge-std/=../../../solidity/dependencies/forge-std-1.9.2/src/",
+    "ds-test/=../../../solidity/dependencies/forge-std-1.9.2/lib/ds-test/src/",
+    "permit2/=../../../solidity/dependencies/permit2-1.0.0/src/",
+]

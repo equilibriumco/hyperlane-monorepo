@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use url::Url;
 
 use hyperlane_base::settings::ChainConnectionConf;
+use hyperlane_base::settings::ChainConnectionConf::*;
 use hyperlane_base::{CheckpointSyncer, CoreMetrics};
 use hyperlane_core::rpc_clients::call_and_retry_indefinitely;
 use hyperlane_core::{CheckpointAtBlock, HyperlaneDomain, MerkleTreeHook, ReorgPeriod, H256};
@@ -214,6 +215,7 @@ impl LatestCheckpointReorgReporter {
                     Tron(updated_conn)
                 })
             }
+            Cardano(conn) => vec![(conn.url.clone(), Cardano(conn))],
         };
 
         chain_conn_confs

@@ -32,6 +32,8 @@ pub enum LanderError {
     EstimationFailed,
     #[error("Non-retryable error: {0}")]
     NonRetryableError(String),
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
 
     // TODO: fully decouple from these crates
     #[error("DB error {0}")]
@@ -58,6 +60,7 @@ impl LanderError {
             SimulationFailed(_) => "SimulationFailed".to_string(),
             EstimationFailed => "EstimationFailed".to_string(),
             NonRetryableError(_) => "NonRetryableError".to_string(),
+            ConfigError(_) => "ConfigError".to_string(),
             DbError(_) => "DbError".to_string(),
             ChainCommunicationError(_) => "ChainCommunicationError".to_string(),
         }
@@ -75,7 +78,7 @@ impl LanderError {
             | DbError(_) => true,
             NonRetryableError(_) | EstimationFailed | SimulationFailed(_) | PayloadNotFound
             | TxDropped(_) | TxGasCapReached | TxHashNotFound(_) | TxAlreadyExists
-            | EyreError(_) => false,
+            | EyreError(_) | ConfigError(_) => false,
         }
     }
 }
@@ -141,6 +144,7 @@ impl IsRetryable for LanderError {
                 .all(|r| r.contains(SIMULATED_DELIVERY_FAILURE_ERROR)),
             ChannelSendFailure(_)
             | NonRetryableError(_)
+            | ConfigError(_)
             | TxDropped(_)
             | EstimationFailed
             | ChannelClosed

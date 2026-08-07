@@ -247,6 +247,8 @@ pub enum KnownHyperlaneDomain {
     StarknetTest23448594 = 23448594,
     CosmosTestNative1 = 75898670,
     CosmosTestNative2 = 75898671,
+    /// Cardano local chain
+    CardanoTest1 = 112233,
 }
 
 #[derive(Clone, Serialize)]
@@ -323,6 +325,8 @@ pub enum HyperlaneDomainProtocol {
     Aleo,
     /// Tron chain
     Tron,
+    /// A Cardano-based chain type which uses hyperlane-cardano.
+    Cardano,
 }
 
 impl HyperlaneDomainProtocol {
@@ -388,7 +392,7 @@ impl KnownHyperlaneDomain {
             | StarknetSepolia => HyperlaneDomainType::Testnet,
             Test1 | Test2 | Test3 | Test4 | FuelTest1 | SealevelTest1 | SealevelTest2
             | RadixTest0 | RadixTest1 | CosmosTest99990 | CosmosTest99991 | CosmosTestNative1
-            | CosmosTestNative2 | StarknetTest23448593 | StarknetTest23448594 => {
+            | CosmosTestNative2 | StarknetTest23448593 | StarknetTest23448594 | CardanoTest1 => {
                 HyperlaneDomainType::LocalTestChain
             }
             _ => HyperlaneDomainType::Mainnet,
@@ -427,6 +431,7 @@ impl KnownHyperlaneDomain {
             | ParadexSepolia => HyperlaneDomainProtocol::Starknet,
             Radix | RadixTestnet | RadixTest0 | RadixTest1 => HyperlaneDomainProtocol::Radix,
             Aleo | AleoTestnet => HyperlaneDomainProtocol::Aleo,
+            CardanoTest1 => HyperlaneDomainProtocol::Cardano,
             _ => HyperlaneDomainProtocol::Ethereum
         }
     }
@@ -633,7 +638,7 @@ impl HyperlaneDomain {
         use HyperlaneDomainProtocol::*;
         let protocol = self.domain_protocol();
         match protocol {
-            Ethereum | Cosmos | CosmosNative | Starknet | Tron => IndexMode::Block,
+            Ethereum | Cosmos | CosmosNative | Starknet | Tron | Cardano => IndexMode::Block,
             Fuel | Sealevel | Radix | Aleo => IndexMode::Sequence,
         }
     }

@@ -7,6 +7,7 @@ export enum ProtocolType {
   Radix = 'radix',
   Aleo = 'aleo',
   Tron = 'tron',
+  Cardano = 'cardano',
   Unknown = 'unknown',
 }
 
@@ -22,5 +23,6 @@ export const ProtocolSmallestUnit = {
   [ProtocolType.Radix]: 'attos',
   [ProtocolType.Aleo]: 'microcredits',
   [ProtocolType.Tron]: 'SUN',
+  [ProtocolType.Cardano]: 'lovelace',
   [ProtocolType.Unknown]: 'unknown',
 };

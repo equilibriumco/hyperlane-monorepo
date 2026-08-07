@@ -197,12 +197,14 @@ describe('hyperlane warp deploy e2e tests', async function () {
 
   const unsupportedChainsTestCases: Record<
     // Radix and Aleo are excluded because they are still not supported on main
+    // Cardano is excluded because it has no TypeScript deploy support
     // Unknown is excluded because it's a forward-compatibility placeholder
     Exclude<
       ProtocolType,
       | ProtocolType.Radix
       | ProtocolType.Aleo
       | ProtocolType.Tron
+      | ProtocolType.Cardano
       | ProtocolType.Unknown
     >,
     Address

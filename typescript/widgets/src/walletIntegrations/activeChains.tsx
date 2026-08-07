@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 import type { MinimalProviderRegistry } from '@hyperlane-xyz/sdk/providers/MinimalProviderRegistry';
-import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
+import { type SdkSupportedProtocol, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoActiveChain } from './aleoWallet.js';
 import { useCosmosActiveChain } from './cosmosWallet.js';
@@ -13,7 +13,7 @@ import { type ActiveChainInfo } from './types.js';
 import { useTronActiveChain } from './tronWallet.js';
 
 export function useActiveChains(multiProvider: MinimalProviderRegistry): {
-  chains: Record<KnownProtocolType, ActiveChainInfo>;
+  chains: Record<SdkSupportedProtocol, ActiveChainInfo>;
   readyChains: Array<ActiveChainInfo>;
 } {
   const evmChain = useEthereumActiveChain(multiProvider);

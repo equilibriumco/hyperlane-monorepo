@@ -462,6 +462,9 @@ async fn process_batch(
     confirm_queue: &OpQueue,
     metrics: &MessageProcessorMetrics,
 ) {
+    if batch.is_empty() {
+        return;
+    }
     let mut task_prep_futures = vec![];
     let op_refs = batch.iter_mut().map(|op| op.as_mut()).collect::<Vec<_>>();
     for op in op_refs {
@@ -481,17 +484,14 @@ async fn process_batch(
         .count();
 
     let batch_len = batch.len();
+    let mut ready_ops = Vec::new();
     for (op, prepare_result) in batch.into_iter().zip(res.into_iter()) {
         let app_context = op.app_context();
         match prepare_result {
             PendingOperationResult::Success => {
                 debug!(?op, "Operation prepared");
-
                 metrics.inc_prepared(app_context);
-                // TODO: push multiple messages at once
-                submit_queue
-                    .push(op, Some(PendingOperationStatus::ReadyToSubmit))
-                    .await;
+                ready_ops.push(op);
             }
             PendingOperationResult::NotReady => {
                 prepare_queue.push(op, None).await;
@@ -513,6 +513,17 @@ async fn process_batch(
                     .await;
             }
         }
+    }
+    if !ready_ops.is_empty() {
+        debug!(%domain, count = ready_ops.len(), "Pushing ready operations to submit queue");
+        submit_queue
+            .push_many(
+                ready_ops
+                    .into_iter()
+                    .map(|op| (op, Some(PendingOperationStatus::ReadyToSubmit)))
+                    .collect(),
+            )
+            .await;
     }
     if not_ready_count == batch_len {
         // none of the operations are ready yet, so wait for a little bit

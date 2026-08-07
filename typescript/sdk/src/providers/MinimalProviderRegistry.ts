@@ -14,6 +14,7 @@ import {
   EthersV5Provider,
   PROTOCOL_TO_DEFAULT_PROVIDER_TYPE,
   ProviderMap,
+  isSdkSupportedProtocol,
   ProviderType,
   RadixProvider,
   SolanaWeb3Provider,
@@ -83,7 +84,7 @@ export class MinimalProviderRegistry<
     const metadata = this.tryGetChainMetadata(chainNameOrId);
     if (!metadata) return null;
     const { protocol, name, rpcUrls } = metadata;
-    if (protocol === ProtocolType.Unknown) return null;
+    if (!isSdkSupportedProtocol(protocol)) return null;
     type = type || PROTOCOL_TO_DEFAULT_PROVIDER_TYPE[protocol];
     if (!type) return null;
 

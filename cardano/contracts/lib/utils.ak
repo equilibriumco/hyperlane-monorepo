@@ -1,0 +1,253 @@
+use aiken/builtin
+use aiken/collection/dict
+use aiken/collection/list
+use aiken/crypto.{Blake2b_224, Hash, VerificationKeyHash}
+use aiken/primitive/bytearray
+use cardano/address.{Address, Script}
+use cardano/assets.{Value, flatten, lovelace_of, merge, quantity_of, zero}
+use cardano/transaction.{
+  InlineDatum, Input, Output, OutputReference, Transaction,
+}
+
+/// Utility functions for Hyperlane Cardano contracts
+/// Script hash type alias
+pub type ScriptHash =
+  Hash<Blake2b_224, ByteArray>
+
+/// Check if a transaction is signed by a specific key
+pub fn is_signed_by(tx: Transaction, key: VerificationKeyHash) -> Bool {
+  list.has(tx.extra_signatories, key)
+}
+
+/// Find an input by its output reference
+pub fn find_input(tx: Transaction, ref: OutputReference) -> Option<Input> {
+  list.find(tx.inputs, fn(input) { input.output_reference == ref })
+}
+
+/// Find outputs going to a specific address
+pub fn find_outputs_to_address(tx: Transaction, addr: Address) -> List<Output> {
+  list.filter(tx.outputs, fn(output) { output.address == addr })
+}
+
+/// Find outputs containing a specific token (by policy ID and asset name)
+pub fn find_outputs_with_token(
+  tx: Transaction,
+  policy: ByteArray,
+  name: ByteArray,
+) -> List<Output> {
+  list.filter(
+    tx.outputs,
+    fn(output) { quantity_of(output.value, policy, name) > 0 },
+  )
+}
+
+/// Check if an input is from a specific script
+pub fn is_script_input(input: Input, script_hash: ScriptHash) -> Bool {
+  when input.output.address.payment_credential is {
+    Script(hash) -> hash == script_hash
+    _ -> False
+  }
+}
+
+/// Find all inputs from a specific script
+pub fn find_script_inputs(
+  tx: Transaction,
+  script_hash: ScriptHash,
+) -> List<Input> {
+  list.filter(tx.inputs, fn(input) { is_script_input(input, script_hash) })
+}
+
+/// Check if any input is from a specific script
+pub fn has_script_input(tx: Transaction, script_hash: ScriptHash) -> Bool {
+  list.any(tx.inputs, fn(input) { is_script_input(input, script_hash) })
+}
+
+/// Get the total value locked in inputs from a script
+pub fn get_script_input_value(tx: Transaction, script_hash: ScriptHash) -> Value {
+  let inputs = find_script_inputs(tx, script_hash)
+  list.foldl(inputs, zero, fn(input, acc) { merge(acc, input.output.value) })
+}
+
+/// Check that value is preserved (output >= input for lovelace AND all native tokens).
+pub fn value_preserved(input_value: Value, output_value: Value) -> Bool {
+  lovelace_of(output_value) >= lovelace_of(input_value) && native_tokens_preserved(
+    input_value,
+    output_value,
+  )
+}
+
+/// Check that all native tokens (non-lovelace) in the input are present
+/// in the output with equal or greater quantity.
+pub fn native_tokens_preserved(input_value: Value, output_value: Value) -> Bool {
+  list.all(
+    flatten(input_value),
+    fn(item) {
+      let (policy, name, qty) = item
+      if policy == #"" {
+        True
+      } else {
+        quantity_of(output_value, policy, name) >= qty
+      }
+    },
+  )
+}
+
+/// Like native_tokens_preserved, but excludes one specific token from the check.
+/// Used when a token is intentionally released from a UTXO (e.g. collateral release).
+pub fn native_tokens_preserved_except(
+  input_value: Value,
+  output_value: Value,
+  except_policy: ByteArray,
+  except_name: ByteArray,
+) -> Bool {
+  list.all(
+    flatten(input_value),
+    fn(item) {
+      let (policy, name, qty) = item
+      if policy == #"" {
+        True
+      } else if policy == except_policy && name == except_name {
+        True
+      } else {
+        quantity_of(output_value, policy, name) >= qty
+      }
+    },
+  )
+}
+
+/// Convert a Hyperlane address (32 bytes) to a Cardano script hash (28 bytes)
+/// The first 4 bytes are the credential type prefix, next 28 bytes are the actual hash
+pub fn hyperlane_address_to_script_hash(addr: ByteArray) -> Option<ScriptHash> {
+  if bytearray.length(addr) == 32 && bytearray.take(addr, 4) == #"02000000" {
+    // Skip first 4 bytes (credential type prefix), take next 28 bytes
+    // bytearray.slice uses inclusive end index, so 4-31 = 28 bytes
+    Some(bytearray.slice(addr, 4, 31))
+  } else {
+    None
+  }
+}
+
+/// Convert a script hash to a Hyperlane address with script credential type prefix
+pub fn script_hash_to_hyperlane_address(hash: ScriptHash) -> ByteArray {
+  // Prefix: 0x02000000 for validator/script credential
+  let prefix = #"02000000"
+  bytearray.concat(prefix, hash)
+}
+
+/// Convert a minting policy ID to a Hyperlane address
+/// Prefix: 0x01000000 for minting policy
+pub fn policy_id_to_hyperlane_address(policy_id: ByteArray) -> ByteArray {
+  let prefix = #"01000000"
+  bytearray.concat(prefix, policy_id)
+}
+
+/// Extract a policy ID from a Hyperlane address (if prefix is 0x01)
+pub fn hyperlane_address_to_policy_id(addr: ByteArray) -> Option<ByteArray> {
+  if bytearray.length(addr) == 32 && bytearray.take(addr, 4) == #"01000000" {
+    Some(bytearray.slice(addr, 4, 31))
+  } else {
+    None
+  }
+}
+
+/// Verify that a list has at least n elements
+pub fn has_at_least(items: List<a>, n: Int) -> Bool {
+  list.length(items) >= n
+}
+
+/// Safe list access by index
+pub fn at(items: List<a>, index: Int) -> Option<a> {
+  at_helper(items, index, 0)
+}
+
+fn at_helper(items: List<a>, target: Int, current: Int) -> Option<a> {
+  when items is {
+    [] -> None
+    [head, ..tail] ->
+      if current == target {
+        Some(head)
+      } else {
+        at_helper(tail, target, current + 1)
+      }
+  }
+}
+
+/// Find a value in an association list by key
+pub fn assoc_find(items: List<(k, v)>, key: k) -> Option<v> {
+  when items is {
+    [] -> None
+    [(k, v), ..tail] ->
+      if k == key {
+        Some(v)
+      } else {
+        assoc_find(tail, key)
+      }
+  }
+}
+
+/// Check if a specific NFT is present in any transaction input
+/// This is used for proving ownership/control of a UTXO
+pub fn has_nft_in_inputs(
+  tx: Transaction,
+  policy_id: ByteArray,
+  asset_name: ByteArray,
+) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) { quantity_of(input.output.value, policy_id, asset_name) > 0 },
+  )
+}
+
+/// Check if any transaction input contains a token from the given policy
+/// Used for NFT policy-based recipient verification
+pub fn has_policy_in_inputs(tx: Transaction, policy_id: ByteArray) -> Bool {
+  list.any(
+    tx.inputs,
+    fn(input) {
+      let policy_tokens = assets.tokens(input.output.value, policy_id)
+      !dict.is_empty(policy_tokens)
+    },
+  )
+}
+
+/// Validate a migration: move state UTXO to a new script address.
+/// Checks: owner signature, continuation at new_address with same datum and value.
+/// Move a state UTXO to a new script address, bumping the datum version.
+///
+/// Migration is executed by the OLD validator: it is a spend of the UTXO at the
+/// old address, and Cardano does not validate outputs when they are created, so
+/// the new script has no say until someone first spends the migrated UTXO. The
+/// old code therefore cannot verify a datum shape that did not exist when it was
+/// compiled.
+///
+/// What it can do is read field 0. Plutus Data is self-describing, so the
+/// version is legible out of any shape, and requiring it to be exactly one more
+/// than the current version keeps the failure on this side of the move: a
+/// migration that gets it wrong is rejected while the state is still spendable
+/// under the old script, rather than stranding the UTXO at an address whose
+/// script will not accept it.
+///
+/// Everything beyond field 0 is owner-attested. The owner already sets validator
+/// sets, oracles and ownership; migration additionally lets them rewrite state,
+/// which is a trust event and is why this is owner-gated and value-preserving.
+pub fn validate_migrate(
+  owner: VerificationKeyHash,
+  new_address: Address,
+  tx: Transaction,
+  own_ref: OutputReference,
+  current_version: Int,
+) -> Bool {
+  expect is_signed_by(tx, owner)
+  expect Some(own_input) = find_input(tx, own_ref)
+  let own_value = own_input.output.value
+  expect Some(continuation) =
+    list.find(tx.outputs, fn(output) { output.address == new_address })
+  expect InlineDatum(cont_datum_data) = continuation.datum
+
+  // Read field 0 without knowing the rest of the shape.
+  let fields = builtin.un_constr_data(cont_datum_data).2nd
+  expect Some(version_field) = list.at(fields, 0)
+  expect builtin.un_i_data(version_field) == current_version + 1
+
+  value_preserved(own_value, continuation.value)
+}

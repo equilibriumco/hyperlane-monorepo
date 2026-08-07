@@ -1,0 +1,44 @@
+[
+  {
+    "script_name": "mailbox",
+    "script_hash": "afc68363b43ccd8534c975c86479845fb6ba92d615c9c91fd4039c69",
+    "tx_hash": "263944bde781bf6297ce44e42b23923d48f45f16469395587bf1ab23820d5642",
+    "output_index": 0,
+    "lovelace": 37000000
+  },
+  {
+    "script_name": "igp",
+    "script_hash": "061a6290caf75341ac9f4cd33aeb8be59b814666515c7c124bea26fb",
+    "tx_hash": "d5888567fcc302cf689aaab67703724d4d3ad921322f6e221c5b635a9d4c77ba",
+    "output_index": 0,
+    "lovelace": 16000000
+  },
+  {
+    "script_name": "message_id_multisig_ism",
+    "script_hash": "fc16a986e4a17c42e33228947cbaec6c6372e9c856fb796cd7d832cb",
+    "tx_hash": "4569122c1b42a20dea00ac8283f20257e96f1aa180c902d379d41522b3872d58",
+    "output_index": 0,
+    "lovelace": 18000000
+  },
+  {
+    "script_name": "validator_announce",
+    "script_hash": "092a77de62c6fe005e51dbe8b2c23aaec35a21d02be6e0f51e4e74ec",
+    "tx_hash": "6d090874f3162bc7cd5e5a9452d9ce9454345ab23d541eba608c9f336055e539",
+    "output_index": 0,
+    "lovelace": 9000000
+  },
+  {
+    "script_name": "mailbox",
+    "script_hash": "e86679a09d84a08d4963d245ae2f125954a403b33e88c5b286299f7d",
+    "tx_hash": "454eefb70fee559fd4a1ea14717c0931dcb903aa213215030095d50783ca2b84",
+    "output_index": 0,
+    "lovelace": 37000000
+  },
+  {
+    "script_name": "validator_announce",
+    "script_hash": "ffa98d7f174b7075dbf2c5131a19cbc6864220e586a147c4ca806ba7",
+    "tx_hash": "fe70d677b4a94194b6d656b5651d96c125f6cded85d18dfccc812cae0f7185fb",
+    "output_index": 0,
+    "lovelace": 9000000
+  }
+]

@@ -48,6 +48,8 @@ pub struct MessageDbLoader {
 struct ForwardBackwardIterator {
     low_nonce_iter: DirectionalNonceIterator,
     high_nonce_iter: DirectionalNonceIterator,
+    /// Allows one jump when the iterator was created before any messages were indexed.
+    bootstrap_from_empty: bool,
     // here for debugging purposes
     _domain: String,
 }
@@ -77,7 +79,53 @@ impl ForwardBackwardIterator {
         Self {
             low_nonce_iter,
             high_nonce_iter,
+            bootstrap_from_empty: high_nonce.is_none(),
             _domain: domain,
+        }
+    }
+
+    /// Refresh the high nonce iterator to check for newly indexed messages.
+    /// This is called when both iterators are stuck on Unindexed, to pick up
+    /// messages that were indexed after the iterator was initialized.
+    ///
+    /// This handles the case where:
+    /// - The relayer starts with an empty database
+    /// - The iterator initializes at nonce 0
+    /// - Messages are indexed at a higher nonce (e.g., 4337)
+    /// - The iterator needs to jump to the newly indexed range
+    fn refresh_high_nonce(&mut self) {
+        if !self.bootstrap_from_empty {
+            return;
+        }
+
+        let db = &self.high_nonce_iter.db;
+        if let Ok(Some(highest_nonce)) = db.retrieve_highest_seen_message_nonce() {
+            let current_nonce = self.high_nonce_iter.nonce.unwrap_or(0);
+            // Only update if database has messages at a higher nonce than our current position
+            // This handles the case where we started at 0 but messages start at a higher nonce
+            if highest_nonce >= current_nonce {
+                // Check if there's actually a message at the current nonce
+                // If not, we need to find where the messages actually start
+                if db
+                    .retrieve_message_by_nonce(current_nonce)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
+                    // No message at current nonce, jump to highest known nonce
+                    // Also initialize the low nonce iterator to scan backward
+                    // from that point, so messages below the highest nonce are found
+                    debug!(
+                        current_nonce,
+                        highest_nonce,
+                        domain = self._domain,
+                        "Jumping high nonce iterator to newly indexed messages"
+                    );
+                    self.high_nonce_iter.nonce = Some(highest_nonce);
+                    self.low_nonce_iter.nonce = highest_nonce.checked_sub(1);
+                    self.bootstrap_from_empty = false;
+                }
+            }
         }
     }
 
@@ -93,9 +141,11 @@ impl ForwardBackwardIterator {
                 // Always prioritize advancing the high nonce iterator, as
                 // we have a preference for higher nonces
                 (MessageStatus::Processed, _) => {
+                    self.bootstrap_from_empty = false;
                     self.high_nonce_iter.iterate();
                 }
                 (MessageStatus::Processable(high_nonce_message), _) => {
+                    self.bootstrap_from_empty = false;
                     self.high_nonce_iter.iterate();
                     return Ok(Some(high_nonce_message));
                 }
@@ -103,15 +153,21 @@ impl ForwardBackwardIterator {
                 // Low nonce messages are only processed if the high nonce iterator
                 // can't make any progress
                 (_, MessageStatus::Processed) => {
+                    self.bootstrap_from_empty = false;
                     self.low_nonce_iter.iterate();
                 }
                 (_, MessageStatus::Processable(low_nonce_message)) => {
+                    self.bootstrap_from_empty = false;
                     self.low_nonce_iter.iterate();
                     return Ok(Some(low_nonce_message));
                 }
 
-                // If both iterators give us unindexed messages, there are no messages at the moment
-                (MessageStatus::Unindexed, MessageStatus::Unindexed) => return Ok(None),
+                // If both iterators give us unindexed messages, check if new messages
+                // have been indexed since we last checked
+                (MessageStatus::Unindexed, MessageStatus::Unindexed) => {
+                    self.refresh_high_nonce();
+                    return Ok(None);
+                }
             }
             // This loop may iterate through millions of processed messages, blocking the runtime.
             // So, to avoid starving other futures in this task, yield to the runtime
@@ -300,7 +356,7 @@ impl DbLoaderExt for MessageDbLoader {
             } else {
                 debug!(
                     ?msg,
-                    "Message destined for unknown message context, skipping",
+                    "Message destined for unknown message context, skipping"
                 );
                 return Ok(());
             };

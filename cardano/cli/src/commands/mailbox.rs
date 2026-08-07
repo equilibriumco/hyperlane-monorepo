@@ -1,0 +1,1821 @@
+//! Mailbox command - Manage Hyperlane Mailbox contract
+
+use anyhow::{anyhow, Result};
+use clap::{Args, Subcommand};
+use colored::Colorize;
+use pallas_primitives::conway::{BigInt, PlutusData};
+use sha3::{Digest, Keccak256};
+
+use crate::utils::blockfrost::BlockfrostClient;
+use crate::utils::cbor::{
+    build_mailbox_datum, build_mailbox_dispatch_redeemer, build_mailbox_set_default_ism_redeemer,
+    build_migrate_redeemer,
+};
+use crate::utils::context::CliContext;
+use crate::utils::tx_builder::{
+    apply_measured_fee, calibrate_ex_units, RedeemerRef, PLACEHOLDER_EX_UNITS,
+};
+use crate::utils::types::ScriptInfo;
+
+#[derive(Args)]
+pub struct MailboxArgs {
+    #[command(subcommand)]
+    command: MailboxCommands,
+}
+
+#[derive(Subcommand)]
+enum MailboxCommands {
+    /// Dispatch a message to a remote chain
+    Dispatch {
+        /// Destination domain ID (e.g., 11155111 for Ethereum Sepolia)
+        #[arg(long)]
+        destination: u32,
+
+        /// Recipient address on destination chain (32 bytes hex, with or without 0x prefix)
+        #[arg(long)]
+        recipient: String,
+
+        /// Message body (string or hex with 0x prefix)
+        #[arg(long)]
+        body: String,
+
+        /// Mailbox policy ID (for finding the mailbox UTXO)
+        #[arg(long)]
+        mailbox_policy: Option<String>,
+
+        /// Reference script UTXO (format: txhash#index)
+        #[arg(long)]
+        reference_script: Option<String>,
+
+        /// Path to signing key
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// Dry run - show message details without submitting
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Set the default ISM for the mailbox
+    SetDefaultIsm {
+        /// New ISM script hash (28 bytes, hex)
+        #[arg(long)]
+        ism_hash: String,
+
+        /// Mailbox policy ID (for finding the mailbox UTXO)
+        #[arg(long)]
+        mailbox_policy: Option<String>,
+
+        /// Reference script UTXO (format: txhash#index) - script deployed on-chain
+        #[arg(long)]
+        reference_script: Option<String>,
+
+        /// Path to signing key
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show current mailbox configuration
+    Show {
+        /// Mailbox policy ID
+        #[arg(long)]
+        mailbox_policy: Option<String>,
+    },
+
+    /// Migrate mailbox state to a new script address
+    Migrate {
+        /// New mailbox script hash (28 bytes, hex). Auto-computed from blueprint + deployment params if omitted.
+        #[arg(long)]
+        new_script_hash: Option<String>,
+
+        /// Reference script UTXO for the OLD mailbox (format: txhash#index)
+        #[arg(long)]
+        reference_script: Option<String>,
+
+        /// Path to signing key
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// Dry run
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+pub async fn execute(ctx: &CliContext, args: MailboxArgs) -> Result<()> {
+    match args.command {
+        MailboxCommands::Dispatch {
+            destination,
+            recipient,
+            body,
+            mailbox_policy,
+            reference_script,
+            signing_key,
+            dry_run,
+        } => {
+            dispatch(
+                ctx,
+                destination,
+                &recipient,
+                &body,
+                mailbox_policy,
+                reference_script,
+                signing_key,
+                dry_run,
+            )
+            .await
+        }
+        MailboxCommands::SetDefaultIsm {
+            ism_hash,
+            mailbox_policy,
+            reference_script,
+            signing_key,
+            dry_run,
+        } => {
+            set_default_ism(
+                ctx,
+                &ism_hash,
+                mailbox_policy,
+                reference_script,
+                signing_key,
+                dry_run,
+            )
+            .await
+        }
+        MailboxCommands::Show { mailbox_policy } => show_config(ctx, mailbox_policy).await,
+        MailboxCommands::Migrate {
+            new_script_hash,
+            reference_script,
+            signing_key,
+            dry_run,
+        } => migrate(ctx, new_script_hash, reference_script, signing_key, dry_run).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch(
+    ctx: &CliContext,
+    destination: u32,
+    recipient: &str,
+    body: &str,
+    mailbox_policy: Option<String>,
+    reference_script: Option<String>,
+    signing_key: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Dispatching Hyperlane message...".cyan());
+
+    // Parse recipient address (32 bytes hex)
+    // Automatically pad shorter addresses (e.g., 20-byte ETH, 28-byte Cardano) to 32 bytes
+    let recipient_raw = recipient.strip_prefix("0x").unwrap_or(recipient);
+    // Validate hex
+    hex::decode(recipient_raw).map_err(|e| anyhow!("Invalid recipient hex: {}", e))?;
+    if recipient_raw.len() > 64 {
+        return Err(anyhow!(
+            "Recipient too long: {} hex chars (max 64)",
+            recipient_raw.len()
+        ));
+    }
+    // Left-pad with zeros to 64 hex chars (32 bytes, standard Hyperlane H256 format)
+    let recipient_hex = format!("{:0>64}", recipient_raw);
+
+    // Parse body (string or hex with 0x prefix)
+    let body_bytes = if body.starts_with("0x") {
+        hex::decode(&body[2..]).map_err(|e| anyhow!("Invalid body hex: {}", e))?
+    } else {
+        body.as_bytes().to_vec()
+    };
+    let body_hex = hex::encode(&body_bytes);
+
+    println!("  Destination: {}", destination);
+    println!("  Recipient: 0x{}", recipient_hex);
+    println!(
+        "  Body: {} ({} bytes)",
+        if body.starts_with("0x") {
+            body.to_string()
+        } else {
+            format!("\"{}\"", body)
+        },
+        body_bytes.len()
+    );
+
+    // Get mailbox policy ID
+    let policy_id = get_mailbox_policy(ctx, mailbox_policy)?;
+    println!("  Mailbox Policy: {}", policy_id);
+
+    // Load signing key (optional for dry_run)
+    let keypair = if dry_run {
+        // Try to load signing key, but don't fail in dry_run mode
+        if let Some(path) = signing_key {
+            Some(ctx.load_signing_key_from(std::path::Path::new(&path))?)
+        } else {
+            ctx.load_signing_key().ok()
+        }
+    } else {
+        // Require signing key for actual transactions
+        let kp = if let Some(path) = signing_key {
+            ctx.load_signing_key_from(std::path::Path::new(&path))?
+        } else {
+            ctx.load_signing_key()?
+        };
+        Some(kp)
+    };
+
+    // Use actual address or placeholder for dry_run
+    let (payer_address, payer_pkh) = if let Some(ref kp) = keypair {
+        (kp.address_bech32(ctx.pallas_network()), kp.pub_key_hash())
+    } else {
+        // Use placeholder for dry_run when no key available
+        let placeholder_pkh = vec![0u8; 28]; // 28-byte placeholder
+        ("(no signing key - dry run)".to_string(), placeholder_pkh)
+    };
+    println!("  Sender: {}", payer_address);
+
+    // Find mailbox UTXO
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Get asset name from deployment info
+    let asset_name_hex = ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.mailbox)
+        .and_then(|m| m.state_nft)
+        .map(|nft| nft.asset_name_hex)
+        .unwrap_or_else(|| hex::encode("Mailbox State"));
+
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&policy_id, &asset_name_hex)
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Found Mailbox UTXO:".green());
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
+
+    // Parse current datum
+    let current_datum = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
+
+    let mailbox_data = parse_mailbox_datum(current_datum)?;
+    println!("\n{}", "Current Mailbox State:".green());
+    println!("  Local Domain: {}", mailbox_data.local_domain);
+    println!("  Outbound Nonce: {}", mailbox_data.outbound_nonce);
+    println!("  Merkle Count: {}", mailbox_data.merkle_count);
+
+    // Build sender address (32 bytes: 0x00000000 + pkh for verification key)
+    let sender_hex = format!("00000000{}", hex::encode(&payer_pkh));
+    println!("  Sender (Hyperlane): 0x{}", sender_hex);
+
+    // Calculate message ID
+    let message_id = compute_message_id(
+        3, // version
+        mailbox_data.outbound_nonce,
+        mailbox_data.local_domain,
+        &sender_hex,
+        destination,
+        &recipient_hex,
+        &body_hex,
+    )?;
+    println!("\n{}", "Message Details:".green());
+    println!("  Message ID: 0x{}", message_id);
+    println!("  Nonce: {}", mailbox_data.outbound_nonce);
+
+    // Calculate new merkle tree state
+    let new_merkle = update_merkle_tree(
+        &mailbox_data.merkle_branches,
+        mailbox_data.merkle_count,
+        &message_id,
+    )?;
+    println!("  New Merkle Count: {}", new_merkle.count);
+
+    // Build new datum with updated nonce and merkle tree
+    let branches_refs: Vec<&str> = new_merkle.branches.iter().map(|s| s.as_str()).collect();
+    let new_datum_cbor = build_mailbox_datum(
+        mailbox_data.local_domain,
+        &mailbox_data.default_ism,
+        &mailbox_data.owner,
+        mailbox_data.outbound_nonce + 1,
+        &branches_refs,
+        new_merkle.count,
+        &mailbox_data.processed_tree_root,
+    )?;
+
+    // Get payer UTXOs for fees, collateral, and sender_ref
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 5_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && u.tx_hash != collateral_utxo.tx_hash
+        })
+        .or_else(|| {
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none()
+            })
+        })
+        .ok_or_else(|| anyhow!("No suitable fee UTXO found"))?;
+
+    // Build Dispatch redeemer — sender_ref points to the fee UTXO (payer's wallet)
+    // so the mailbox can deterministically identify the sender.
+    let redeemer_cbor = build_mailbox_dispatch_redeemer(
+        destination,
+        &recipient_hex,
+        &body_hex,
+        &fee_utxo.tx_hash,
+        fee_utxo.output_index as u32,
+        &[], // no hook metadata for direct dispatch
+    )?;
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        println!("\n{}", "Transaction Details:".cyan());
+        println!(
+            "  Mailbox UTXO: {}#{}",
+            mailbox_utxo.tx_hash, mailbox_utxo.output_index
+        );
+        println!("  Fee UTXO: {}#{}", fee_utxo.tx_hash, fee_utxo.output_index);
+        println!("  Redeemer: {}", hex::encode(&redeemer_cbor));
+        println!("  New Datum: {}", hex::encode(&new_datum_cbor));
+        println!("\n{}", "Message Summary:".cyan());
+        println!("  Message ID: 0x{}", message_id);
+        println!(
+            "  From: {} (domain {})",
+            payer_address, mailbox_data.local_domain
+        );
+        println!("  To: 0x{} (domain {})", recipient_hex, destination);
+        println!("  Body: {} bytes", body_bytes.len());
+        return Ok(());
+    }
+
+    // Build and submit the transaction
+    println!("\n{}", "Building transaction...".cyan());
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
+
+    // Parse reference script UTXO if provided
+    let ref_script_utxo = if let Some(ref ref_script) = reference_script {
+        let parts: Vec<&str> = ref_script.split('#').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!(
+                "Invalid reference script format. Use: txhash#index"
+            ));
+        }
+        Some((parts[0].to_string(), parts[1].parse::<u64>()?))
+    } else {
+        // Try to get from deployment info
+        ctx.load_deployment_info()
+            .ok()
+            .and_then(|d| d.mailbox)
+            .and_then(|m| m.reference_script_utxo)
+            .map(|r| (r.tx_hash, r.output_index as u64))
+    };
+
+    // Load mailbox script only if not using reference script.
+    // Mailbox is parameterized, so we must apply params from deployment_info.
+    let mailbox_script_bytes = if ref_script_utxo.is_none() {
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment
+            .mailbox
+            .as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir,
+            "mailbox",
+            "mailbox",
+            &[&vm_cbor, &ism_cbor],
+        )?;
+        println!("  Applied script hash: {}", applied.policy_id);
+        Some(hex::decode(&applied.compiled_code)?)
+    } else {
+        println!(
+            "  Using reference script: {}#{}",
+            ref_script_utxo.as_ref().unwrap().0,
+            ref_script_utxo.as_ref().unwrap().1
+        );
+        None
+    };
+
+    // Get PlutusV3 cost model
+    let cost_model = client.get_plutusv3_cost_model().await?;
+
+    // Get current slot for validity
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200; // ~2 hours
+
+    // Build the transaction using pallas_txbuilder
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
+
+    // Parse addresses and hashes
+    let mailbox_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
+        .map_err(|e| anyhow!("Invalid mailbox address: {:?}", e))?;
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+
+    // Build mailbox continuation output with new datum and state NFT
+    // Decode asset name from hex (it's stored as hex string like "4d61696c626f78205374617465")
+    let asset_name_bytes =
+        hex::decode(&asset_name_hex).map_err(|e| anyhow!("Invalid asset name hex: {}", e))?;
+    let mailbox_output = Output::new(mailbox_address, mailbox_utxo.lovelace)
+        .set_inline_datum(new_datum_cbor.clone())
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+    // Calculate change
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    // Build staging transaction
+    // Convert payer_pkh to [u8; 28] for disclosed_signer
+    let payer_pkh_bytes: [u8; 28] = payer_pkh
+        .clone()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid payer pkh length"))?;
+
+    let mut staging = StagingTransaction::new()
+        // Fee input first (so it becomes the sender)
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        // Mailbox script input
+        .input(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        ))
+        // Collateral
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
+        // Required signer (so Plutus script can verify sender authorization)
+        .disclosed_signer(Hash::new(payer_pkh_bytes))
+        // Mailbox continuation output
+        .output(mailbox_output)
+        // Spend redeemer for mailbox input
+        .add_spend_redeemer(
+            Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
+        )
+        // Cost model for script data hash
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        // Fee and validity
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(0); // Testnet
+
+    // Add reference input OR embedded script
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx));
+    } else if let Some(script_bytes) = mailbox_script_bytes {
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    } else {
+        return Err(anyhow!(
+            "No script provided and no reference script specified"
+        ));
+    }
+
+    // Add change output if significant
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr.clone(), change));
+    }
+
+    // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    // Sign the transaction
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    // Unwrap is safe here - we already verified keypair exists (not dry_run)
+    let kp = keypair
+        .as_ref()
+        .expect("Keypair required for transaction signing");
+    let signature = kp.sign(tx_hash_bytes);
+    let signed_tx = tx
+        .add_signature(kp.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    // Submit the transaction
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n{}", "Message Dispatched:".cyan());
+    println!("  Message ID: 0x{}", message_id);
+    println!(
+        "  From: {} (domain {})",
+        payer_address, mailbox_data.local_domain
+    );
+    println!("  To: 0x{} (domain {})", recipient_hex, destination);
+    println!("  Nonce: {}", mailbox_data.outbound_nonce);
+
+    Ok(())
+}
+
+/// Compute message ID (keccak256 of encoded message)
+/// Format: version (1 byte) || nonce (4 bytes) || origin (4 bytes) || sender (32 bytes)
+///         || destination (4 bytes) || recipient (32 bytes) || body (variable)
+fn compute_message_id(
+    version: u8,
+    nonce: u32,
+    origin: u32,
+    sender_hex: &str,
+    destination: u32,
+    recipient_hex: &str,
+    body_hex: &str,
+) -> Result<String> {
+    let mut message = Vec::new();
+
+    // Version (1 byte)
+    message.push(version);
+
+    // Nonce (4 bytes, big-endian)
+    message.extend_from_slice(&nonce.to_be_bytes());
+
+    // Origin (4 bytes, big-endian)
+    message.extend_from_slice(&origin.to_be_bytes());
+
+    // Sender (32 bytes)
+    let sender_bytes = hex::decode(sender_hex)?;
+    if sender_bytes.len() != 32 {
+        return Err(anyhow!("Sender must be 32 bytes"));
+    }
+    message.extend_from_slice(&sender_bytes);
+
+    // Destination (4 bytes, big-endian)
+    message.extend_from_slice(&destination.to_be_bytes());
+
+    // Recipient (32 bytes)
+    let recipient_bytes = hex::decode(recipient_hex)?;
+    if recipient_bytes.len() != 32 {
+        return Err(anyhow!("Recipient must be 32 bytes"));
+    }
+    message.extend_from_slice(&recipient_bytes);
+
+    // Body (variable)
+    let body_bytes = hex::decode(body_hex)?;
+    message.extend_from_slice(&body_bytes);
+
+    // Compute keccak256
+    let mut hasher = Keccak256::new();
+    hasher.update(&message);
+    let result = hasher.finalize();
+
+    Ok(hex::encode(result))
+}
+
+/// Merkle tree state after update
+struct MerkleTreeUpdate {
+    branches: Vec<String>,
+    count: u32,
+}
+
+/// Update merkle tree with a new leaf (message hash)
+/// Implements the incremental merkle tree algorithm from hyperlane-core
+fn update_merkle_tree(
+    current_branches: &[String],
+    current_count: u32,
+    message_id: &str,
+) -> Result<MerkleTreeUpdate> {
+    let message_hash = hex::decode(message_id)?;
+    if message_hash.len() != 32 {
+        return Err(anyhow!("Message hash must be 32 bytes"));
+    }
+
+    // Zero hash for empty branches
+    let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    // Ensure we have 32 branches (pad with zeros if needed)
+    let mut branches: Vec<String> = current_branches.to_vec();
+    while branches.len() < 32 {
+        branches.push(zero_hash.to_string());
+    }
+
+    // Insert the new leaf
+    let new_count = current_count + 1;
+    let mut node = message_id.to_string();
+    let mut size = new_count;
+    let mut depth = 0usize;
+
+    // Standard Hyperlane merkle tree algorithm (matches Solidity/Rust implementations)
+    while size > 0 {
+        if size % 2 == 1 {
+            // Odd: store node at this level and stop
+            branches[depth] = node.clone();
+            break;
+        } else {
+            // Even: hash with sibling and continue up
+            let sibling = &branches[depth];
+            node = hash_pair(sibling, &node)?;
+        }
+        size /= 2;
+        depth += 1;
+    }
+
+    Ok(MerkleTreeUpdate {
+        branches,
+        count: new_count,
+    })
+}
+
+/// Hash two nodes together: keccak256(left || right)
+fn hash_pair(left: &str, right: &str) -> Result<String> {
+    let left_bytes = hex::decode(left)?;
+    let right_bytes = hex::decode(right)?;
+
+    let mut combined = Vec::new();
+    combined.extend_from_slice(&left_bytes);
+    combined.extend_from_slice(&right_bytes);
+
+    let mut hasher = Keccak256::new();
+    hasher.update(&combined);
+    let result = hasher.finalize();
+
+    Ok(hex::encode(result))
+}
+
+async fn set_default_ism(
+    ctx: &CliContext,
+    new_ism_hash: &str,
+    mailbox_policy: Option<String>,
+    reference_script: Option<String>,
+    signing_key: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Setting Mailbox default ISM...".cyan());
+
+    // Validate ISM hash
+    let new_ism_hash = new_ism_hash.strip_prefix("0x").unwrap_or(new_ism_hash);
+    let ism_bytes = hex::decode(new_ism_hash)?;
+    if ism_bytes.len() != 28 {
+        return Err(anyhow!(
+            "ISM script hash must be 28 bytes (56 hex chars), got {}",
+            ism_bytes.len()
+        ));
+    }
+    println!("  New ISM: {}", new_ism_hash);
+
+    // Get mailbox policy ID
+    let policy_id = get_mailbox_policy(ctx, mailbox_policy)?;
+    println!("  Mailbox Policy: {}", policy_id);
+
+    // Load signing key
+    let keypair = if let Some(path) = signing_key {
+        ctx.load_signing_key_from(std::path::Path::new(&path))?
+    } else {
+        ctx.load_signing_key()?
+    };
+
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let payer_pkh = keypair.pub_key_hash();
+    println!("  Payer: {}", payer_address);
+
+    // Find mailbox UTXO
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    // Get asset name from deployment info (hex-encoded)
+    let asset_name_hex = ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.mailbox)
+        .and_then(|m| m.state_nft)
+        .map(|nft| nft.asset_name_hex)
+        .unwrap_or_else(|| hex::encode("Mailbox State"));
+
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&policy_id, &asset_name_hex)
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Found Mailbox UTXO:".green());
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
+    println!("  Address: {}", mailbox_utxo.address);
+    println!("  Lovelace: {}", mailbox_utxo.lovelace);
+
+    // Parse current datum
+    let current_datum = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
+
+    let mailbox_data = parse_mailbox_datum(current_datum)?;
+    println!("\n{}", "Current Mailbox State:".green());
+    println!("  Local Domain: {}", mailbox_data.local_domain);
+    println!("  Default ISM: {}", mailbox_data.default_ism);
+    println!("  Owner: {}", mailbox_data.owner);
+    println!("  Outbound Nonce: {}", mailbox_data.outbound_nonce);
+    println!("  Merkle Count: {}", mailbox_data.merkle_count);
+
+    // Verify we are the owner
+    if mailbox_data.owner != hex::encode(&payer_pkh) {
+        return Err(anyhow!(
+            "Signing key does not match mailbox owner. Expected: {}, Got: {}",
+            mailbox_data.owner,
+            hex::encode(&payer_pkh)
+        ));
+    }
+
+    // Check if ISM is already set to this value
+    if mailbox_data.default_ism.to_lowercase() == new_ism_hash.to_lowercase() {
+        println!(
+            "\n{}",
+            "Mailbox default ISM is already set to this value!".yellow()
+        );
+        return Ok(());
+    }
+
+    // Build new datum with updated default_ism
+    // Convert branches from Vec<String> to Vec<&str> for build_mailbox_datum
+    let branches_refs: Vec<&str> = mailbox_data
+        .merkle_branches
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let new_datum_cbor = build_mailbox_datum(
+        mailbox_data.local_domain,
+        new_ism_hash,
+        &mailbox_data.owner,
+        mailbox_data.outbound_nonce,
+        &branches_refs,
+        mailbox_data.merkle_count,
+        &mailbox_data.processed_tree_root,
+    )?;
+
+    println!("\n{}", "New Mailbox Datum:".green());
+    println!("  Default ISM: {}", new_ism_hash);
+    println!("  Datum CBOR: {}", hex::encode(&new_datum_cbor));
+
+    // Build SetDefaultIsm redeemer
+    let redeemer_cbor = build_mailbox_set_default_ism_redeemer(new_ism_hash)?;
+    println!("\n{}", "SetDefaultIsm Redeemer:".green());
+    println!("  CBOR: {}", hex::encode(&redeemer_cbor));
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        println!("\nTo update mailbox, build a transaction that:");
+        println!(
+            "1. Spends Mailbox UTXO: {}#{}",
+            mailbox_utxo.tx_hash, mailbox_utxo.output_index
+        );
+        println!(
+            "2. Uses SetDefaultIsm redeemer: {}",
+            hex::encode(&redeemer_cbor)
+        );
+        println!("3. Creates new Mailbox UTXO with updated datum");
+        println!("4. Requires owner signature: {}", mailbox_data.owner);
+        return Ok(());
+    }
+
+    // Build and submit the transaction
+    println!("\n{}", "Building transaction...".cyan());
+
+    // Get payer UTXOs for fees and collateral
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    // Find collateral UTXO (pure ADA, no tokens, no reference script)
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
+
+    // Find fee UTXO (must not have reference script)
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
+        })
+        .or_else(|| {
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
+            })
+        })
+        .unwrap_or(collateral_utxo);
+
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
+
+    // Parse reference script UTXO if provided
+    let ref_script_utxo = if let Some(ref ref_script) = reference_script {
+        let parts: Vec<&str> = ref_script.split('#').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!(
+                "Invalid reference script format. Use: txhash#index"
+            ));
+        }
+        Some((parts[0].to_string(), parts[1].parse::<u64>()?))
+    } else {
+        None
+    };
+
+    // Load mailbox script only if not using reference script.
+    // Mailbox is parameterized, so we must apply params from deployment_info.
+    let mailbox_script_bytes = if ref_script_utxo.is_none() {
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment
+            .mailbox
+            .as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed — run `init mailbox` first"))?;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir,
+            "mailbox",
+            "mailbox",
+            &[&vm_cbor, &ism_cbor],
+        )?;
+        println!("  Applied script hash: {}", applied.policy_id);
+        Some(hex::decode(&applied.compiled_code)?)
+    } else {
+        println!(
+            "  Using reference script: {}#{}",
+            ref_script_utxo.as_ref().unwrap().0,
+            ref_script_utxo.as_ref().unwrap().1
+        );
+        None
+    };
+
+    // Get PlutusV3 cost model
+    let cost_model = client.get_plutusv3_cost_model().await?;
+
+    // Get current slot for validity
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200; // ~2 hours
+
+    // Build the transaction using pallas_txbuilder
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
+
+    // Parse addresses and hashes
+    let mailbox_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
+        .map_err(|e| anyhow!("Invalid mailbox address: {:?}", e))?;
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = hex::decode(&mailbox_data.owner)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
+
+    // Build mailbox continuation output with new datum and state NFT
+    let asset_name_bytes = hex::decode(&asset_name_hex).unwrap_or_default();
+    let mailbox_output = Output::new(mailbox_address, mailbox_utxo.lovelace)
+        .set_inline_datum(new_datum_cbor.clone())
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+    // Calculate change
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    // Build staging transaction
+    let mut staging = StagingTransaction::new()
+        // Mailbox script input
+        .input(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        ))
+        // Fee input
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        // Collateral
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
+        // Mailbox continuation output
+        .output(mailbox_output)
+        // Spend redeemer for mailbox input
+        .add_spend_redeemer(
+            Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
+        )
+        // Cost model for script data hash
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        // Required signer (owner)
+        .disclosed_signer(Hash::new(owner_hash))
+        // Fee and validity
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(0); // Testnet
+
+    // Add reference input OR embedded script
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx));
+    } else if let Some(script_bytes) = mailbox_script_bytes {
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    } else {
+        return Err(anyhow!(
+            "No script provided and no reference script specified"
+        ));
+    }
+
+    // Add change output if significant
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr.clone(), change));
+    }
+
+    // Build the transaction
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    // Sign the transaction
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    // Submit the transaction
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n  Old ISM: {}", mailbox_data.default_ism);
+    println!("  New ISM: {}", new_ism_hash);
+
+    Ok(())
+}
+
+async fn migrate(
+    ctx: &CliContext,
+    new_script_hash: Option<String>,
+    reference_script: Option<String>,
+    signing_key: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    println!("{}", "Migrating Mailbox to new script address...".cyan());
+
+    let new_script_hash = match new_script_hash {
+        Some(h) => h.strip_prefix("0x").unwrap_or(&h).to_string(),
+        None => {
+            println!("  Computing new script hash from blueprint + deployment params...");
+            let deployment = ctx.load_deployment_info()?;
+            let mailbox_info = deployment
+                .mailbox
+                .as_ref()
+                .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+            let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
+            let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+            let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
+            let applied = crate::utils::plutus::apply_validator_params(
+                &ctx.contracts_dir,
+                "mailbox",
+                "mailbox",
+                &[&vm_cbor, &ism_cbor],
+            )?;
+            applied.policy_id
+        }
+    };
+    let hash_bytes = hex::decode(&new_script_hash)?;
+    if hash_bytes.len() != 28 {
+        return Err(anyhow!(
+            "Script hash must be 28 bytes (56 hex chars), got {}",
+            hash_bytes.len()
+        ));
+    }
+
+    let policy_id = get_mailbox_policy(ctx, None)?;
+    println!("  Mailbox Policy: {}", policy_id);
+
+    let keypair = if let Some(path) = signing_key {
+        ctx.load_signing_key_from(std::path::Path::new(&path))?
+    } else {
+        ctx.load_signing_key()?
+    };
+    let payer_address = keypair.address_bech32(ctx.pallas_network());
+    let payer_pkh = keypair.pub_key_hash();
+
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let asset_name_hex = ctx
+        .load_deployment_info()
+        .ok()
+        .and_then(|d| d.mailbox)
+        .and_then(|m| m.state_nft)
+        .map(|nft| nft.asset_name_hex)
+        .unwrap_or_else(|| hex::encode("Mailbox State"));
+
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&policy_id, &asset_name_hex)
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Found Mailbox UTXO:".green());
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
+    println!("  Address: {}", mailbox_utxo.address);
+    println!("  Lovelace: {}", mailbox_utxo.lovelace);
+
+    let current_address = pallas_addresses::Address::from_bech32(&mailbox_utxo.address)
+        .map_err(|e| anyhow!("Invalid mailbox address: {:?}", e))?;
+    let current_hash_hex = match &current_address {
+        pallas_addresses::Address::Shelley(shelley) => hex::encode(shelley.payment().as_hash()),
+        _ => String::new(),
+    };
+    let new_address_bech32 =
+        crate::utils::plutus::script_hash_to_address(&new_script_hash, ctx.pallas_network())?;
+
+    println!("\n{}", "Migration summary:".green());
+    println!("  Current hash: {}", current_hash_hex);
+    println!("  New hash:     {}", new_script_hash);
+    println!("  New address:  {}", new_address_bech32);
+
+    if current_hash_hex == new_script_hash {
+        println!(
+            "\n{}",
+            "Mailbox is already at the target script hash. No migration needed.".yellow()
+        );
+        return Ok(());
+    }
+
+    let current_datum = mailbox_utxo
+        .inline_datum
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mailbox UTXO has no inline datum"))?;
+
+    let mailbox_data = parse_mailbox_datum(current_datum)?;
+
+    if mailbox_data.owner != hex::encode(&payer_pkh) {
+        return Err(anyhow!(
+            "Signing key does not match mailbox owner. Expected: {}, Got: {}",
+            mailbox_data.owner,
+            hex::encode(&payer_pkh)
+        ));
+    }
+
+    let branches_refs: Vec<&str> = mailbox_data
+        .merkle_branches
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let datum_cbor = build_mailbox_datum(
+        mailbox_data.local_domain,
+        &mailbox_data.default_ism,
+        &mailbox_data.owner,
+        mailbox_data.outbound_nonce,
+        &branches_refs,
+        mailbox_data.merkle_count,
+        &mailbox_data.processed_tree_root,
+    )?;
+
+    let redeemer_cbor = build_migrate_redeemer(4, &new_script_hash)?;
+
+    if dry_run {
+        println!("\n{}", "[Dry run - not submitting transaction]".yellow());
+        return Ok(());
+    }
+
+    println!("\n{}", "Building transaction...".cyan());
+
+    let payer_utxos = client.get_utxos(&payer_address).await?;
+    if payer_utxos.is_empty() {
+        return Err(anyhow!("No UTXOs found for payer address"));
+    }
+
+    let collateral_utxo = payer_utxos
+        .iter()
+        .find(|u| u.lovelace >= 5_000_000 && u.assets.is_empty() && u.reference_script.is_none())
+        .ok_or_else(|| {
+            anyhow!("No suitable collateral UTXO (need 5+ ADA without tokens or reference scripts)")
+        })?;
+
+    let fee_utxo = payer_utxos
+        .iter()
+        .find(|u| {
+            u.lovelace >= 10_000_000
+                && u.assets.is_empty()
+                && u.reference_script.is_none()
+                && (u.tx_hash != collateral_utxo.tx_hash
+                    || u.output_index != collateral_utxo.output_index)
+        })
+        .or_else(|| {
+            payer_utxos.iter().find(|u| {
+                u.lovelace >= 5_000_000
+                    && u.assets.is_empty()
+                    && u.reference_script.is_none()
+                    && (u.tx_hash != collateral_utxo.tx_hash
+                        || u.output_index != collateral_utxo.output_index)
+            })
+        })
+        .unwrap_or(collateral_utxo);
+
+    println!(
+        "  Collateral: {}#{}",
+        collateral_utxo.tx_hash, collateral_utxo.output_index
+    );
+    println!(
+        "  Fee input: {}#{}",
+        fee_utxo.tx_hash, fee_utxo.output_index
+    );
+
+    let new_hash_bytes: [u8; 28] = hash_bytes
+        .try_into()
+        .map_err(|_| anyhow!("Invalid hash length"))?;
+    let new_address = pallas_addresses::Address::Shelley(pallas_addresses::ShelleyAddress::new(
+        ctx.pallas_network(),
+        pallas_addresses::ShelleyPaymentPart::Script(pallas_crypto::hash::Hash::new(
+            new_hash_bytes,
+        )),
+        pallas_addresses::ShelleyDelegationPart::Null,
+    ));
+
+    let ref_script_utxo = if let Some(ref ref_script) = reference_script {
+        let parts: Vec<&str> = ref_script.split('#').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!(
+                "Invalid reference script format. Use: txhash#index"
+            ));
+        }
+        Some((parts[0].to_string(), parts[1].parse::<u64>()?))
+    } else {
+        None
+    };
+
+    let mailbox_script_bytes = if ref_script_utxo.is_none() {
+        println!("  Applying parameters from deployment_info to current blueprint...");
+        let deployment = ctx.load_deployment_info()?;
+        let mailbox_info = deployment
+            .mailbox
+            .as_ref()
+            .ok_or_else(|| anyhow!("Mailbox not deployed"))?;
+        let (vm_policy, ism_nft) = find_mailbox_params(mailbox_info)?;
+        let vm_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(vm_policy)?);
+        let ism_cbor = hex::encode(crate::utils::plutus::encode_script_hash_param(ism_nft)?);
+        let applied = crate::utils::plutus::apply_validator_params(
+            &ctx.contracts_dir,
+            "mailbox",
+            "mailbox",
+            &[&vm_cbor, &ism_cbor],
+        )?;
+        let applied_hash = &applied.policy_id;
+        if applied_hash != &current_hash_hex {
+            return Err(anyhow!(
+                "Applied script hash {} does not match current UTXO address hash {}. \
+                 The blueprint may have changed. Use --reference-script to provide \
+                 the correct script for the current deployment.",
+                applied_hash,
+                current_hash_hex
+            ));
+        }
+        println!(
+            "  Applied script hash matches current address: {}",
+            applied_hash
+        );
+        Some(hex::decode(&applied.compiled_code)?)
+    } else {
+        println!(
+            "  Using reference script: {}#{}",
+            ref_script_utxo.as_ref().unwrap().0,
+            ref_script_utxo.as_ref().unwrap().1
+        );
+        None
+    };
+
+    let cost_model = client.get_plutusv3_cost_model().await?;
+    let current_slot = client.get_latest_slot().await?;
+    let validity_end = current_slot + 7200;
+
+    use pallas_crypto::hash::Hash;
+    use pallas_txbuilder::{BuildConway, Input, Output, ScriptKind, StagingTransaction};
+
+    let mailbox_tx_hash: [u8; 32] = hex::decode(&mailbox_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid mailbox tx hash"))?;
+    let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+    let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+    let policy_id_bytes: [u8; 28] = hex::decode(&policy_id)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid policy ID"))?;
+    let owner_hash: [u8; 28] = hex::decode(&mailbox_data.owner)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid owner hash"))?;
+
+    let asset_name_bytes = hex::decode(&asset_name_hex).unwrap_or_default();
+    let migration_output = Output::new(new_address, mailbox_utxo.lovelace)
+        .set_inline_datum(datum_cbor.clone())
+        .add_asset(Hash::new(policy_id_bytes), asset_name_bytes, 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+    let fee_estimate = 2_000_000u64;
+    let change = fee_utxo.lovelace.saturating_sub(fee_estimate);
+
+    let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+        .map_err(|e| anyhow!("Invalid payer address: {:?}", e))?;
+
+    let mut staging = StagingTransaction::new()
+        .input(Input::new(
+            Hash::new(mailbox_tx_hash),
+            mailbox_utxo.output_index as u64,
+        ))
+        .input(Input::new(
+            Hash::new(fee_tx_hash),
+            fee_utxo.output_index as u64,
+        ))
+        .collateral_input(Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        ))
+        .output(migration_output)
+        .add_spend_redeemer(
+            Input::new(Hash::new(mailbox_tx_hash), mailbox_utxo.output_index as u64),
+            redeemer_cbor.clone(),
+            PLACEHOLDER_EX_UNITS,
+        )
+        .language_view(ScriptKind::PlutusV3, cost_model)
+        .disclosed_signer(Hash::new(owner_hash))
+        .fee(fee_estimate)
+        .invalid_from_slot(validity_end)
+        .network_id(0);
+
+    if let Some((ref_tx_hash, ref_output_idx)) = ref_script_utxo {
+        let ref_tx_hash_bytes: [u8; 32] = hex::decode(&ref_tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid reference script tx hash"))?;
+        staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash_bytes), ref_output_idx));
+    } else if let Some(script_bytes) = mailbox_script_bytes {
+        staging = staging.script(ScriptKind::PlutusV3, script_bytes);
+    } else {
+        return Err(anyhow!(
+            "No script provided and no reference script specified"
+        ));
+    }
+
+    if change > 1_500_000 {
+        staging = staging.output(Output::new(payer_addr.clone(), change));
+    }
+
+    let staging = calibrate_ex_units(
+        &client,
+        staging,
+        vec![(
+            RedeemerRef::Spend(Input::new(
+                Hash::new(mailbox_tx_hash),
+                mailbox_utxo.output_index as u64,
+            )),
+            redeemer_cbor.clone(),
+        )],
+    )
+    .await?;
+    let staging = apply_measured_fee(&client, staging, &payer_addr).await?;
+    let tx = staging
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+    println!("  TX Hash: {}", hex::encode(&tx.tx_hash.0));
+
+    println!("{}", "Signing transaction...".cyan());
+    let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+    let signature = keypair.sign(tx_hash_bytes);
+    let signed_tx = tx
+        .add_signature(keypair.pallas_public_key().clone(), signature)
+        .map_err(|e| anyhow!("Failed to sign transaction: {:?}", e))?;
+
+    println!("{}", "Submitting transaction...".cyan());
+    let tx_hash = client
+        .submit_and_confirm(&signed_tx.tx_bytes.0, ctx.no_wait)
+        .await?;
+
+    println!("\n{}", "SUCCESS!".green().bold());
+    println!("  Explorer: {}", ctx.explorer_tx_url(&tx_hash));
+    println!("\n  Old address: {}", mailbox_utxo.address);
+    println!("  New script hash: {}", new_script_hash);
+
+    if let Ok(mut deployment) = ctx.load_deployment_info() {
+        if let Some(ref mut mailbox) = deployment.mailbox {
+            mailbox.hash = new_script_hash.clone();
+            mailbox.address = new_address_bech32.clone();
+            mailbox.state_utxo = Some(format!("{}#0", tx_hash));
+            mailbox.reference_script_utxo = None;
+            if let Err(e) = ctx.save_deployment_info(&deployment) {
+                println!(
+                    "  {}",
+                    format!("Warning: failed to update deployment_info.json: {}", e).yellow()
+                );
+            } else {
+                println!("  Updated deployment_info.json");
+            }
+        }
+    }
+    println!(
+        "\n  {}",
+        "Deploy new reference script: `deploy reference-script mailbox`".yellow()
+    );
+
+    Ok(())
+}
+
+async fn show_config(ctx: &CliContext, mailbox_policy: Option<String>) -> Result<()> {
+    println!("{}", "Mailbox Configuration".cyan());
+
+    let policy_id = get_mailbox_policy(ctx, mailbox_policy)?;
+    let api_key = ctx.require_api_key()?;
+    let client = BlockfrostClient::new(ctx.blockfrost_url(), api_key);
+
+    let mailbox_utxo = client
+        .find_utxo_by_asset(&policy_id, "")
+        .await?
+        .ok_or_else(|| anyhow!("Mailbox UTXO not found with policy {}", policy_id))?;
+
+    println!("\n{}", "Mailbox UTXO:".green());
+    println!(
+        "  TX: {}#{}",
+        mailbox_utxo.tx_hash, mailbox_utxo.output_index
+    );
+    println!("  Address: {}", mailbox_utxo.address);
+    println!("  Lovelace: {}", mailbox_utxo.lovelace);
+
+    if let Some(datum) = &mailbox_utxo.inline_datum {
+        println!("\n{}", "Inline Datum:".green());
+        println!("{}", serde_json::to_string_pretty(datum)?);
+
+        // Parse and display datum
+        match parse_mailbox_datum(datum) {
+            Ok(data) => {
+                println!("\n{}", "Parsed Configuration:".green());
+                println!("  Local Domain: {}", data.local_domain);
+                println!("  Default ISM: {}", data.default_ism);
+                println!("  Owner: {}", data.owner);
+                println!("  Outbound Nonce: {}", data.outbound_nonce);
+                println!(
+                    "  Merkle Branches: {} branches stored",
+                    data.merkle_branches.len()
+                );
+                println!("  Merkle Count: {}", data.merkle_count);
+            }
+            Err(e) => {
+                println!("\n{}", format!("Failed to parse datum: {:?}", e).yellow());
+            }
+        }
+    } else {
+        println!("\n{}", "No inline datum found".yellow());
+    }
+
+    Ok(())
+}
+
+// Helper functions
+
+fn get_mailbox_policy(ctx: &CliContext, mailbox_policy: Option<String>) -> Result<String> {
+    if let Some(p) = mailbox_policy {
+        return Ok(p);
+    }
+
+    // Try to load from deployment info
+    let deployment = ctx.load_deployment_info()?;
+    deployment
+        .mailbox
+        .and_then(|m| m.state_nft_policy)
+        .ok_or_else(|| {
+            anyhow!("Mailbox policy not found. Use --mailbox-policy or update deployment_info.json")
+        })
+}
+
+/// Parsed mailbox datum with nested MerkleTreeState
+struct MailboxData {
+    local_domain: u32,
+    default_ism: String,
+    owner: String,
+    outbound_nonce: u32,
+    /// Full branch state from MerkleTreeState (32 branches, each 32 bytes hex)
+    merkle_branches: Vec<String>,
+    merkle_count: u32,
+    /// 32-byte SMT root for replay protection (hex)
+    processed_tree_root: String,
+}
+
+/// Parse mailbox datum from Blockfrost JSON
+/// New structure with nested MerkleTreeState:
+/// MailboxDatum { local_domain, default_ism, owner, outbound_nonce, merkle_tree: { branches, count } }
+fn parse_mailbox_datum(datum: &serde_json::Value) -> Result<MailboxData> {
+    // Check if datum is a hex string (raw CBOR)
+    if let Some(hex_str) = datum.as_str() {
+        return parse_mailbox_datum_from_cbor(hex_str);
+    }
+
+    // Otherwise try the JSON format
+    let fields = datum
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid datum structure - missing fields"))?;
+
+    if fields.len() < 7 {
+        return Err(anyhow!(
+            "Mailbox datum must have at least 7 fields, got {}. A deployment \
+             predating the datum version field must be redeployed.",
+            fields.len()
+        ));
+    }
+
+    let local_domain = fields
+        .get(1)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid local_domain"))? as u32;
+
+    let default_ism = fields
+        .get(2)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid default_ism"))?
+        .to_string();
+
+    let owner = fields
+        .get(3)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| anyhow!("Invalid owner"))?
+        .to_string();
+
+    let outbound_nonce = fields
+        .get(4)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid outbound_nonce"))? as u32;
+
+    // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
+    let merkle_tree = fields
+        .get(5)
+        .ok_or_else(|| anyhow!("Missing merkle_tree field"))?;
+
+    let merkle_tree_fields = merkle_tree
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| anyhow!("Invalid merkle_tree structure - missing fields"))?;
+
+    if merkle_tree_fields.len() < 2 {
+        return Err(anyhow!(
+            "MerkleTreeState must have 2 fields, got {}",
+            merkle_tree_fields.len()
+        ));
+    }
+
+    // Parse branches list
+    let branches_list = merkle_tree_fields
+        .get(0)
+        .and_then(|f| f.get("list"))
+        .and_then(|l| l.as_array())
+        .ok_or_else(|| anyhow!("Invalid branches list"))?;
+
+    let merkle_branches: Vec<String> = branches_list
+        .iter()
+        .filter_map(|b| {
+            b.get("bytes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    let merkle_count = merkle_tree_fields
+        .get(1)
+        .and_then(|f| f.get("int"))
+        .and_then(|i| i.as_u64())
+        .ok_or_else(|| anyhow!("Invalid merkle_count"))? as u32;
+
+    let processed_tree_root = fields
+        .get(6)
+        .and_then(|f| f.get("bytes"))
+        .and_then(|b| b.as_str())
+        .unwrap_or("5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f")
+        .to_string();
+
+    Ok(MailboxData {
+        local_domain,
+        default_ism,
+        owner,
+        outbound_nonce,
+        merkle_branches,
+        merkle_count,
+        processed_tree_root,
+    })
+}
+
+/// Parse mailbox datum from raw CBOR hex
+/// New structure with nested MerkleTreeState:
+/// MailboxDatum { local_domain, default_ism, owner, outbound_nonce, merkle_tree: { branches, count } }
+fn parse_mailbox_datum_from_cbor(hex_str: &str) -> Result<MailboxData> {
+    let cbor_bytes = hex::decode(hex_str)?;
+    let datum: PlutusData = pallas_codec::minicbor::decode(&cbor_bytes)
+        .map_err(|e| anyhow!("Failed to decode CBOR datum: {:?}", e))?;
+
+    // Mailbox Datum is Constr 0 [local_domain, default_ism, owner, outbound_nonce, merkle_tree]
+    let fields = match &datum {
+        PlutusData::Constr(c) if c.tag == 121 => &c.fields,
+        _ => return Err(anyhow!("Expected Constr 0 datum")),
+    };
+
+    let fields_vec: Vec<&PlutusData> = fields.iter().collect();
+    if fields_vec.len() < 7 {
+        return Err(anyhow!(
+            "Mailbox datum must have at least 5 fields, got {}",
+            fields_vec.len()
+        ));
+    }
+
+    let local_domain = extract_u32(fields_vec[1])?;
+    let default_ism = extract_bytes_hex(fields_vec[2])?;
+    let owner = extract_bytes_hex(fields_vec[3])?;
+    let outbound_nonce = extract_u32(fields_vec[4])?;
+
+    // Parse nested MerkleTreeState { branches: List<ByteArray>, count: Int }
+    let merkle_tree_fields = match fields_vec[5] {
+        PlutusData::Constr(c) if c.tag == 121 => {
+            let f: Vec<&PlutusData> = c.fields.iter().collect();
+            if f.len() < 2 {
+                return Err(anyhow!("MerkleTreeState must have 2 fields"));
+            }
+            f
+        }
+        _ => return Err(anyhow!("Expected Constr 0 for MerkleTreeState")),
+    };
+
+    // Parse branches list
+    let merkle_branches = match merkle_tree_fields[0] {
+        PlutusData::Array(arr) => arr
+            .iter()
+            .map(|item| extract_bytes_hex(item))
+            .collect::<Result<Vec<String>>>()?,
+        _ => return Err(anyhow!("Expected array for merkle branches")),
+    };
+
+    let merkle_count = extract_u32(merkle_tree_fields[1])?;
+
+    let processed_tree_root = if fields_vec.len() > 5 {
+        extract_bytes_hex(fields_vec[6])?
+    } else {
+        "5c3cc358c060877ced35947091c44c900594ece1e0a4ade23143ef57c3f7600f".to_string()
+    };
+
+    Ok(MailboxData {
+        local_domain,
+        default_ism,
+        owner,
+        outbound_nonce,
+        merkle_branches,
+        merkle_count,
+        processed_tree_root,
+    })
+}
+
+/// Extract u32 from PlutusData
+fn extract_u32(data: &PlutusData) -> Result<u32> {
+    match data {
+        PlutusData::BigInt(BigInt::Int(i)) => {
+            let inner = &i.0;
+            match i64::try_from(*inner) {
+                Ok(val) => {
+                    u32::try_from(val).map_err(|_| anyhow!("Integer out of u32 range: {}", val))
+                }
+                Err(_) => Err(anyhow!("Integer too large for i64")),
+            }
+        }
+        _ => Err(anyhow!("Expected integer")),
+    }
+}
+
+/// Extract bytes as hex string from PlutusData
+fn extract_bytes_hex(data: &PlutusData) -> Result<String> {
+    match data {
+        PlutusData::BoundedBytes(b) => {
+            let bytes: &[u8] = b.as_ref();
+            Ok(hex::encode(bytes))
+        }
+        _ => Err(anyhow!("Expected bytes")),
+    }
+}
+
+fn find_mailbox_params(mailbox_info: &ScriptInfo) -> Result<(&str, &str)> {
+    let vm_policy = mailbox_info
+        .applied_parameters
+        .iter()
+        .find(|p| p.name == "verified_message_nft_policy")
+        .map(|p| p.value.as_str())
+        .ok_or_else(|| {
+            anyhow!("verified_message_nft_policy not found in mailbox.appliedParameters")
+        })?;
+    let ism_nft = mailbox_info
+        .applied_parameters
+        .iter()
+        .find(|p| p.name == "ism_nft_policy")
+        .map(|p| p.value.as_str())
+        .ok_or_else(|| anyhow!("ism_nft_policy not found in mailbox.appliedParameters"))?;
+    Ok((vm_policy, ism_nft))
+}
+
+#[cfg(test)]
+mod datum_roundtrip_tests {
+    use super::*;
+    use crate::utils::cbor::{build_mailbox_datum, decode_plutus_datum};
+
+    /// Encode a datum, decode it the way Blockfrost hands it back, parse it, and
+    /// check every field survived. This is the check that catches a parser
+    /// reading the wrong index: the types line up either way, only the values
+    /// move, so nothing else notices.
+    #[test]
+    fn mailbox_datum_survives_encode_decode_parse() {
+        let branches: Vec<String> = (0..32u8).map(|i| format!("{:02x}", i).repeat(32)).collect();
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let default_ism = "aa".repeat(28);
+        let owner = "bb".repeat(28);
+        let root = "cc".repeat(32);
+
+        let cbor = build_mailbox_datum(2003, &default_ism, &owner, 7, &branch_refs, 5, &root)
+            .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let parsed = parse_mailbox_datum(&json).expect("parse");
+
+        assert_eq!(parsed.local_domain, 2003, "local_domain");
+        assert_eq!(parsed.default_ism, default_ism, "default_ism");
+        assert_eq!(parsed.owner, owner, "owner");
+        assert_eq!(parsed.outbound_nonce, 7, "outbound_nonce");
+        assert_eq!(parsed.merkle_count, 5, "merkle_count");
+        assert_eq!(parsed.merkle_branches, branches, "merkle_branches");
+        assert_eq!(parsed.processed_tree_root, root, "processed_tree_root");
+    }
+
+    /// The CBOR path is a separate parser from the JSON one and shifted
+    /// independently, so it gets its own round trip.
+    #[test]
+    fn mailbox_datum_survives_the_cbor_parser() {
+        let branches: Vec<String> = (0..32u8).map(|i| format!("{:02x}", i).repeat(32)).collect();
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let default_ism = "dd".repeat(28);
+        let owner = "ee".repeat(28);
+        let root = "ff".repeat(32);
+
+        let cbor =
+            build_mailbox_datum(9, &default_ism, &owner, 3, &branch_refs, 1, &root).expect("build");
+        let parsed = parse_mailbox_datum_from_cbor(&hex::encode(&cbor)).expect("parse");
+
+        assert_eq!(parsed.local_domain, 9, "local_domain");
+        assert_eq!(parsed.default_ism, default_ism, "default_ism");
+        assert_eq!(parsed.owner, owner, "owner");
+        assert_eq!(parsed.outbound_nonce, 3, "outbound_nonce");
+        assert_eq!(parsed.merkle_count, 1, "merkle_count");
+        assert_eq!(parsed.merkle_branches, branches, "merkle_branches");
+        assert_eq!(parsed.processed_tree_root, root, "processed_tree_root");
+    }
+
+    /// Distinct values in every position, so a parser reading a neighbouring
+    /// field produces a mismatch rather than a coincidentally equal value.
+    #[test]
+    fn adjacent_mailbox_fields_are_not_confused() {
+        let branches: Vec<String> = vec!["11".repeat(32); 32];
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        let cbor = build_mailbox_datum(
+            1,
+            &"22".repeat(28),
+            &"33".repeat(28),
+            2,
+            &branch_refs,
+            3,
+            &"44".repeat(32),
+        )
+        .expect("build");
+        let json = decode_plutus_datum(&hex::encode(&cbor)).expect("decode");
+        let parsed = parse_mailbox_datum(&json).expect("parse");
+
+        assert_ne!(parsed.local_domain, parsed.outbound_nonce);
+        assert_ne!(parsed.default_ism, parsed.owner);
+        assert_ne!(parsed.merkle_count, parsed.local_domain);
+    }
+}
