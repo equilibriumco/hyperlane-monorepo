@@ -216,9 +216,8 @@ describe('Address utilities', () => {
 
     it('Validates 32-byte hex addresses', () => {
       expect(isValidAddressMidnight(MIDNIGHT_ADDR)).to.be.true;
-      expect(
-        isValidAddressMidnight(MIDNIGHT_ADDR.slice(2).toUpperCase()),
-      ).to.be.true;
+      expect(isValidAddressMidnight(MIDNIGHT_ADDR.slice(2).toUpperCase())).to.be
+        .true;
       expect(isValidAddressMidnight('0x1234')).to.be.false;
       expect(
         isValidAddressMidnight('0x67C6390e8782b0B4F913f4dA99c065238Fb7DB30'),
@@ -246,8 +245,7 @@ describe('Address utilities', () => {
     });
 
     it('Validates transaction hashes', () => {
-      expect(isValidTransactionHashMidnight('0x' + 'ab'.repeat(32))).to.be
-        .true;
+      expect(isValidTransactionHashMidnight('0x' + 'ab'.repeat(32))).to.be.true;
       expect(isValidTransactionHashMidnight('ab'.repeat(32))).to.be.true;
       expect(isValidTransactionHashMidnight('0x1234')).to.be.false;
     });
