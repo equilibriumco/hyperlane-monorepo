@@ -1,0 +1,199 @@
+//! Hyperlane Cardano CLI
+//!
+//! A comprehensive CLI for deploying, initializing, and managing
+//! Hyperlane smart contracts on Cardano.
+
+mod commands;
+mod utils;
+
+use clap::{Parser, Subcommand};
+use colored::Colorize;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+use commands::{
+    config, deploy, greeting, igp, init, ism, mailbox, message, query, token, tx, utxo, validator,
+    warp,
+};
+
+/// Hyperlane Cardano CLI - Deploy and manage Hyperlane on Cardano
+#[derive(Parser)]
+#[command(name = "hyperlane-cardano")]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    /// Cardano network (mainnet, preprod, preview)
+    #[arg(
+        long,
+        global = true,
+        default_value = "preview",
+        env = "CARDANO_NETWORK"
+    )]
+    network: String,
+
+    /// Blockfrost API key
+    #[arg(long, global = true, env = "BLOCKFROST_API_KEY")]
+    api_key: Option<String>,
+
+    /// Path to signing key file
+    #[arg(long, global = true, env = "CARDANO_SIGNING_KEY")]
+    signing_key: Option<String>,
+
+    /// Path to deployment directory
+    #[arg(
+        long,
+        global = true,
+        default_value = "./deployments",
+        env = "CARDANO_DEPLOYMENTS_DIR"
+    )]
+    deployments_dir: String,
+
+    /// Path to contracts directory (with plutus.json)
+    #[arg(
+        long,
+        global = true,
+        default_value = "./contracts",
+        env = "CARDANO_CONTRACTS_DIR"
+    )]
+    contracts_dir: String,
+
+    /// Verbose output
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
+    /// Skip waiting for TX confirmation after submission
+    #[arg(long, global = true)]
+    no_wait: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Deploy Hyperlane contracts (extract validators, compute hashes)
+    Deploy(deploy::DeployArgs),
+
+    /// Initialize contracts with state NFTs and initial datums
+    Init(init::InitArgs),
+
+    /// Manage Interchain Gas Paymaster (IGP)
+    Igp(igp::IgpArgs),
+
+    /// Manage Interchain Security Module (ISM) validators
+    Ism(ism::IsmArgs),
+
+    /// Manage Hyperlane Mailbox contract
+    Mailbox(mailbox::MailboxArgs),
+
+    /// Manage warp routes (token bridges)
+    Warp(warp::WarpArgs),
+
+    /// Manage test tokens for development
+    Token(token::TokenArgs),
+
+    /// Manage validator announcements
+    Validator(validator::ValidatorArgs),
+
+    /// Query contract state and UTXOs
+    Query(query::QueryArgs),
+
+    /// UTXO management utilities
+    Utxo(utxo::UtxoArgs),
+
+    /// Transaction building and submission
+    Tx(tx::TxArgs),
+
+    /// Message redemption (list, claim, expire stored messages)
+    Message(message::MessageArgs),
+
+    /// Greeting contract (list, receive, show)
+    Greeting(greeting::GreetingArgs),
+
+    /// Manage configuration files (relayer config)
+    Config(config::ConfigArgs),
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Initialize logging
+    let filter = if cli.verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::new("info")
+    };
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter)
+        .init();
+
+    // Print banner
+    println!(
+        "{}",
+        r#"
+    __  __                      __
+   / / / /_  ______  ___  _____/ /___ _____  ___
+  / /_/ / / / / __ \/ _ \/ ___/ / __ `/ __ \/ _ \
+ / __  / /_/ / /_/ /  __/ /  / / /_/ / / / /  __/
+/_/ /_/\__, / .___/\___/_/  /_/\__,_/_/ /_/\___/
+      /____/_/              Cardano CLI
+"#
+        .cyan()
+    );
+
+    // Create context with global options
+    let ctx = utils::context::CliContext::new(
+        &cli.network,
+        cli.api_key.as_deref(),
+        cli.signing_key.as_deref(),
+        &cli.deployments_dir,
+        &cli.contracts_dir,
+        cli.no_wait,
+    )?;
+
+    // Acquire a process-level wallet lock when a signing key is provided so
+    // that parallel CLI invocations with the same wallet cannot select
+    // overlapping UTXOs as collateral or inputs.
+    let _wallet_lock = if ctx.has_signing_key() {
+        Some(ctx.acquire_wallet_lock()?)
+    } else {
+        None
+    };
+
+    // Execute command
+    match cli.command {
+        Commands::Deploy(args) => deploy::execute(&ctx, args).await,
+        Commands::Init(args) => init::execute(&ctx, args).await,
+        Commands::Igp(args) => igp::execute(&ctx, args).await,
+        Commands::Ism(args) => ism::execute(&ctx, args).await,
+        Commands::Mailbox(args) => mailbox::execute(&ctx, args).await,
+        Commands::Warp(args) => warp::execute(&ctx, args).await,
+        Commands::Token(args) => token::execute(&ctx, args).await,
+        Commands::Validator(args) => validator::execute(&ctx, args).await,
+        Commands::Query(args) => query::execute(&ctx, args).await,
+        Commands::Utxo(args) => utxo::execute(&ctx, args).await,
+        Commands::Tx(args) => tx::execute(&ctx, args).await,
+        Commands::Message(args) => message::execute(&ctx, args).await,
+        Commands::Greeting(args) => greeting::execute(&ctx, args).await,
+        Commands::Config(args) => config::execute(&ctx, args).await,
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            use clap_complete::generate;
+            use std::io;
+
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, name, &mut io::stdout());
+            Ok(())
+        }
+    }
+}

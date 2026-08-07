@@ -1,0 +1,1498 @@
+//! CBOR encoding/decoding utilities for Cardano datums and redeemers
+
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
+
+/// CBOR builder for Plutus data
+pub struct CborBuilder {
+    bytes: Vec<u8>,
+}
+
+impl CborBuilder {
+    pub fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    /// Start a definite-length constructor (Constr n [...]) with known field count
+    pub fn start_constr_definite(&mut self, index: u32, count: usize) -> &mut Self {
+        match index {
+            0..=6 => {
+                self.bytes.push(0xd8);
+                self.bytes.push((121 + index) as u8);
+            }
+            7..=127 => {
+                self.bytes.push(0xd9);
+                let tag = 1280 + index;
+                self.bytes.extend_from_slice(&(tag as u16).to_be_bytes());
+            }
+            _ => {
+                self.bytes.push(0xd8);
+                self.bytes.push(102);
+                self.start_list_definite(2); // [tag, fields]
+                self.uint(index as u64);
+            }
+        }
+        self.encode_array_header(count);
+        self
+    }
+
+    /// Start an indefinite-length constructor (Constr n [...])
+    pub fn start_constr(&mut self, index: u32) -> &mut Self {
+        match index {
+            0..=6 => {
+                // Tags 121-127 for constructors 0-6
+                self.bytes.push(0xd8);
+                self.bytes.push((121 + index) as u8);
+            }
+            7..=127 => {
+                // Tag 1280 + n for constructors 7-127
+                self.bytes.push(0xd9);
+                let tag = 1280 + index;
+                self.bytes.extend_from_slice(&(tag as u16).to_be_bytes());
+            }
+            _ => {
+                // General constructor with tag 102
+                self.bytes.push(0xd8);
+                self.bytes.push(102);
+                self.start_list();
+                self.uint(index as u64);
+            }
+        }
+        self.bytes.push(0x9f); // indefinite array start
+        self
+    }
+
+    /// End a constructor (only for indefinite-length)
+    pub fn end_constr(&mut self) -> &mut Self {
+        self.bytes.push(0xff); // break
+        self
+    }
+
+    /// Start a definite-length list with known item count
+    pub fn start_list_definite(&mut self, count: usize) -> &mut Self {
+        self.encode_array_header(count);
+        self
+    }
+
+    /// Start an indefinite-length list
+    pub fn start_list(&mut self) -> &mut Self {
+        self.bytes.push(0x9f);
+        self
+    }
+
+    /// End a list (only for indefinite-length)
+    pub fn end_list(&mut self) -> &mut Self {
+        self.bytes.push(0xff);
+        self
+    }
+
+    /// Encode a CBOR array header with definite length
+    fn encode_array_header(&mut self, count: usize) {
+        let major_bits: u8 = 4 << 5; // major type 4 = array
+        match count {
+            0..=23 => {
+                self.bytes.push(major_bits | (count as u8));
+            }
+            24..=255 => {
+                self.bytes.push(major_bits | 24);
+                self.bytes.push(count as u8);
+            }
+            _ => {
+                self.bytes.push(major_bits | 25);
+                self.bytes.extend_from_slice(&(count as u16).to_be_bytes());
+            }
+        }
+    }
+
+    /// Add an unsigned integer
+    pub fn uint(&mut self, n: u64) -> &mut Self {
+        self.encode_uint(0, n);
+        self
+    }
+
+    /// Add a signed integer
+    pub fn int(&mut self, n: i64) -> &mut Self {
+        if n >= 0 {
+            self.encode_uint(0, n as u64);
+        } else {
+            self.encode_uint(1, (-1 - n) as u64);
+        }
+        self
+    }
+
+    /// Add a byte string from hex
+    pub fn bytes_hex(&mut self, hex: &str) -> Result<&mut Self> {
+        let data = hex::decode(hex).map_err(|e| anyhow!("Invalid hex: {}", e))?;
+        self.encode_uint(2, data.len() as u64);
+        self.bytes.extend_from_slice(&data);
+        Ok(self)
+    }
+
+    /// Add a raw byte string
+    pub fn bytes_raw(&mut self, data: &[u8]) -> &mut Self {
+        self.encode_uint(2, data.len() as u64);
+        self.bytes.extend_from_slice(data);
+        self
+    }
+
+    /// Encode a major type with argument
+    fn encode_uint(&mut self, major: u8, n: u64) {
+        let major_bits = major << 5;
+        match n {
+            0..=23 => {
+                self.bytes.push(major_bits | (n as u8));
+            }
+            24..=255 => {
+                self.bytes.push(major_bits | 24);
+                self.bytes.push(n as u8);
+            }
+            256..=65535 => {
+                self.bytes.push(major_bits | 25);
+                self.bytes.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            65536..=4294967295 => {
+                self.bytes.push(major_bits | 26);
+                self.bytes.extend_from_slice(&(n as u32).to_be_bytes());
+            }
+            _ => {
+                self.bytes.push(major_bits | 27);
+                self.bytes.extend_from_slice(&n.to_be_bytes());
+            }
+        }
+    }
+
+    /// Append pre-encoded CBOR bytes directly
+    pub fn raw_cbor(&mut self, cbor: &[u8]) -> &mut Self {
+        self.bytes.extend_from_slice(cbor);
+        self
+    }
+
+    /// Build and return the CBOR bytes
+    pub fn build(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Default for CborBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a Mailbox datum with nested MerkleTreeState
+///
+/// Structure:
+/// ```
+/// MailboxDatum {
+///   local_domain: Domain,
+///   default_ism: ScriptHash,
+///   owner: VerificationKeyHash,
+///   outbound_nonce: Int,
+///   merkle_tree: MerkleTreeState {
+///     branches: List<ByteArray>,  // 32 branches, each 32 bytes
+///     count: Int,
+///   },
+/// }
+/// ```
+pub fn build_mailbox_datum(
+    local_domain: u32,
+    default_ism_hash: &str,
+    owner_pkh: &str,
+    outbound_nonce: u32,
+    branches: &[&str], // 32 branch hashes (each 64 hex chars = 32 bytes)
+    merkle_count: u32,
+    processed_tree_root: &str, // 32-byte hex SMT root
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+    builder.uint(local_domain as u64);
+
+    builder.bytes_hex(default_ism_hash)?;
+    builder.bytes_hex(owner_pkh)?;
+
+    builder.uint(outbound_nonce as u64);
+
+    // MerkleTreeState { branches: List<ByteArray>, count: Int }
+    builder.start_constr(0);
+
+    // branches: List<ByteArray>
+    builder.start_list();
+    for branch in branches {
+        builder.bytes_hex(branch)?;
+    }
+    builder.end_list();
+
+    // count: Int
+    builder.uint(merkle_count as u64);
+
+    builder.end_constr(); // End MerkleTreeState
+
+    // processed_tree_root: ByteArray (32-byte SMT root for replay protection)
+    builder.bytes_hex(processed_tree_root)?;
+
+    builder.end_constr(); // End MailboxDatum
+
+    Ok(builder.build())
+}
+
+/// Build an ISM datum
+/// ISM flavour, encoded as the 4th field of the ISM datum (constructor 0 =
+/// MessageId, constructor 1 = MerkleRoot). Kept in sync with the Aiken
+/// `ModuleType` enum and the relayer's parser.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IsmModuleType {
+    MessageId,
+    MerkleRoot,
+}
+
+impl IsmModuleType {
+    fn constr_index(self) -> u32 {
+        match self {
+            IsmModuleType::MessageId => 0,
+            IsmModuleType::MerkleRoot => 1,
+        }
+    }
+}
+
+pub fn build_ism_datum(
+    validators: &[(u32, Vec<String>)], // (domain, validator_addresses_hex)
+    thresholds: &[(u32, u32)],         // (domain, threshold)
+    owner_pkh: &str,
+    module_type: IsmModuleType,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // Validators list: List<(Domain, List<Address>)>
+    // NOTE: In Plutus/Aiken, tuples are encoded as plain CBOR arrays, NOT as Constr 0
+    builder.start_list();
+    for (domain, addrs) in validators {
+        // Tuple is a plain array [domain, addrs], NOT Constr 0
+        builder.start_list().uint(*domain as u64).start_list();
+        for addr in addrs {
+            builder.bytes_hex(addr)?;
+        }
+        builder.end_list().end_list();
+    }
+    builder.end_list();
+
+    // Thresholds list: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, threshold) in thresholds {
+        // Tuple is a plain array [domain, threshold], NOT Constr 0
+        builder
+            .start_list()
+            .uint(*domain as u64)
+            .uint(*threshold as u64)
+            .end_list();
+    }
+    builder.end_list();
+
+    // Owner
+    builder.bytes_hex(owner_pkh)?;
+
+    // module_type (Constr 0 = MessageId, Constr 1 = MerkleRoot)
+    builder
+        .start_constr(module_type.constr_index())
+        .end_constr();
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a mint redeemer (empty constructor 0)
+pub fn build_mint_redeemer() -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+    builder.start_constr(0).end_constr();
+    builder.build()
+}
+
+/// Build a Mailbox SetDefaultIsm redeemer
+/// Redeemer: SetDefaultIsm { new_ism: ScriptHash }
+/// SetDefaultIsm is constructor index 2 in MailboxRedeemer
+pub fn build_mailbox_set_default_ism_redeemer(new_ism_hash: &str) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // SetDefaultIsm is constructor 2
+    builder.start_constr(2);
+    builder.bytes_hex(new_ism_hash)?;
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a Mailbox Dispatch redeemer
+/// Redeemer: Dispatch { destination, recipient, body, sender_ref: OutputReference, hook_metadata: ByteArray }
+/// Dispatch is constructor index 0 in MailboxRedeemer
+/// sender_ref is encoded as Constr 0 [ByteArray(tx_hash), Int(output_index)]
+pub fn build_mailbox_dispatch_redeemer(
+    destination: u32,
+    recipient_hex: &str,      // 32 bytes hex (64 chars)
+    body_hex: &str,           // variable length hex
+    sender_tx_hash: &str,     // 32 bytes hex (64 chars) - sender UTXO tx hash
+    sender_output_index: u32, // sender UTXO output index
+    hook_metadata: &[u8],     // CBOR-encoded hook metadata (empty when no IGP)
+) -> Result<Vec<u8>> {
+    let sender_ref_cbor =
+        crate::utils::plutus::encode_output_reference(sender_tx_hash, sender_output_index)?;
+
+    let mut builder = CborBuilder::new();
+
+    // Dispatch is constructor 0
+    builder.start_constr(0);
+    builder.uint(destination as u64);
+    builder.bytes_hex(recipient_hex)?;
+    builder.bytes_hex(body_hex)?;
+    builder.raw_cbor(&sender_ref_cbor);
+    builder.bytes_raw(hook_metadata);
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build IGP (Interchain Gas Paymaster) datum CBOR
+///
+/// Structure from types.ak:
+/// ```
+/// IgpDatum {
+///   owner: VerificationKeyHash,
+///   beneficiary: ByteArray,
+///   gas_oracles: List<(Domain, GasOracleConfig)>,
+/// }
+///
+/// GasOracleConfig {
+///   gas_price: Int,
+///   token_exchange_rate: Int,
+///   gas_overhead: Int,
+/// }
+/// ```
+///
+/// CBOR encoding:
+/// Constr 0 [
+///   owner: ByteArray (28 bytes),
+///   beneficiary: ByteArray (28 bytes),
+///   gas_oracles: List<[Int, Constr 0 [Int, Int, Int]]>,
+/// ]
+pub fn build_igp_datum(
+    owner_pkh: &str,                      // 28 bytes hex (verification key hash)
+    beneficiary: &str,                    // 28 bytes hex (verification key hash)
+    gas_oracles: &[(u32, u64, u64, u64)], // (domain, gas_price, exchange_rate, gas_overhead)
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // owner: VerificationKeyHash (28 bytes)
+    builder.bytes_hex(owner_pkh)?;
+
+    // beneficiary: ByteArray (28 bytes)
+    builder.bytes_hex(beneficiary)?;
+
+    // gas_oracles: List<(Domain, GasOracleConfig)>
+    // In Plutus/Aiken, tuples are encoded as plain CBOR arrays, NOT as Constr 0
+    // GasOracleConfig is Constr 0 [gas_price, token_exchange_rate, gas_overhead]
+    builder.start_list();
+    for (domain, gas_price, exchange_rate, gas_overhead) in gas_oracles {
+        // Tuple is a plain array [domain, GasOracleConfig]
+        builder.start_list();
+        builder.uint(*domain as u64);
+        // GasOracleConfig is a record type -> Constr 0 [gas_price, token_exchange_rate, gas_overhead]
+        builder.start_constr(0);
+        builder.uint(*gas_price);
+        builder.uint(*exchange_rate);
+        builder.uint(*gas_overhead);
+        builder.end_constr();
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build an ISM config datum for the canonical config NFT UTXO.
+///
+/// Encodes `Option<IsmConfig>` as Plutus data:
+/// - `None`       → `Constr 1 []` = `d87980`
+/// - `Some(config)` → `Constr 0 [Constr 0 [hash, state_nft_policy]]`
+pub fn build_ism_config_datum(ism: Option<(&[u8; 28], &[u8; 28])>) -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+    match ism {
+        None => {
+            builder.start_constr(1).end_constr();
+        }
+        Some((hash, state_nft_policy)) => {
+            builder.start_constr(0);
+            builder.start_constr(0);
+            builder.bytes_raw(hash);
+            builder.bytes_raw(state_nft_policy);
+            builder.end_constr();
+            builder.end_constr();
+        }
+    }
+    builder.build()
+}
+
+// =============================================================================
+// CBOR Decoder for Plutus Data
+// =============================================================================
+
+/// Decode CBOR hex to Cardano JSON datum format
+/// This handles the Plutus data encoding used by Blockfrost
+pub fn decode_plutus_datum(cbor_hex: &str) -> Result<Value> {
+    let bytes = hex::decode(cbor_hex).map_err(|e| anyhow!("Invalid hex: {}", e))?;
+    let mut decoder = CborDecoder::new(&bytes);
+    decoder.decode_value()
+}
+
+struct CborDecoder<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> CborDecoder<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn peek(&self) -> Result<u8> {
+        self.bytes
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| anyhow!("Unexpected end of CBOR data"))
+    }
+
+    fn read_byte(&mut self) -> Result<u8> {
+        let b = self.peek()?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.pos + n > self.bytes.len() {
+            return Err(anyhow!("Unexpected end of CBOR data"));
+        }
+        let slice = &self.bytes[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(slice)
+    }
+
+    fn read_uint(&mut self, additional: u8) -> Result<u64> {
+        match additional {
+            0..=23 => Ok(additional as u64),
+            24 => Ok(self.read_byte()? as u64),
+            25 => {
+                let bytes = self.read_bytes(2)?;
+                Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as u64)
+            }
+            26 => {
+                let bytes = self.read_bytes(4)?;
+                Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64)
+            }
+            27 => {
+                let bytes = self.read_bytes(8)?;
+                Ok(u64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]))
+            }
+            _ => Err(anyhow!("Invalid CBOR additional info: {}", additional)),
+        }
+    }
+
+    /// Read an indefinite-length string as the concatenation of its definite-length
+    /// chunks, up to the break byte. Cardano emits this form for byte strings longer
+    /// than 64 bytes, so any datum carrying a message body over that size hits it.
+    fn read_indefinite_chunks(&mut self, expected_major: u8) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            if self.peek()? == 0xff {
+                self.read_byte()?; // consume break
+                return Ok(out);
+            }
+            let initial = self.read_byte()?;
+            let major = initial >> 5;
+            let additional = initial & 0x1f;
+            if major != expected_major || additional == 31 {
+                return Err(anyhow!(
+                    "Invalid chunk in indefinite-length string: major {major}, additional {additional}"
+                ));
+            }
+            let len = self.read_uint(additional)? as usize;
+            out.extend_from_slice(self.read_bytes(len)?);
+        }
+    }
+
+    fn decode_value(&mut self) -> Result<Value> {
+        let initial = self.read_byte()?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+
+        match major {
+            0 => {
+                // Unsigned integer
+                let n = self.read_uint(additional)?;
+                Ok(json!({"int": n}))
+            }
+            1 => {
+                // Negative integer
+                let n = self.read_uint(additional)?;
+                let value = -1i64 - (n as i64);
+                Ok(json!({"int": value}))
+            }
+            2 => {
+                // Byte string
+                if additional == 31 {
+                    let bytes = self.read_indefinite_chunks(2)?;
+                    Ok(json!({"bytes": hex::encode(bytes)}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let bytes = self.read_bytes(len)?;
+                    Ok(json!({"bytes": hex::encode(bytes)}))
+                }
+            }
+            3 => {
+                // Text string
+                if additional == 31 {
+                    let bytes = self.read_indefinite_chunks(3)?;
+                    Ok(json!({"string": String::from_utf8_lossy(&bytes)}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let bytes = self.read_bytes(len)?;
+                    let text = String::from_utf8_lossy(bytes);
+                    Ok(json!({"string": text}))
+                }
+            }
+            4 => {
+                // Array
+                if additional == 31 {
+                    // Indefinite-length array
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?; // consume break
+                            break;
+                        }
+                        items.push(self.decode_value()?);
+                    }
+                    Ok(json!({"list": items}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        items.push(self.decode_value()?);
+                    }
+                    Ok(json!({"list": items}))
+                }
+            }
+            5 => {
+                // Map
+                if additional == 31 {
+                    // Indefinite-length map
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?;
+                            break;
+                        }
+                        let key = self.decode_value()?;
+                        let value = self.decode_value()?;
+                        items.push(json!({"k": key, "v": value}));
+                    }
+                    Ok(json!({"map": items}))
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        let key = self.decode_value()?;
+                        let value = self.decode_value()?;
+                        items.push(json!({"k": key, "v": value}));
+                    }
+                    Ok(json!({"map": items}))
+                }
+            }
+            6 => {
+                // Tag - this is where Plutus constructors are encoded
+                let tag = self.read_uint(additional)?;
+                self.decode_tagged(tag)
+            }
+            7 => {
+                // Simple values
+                match additional {
+                    20 => Ok(json!(false)),
+                    21 => Ok(json!(true)),
+                    22 => Ok(json!(null)),
+                    _ => Err(anyhow!("Unsupported simple value: {}", additional)),
+                }
+            }
+            _ => Err(anyhow!("Invalid CBOR major type: {}", major)),
+        }
+    }
+
+    fn decode_tagged(&mut self, tag: u64) -> Result<Value> {
+        match tag {
+            // Plutus constructor tags 121-127 map to constructors 0-6
+            121..=127 => {
+                let constructor = tag - 121;
+                let fields = self.decode_constructor_fields()?;
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            // Plutus constructor tags 1280-1400 map to constructors 7-127
+            1280..=1400 => {
+                let constructor = tag - 1280 + 7;
+                let fields = self.decode_constructor_fields()?;
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            // General constructor (tag 102)
+            102 => {
+                // Format: [constructor_index, fields...]
+                let initial = self.read_byte()?;
+                let major = initial >> 5;
+                let additional = initial & 0x1f;
+
+                if major != 4 {
+                    return Err(anyhow!("Expected array for tag 102 constructor"));
+                }
+
+                let items = if additional == 31 {
+                    let mut items = Vec::new();
+                    loop {
+                        if self.peek()? == 0xff {
+                            self.read_byte()?;
+                            break;
+                        }
+                        items.push(self.decode_value()?);
+                    }
+                    items
+                } else {
+                    let len = self.read_uint(additional)? as usize;
+                    let mut items = Vec::new();
+                    for _ in 0..len {
+                        items.push(self.decode_value()?);
+                    }
+                    items
+                };
+
+                if items.is_empty() {
+                    return Err(anyhow!("Tag 102 constructor requires at least index"));
+                }
+
+                let constructor = items[0]
+                    .get("int")
+                    .and_then(|i| i.as_u64())
+                    .ok_or_else(|| anyhow!("Invalid constructor index"))?;
+
+                let fields: Vec<Value> = items.into_iter().skip(1).collect();
+                Ok(json!({"constructor": constructor, "fields": fields}))
+            }
+            _ => {
+                // Unknown tag, decode the content
+                let content = self.decode_value()?;
+                Ok(json!({"tag": tag, "content": content}))
+            }
+        }
+    }
+
+    fn decode_constructor_fields(&mut self) -> Result<Vec<Value>> {
+        let initial = self.read_byte()?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+
+        if major != 4 {
+            return Err(anyhow!(
+                "Expected array for constructor fields, got major {}",
+                major
+            ));
+        }
+
+        if additional == 31 {
+            // Indefinite-length array
+            let mut items = Vec::new();
+            loop {
+                if self.peek()? == 0xff {
+                    self.read_byte()?;
+                    break;
+                }
+                items.push(self.decode_value()?);
+            }
+            Ok(items)
+        } else {
+            let len = self.read_uint(additional)? as usize;
+            let mut items = Vec::new();
+            for _ in 0..len {
+                items.push(self.decode_value()?);
+            }
+            Ok(items)
+        }
+    }
+}
+
+/// Try to normalize a datum value from Blockfrost
+/// If it's a hex string, decode it as CBOR; otherwise return as-is
+pub fn normalize_datum(datum: &Value) -> Result<Value> {
+    if let Some(hex_str) = datum.as_str() {
+        // It's a hex-encoded CBOR string
+        decode_plutus_datum(hex_str)
+    } else {
+        // It's already a JSON object
+        Ok(datum.clone())
+    }
+}
+
+/// Convert a Blockfrost inline datum (JSON Value) back to CBOR bytes.
+/// If it's a hex string, decode it directly. If it's JSON schema, encode it.
+pub fn json_datum_to_cbor(datum: &Value) -> Result<Vec<u8>> {
+    if let Some(hex_str) = datum.as_str() {
+        // It's hex-encoded CBOR
+        Ok(hex::decode(hex_str)?)
+    } else {
+        // JSON schema format — encode back to CBOR
+        json_schema_to_cbor(datum)
+    }
+}
+
+fn json_schema_to_cbor(value: &Value) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+    encode_json_value(&mut builder, value)?;
+    Ok(builder.build())
+}
+
+fn encode_json_value(builder: &mut CborBuilder, value: &Value) -> Result<()> {
+    if let Some(int_val) = value.get("int").and_then(|i| i.as_i64()) {
+        builder.int(int_val);
+    } else if let Some(bytes_hex) = value.get("bytes").and_then(|b| b.as_str()) {
+        builder.bytes_hex(bytes_hex)?;
+    } else if let Some(items) = value.get("list").and_then(|l| l.as_array()) {
+        builder.start_list();
+        for item in items {
+            encode_json_value(builder, item)?;
+        }
+        builder.end_list();
+    } else if let Some(constructor) = value.get("constructor").and_then(|c| c.as_u64()) {
+        let fields = value
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .map(|f| f.as_slice())
+            .unwrap_or(&[]);
+        builder.start_constr(constructor as u32);
+        for field in fields {
+            encode_json_value(builder, field)?;
+        }
+        builder.end_constr();
+    } else {
+        return Err(anyhow!("Unknown datum JSON structure: {}", value));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Warp Route Datum Builder
+// ============================================================================
+
+/// Token type for warp routes
+///
+/// Corresponds to WarpTokenType in Aiken:
+/// - Collateral (0): Lock existing tokens in the warp route UTXO
+/// - Synthetic (1): Mint new tokens via a minting policy
+/// - Native (2): Lock ADA directly
+pub enum WarpTokenType<'a> {
+    /// Collateral: lock existing tokens (policy_id, asset_name)
+    Collateral {
+        policy_id: &'a str,
+        asset_name: &'a str,
+    },
+    /// Synthetic: mint new tokens via minting_policy, under asset_name (hex)
+    Synthetic {
+        minting_policy: &'a str,
+        asset_name: &'a str,
+    },
+    /// Native: lock ADA directly
+    Native,
+}
+
+/// Build a WarpRoute datum with the given token type
+///
+/// Structure:
+/// ```
+/// WarpRouteDatum {
+///   config: WarpRouteConfig {
+///     token_type: WarpTokenType,
+///     decimals: Int,
+///     remote_decimals: Int,
+///     remote_routes: List<(Domain, HyperlaneAddress)>,
+///   },
+///   owner: VerificationKeyHash,
+///   total_bridged: Int,
+///   ism: Option<ScriptHash>,
+/// }
+/// ```
+fn build_warp_route_datum(
+    token_type: WarpTokenType,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType
+    match token_type {
+        WarpTokenType::Collateral {
+            policy_id,
+            asset_name,
+        } => {
+            // Collateral - Constr 0 [policy_id, asset_name]
+            builder.start_constr(0);
+            builder.bytes_hex(policy_id)?;
+            builder.bytes_hex(asset_name)?;
+            builder.end_constr();
+        }
+        WarpTokenType::Synthetic {
+            minting_policy,
+            asset_name,
+        } => {
+            // Synthetic - Constr 1 [minting_policy, asset_name]
+            builder.start_constr(1);
+            builder.bytes_hex(minting_policy)?;
+            builder.bytes_hex(asset_name)?;
+            builder.end_constr();
+        }
+        WarpTokenType::Native => {
+            // Native - Constr 2 (no fields)
+            builder.start_constr(2);
+            builder.end_constr();
+        }
+    }
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals, typically 18 for EVM)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)> - empty list initially
+    builder.start_list().end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int - starts at 0
+    builder.int(0);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
+
+    // destination_gas: List<(Domain, Int)> - empty until the owner sets one
+    builder.start_list();
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Collateral type
+///
+/// Collateral warp routes lock existing tokens in the warp route UTXO.
+pub fn build_warp_route_collateral_datum(
+    token_policy: &str,
+    token_asset: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    build_warp_route_datum(
+        WarpTokenType::Collateral {
+            policy_id: token_policy,
+            asset_name: token_asset,
+        },
+        decimals,
+        remote_decimals,
+        owner_pkh,
+    )
+}
+
+/// Build a WarpRoute datum for Native (ADA) type
+///
+/// Native warp routes lock ADA directly in the warp route UTXO.
+pub fn build_warp_route_native_datum(
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    build_warp_route_datum(WarpTokenType::Native, decimals, remote_decimals, owner_pkh)
+}
+
+/// Build a WarpRoute datum for Synthetic type
+///
+/// Synthetic warp routes mint new tokens via a minting policy.
+pub fn build_warp_route_synthetic_datum(
+    minting_policy: &str,
+    asset_name: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    owner_pkh: &str,
+) -> Result<Vec<u8>> {
+    build_warp_route_datum(
+        WarpTokenType::Synthetic {
+            minting_policy,
+            asset_name,
+        },
+        decimals,
+        remote_decimals,
+        owner_pkh,
+    )
+}
+
+/// Build a WarpRoute EnrollRemoteRoute redeemer
+///
+/// Structure:
+/// ```
+/// EnrollRemoteRoute { domain: Domain, route: HyperlaneAddress }
+/// ```
+/// EnrollRemoteRoute is constructor 2 in WarpRouteRedeemer
+pub fn build_enroll_remote_route_redeemer(
+    domain: u32,
+    route_hex: &str, // 32 bytes (64 hex chars)
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // EnrollRemoteRoute is constructor 2 with 2 fields
+    builder.start_constr_definite(2, 2);
+    builder.uint(domain as u64);
+    builder.bytes_hex(route_hex)?;
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute SetDestinationGas redeemer
+///
+/// Constructor 4, matching the variant's position in `WarpRouteRedeemer`.
+pub fn build_set_destination_gas_redeemer(domain: u32, gas: i64) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    builder.start_constr_definite(4, 2);
+    builder.uint(domain as u64);
+    builder.int(gas);
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute TransferRemote redeemer
+///
+/// Structure:
+/// ```
+/// TransferRemote { destination: Domain, recipient: HyperlaneAddress, amount: Int }
+/// ```
+/// TransferRemote is constructor 0 in WarpRouteRedeemer
+pub fn build_transfer_remote_redeemer(
+    destination: u32,
+    recipient_hex: &str, // 32 bytes (64 hex chars)
+    amount: i64,
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // TransferRemote is constructor 0
+    builder.start_constr(0);
+    builder.uint(destination as u64);
+    builder.bytes_hex(recipient_hex)?;
+    builder.int(amount);
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a Synthetic token burn redeemer
+///
+/// The synthetic_token validator ignores the redeemer (uses `_redeemer: Data`)
+/// and just checks that the warp route is being spent in the same transaction.
+/// We use a simple unit value for the redeemer.
+pub fn build_synthetic_burn_redeemer(_amount: i64) -> Vec<u8> {
+    let mut builder = CborBuilder::new();
+
+    // Use a simple unit constructor (Constr 0 [])
+    builder.start_constr(0);
+    builder.end_constr();
+
+    builder.build()
+}
+
+/// Remote route tuple (domain, router_address)
+pub struct RemoteRoute {
+    pub domain: u32,
+    pub router: String, // 32 bytes hex (64 chars)
+}
+
+/// Build a WarpRoute datum for Collateral type with remote routes
+pub fn build_warp_route_collateral_datum_with_routes(
+    token_policy: &str,
+    token_asset: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+    destination_gas: &[(u32, i64)],
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Collateral - Constr 0
+    builder.start_constr(0);
+    builder.bytes_hex(token_policy)?;
+    builder.bytes_hex(token_asset)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
+    builder.start_list();
+    for route in remote_routes {
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
+
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Synthetic type with remote routes
+pub fn build_warp_route_synthetic_datum_with_routes(
+    minting_policy: &str,
+    asset_name: &str,
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+    destination_gas: &[(u32, i64)],
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Synthetic - Constr 1 [minting_policy, asset_name]
+    builder.start_constr(1);
+    builder.bytes_hex(minting_policy)?;
+    builder.bytes_hex(asset_name)?;
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
+    builder.start_list();
+    for route in remote_routes {
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
+
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr();
+
+    Ok(builder.build())
+}
+
+/// Build a WarpRoute datum for Native (ADA) type with remote routes
+/// Uses same indefinite-length encoding style as the original build_warp_route_datum
+/// to ensure datum comparisons work correctly in the validator
+pub fn build_warp_route_native_datum_with_routes(
+    decimals: u32,
+    remote_decimals: u32,
+    remote_routes: &[RemoteRoute],
+    owner_pkh: &str,
+    total_bridged: i64,
+    destination_gas: &[(u32, i64)],
+) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // WarpRouteDatum - Constr 0 (indefinite length)
+    builder.start_constr(0);
+    // version: Int - field 0 on every datum, bumped only by migration
+    builder.int(0);
+
+    // config: WarpRouteConfig - Constr 0
+    builder.start_constr(0);
+
+    // token_type: WarpTokenType::Native - Constr 2 (no fields)
+    // Use indefinite encoding to match original on-chain datum
+    builder.start_constr(2);
+    builder.end_constr();
+
+    // decimals: Int (local token decimals)
+    builder.uint(decimals as u64);
+
+    // remote_decimals: Int (wire format decimals)
+    builder.uint(remote_decimals as u64);
+
+    // remote_routes: List<(Domain, HyperlaneAddress)>
+    // In Aiken, tuples are encoded as plain lists [a, b], not as constructors
+    builder.start_list();
+    for route in remote_routes {
+        // Tuple (domain, address) is encoded as a plain list [domain, address]
+        builder.start_list();
+        builder.uint(route.domain as u64);
+        builder.bytes_hex(&route.router)?;
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteConfig
+
+    // owner: VerificationKeyHash
+    builder.bytes_hex(owner_pkh)?;
+
+    // total_bridged: Int
+    builder.int(total_bridged);
+
+    // ism: Option<ScriptHash> - None by default
+    builder.start_constr(1); // None = Constr 1
+    builder.end_constr();
+
+    // destination_gas: List<(Domain, Int)>
+    builder.start_list();
+    for (domain, gas) in destination_gas {
+        builder.start_list();
+        builder.uint(*domain as u64);
+        builder.int(*gas);
+        builder.end_list();
+    }
+    builder.end_list();
+
+    builder.end_constr(); // end WarpRouteDatum
+
+    Ok(builder.build())
+}
+
+/// Build a Migrate redeemer for any contract.
+///
+/// Each contract has a Migrate variant at a specific constructor index:
+/// - Mailbox: MigrateMailbox (index 4)
+/// - MultisigISM: MigrateIsm (index 3)
+/// - IGP: MigrateIgp (index 3)
+/// - WarpRoute: MigrateWarp (index 3)
+///
+/// The single field is an Address:
+/// `Constr 0 [payment_credential, stake_credential]`
+/// where payment_credential = `Constr 1 [script_hash]` (Script)
+/// and stake_credential = `Constr 1 []` (None)
+pub fn build_migrate_redeemer(constructor_index: u32, new_script_hash: &str) -> Result<Vec<u8>> {
+    let mut builder = CborBuilder::new();
+
+    // Migrate variant at the given constructor index, 1 field (Address)
+    builder.start_constr_definite(constructor_index, 1);
+
+    // Address = Constr 0 [payment_credential, stake_credential]
+    builder.start_constr_definite(0, 2);
+
+    // payment_credential = Script(hash) = Constr 1 [hash]
+    builder.start_constr_definite(1, 1);
+    builder.bytes_hex(new_script_hash)?;
+
+    // stake_credential = None = Constr 1 []
+    builder.start_constr_definite(1, 0);
+
+    Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cbor_uint() {
+        let mut builder = CborBuilder::new();
+        builder.uint(0);
+        assert_eq!(builder.build(), vec![0x00]);
+
+        let mut builder = CborBuilder::new();
+        builder.uint(23);
+        assert_eq!(builder.build(), vec![0x17]);
+
+        let mut builder = CborBuilder::new();
+        builder.uint(24);
+        assert_eq!(builder.build(), vec![0x18, 0x18]);
+
+        let mut builder = CborBuilder::new();
+        builder.uint(1000);
+        assert_eq!(builder.build(), vec![0x19, 0x03, 0xe8]);
+    }
+
+    #[test]
+    fn test_cbor_constr() {
+        let mut builder = CborBuilder::new();
+        builder.start_constr(0).uint(42).end_constr();
+        let result = builder.build();
+        // d8 79 9f 18 2a ff
+        assert_eq!(result, vec![0xd8, 0x79, 0x9f, 0x18, 0x2a, 0xff]);
+    }
+
+    #[test]
+    fn test_mint_redeemer() {
+        let redeemer = build_mint_redeemer();
+        // Constructor 0 with empty fields
+        assert_eq!(redeemer, vec![0xd8, 0x79, 0x9f, 0xff]);
+    }
+
+    #[test]
+    fn test_build_ism_config_datum_binds_state_policy() {
+        let hash = [0xaa; 28];
+        let policy = [0xbb; 28];
+        let datum = build_ism_config_datum(Some((&hash, &policy)));
+        let decoded = decode_plutus_datum(&hex::encode(datum)).unwrap();
+
+        assert_eq!(decoded["constructor"], 0);
+        let config = &decoded["fields"][0];
+        assert_eq!(config["constructor"], 0);
+        assert_eq!(config["fields"][0]["bytes"], hex::encode(hash));
+        assert_eq!(config["fields"][1]["bytes"], hex::encode(policy));
+    }
+
+    #[test]
+    fn test_decode_plutus_datum() {
+        // Constructor 0 with int 42: d8 79 9f 18 2a ff
+        let datum = decode_plutus_datum("d8799f182aff").unwrap();
+        assert_eq!(datum["constructor"], 0);
+        assert_eq!(datum["fields"][0]["int"], 42);
+    }
+
+    #[test]
+    fn test_build_igp_datum_no_oracles() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+
+        let result = build_igp_datum(owner, beneficiary, &[]).unwrap();
+
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        assert_eq!(decoded["constructor"], 0);
+
+        let fields = decoded["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 4);
+
+        assert_eq!(fields[0]["int"], 0, "datum version");
+        assert_eq!(fields[1]["bytes"].as_str().unwrap(), owner);
+        assert_eq!(fields[2]["bytes"].as_str().unwrap(), beneficiary);
+        assert!(fields[3]["list"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_igp_datum_with_one_oracle() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let oracles = vec![(11155111u32, 25000000000u64, 1000000u64, 500000u64)];
+
+        let result = build_igp_datum(owner, beneficiary, &oracles).unwrap();
+
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        let fields = decoded["fields"].as_array().unwrap();
+
+        let oracles_list = fields[3]["list"].as_array().unwrap();
+        assert_eq!(oracles_list.len(), 1);
+
+        let oracle_tuple = oracles_list[0]["list"].as_array().unwrap();
+        assert_eq!(oracle_tuple[0]["int"], 11155111);
+
+        // GasOracleConfig is Constr 0 [gas_price, exchange_rate, gas_overhead]
+        let config = &oracle_tuple[1];
+        assert_eq!(config["constructor"], 0);
+        let config_fields = config["fields"].as_array().unwrap();
+        assert_eq!(config_fields.len(), 3);
+        assert_eq!(config_fields[0]["int"], 25000000000u64);
+        assert_eq!(config_fields[1]["int"], 1000000);
+        assert_eq!(config_fields[2]["int"], 500000);
+    }
+
+    #[test]
+    fn test_build_igp_datum_with_multiple_oracles() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+        let oracles = vec![
+            (11155111u32, 25000000000u64, 1000000u64, 0u64),
+            (11155111u32, 30000000000u64, 1200000u64, 100000u64),
+        ];
+
+        let result = build_igp_datum(owner, beneficiary, &oracles).unwrap();
+
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        let fields = decoded["fields"].as_array().unwrap();
+
+        let oracles_list = fields[3]["list"].as_array().unwrap();
+        assert_eq!(oracles_list.len(), 2);
+
+        let sepolia = oracles_list[0]["list"].as_array().unwrap();
+        assert_eq!(sepolia[0]["int"], 11155111);
+
+        let sepolia = oracles_list[1]["list"].as_array().unwrap();
+        assert_eq!(sepolia[0]["int"], 11155111);
+    }
+
+    #[test]
+    fn test_build_igp_datum_invalid_owner_length() {
+        let owner = "1212a023380020f8c7b94b831e457b9ee65f009d";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+
+        let result = build_igp_datum(owner, beneficiary, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_igp_datum_invalid_hex() {
+        let owner = "not_valid_hex_string_at_all_gggg";
+        let beneficiary = "1212a023380020f8c7b94b831e457b9ee65f009df9d1d588430dcc89";
+
+        let result = build_igp_datum(owner, beneficiary, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_migrate_redeemer_mailbox() {
+        let hash = "aabbccdd00000000000000000000000000000000000000000000aabb";
+        let result = build_migrate_redeemer(4, hash).unwrap();
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+
+        // MigrateMailbox = constructor 4
+        assert_eq!(decoded["constructor"], 4);
+        let fields = decoded["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 1);
+
+        // Address = Constr 0 [payment_credential, stake_credential]
+        let addr = &fields[0];
+        assert_eq!(addr["constructor"], 0);
+        let addr_fields = addr["fields"].as_array().unwrap();
+        assert_eq!(addr_fields.len(), 2);
+
+        // payment_credential = Script(hash) = Constr 1 [hash]
+        let pay_cred = &addr_fields[0];
+        assert_eq!(pay_cred["constructor"], 1);
+        let pay_fields = pay_cred["fields"].as_array().unwrap();
+        assert_eq!(pay_fields[0]["bytes"].as_str().unwrap(), hash);
+
+        // stake_credential = None = Constr 1 []
+        let stake_cred = &addr_fields[1];
+        assert_eq!(stake_cred["constructor"], 1);
+        assert!(stake_cred["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_migrate_redeemer_igp() {
+        let hash = "ec4201ee17e0a800883934d14fb535a8b26e7d72b60d540b0b92d7ad";
+        let result = build_migrate_redeemer(3, hash).unwrap();
+        let decoded = decode_plutus_datum(&hex::encode(&result)).unwrap();
+        assert_eq!(decoded["constructor"], 3);
+    }
+
+    /// Cardano serializes byte strings longer than 64 bytes as an indefinite-length
+    /// sequence of 64-byte chunks. Decoding used to fail on those with
+    /// "Invalid CBOR additional info: 31", so any greeting body over 64 bytes was
+    /// unreadable (`greeting receive` could not consume it).
+    #[test]
+    fn test_decode_indefinite_length_byte_string() {
+        let body: Vec<u8> = (0..100u32).map(|i| (i % 251) as u8).collect();
+        // Constr 0 [ bytes ] with the bytes chunked the way Cardano emits them.
+        let mut cbor = vec![0xd8, 0x79, 0x9f]; // tag 121, indefinite array
+        cbor.push(0x5f); // indefinite-length byte string
+        for chunk in body.chunks(64) {
+            cbor.push(0x58); // definite byte string, 1-byte length
+            cbor.push(chunk.len() as u8);
+            cbor.extend_from_slice(chunk);
+        }
+        cbor.push(0xff); // break (end of chunks)
+        cbor.push(0xff); // break (end of array)
+
+        let decoded = decode_plutus_datum(&hex::encode(&cbor)).unwrap();
+        assert_eq!(decoded["fields"][0]["bytes"], hex::encode(&body));
+    }
+}

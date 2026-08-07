@@ -4,7 +4,7 @@ import type { ChainName } from '@hyperlane-xyz/sdk/types';
 import {
   type Address,
   type HexString,
-  type KnownProtocolType,
+  type SdkSupportedProtocol,
   ProtocolType,
 } from '@hyperlane-xyz/utils';
 
@@ -14,7 +14,7 @@ import { getAddressForChain } from './walletAddresses.js';
 export function getAccountAddressForChain(
   multiProvider: MinimalProviderRegistry,
   chainName?: ChainName,
-  accounts?: Record<KnownProtocolType, AccountInfo>,
+  accounts?: Record<SdkSupportedProtocol, AccountInfo>,
 ): Address | undefined {
   if (!chainName || !accounts) return undefined;
   const protocol = multiProvider.getProtocol(chainName);
@@ -62,7 +62,7 @@ export function getAddressFromAccountAndChain(
 export function getAccountAddressAndPubKey(
   multiProvider: MinimalProviderRegistry,
   chainName?: ChainName,
-  accounts?: Record<KnownProtocolType, AccountInfo>,
+  accounts?: Record<SdkSupportedProtocol, AccountInfo>,
 ): { address?: Address; publicKey?: Promise<HexString | undefined> } {
   const address = getAccountAddressForChain(multiProvider, chainName, accounts);
   if (!accounts || !chainName || !address) return {};

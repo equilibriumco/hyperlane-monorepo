@@ -1,0 +1,1329 @@
+//! Transaction building utilities using pallas-txbuilder
+
+use anyhow::{anyhow, Result};
+use pallas_addresses::Network;
+use pallas_crypto::hash::Hash;
+use pallas_traverse::MultiEraTx;
+use pallas_txbuilder::{
+    BuildConway, BuiltTransaction, ExUnits, Input, Output, ScriptKind, StagingTransaction,
+};
+use std::collections::HashMap;
+
+use super::blockfrost::BlockfrostClient;
+use super::cbor::build_mint_redeemer;
+use super::crypto::Keypair;
+use super::types::{ProtocolParams, Utxo};
+
+/// Headroom over the measured cost, covering the small variation between
+/// evaluating against the current ledger tip and validating against the tip the
+/// transaction actually lands on.
+const EX_UNITS_MARGIN_PERCENT: u64 = 10;
+
+/// Budget a redeemer carries only so the transaction can be evaluated. Every
+/// caller replaces it with the measured cost before building, and evaluation
+/// reports what a script truly needs regardless of what it was given, so this
+/// value has no bearing on the result.
+pub const PLACEHOLDER_EX_UNITS: Option<ExUnits> = Some(ExUnits {
+    mem: 1_000_000,
+    steps: 500_000_000,
+});
+
+/// What each redeemer actually costs, measured by evaluating the transaction.
+///
+/// Evaluation reports costs positionally — `spend:2` is the third of the
+/// transaction's sorted inputs — so this keeps those orderings alongside the
+/// results and lets callers look a cost up by the input or policy they already
+/// hold, rather than working out the position themselves.
+pub struct MeasuredExUnits {
+    by_key: HashMap<String, super::blockfrost::ExUnitsRequired>,
+    spend_order: Vec<(Vec<u8>, u64)>,
+    mint_order: Vec<Vec<u8>>,
+}
+
+impl MeasuredExUnits {
+    fn units_at(&self, key: Option<String>) -> Option<ExUnits> {
+        let needed = self.by_key.get(&key?)?;
+        Some(ExUnits {
+            mem: needed.mem * (100 + EX_UNITS_MARGIN_PERCENT) / 100,
+            steps: needed.steps * (100 + EX_UNITS_MARGIN_PERCENT) / 100,
+        })
+    }
+
+    /// Measured cost of the redeemer spending `input`.
+    pub fn spend(&self, input: &Input) -> Option<ExUnits> {
+        let key = self
+            .spend_order
+            .iter()
+            .position(|(hash, index)| {
+                hash.as_slice() == input.tx_hash.0.as_slice() && *index == input.txo_index as u64
+            })
+            .map(|i| format!("spend:{i}"));
+        self.units_at(key)
+    }
+
+    /// Measured cost of the redeemer minting or burning under `policy`.
+    pub fn mint(&self, policy: &[u8; 28]) -> Option<ExUnits> {
+        let key = self
+            .mint_order
+            .iter()
+            .position(|p| p.as_slice() == policy.as_slice())
+            .map(|i| format!("mint:{i}"));
+        self.units_at(key)
+    }
+}
+
+/// A redeemer's target, recorded when it is declared so its budget can be
+/// replaced once measured.
+#[derive(Clone)]
+pub enum RedeemerRef {
+    Spend(Input),
+    Mint([u8; 28]),
+}
+
+/// Re-declare a transaction's redeemers with the ExUnits its scripts actually
+/// consume.
+///
+/// Hand-declared budgets have to be guesses on the high side, since one that is
+/// too small is only discovered when the node rejects the transaction. That is
+/// tolerable while iterating on a deployment and not tolerable in a shipped
+/// tool, where the person hitting it cannot edit the source to raise a number.
+///
+/// Callers declare each redeemer with [`PLACEHOLDER_EX_UNITS`] and record it in
+/// `declared`; evaluation then reports what each script truly needs — it
+/// disregards the budget it was handed — and those measurements replace the
+/// placeholders. A redeemer that evaluation does not report keeps the
+/// placeholder, so a gap can only leave a budget too generous, never too small.
+pub async fn calibrate_ex_units(
+    client: &BlockfrostClient,
+    staging: StagingTransaction,
+    declared: Vec<(RedeemerRef, Vec<u8>)>,
+) -> Result<StagingTransaction> {
+    if declared.is_empty() {
+        return Ok(staging);
+    }
+
+    let probe = staging
+        .clone()
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction for evaluation: {:?}", e))?;
+
+    let by_key = client.evaluate_tx(probe.tx_bytes.as_ref()).await?;
+
+    let decoded = MultiEraTx::decode(probe.tx_bytes.as_ref())
+        .map_err(|e| anyhow!("Failed to decode built transaction: {e}"))?;
+    let measured = MeasuredExUnits {
+        by_key,
+        spend_order: decoded
+            .inputs_sorted_set()
+            .iter()
+            .map(|i| (i.hash().to_vec(), i.index()))
+            .collect(),
+        mint_order: decoded
+            .mints_sorted_set()
+            .iter()
+            .map(|m| m.policy().to_vec())
+            .collect(),
+    };
+
+    let mut staging = staging;
+    for (target, redeemer) in declared {
+        staging = match target {
+            RedeemerRef::Spend(input) => {
+                let units = measured.spend(&input).or(PLACEHOLDER_EX_UNITS);
+                staging.add_spend_redeemer(input, redeemer, units)
+            }
+            RedeemerRef::Mint(policy) => {
+                let units = measured.mint(&policy).or(PLACEHOLDER_EX_UNITS);
+                staging.add_mint_redeemer(Hash::new(policy), redeemer, units)
+            }
+        };
+    }
+    Ok(staging)
+}
+
+/// Slack over the ledger minimum, absorbing the few bytes the fee and change
+/// values themselves shift by once written into the transaction.
+const FEE_MARGIN_PERCENT: u64 = 15;
+
+/// Bytes a signature witness adds, which the unsigned probe does not carry.
+const WITNESS_BYTES: u64 = 102;
+
+/// Conway prices reference scripts per byte, and the price steps up by a fifth
+/// for each further 25,600 bytes a transaction reads.
+fn ref_script_fee(total_bytes: u64, base_price: u64) -> u64 {
+    const TIER_BYTES: u64 = 25_600;
+    let (mut remaining, mut fee) = (total_bytes, 0u64);
+    let (mut num, mut den) = (base_price, 1u64);
+    while remaining > 0 {
+        let chunk = remaining.min(TIER_BYTES);
+        fee += (chunk * num).div_ceil(den);
+        remaining -= chunk;
+        // ×1.2, kept as a rational so the tiers stay exact.
+        num *= 6;
+        den *= 5;
+    }
+    fee
+}
+
+/// The ledger's minimum fee for a transaction of this size and script cost.
+fn min_fee(size: u64, mem: u64, steps: u64, ref_script_bytes: u64, params: &ProtocolParams) -> u64 {
+    let (mem_num, mem_den) = params.price_mem;
+    let (step_num, step_den) = params.price_step;
+    // The two execution prices are summed exactly and rounded once, not rounded
+    // individually — rounding each term costs an extra lovelace and the node
+    // rejects the transaction as overpaying nothing it asked for.
+    let num = mem as u128 * mem_num as u128 * step_den as u128
+        + steps as u128 * step_num as u128 * mem_den as u128;
+    let den = mem_den as u128 * step_den as u128;
+    let exec_fee = num.div_ceil(den) as u64;
+
+    params.tx_fee_per_byte * size
+        + params.tx_fee_fixed
+        + exec_fee
+        + ref_script_fee(ref_script_bytes, params.ref_script_cost_per_byte)
+}
+
+/// Replace the transaction's flat fee estimate with the fee its size and
+/// measured script cost actually require, returning the difference to the
+/// payer's change output.
+///
+/// A flat estimate has to be picked high enough for the largest transaction the
+/// builder might produce, so every smaller one overpays — the surplus is not
+/// refunded, it goes to the treasury. Worse, "high enough" is a guess like any
+/// other: a transaction that outgrows it is rejected with `FeeTooSmallUTxO`,
+/// which a shipped CLI's users cannot fix.
+///
+/// Call this after [`calibrate_ex_units`], so the script cost being charged for
+/// is the measured one. The change output is identified as the plain
+/// lovelace-only output paying `payer_addr`; when the transaction has none,
+/// there is nowhere to put the surplus and the fee is left alone rather than
+/// silently unbalancing the transaction.
+pub async fn apply_measured_fee(
+    client: &BlockfrostClient,
+    staging: StagingTransaction,
+    payer_addr: &pallas_addresses::Address,
+) -> Result<StagingTransaction> {
+    let Some(declared_fee) = staging.fee else {
+        return Ok(staging);
+    };
+
+    let probe = staging
+        .clone()
+        .build_conway_raw()
+        .map_err(|e| anyhow!("Failed to build transaction for fee measurement: {:?}", e))?;
+    let decoded = MultiEraTx::decode(probe.tx_bytes.as_ref())
+        .map_err(|e| anyhow!("Failed to decode built transaction: {e}"))?;
+
+    let (mem, steps) = decoded.redeemers().iter().fold((0u64, 0u64), |(m, s), r| {
+        let u = r.ex_units();
+        (m + u.mem, s + u.steps)
+    });
+
+    // Every reference script the transaction reads is charged per byte, so
+    // resolve each one's size from chain.
+    let mut ref_script_bytes = 0u64;
+    for input in decoded.reference_inputs() {
+        ref_script_bytes += client
+            .reference_script_size(&input.hash().to_string(), input.index() as u32)
+            .await?;
+    }
+
+    let params = client.get_protocol_params().await?;
+    // The probe is unsigned; the submitted transaction carries a witness per
+    // required signer.
+    let signers = staging
+        .disclosed_signers
+        .as_ref()
+        .map(|s| s.len() as u64)
+        .unwrap_or(0)
+        .max(1);
+    let size = probe.tx_bytes.as_ref().len() as u64 + signers * WITNESS_BYTES;
+    let required =
+        min_fee(size, mem, steps, ref_script_bytes, &params) * (100 + FEE_MARGIN_PERCENT) / 100;
+
+    if required == declared_fee {
+        return Ok(staging);
+    }
+
+    let payer_bytes = payer_addr.to_vec();
+    let mut staging = staging;
+    let Some(change) = staging.outputs.as_mut().and_then(|outputs| {
+        outputs.iter_mut().find(|o| {
+            o.assets.is_none()
+                && o.datum.is_none()
+                && o.script.is_none()
+                && o.address.0.to_vec() == payer_bytes
+        })
+    }) else {
+        // Nothing to balance against. Raising the fee would unbalance the
+        // transaction, so surface the shortfall instead of letting the node
+        // reject it with an error the user cannot act on.
+        if required > declared_fee {
+            return Err(anyhow!(
+                "Transaction needs a fee of {required} lovelace but declares {declared_fee}, \
+                 and has no change output to take the difference from."
+            ));
+        }
+        return Ok(staging);
+    };
+
+    if required > declared_fee {
+        let shortfall = required - declared_fee;
+        if change.lovelace < shortfall + params.min_utxo_lovelace {
+            return Err(anyhow!(
+                "Transaction needs a fee of {required} lovelace but declares {declared_fee}, \
+                 and its change output cannot cover the difference."
+            ));
+        }
+        change.lovelace -= shortfall;
+    } else {
+        change.lovelace += declared_fee - required;
+    }
+
+    staging.fee = Some(required);
+    Ok(staging)
+}
+
+/// Parse a UTXO reference string (format: "txhash#index")
+fn parse_utxo_ref(s: &str) -> Result<(String, u32)> {
+    let parts: Vec<&str> = s.split('#').collect();
+    if parts.len() != 2 {
+        return Err(anyhow!(
+            "Invalid UTXO reference format. Expected 'txhash#index', got '{}'",
+            s
+        ));
+    }
+    let tx_hash = parts[0].to_string();
+    let output_index: u32 = parts[1]
+        .parse()
+        .map_err(|_| anyhow!("Invalid output index: {}", parts[1]))?;
+    Ok((tx_hash, output_index))
+}
+
+/// Transaction builder for Hyperlane Cardano operations
+pub struct HyperlaneTxBuilder<'a> {
+    client: &'a BlockfrostClient,
+    network: Network,
+}
+
+impl<'a> HyperlaneTxBuilder<'a> {
+    pub fn new(client: &'a BlockfrostClient, network: Network) -> Self {
+        Self { client, network }
+    }
+
+    /// Build an initialization transaction that mints a state NFT and creates
+    /// an initial UTXO at a script address with inline datum
+    ///
+    /// # Arguments
+    /// * `asset_name` - Optional asset name for the NFT (e.g., "Mailbox State"). If None, uses empty name.
+    pub async fn build_init_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        mint_script_cbor: &[u8],
+        script_address: &str,
+        datum_cbor: &[u8],
+        output_lovelace: u64,
+        asset_name: Option<&str>,
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model for script data hash
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Calculate policy ID from script (PlutusV3 uses tag 0x03)
+        let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Convert asset name to bytes (empty vec if None)
+        let asset_name_bytes: Vec<u8> = asset_name
+            .map(|n| n.as_bytes().to_vec())
+            .unwrap_or_default();
+
+        // Parse tx hashes
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+
+        // Build inputs
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+
+        // Build the script output
+        let script_output = Output::new(
+            pallas_addresses::Address::from_bech32(script_address)
+                .map_err(|e| anyhow!("Invalid script address: {}", e))?,
+            output_lovelace,
+        )
+        .set_inline_datum(datum_cbor.to_vec())
+        .add_asset(Hash::new(policy_id), asset_name_bytes.clone(), 1)
+        .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
+
+        // Build change output
+        let fee_estimate = 2_000_000u64;
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
+
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Build mint redeemer CBOR
+        let mint_redeemer = build_mint_redeemer();
+
+        // Build staging transaction
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .collateral_input(collateral)
+            .output(script_output)
+            .mint_asset(Hash::new(policy_id), asset_name_bytes, 1)
+            .map_err(|e| anyhow!("Failed to add mint: {:?}", e))?
+            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
+            .add_mint_redeemer(
+                Hash::new(policy_id),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        // Add required signer
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
+        )
+        .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
+
+        // Build the transaction
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Sign a built transaction
+    pub fn sign_tx(&self, tx: BuiltTransaction, payer: &Keypair) -> Result<Vec<u8>> {
+        // Get the transaction hash for signing
+        let tx_hash_bytes: &[u8] = &tx.tx_hash.0;
+
+        // Sign the transaction hash
+        let signature = payer.sign(tx_hash_bytes);
+
+        // Get the public key
+        let public_key = payer.pallas_public_key();
+
+        // Add the signature to the built transaction
+        let signed = tx
+            .add_signature(public_key.clone(), signature)
+            .map_err(|e| anyhow!("Failed to add signature: {:?}", e))?;
+
+        // Return the serialized signed transaction
+        Ok(signed.tx_bytes.0.clone())
+    }
+
+    /// Build a transaction that creates a reference script UTXO
+    /// The script is stored in the output's reference_script field
+    pub async fn build_reference_script_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        script_cbor: &[u8],
+        output_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid tx hash"))?;
+
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+
+        // Build the reference script output
+        // The script is attached to the output, not in the witness set
+        let ref_script_output = Output::new(payer_addr.clone(), output_lovelace)
+            .set_inline_script(ScriptKind::PlutusV3, script_cbor.to_vec());
+
+        // Calculate fee and change
+        let fee_estimate = 500_000u64; // Reference script txs are typically larger
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .output(ref_script_output)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a recipient initialization transaction with two-UTXO pattern
+    ///
+    /// This creates:
+    /// 1. State UTXO: script_address + state_NFT (empty name) + datum
+    /// 2. Reference Script UTXO: payer_address + ref_NFT ("ref") + script attached
+    ///
+    /// Both NFTs use the same policy ID, enabling the relayer to discover
+    /// the reference script UTXO by scanning for the ref NFT.
+    pub async fn build_init_recipient_two_utxo_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        mint_script_cbor: &[u8],      // state_nft minting policy
+        recipient_script_cbor: &[u8], // recipient validator to attach as reference script
+        script_address: &str,         // recipient script address
+        datum_cbor: &[u8],            // initial datum for state UTXO
+        state_output_lovelace: u64,   // ADA for state UTXO
+        ref_output_lovelace: u64,     // ADA for reference script UTXO
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Calculate policy ID from mint script
+        let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Parse tx hashes
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Build inputs
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+
+        // Asset names: state NFT has empty name, ref NFT has "ref" (726566 in hex)
+        let state_asset_name: Vec<u8> = vec![];
+        let ref_asset_name: Vec<u8> = b"ref".to_vec(); // "ref" = 0x726566
+
+        // Output 1: State UTXO at script address with state NFT + datum
+        let state_output = Output::new(
+            pallas_addresses::Address::from_bech32(script_address)
+                .map_err(|e| anyhow!("Invalid script address: {}", e))?,
+            state_output_lovelace,
+        )
+        .set_inline_datum(datum_cbor.to_vec())
+        .add_asset(Hash::new(policy_id), state_asset_name.clone(), 1)
+        .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+        // Output 2: Reference Script UTXO at payer address with ref NFT + script attached
+        let ref_script_output = Output::new(payer_addr.clone(), ref_output_lovelace)
+            .add_asset(Hash::new(policy_id), ref_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT: {:?}", e))?
+            .set_inline_script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec());
+
+        // Build mint redeemer
+        let mint_redeemer = build_mint_redeemer();
+
+        // Fee estimate (larger due to reference script)
+        let fee_estimate = 3_000_000u64;
+        let total_outputs = state_output_lovelace + ref_output_lovelace;
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(total_outputs)
+            .saturating_sub(fee_estimate);
+
+        // Build staging transaction - mint both NFTs
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .collateral_input(collateral)
+            .output(state_output)
+            .output(ref_script_output)
+            // Mint state NFT (empty name)
+            .mint_asset(Hash::new(policy_id), state_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add state NFT mint: {:?}", e))?
+            // Mint ref NFT ("ref")
+            .mint_asset(Hash::new(policy_id), ref_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT mint: {:?}", e))?
+            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
+            .add_mint_redeemer(
+                Hash::new(policy_id),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        // Add required signer
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Mint(policy_id), mint_redeemer)],
+        )
+        .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a token minting transaction
+    ///
+    /// This mints fungible tokens using a one-shot minting policy and sends them
+    /// to the payer's address. Used for creating test tokens.
+    ///
+    /// # Arguments
+    /// * `payer` - The keypair that will pay for the transaction and receive the tokens
+    /// * `input_utxo` - The UTXO that will be consumed (must match the policy parameter)
+    /// * `collateral_utxo` - Collateral for Plutus script execution
+    /// * `mint_script_cbor` - The compiled test_token minting policy
+    /// * `asset_name` - Name for the token (e.g., "TEST")
+    /// * `amount` - Amount of tokens to mint
+    /// * `output_lovelace` - ADA to include with the tokens in the output
+    pub async fn build_mint_token_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        collateral_utxo: &Utxo,
+        mint_script_cbor: &[u8],
+        asset_name: &str,
+        amount: u64,
+        output_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Calculate policy ID from script
+        let policy_id = super::crypto::script_hash(mint_script_cbor);
+
+        // Convert asset name to bytes
+        let asset_name_bytes: Vec<u8> = asset_name.as_bytes().to_vec();
+
+        // Parse tx hashes
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Build inputs
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+
+        // Build the token output - send minted tokens to payer
+        let token_output = Output::new(payer_addr.clone(), output_lovelace)
+            .add_asset(Hash::new(policy_id), asset_name_bytes.clone(), amount)
+            .map_err(|e| anyhow!("Failed to add asset: {:?}", e))?;
+
+        // Build mint redeemer
+        let mint_redeemer = build_mint_redeemer();
+
+        // Fee estimate
+        let fee_estimate = 2_000_000u64;
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(output_lovelace)
+            .saturating_sub(fee_estimate);
+
+        // Build staging transaction
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .collateral_input(collateral)
+            .output(token_output)
+            .mint_asset(Hash::new(policy_id), asset_name_bytes, amount as i64)
+            .map_err(|e| anyhow!("Failed to add mint: {:?}", e))?
+            .script(ScriptKind::PlutusV3, mint_script_cbor.to_vec())
+            .add_mint_redeemer(
+                Hash::new(policy_id),
+                mint_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        // Add required signer
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a message receive transaction
+    ///
+    /// This transaction:
+    /// 1. Spends the verified message UTXO at recipient's address
+    /// 2. Includes the recipient state UTXO as input (proves authorization)
+    /// 3. Burns the verified_message_nft
+    /// 4. Optionally updates recipient state
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_message_receive_tx(
+        &self,
+        payer: &Keypair,
+        fee_utxo: &Utxo,
+        message_utxo: &Utxo,
+        recipient_state_utxo: &Utxo,
+        message_nft_policy: &str,
+        message_id: &str,
+        nft_burn_redeemer: &[u8],
+        nft_ref_script: Option<&str>,
+        nft_inline_script: Option<&[u8]>,
+        recipient_redeemer: Option<&[u8]>,
+        message_redeemer: Option<&[u8]>,
+        new_state_datum: Option<&[u8]>,
+        recipient_ref_script: Option<&str>,
+        recipient_inline_script: Option<&[u8]>,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee tx hash"))?;
+
+        let message_tx_hash: [u8; 32] = hex::decode(&message_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid message tx hash"))?;
+
+        let state_tx_hash: [u8; 32] = hex::decode(&recipient_state_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid state tx hash"))?;
+
+        let nft_policy: [u8; 28] = hex::decode(message_nft_policy)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid NFT policy ID"))?;
+
+        let message_id_bytes = hex::decode(message_id).unwrap_or_default();
+
+        // Build inputs
+        let fee_input = Input::new(Hash::new(fee_tx_hash), fee_utxo.output_index as u64);
+        let message_input =
+            Input::new(Hash::new(message_tx_hash), message_utxo.output_index as u64);
+        let state_input = Input::new(
+            Hash::new(state_tx_hash),
+            recipient_state_utxo.output_index as u64,
+        );
+
+        // Recipient state UTXO continuation (same datum, same address)
+        let state_addr = pallas_addresses::Address::from_bech32(&recipient_state_utxo.address)
+            .map_err(|e| anyhow!("Invalid state address: {}", e))?;
+
+        let mut state_output = Output::new(state_addr, recipient_state_utxo.lovelace);
+        if let Some(datum) = new_state_datum {
+            state_output = state_output.set_inline_datum(datum.to_vec());
+        } else if let Some(datum_json) = &recipient_state_utxo.inline_datum {
+            let datum_cbor = super::cbor::json_datum_to_cbor(datum_json)?;
+            state_output = state_output.set_inline_datum(datum_cbor);
+        }
+        for asset in &recipient_state_utxo.assets {
+            let policy: [u8; 28] = hex::decode(&asset.policy_id)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid policy ID: {}", asset.policy_id))?;
+            let asset_name = hex::decode(&asset.asset_name).unwrap_or_default();
+            state_output = state_output
+                .add_asset(Hash::new(policy), asset_name, asset.quantity)
+                .map_err(|e| anyhow!("Failed to add state asset: {:?}", e))?;
+        }
+
+        let fee_estimate = 2_000_000u64;
+        let change = fee_utxo
+            .lovelace
+            .saturating_add(message_utxo.lovelace)
+            .saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            .input(fee_input.clone())
+            .input(message_input.clone())
+            .input(state_input.clone())
+            .collateral_input(fee_input)
+            .output(state_output)
+            .mint_asset(Hash::new(nft_policy), message_id_bytes, -1)
+            .map_err(|e| anyhow!("Failed to add burn: {:?}", e))?;
+
+        // Add spend redeemer for recipient state (required for script-based recipients)
+        if let Some(redeemer) = recipient_redeemer {
+            staging = staging.add_spend_redeemer(
+                state_input.clone(),
+                redeemer.to_vec(),
+                PLACEHOLDER_EX_UNITS,
+            );
+        }
+
+        // Add spend redeemer for message UTXO (when it's at a script address)
+        if let Some(redeemer) = message_redeemer {
+            staging = staging.add_spend_redeemer(
+                message_input.clone(),
+                redeemer.to_vec(),
+                PLACEHOLDER_EX_UNITS,
+            );
+        }
+
+        staging = staging
+            .add_mint_redeemer(
+                Hash::new(nft_policy),
+                nft_burn_redeemer.to_vec(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if let Some(ref_script) = nft_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid NFT reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else if let Some(inline_script) = nft_inline_script {
+            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
+        }
+
+        if let Some(ref_script) = recipient_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid recipient reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        } else if let Some(inline_script) = recipient_inline_script {
+            staging = staging.script(ScriptKind::PlutusV3, inline_script.to_vec());
+        }
+
+        if change > 1_500_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        let mut declared = Vec::new();
+        if let Some(redeemer) = recipient_redeemer {
+            declared.push((RedeemerRef::Spend(state_input), redeemer.to_vec()));
+        }
+        if let Some(redeemer) = message_redeemer {
+            declared.push((RedeemerRef::Spend(message_input), redeemer.to_vec()));
+        }
+        declared.push((RedeemerRef::Mint(nft_policy), nft_burn_redeemer.to_vec()));
+        let staging = calibrate_ex_units(self.client, staging, declared).await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a warp route enroll remote router transaction
+    ///
+    /// This transaction spends the warp route UTXO and creates a new one with the
+    /// remote route added to the datum.
+    pub async fn build_enroll_route_tx(
+        &self,
+        payer: &Keypair,
+        fee_input: &Utxo,
+        collateral_utxo: &Utxo,
+        warp_utxo: &Utxo,
+        warp_ref_script: Option<&str>,
+        new_datum: &[u8],
+        redeemer: &[u8],
+    ) -> Result<BuiltTransaction> {
+        // Get current slot for validity
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200; // ~2 hours
+
+        // Get PlutusV3 cost model
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        // Parse tx hashes
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_input.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee input tx hash"))?;
+
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let warp_tx_hash: [u8; 32] = hex::decode(&warp_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid warp route tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+
+        // Warp route address
+        let warp_addr = pallas_addresses::Address::from_bech32(&warp_utxo.address)
+            .map_err(|e| anyhow!("Invalid warp route address: {}", e))?;
+
+        // Build inputs
+        let fee_input_ref = Input::new(Hash::new(fee_tx_hash), fee_input.output_index as u64);
+        let collateral = Input::new(
+            Hash::new(collateral_tx_hash),
+            collateral_utxo.output_index as u64,
+        );
+        let warp_input = Input::new(Hash::new(warp_tx_hash), warp_utxo.output_index as u64);
+
+        // Build warp route output with updated datum and ALL existing assets preserved
+        // This is critical for collateral warp routes that hold locked tokens
+        let mut warp_output =
+            Output::new(warp_addr.clone(), warp_utxo.lovelace).set_inline_datum(new_datum.to_vec());
+
+        // Preserve all native tokens from the warp UTXO (state NFT + any collateral tokens)
+        for asset in &warp_utxo.assets {
+            let policy: [u8; 28] = hex::decode(&asset.policy_id)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid policy ID: {}", asset.policy_id))?;
+            let asset_name = hex::decode(&asset.asset_name).unwrap_or_default();
+            warp_output = warp_output
+                .add_asset(Hash::new(policy), asset_name, asset.quantity)
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to add asset {}.{}: {:?}",
+                        asset.policy_id,
+                        asset.asset_name,
+                        e
+                    )
+                })?;
+        }
+
+        // Fee estimate (higher due to Plutus script execution costs)
+        let fee_estimate = 2_000_000u64;
+        let change = fee_input.lovelace.saturating_sub(fee_estimate);
+
+        // Build staging transaction
+        let mut staging = StagingTransaction::new()
+            .input(fee_input_ref)
+            .input(warp_input.clone())
+            .collateral_input(collateral)
+            .output(warp_output)
+            .add_spend_redeemer(warp_input.clone(), redeemer.to_vec(), PLACEHOLDER_EX_UNITS)
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        // Add reference script or inline script
+        if let Some(ref_script) = warp_ref_script {
+            let (ref_tx, ref_idx) = parse_utxo_ref(ref_script)?;
+            let ref_tx_hash: [u8; 32] = hex::decode(&ref_tx)?
+                .try_into()
+                .map_err(|_| anyhow!("Invalid warp reference script tx hash"))?;
+            staging = staging.reference_input(Input::new(Hash::new(ref_tx_hash), ref_idx as u64));
+        }
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        // Add required signer (must be owner)
+        let signer_hash: Hash<28> = Hash::new(payer.verification_key_hash());
+        staging = staging.disclosed_signer(signer_hash);
+
+        // Build the transaction
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![(RedeemerRef::Spend(warp_input), redeemer.to_vec())],
+        )
+        .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build a simple ADA-transfer transaction (no scripts, no tokens).
+    ///
+    /// Used for TX1 of the canonical recipient init flow: funds the init-signal
+    /// UTXO at the recipient's script address.
+    pub async fn build_send_ada_tx(
+        &self,
+        payer: &Keypair,
+        input_utxo: &Utxo,
+        destination_address: &str,
+        amount_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+
+        let input_tx_hash: [u8; 32] = hex::decode(&input_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid input tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+        let dest_addr = pallas_addresses::Address::from_bech32(destination_address)
+            .map_err(|e| anyhow!("Invalid destination address: {}", e))?;
+
+        let input = Input::new(Hash::new(input_tx_hash), input_utxo.output_index as u64);
+
+        let fee_estimate = 200_000u64;
+        let change = input_utxo
+            .lovelace
+            .saturating_sub(amount_lovelace)
+            .saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            .input(input)
+            .output(Output::new(dest_addr, amount_lovelace))
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build send-ADA transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+
+    /// Build TX2 of the canonical recipient init flow.
+    ///
+    /// Spends the init-signal UTXO at the script address (with `Init` redeemer),
+    /// mints the canonical config NFT ("hyperlane-config") and the state NFT ("" + "ref"),
+    /// and creates three outputs:
+    /// - Output #0: config UTXO at script address — canonical NFT + ISM config datum
+    /// - Output #1: state UTXO at script address — state NFT ("") + initial state datum
+    /// - Output #2: ref script UTXO at payer address — state NFT ("ref") + recipient script
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_init_canonical_nft_tx(
+        &self,
+        payer: &Keypair,
+        init_signal_utxo: &Utxo, // ADA-only UTXO at script address (from TX1)
+        fee_utxo: &Utxo,         // wallet UTXO for fees + supplemental ADA
+        collateral_utxo: &Utxo,
+        canonical_nft_script_cbor: &[u8], // canonical_config_nft script (fixed policy)
+        state_nft_script_cbor: &[u8],     // state_nft applied script (one-shot)
+        recipient_script_cbor: &[u8],     // recipient validator (e.g. greeting) for ref UTXO
+        script_address: &str,
+        config_asset_name: &[u8], // recipient's script hash bytes (28 bytes) — asset name
+        config_datum_cbor: &[u8], // Option<IsmConfig> datum for config UTXO
+        state_datum_cbor: &[u8],  // initial state datum (e.g. GreetingDatum)
+        owner_pkh: &[u8; 28],     // required signer (passes greeting's Init check)
+        state_output_lovelace: u64,
+        ref_output_lovelace: u64,
+    ) -> Result<BuiltTransaction> {
+        let current_slot = self.client.get_latest_slot().await?;
+        let validity_end = current_slot + 7200;
+
+        let cost_model = self.client.get_plutusv3_cost_model().await?;
+
+        let canonical_policy = super::crypto::script_hash(canonical_nft_script_cbor);
+        let state_policy = super::crypto::script_hash(state_nft_script_cbor);
+
+        let init_signal_tx_hash: [u8; 32] = hex::decode(&init_signal_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid init-signal tx hash"))?;
+        let init_signal_input = Input::new(
+            Hash::new(init_signal_tx_hash),
+            init_signal_utxo.output_index as u64,
+        );
+        let fee_tx_hash: [u8; 32] = hex::decode(&fee_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid fee UTXO tx hash"))?;
+        let collateral_tx_hash: [u8; 32] = hex::decode(&collateral_utxo.tx_hash)?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid collateral tx hash"))?;
+
+        let payer_address = payer.address_bech32(self.network);
+        let payer_addr = pallas_addresses::Address::from_bech32(&payer_address)
+            .map_err(|e| anyhow!("Invalid payer address: {}", e))?;
+        let script_addr = pallas_addresses::Address::from_bech32(script_address)
+            .map_err(|e| anyhow!("Invalid script address: {}", e))?;
+
+        // Init redeemer = Constr 0 [] = d87980
+        let init_redeemer: Vec<u8> = vec![0xd8, 0x79, 0x80];
+
+        let config_asset_name: Vec<u8> = config_asset_name.to_vec();
+        let state_asset_name: Vec<u8> = vec![];
+        let ref_asset_name: Vec<u8> = b"ref".to_vec();
+
+        // Output #0: config UTXO
+        let min_config_lovelace = 2_000_000u64;
+        let config_output = Output::new(script_addr.clone(), min_config_lovelace)
+            .set_inline_datum(config_datum_cbor.to_vec())
+            .add_asset(Hash::new(canonical_policy), config_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add canonical NFT: {:?}", e))?;
+
+        // Output #1: state UTXO
+        let state_output = Output::new(script_addr, state_output_lovelace)
+            .set_inline_datum(state_datum_cbor.to_vec())
+            .add_asset(Hash::new(state_policy), state_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add state NFT: {:?}", e))?;
+
+        // Output #2: ref script UTXO
+        let ref_output = Output::new(payer_addr.clone(), ref_output_lovelace)
+            .add_asset(Hash::new(state_policy), ref_asset_name.clone(), 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT: {:?}", e))?
+            .set_inline_script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec());
+
+        let fee_estimate = 3_500_000u64;
+        let total_outputs = min_config_lovelace + state_output_lovelace + ref_output_lovelace;
+        let available = init_signal_utxo.lovelace + fee_utxo.lovelace;
+        let change = available
+            .saturating_sub(total_outputs)
+            .saturating_sub(fee_estimate);
+
+        let mut staging = StagingTransaction::new()
+            // init-signal UTXO (at script address, spent with Init redeemer)
+            .input(Input::new(
+                Hash::new(init_signal_tx_hash),
+                init_signal_utxo.output_index as u64,
+            ))
+            // wallet UTXO for fees
+            .input(Input::new(
+                Hash::new(fee_tx_hash),
+                fee_utxo.output_index as u64,
+            ))
+            .collateral_input(Input::new(
+                Hash::new(collateral_tx_hash),
+                collateral_utxo.output_index as u64,
+            ))
+            .output(config_output)
+            .output(state_output)
+            .output(ref_output)
+            // Canonical config NFT (one token: "hyperlane-config")
+            .mint_asset(Hash::new(canonical_policy), config_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add canonical NFT mint: {:?}", e))?
+            // State NFT (two tokens: "" + "ref")
+            .mint_asset(Hash::new(state_policy), state_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add state NFT mint: {:?}", e))?
+            .mint_asset(Hash::new(state_policy), ref_asset_name, 1)
+            .map_err(|e| anyhow!("Failed to add ref NFT mint: {:?}", e))?
+            // Scripts in witness set
+            .script(ScriptKind::PlutusV3, canonical_nft_script_cbor.to_vec())
+            .script(ScriptKind::PlutusV3, state_nft_script_cbor.to_vec())
+            .script(ScriptKind::PlutusV3, recipient_script_cbor.to_vec())
+            // Mint redeemers (canonical_config_nft + state_nft)
+            .add_mint_redeemer(
+                Hash::new(canonical_policy),
+                build_mint_redeemer(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .add_mint_redeemer(
+                Hash::new(state_policy),
+                build_mint_redeemer(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            // Spend redeemer for init-signal UTXO (Init = Constr 0 [])
+            .add_spend_redeemer(
+                init_signal_input.clone(),
+                init_redeemer.clone(),
+                PLACEHOLDER_EX_UNITS,
+            )
+            .language_view(ScriptKind::PlutusV3, cost_model)
+            .fee(fee_estimate)
+            .invalid_from_slot(validity_end)
+            .network_id(if matches!(self.network, Network::Testnet) {
+                0
+            } else {
+                1
+            });
+
+        if change >= 1_000_000 {
+            staging = staging.output(Output::new(payer_addr.clone(), change));
+        }
+
+        // Required signer: the owner key (so the Init handler passes)
+        staging = staging.disclosed_signer(Hash::new(*owner_pkh));
+
+        let staging = calibrate_ex_units(
+            self.client,
+            staging,
+            vec![
+                (RedeemerRef::Mint(canonical_policy), build_mint_redeemer()),
+                (RedeemerRef::Mint(state_policy), build_mint_redeemer()),
+                (RedeemerRef::Spend(init_signal_input), init_redeemer),
+            ],
+        )
+        .await?;
+        let staging = apply_measured_fee(self.client, staging, &payer_addr).await?;
+        let tx = staging
+            .build_conway_raw()
+            .map_err(|e| anyhow!("Failed to build canonical-nft init transaction: {:?}", e))?;
+
+        Ok(tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview_params() -> ProtocolParams {
+        ProtocolParams::default()
+    }
+
+    #[test]
+    fn min_fee_matches_a_known_transaction() {
+        // The warp transfer at 7450d1c4…: 2484 bytes, 1_494_777 mem,
+        // 513_446_587 steps, which the node accepted against a 387_946 minimum.
+        let fee = min_fee(2484, 1_494_777, 513_446_587, 0, &preview_params());
+        assert_eq!(fee, 387_946);
+    }
+
+    #[test]
+    fn script_cost_dominates_a_large_budget() {
+        // The budgets this CLI used to hardcode, at the same size.
+        let guessed = min_fee(2484, 12_000_000, 5_000_000_000, 0, &preview_params());
+        let measured = min_fee(2484, 1_494_777, 513_446_587, 0, &preview_params());
+        assert!(
+            guessed > measured * 3,
+            "guessed={guessed} measured={measured}"
+        );
+        // Both must still fit under the flat estimate the builders start from.
+        assert!(guessed < 2_000_000);
+    }
+
+    #[test]
+    fn charges_for_reference_scripts() {
+        // The IGP set-oracle transaction the node priced at 248_210: 615 bytes
+        // signed, 249_500 mem, 82_353_489 steps, reading a 3_029-byte reference
+        // script. Omitting that last term underprices it by 45_435.
+        let params = preview_params();
+        let with_ref = min_fee(615, 249_500, 82_353_489, 3_029, &params);
+        let without = min_fee(615, 249_500, 82_353_489, 0, &params);
+        assert_eq!(with_ref, 248_210);
+        assert_eq!(with_ref - without, 45_435);
+    }
+
+    #[test]
+    fn reference_script_price_steps_up_per_tier() {
+        // First 25_600 bytes at 15/byte, the next tier a fifth dearer.
+        assert_eq!(ref_script_fee(25_600, 15), 384_000);
+        assert_eq!(ref_script_fee(25_601, 15), 384_000 + 18);
+    }
+
+    #[test]
+    fn rounds_each_script_term_up() {
+        // A single step must still cost a whole lovelace, never zero.
+        let params = preview_params();
+        let base = min_fee(0, 0, 0, 0, &params);
+        assert_eq!(min_fee(0, 0, 1, 0, &params), base + 1);
+        assert_eq!(min_fee(0, 1, 0, 0, &params), base + 1);
+        // …and the two prices round together, not separately.
+        assert_eq!(min_fee(0, 1, 1, 0, &params), base + 1);
+    }
+}

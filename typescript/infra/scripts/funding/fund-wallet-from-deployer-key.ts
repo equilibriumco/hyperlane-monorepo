@@ -18,6 +18,7 @@ import {
   Address,
   ProtocolType,
   assert,
+  isSdkSupportedProtocol,
   rootLogger,
   toWei,
 } from '@hyperlane-xyz/utils';
@@ -247,8 +248,8 @@ async function fundAccount({
   const chainMetadata = multiProtocolProvider.getChainMetadata(chainName);
   const protocol = chainMetadata.protocol;
   assert(
-    protocol !== ProtocolType.Unknown,
-    `Cannot fund wallet on chain with unknown protocol: ${chainName}`,
+    isSdkSupportedProtocol(protocol),
+    `Cannot fund wallet on chain with unsupported protocol ${protocol}: ${chainName}`,
   );
 
   const fundingLogger = logger.child({

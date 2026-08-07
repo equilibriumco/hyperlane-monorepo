@@ -81,7 +81,7 @@ fn test_fee_estimate_clone() {
 #[test]
 fn test_fee_estimate_debug() {
     let fee = FeeEstimate::new(1000, 100);
-    let debug_str = format!("{:?}", fee);
+    let debug_str = format!("{fee:?}");
     assert!(debug_str.contains("1000"));
     assert!(debug_str.contains("100"));
     assert!(debug_str.contains("1100"));

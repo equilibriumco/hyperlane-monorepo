@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 import type { MultiProviderAdapter } from '@hyperlane-xyz/sdk/providers/MultiProviderAdapter';
-import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
+import { type SdkSupportedProtocol, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoWatchAsset } from './aleo.js';
 import { useCosmosWatchAsset } from './cosmos.js';
@@ -14,7 +14,7 @@ import { useTronWatchAsset } from './tron.js';
 
 export function useWatchAsset(
   multiProvider: MultiProviderAdapter,
-): Record<KnownProtocolType, WatchAssetFns> {
+): Record<SdkSupportedProtocol, WatchAssetFns> {
   const { addAsset: evmAddAsset } = useEthereumWatchAsset(multiProvider);
   const { addAsset: solanaAddAsset } = useSolanaWatchAsset(multiProvider);
   const { addAsset: cosmosAddAsset } = useCosmosWatchAsset(multiProvider);

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 
-import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
+import { type SdkSupportedProtocol, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { widgetLogger } from '../logger.js';
 
@@ -17,7 +17,7 @@ const logger = widgetLogger.child({
 });
 
 export function useDisconnectFns(): Record<
-  KnownProtocolType,
+  SdkSupportedProtocol,
   () => Promise<void>
 > {
   const disconnectEvm = useEthereumDisconnectFn();

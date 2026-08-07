@@ -4,7 +4,7 @@ import type { MinimalProviderRegistry } from '@hyperlane-xyz/sdk/providers/Minim
 import type { ChainName } from '@hyperlane-xyz/sdk/types';
 import {
   type Address,
-  type KnownProtocolType,
+  type SdkSupportedProtocol,
   ProtocolType,
 } from '@hyperlane-xyz/utils';
 
@@ -22,7 +22,7 @@ export function useAccounts(
   multiProvider: MinimalProviderRegistry,
   blacklistedAddresses: Address[] = [],
 ): {
-  accounts: Record<KnownProtocolType, AccountInfo>;
+  accounts: Record<SdkSupportedProtocol, AccountInfo>;
   readyAccounts: Array<AccountInfo>;
 } {
   const evmAccountInfo = useEthereumAccount(multiProvider);

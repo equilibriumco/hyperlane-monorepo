@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.22;
+
+import "forge-std/Script.sol";
+import "forge-std/console.sol";
+
+import {StaticMessageIdMultisigIsm, StaticMessageIdMultisigIsmFactory} from "contracts/isms/multisig/StaticMultisigIsm.sol";
+import {TestRecipient} from "contracts/test/TestRecipient.sol";
+
+interface ITokenRouter {
+    function setInterchainSecurityModule(address _module) external;
+    function interchainSecurityModule() external view returns (address);
+}
+
+/**
+ * @title DeployCardanoISM
+ * @notice Deploys a MultisigISM on Sepolia for validating messages from Cardano
+ * @dev Creates a simple 1-of-1 multisig with the Cardano validator
+ *
+ * Required environment variables:
+ *   - EVM_SIGNER_KEY: Private key for Sepolia transactions
+ *   - CARDANO_VALIDATOR: Cardano validator address (20-byte EVM address)
+ *
+ * Optional environment variables:
+ *   - CARDANO_DOMAIN: Cardano domain ID (default: 2003 for Preview)
+ *   - CARDANO_ISM_THRESHOLD: Validator threshold (default: 1)
+ */
+contract DeployCardanoISM is Script {
+    // Default Cardano domain ID (Preview testnet)
+    uint32 constant DEFAULT_CARDANO_DOMAIN = 2003;
+
+    // Default threshold for multisig (1 of 1)
+    uint8 constant DEFAULT_THRESHOLD = 1;
+
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        // Read validator address from environment (required)
+        address cardanoValidator = vm.envAddress("CARDANO_VALIDATOR");
+
+        // Read optional parameters with defaults
+        uint8 threshold = uint8(
+            vm.envOr("CARDANO_ISM_THRESHOLD", uint256(DEFAULT_THRESHOLD))
+        );
+
+        console.log("Deploying Cardano MultisigISM on Sepolia");
+        console.log("Deployer:", deployer);
+        console.log("Cardano Validator:", cardanoValidator);
+        console.log("Threshold:", threshold);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Create validator set
+        address[] memory validators = new address[](1);
+        validators[0] = cardanoValidator;
+
+        // Deploy StaticMessageIdMultisigIsm for Cardano domain
+        // MessageId ISM only needs message_id + signatures (no full merkle proof)
+        StaticMessageIdMultisigIsmFactory factory = new StaticMessageIdMultisigIsmFactory();
+        address ism = factory.deploy(validators, threshold);
+
+        console.log("\n=== Deployment Complete ===");
+        console.log("Factory deployed:", address(factory));
+        console.log("MultisigISM deployed:", ism);
+        console.log("\nThis ISM validates messages with:");
+        console.log("  - Validator:", cardanoValidator);
+        console.log("  - Threshold:", threshold);
+
+        vm.stopBroadcast();
+
+        console.log("\n=== Environment Variable ===");
+        console.log(string.concat("EVM_ISM=", vm.toString(ism)));
+    }
+
+    /**
+     * @notice Set the new ISM on all Sepolia warp routes
+     */
+    function setISMOnWarpRoutes() external {
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
+
+        address cardanoIsm = vm.envAddress("EVM_ISM");
+
+        // Read warp route addresses
+        address syntheticWCtest = vm.envAddress("EVM_SYNTHETIC_WCTEST");
+        address collateralFtest = vm.envAddress("EVM_COLLATERAL_FTEST");
+        address syntheticWAda = vm.envAddress("EVM_SYNTHETIC_WADA");
+        address collateralWada = vm.envAddress("EVM_COLLATERAL_WADA");
+
+        console.log("Setting Cardano ISM on Sepolia warp routes");
+        console.log("ISM:", cardanoIsm);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Set ISM on synthetic wCTEST (receives from Cardano collateral)
+        ITokenRouter(syntheticWCtest).setInterchainSecurityModule(cardanoIsm);
+        console.log("Set ISM on synthetic wCTEST:", syntheticWCtest);
+
+        // Set ISM on collateral FTEST (receives from Cardano synthetic - burn/unlock)
+        ITokenRouter(collateralFtest).setInterchainSecurityModule(cardanoIsm);
+        console.log("Set ISM on collateral FTEST:", collateralFtest);
+
+        // Set ISM on synthetic wADA (receives from Cardano native)
+        ITokenRouter(syntheticWAda).setInterchainSecurityModule(cardanoIsm);
+        console.log("Set ISM on synthetic wADA:", syntheticWAda);
+
+        // Set ISM on collateral WADA (receives from Cardano native)
+        ITokenRouter(collateralWada).setInterchainSecurityModule(cardanoIsm);
+        console.log("Set ISM on collateral WADA:", collateralWada);
+
+        vm.stopBroadcast();
+
+        console.log("\n=== ISM Configuration Complete ===");
+    }
+
+    /**
+     * @notice Deploy a TestRecipient on Sepolia and set the Cardano ISM
+     */
+    function deployTestRecipient() external {
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
+        address deployer = vm.addr(deployerPrivateKey);
+
+        address cardanoIsm = vm.envAddress("EVM_ISM");
+
+        console.log("Deploying TestRecipient on Sepolia");
+        console.log("Deployer:", deployer);
+        console.log("Cardano ISM:", cardanoIsm);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Deploy TestRecipient
+        TestRecipient recipient = new TestRecipient();
+
+        // Set the Cardano ISM
+        recipient.setInterchainSecurityModule(cardanoIsm);
+
+        console.log("\n=== TestRecipient Deployed ===");
+        console.log("Address:", address(recipient));
+        console.log("ISM:", address(recipient.interchainSecurityModule()));
+
+        vm.stopBroadcast();
+
+        // Output H256 format for Cardano dispatch
+        console.log("\n=== For Cardano dispatch ===");
+        console.log(
+            string.concat(
+                "EVM_TEST_RECIPIENT=",
+                vm.toString(address(recipient))
+            )
+        );
+        console.log(
+            string.concat(
+                "EVM_TEST_RECIPIENT_H256=0x000000000000000000000000",
+                vm.toString(address(recipient))
+            )
+        );
+    }
+
+    /**
+     * @notice Set ISM on an existing TestRecipient
+     */
+    function setISMOnTestRecipient() external {
+        uint256 deployerPrivateKey = vm.envUint("EVM_SIGNER_KEY");
+
+        address cardanoIsm = vm.envAddress("EVM_ISM");
+        address payable testRecipient = payable(
+            vm.envAddress("EVM_TEST_RECIPIENT")
+        );
+
+        console.log("Setting Cardano ISM on TestRecipient");
+        console.log("TestRecipient:", testRecipient);
+        console.log("ISM:", cardanoIsm);
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        TestRecipient(testRecipient).setInterchainSecurityModule(cardanoIsm);
+
+        console.log("\n=== ISM Set Successfully ===");
+
+        vm.stopBroadcast();
+    }
+}

@@ -1,0 +1,6 @@
+cli/target
+contracts/build/
+demo/solidity/out/
+demo/solidity/forge-cache/
+demo/solidity/broadcast/
+demo/solidity/sepolia.env

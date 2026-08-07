@@ -1,6 +1,6 @@
 import { ProtocolType } from '@hyperlane-xyz/utils';
 
-import type { KnownProtocolType, TypedProvider } from './ProviderType.js';
+import type { SdkSupportedProtocol, TypedProvider } from './ProviderType.js';
 import { ProviderType } from './ProviderType.js';
 import { defaultAleoProviderBuilder } from './builders/aleo.js';
 import {
@@ -41,7 +41,7 @@ export const defaultProviderBuilderMap: ProviderBuilderMap = {
 };
 
 export const protocolToDefaultProviderBuilder: Record<
-  KnownProtocolType,
+  SdkSupportedProtocol,
   ProviderBuilderFn<TypedProvider>
 > = {
   [ProtocolType.Ethereum]: defaultEthersV5ProviderBuilder,

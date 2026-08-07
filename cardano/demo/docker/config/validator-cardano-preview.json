@@ -1,0 +1,70 @@
+{
+  "originChainName": "cardanopreview",
+
+  "validator": {
+    "type": "hexKey",
+    "key": "${VALIDATOR_KEY}"
+  },
+
+  "checkpointSyncer": {
+    "type": "localStorage",
+    "path": "/data/checkpoints"
+  },
+
+  "interval": 10,
+
+  "chains": {
+    "cardanopreview": {
+      "name": "cardanopreview",
+      "domainId": 2003,
+      "protocol": "cardano",
+      "chainId": 2003,
+      "blocks": {
+        "reorgPeriod": 2,
+        "estimateBlockTime": 20
+      },
+      "rpcUrls": [
+        {
+          "http": "https://cardano-preview.blockfrost.io/api/v0"
+        }
+      ],
+      "mailbox": "${CARDANO_MAILBOX}",
+      "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "validatorAnnounce": "${CARDANO_VALIDATOR_ANNOUNCE}",
+      "merkleTreeHook": "${CARDANO_MERKLE_TREE_HOOK}",
+      "interchainSecurityModule": "${CARDANO_ISM}",
+      "connection": {
+        "type": "blockfrost",
+        "url": "https://cardano-preview.blockfrost.io/api/v0",
+        "apiKey": "${BLOCKFROST_API_KEY}",
+        "network": "preview",
+        "mailboxPolicyId": "${CARDANO_MAILBOX_POLICY_ID}",
+        "mailboxAssetNameHex": "4d61696c626f78205374617465",
+        "mailboxScriptHash": "${CARDANO_MAILBOX_SCRIPT_HASH}",
+        "mailboxReferenceScriptUtxo": "${CARDANO_MAILBOX_REF_UTXO}",
+        "ismPolicyId": "${CARDANO_ISM_STATE_NFT_POLICY_ID}",
+        "ismAssetNameHex": "49534d205374617465",
+        "ismScriptHash": "${CARDANO_ISM_SCRIPT_HASH}",
+        "ismReferenceScriptUtxo": "${CARDANO_ISM_REF_UTXO}",
+        "igpScriptHash": "${CARDANO_IGP_SCRIPT_HASH}",
+        "validatorAnnouncePolicyId": "${CARDANO_VA_POLICY_ID}",
+        "validatorAnnounceReferenceScriptUtxo": "${CARDANO_VA_REF_UTXO}",
+        "confirmationBlockDelay": 2
+      },
+      "index": {
+        "from": ${CARDANO_INDEX_FROM},
+        "chunk": 100
+      },
+      "signer": {
+        "type": "hexKey",
+        "key": "${CARDANO_SIGNER_KEY}"
+      }
+    }
+  },
+
+  "db": "/data/validator_db",
+
+  "metrics": {
+    "port": 9093
+  }
+}

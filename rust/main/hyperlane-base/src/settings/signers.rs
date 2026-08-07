@@ -140,6 +140,13 @@ pub enum SignerConf {
         /// Whether the Starknet signer is legacy
         is_legacy: bool,
     },
+    /// Cardano Specific key
+    CardanoKey {
+        /// Private key value (extracted from .skey file)
+        key: H256,
+        /// Whether this is a mainnet signer (affects bech32 address prefix)
+        is_mainnet: bool,
+    },
     /// Assume node will sign on RPC calls
     #[default]
     Node,
@@ -193,6 +200,9 @@ impl BuildableWithSignerConf for hyperlane_ethereum::Signers {
             SignerConf::Node => bail!("Node signer"),
             SignerConf::RadixKey { .. } => {
                 bail!("radixKey signer is not supported by Ethereum")
+            }
+            SignerConf::CardanoKey { .. } => {
+                bail!("cardanoKey signer is not supported by Ethereum")
             }
         })
     }
@@ -387,6 +397,36 @@ impl BuildableWithSignerConf for hyperlane_aleo::AleoSigner {
 impl ChainSigner for hyperlane_aleo::AleoSigner {
     fn address_string(&self) -> String {
         self.address().to_owned()
+    }
+
+    fn address_h256(&self) -> H256 {
+        self.address_h256()
+    }
+}
+
+// Cardano signer implementations
+#[async_trait]
+impl BuildableWithSignerConf for hyperlane_cardano::Keypair {
+    async fn build(conf: &SignerConf) -> Result<Self, Report> {
+        match conf {
+            SignerConf::HexKey { key } => Ok(hyperlane_cardano::Keypair::from_string(
+                &ethers::utils::hex::encode(key.as_bytes()),
+            )
+            .ok_or_else(|| eyre::eyre!("Failed to create Cardano keypair"))?),
+            SignerConf::CardanoKey { key, is_mainnet } => {
+                let mut keypair = hyperlane_cardano::Keypair::from_secret_key(key.as_bytes())
+                    .map_err(|e| eyre::eyre!("Failed to create Cardano keypair: {}", e))?;
+                keypair.set_mainnet(*is_mainnet);
+                Ok(keypair)
+            }
+            _ => bail!(format!("{conf:?} key is not supported by Cardano")),
+        }
+    }
+}
+
+impl ChainSigner for hyperlane_cardano::Keypair {
+    fn address_string(&self) -> String {
+        self.address_bech32_for_configured_network()
     }
 
     fn address_h256(&self) -> H256 {

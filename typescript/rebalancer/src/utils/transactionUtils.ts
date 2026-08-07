@@ -1,6 +1,6 @@
 import {
   assert,
-  type KnownProtocolType,
+  isSdkSupportedProtocol,
   type ProtocolType,
 } from '@hyperlane-xyz/utils';
 import {
@@ -31,8 +31,9 @@ export function toProtocolTransaction(
   tx: WarpTypedTransaction,
   expectedProtocol: ProtocolType,
 ): ProtocolTypedTransaction<ProtocolType> {
-  const expectedType =
-    PROTOCOL_TO_DEFAULT_PROVIDER_TYPE[expectedProtocol as KnownProtocolType];
+  const expectedType = isSdkSupportedProtocol(expectedProtocol)
+    ? PROTOCOL_TO_DEFAULT_PROVIDER_TYPE[expectedProtocol]
+    : undefined;
   assert(
     expectedType && tx.type === expectedType,
     `Transaction type ${tx.type} doesn't match expected protocol ${expectedProtocol} (expected ${expectedType})`,

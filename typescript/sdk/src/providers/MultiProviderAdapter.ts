@@ -22,6 +22,7 @@ import {
   ProviderType,
   TypedTransaction,
   TypedProvider,
+  isSdkSupportedProtocol,
 } from './ProviderType.js';
 import { defaultZKSyncProviderBuilder } from './builders/zksync.js';
 import type { ProviderBuilderFn } from './providerBuilders.js';
@@ -113,7 +114,7 @@ export class MultiProviderAdapter<
     ) {
       return ProviderType.ZkSync;
     }
-    if (metadata.protocol === ProtocolType.Unknown) return undefined;
+    if (!isSdkSupportedProtocol(metadata.protocol)) return undefined;
     return PROTOCOL_TO_DEFAULT_PROVIDER_TYPE[metadata.protocol];
   }
 
