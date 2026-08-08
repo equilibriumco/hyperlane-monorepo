@@ -83,6 +83,7 @@ const ALTVM_CHECK_PROTOCOLS: ReadonlySet<ProtocolType> = new Set([
   ProtocolType.Aleo,
   ProtocolType.Sealevel,
   ProtocolType.Starknet,
+  ProtocolType.Midnight,
 ]);
 
 function isSupportedAltVmProtocol(protocol: ProtocolType | null): boolean {

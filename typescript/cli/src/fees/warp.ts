@@ -41,6 +41,9 @@ const PLACEHOLDER_ADDRESSES: Partial<Record<ProtocolType, string>> = {
     'aleo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq3ljyzc',
   [ProtocolType.Radix]:
     'resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd',
+  // Quotes on Midnight never dereference the sender/recipient.
+  [ProtocolType.Midnight]:
+    '0x0000000000000000000000000000000000000000000000000000000000000001',
 };
 
 /**

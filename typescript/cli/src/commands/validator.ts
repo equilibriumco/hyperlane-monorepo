@@ -2,6 +2,7 @@ import { type CommandModule } from 'yargs';
 
 import {
   type Address,
+  ProtocolType,
   isEVMLike,
   isValidAddressEvm,
   normalizeAddressEvm,
@@ -88,7 +89,12 @@ const preFlightCheckCommand: CommandModuleWithContext<{
 
     const chainMetadata = multiProvider.getChainMetadata(chain);
 
-    if (!isEVMLike(chainMetadata.protocol)) {
+    // Midnight validator identities are EVM-style addresses (checkpoint
+    // signing is secp256k1), so the address validation below applies as-is.
+    if (
+      !isEVMLike(chainMetadata.protocol) &&
+      chainMetadata.protocol !== ProtocolType.Midnight
+    ) {
       errorRed(
         `\n❌ Validator pre flight check only supports EVM chains. Exiting.`,
       );

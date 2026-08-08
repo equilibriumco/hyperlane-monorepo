@@ -52,6 +52,10 @@ export interface MultisigIsmConfig {
   type: 'merkleRootMultisigIsm' | 'messageIdMultisigIsm';
   validators: string[];
   threshold: number;
+  // Uncompressed 64-byte secp256k1 pubkeys (hex), one per validator, for
+  // chains whose ISM stores pubkeys instead of addresses (e.g. Midnight).
+  // Addresses are keccak-derived from pubkeys and not reversible.
+  validatorPubkeys?: string[];
 }
 
 export interface TestIsmConfig {
@@ -258,6 +262,16 @@ export interface IRawIsmArtifactManager extends IArtifactManager<
    * @returns The artifact configuration and deployment data
    */
   readIsm(address: string): Promise<DeployedRawIsmArtifact>;
+
+  /**
+   * Whether "static" ISM types (multisig, test) are mutable in place on this
+   * protocol. Defaults to false (EVM semantics: static ISMs are immutable and
+   * a config change means a new deployment). Protocols whose multisig ISM
+   * exposes an on-chain rotation entry point (e.g. Midnight's
+   * setValidatorsAndThreshold) return true so config changes route through
+   * the writer's update() instead of a redeploy.
+   */
+  supportsInPlaceStaticIsmUpdates?(): boolean;
 }
 
 /**
@@ -306,6 +320,12 @@ export function shouldDeployNewIsm(
 export function mergeIsmArtifacts(
   currentArtifact: DeployedIsmArtifact | undefined,
   expectedArtifact: ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact,
+  options?: {
+    // See IRawIsmArtifactManager.supportsInPlaceStaticIsmUpdates: when true,
+    // a changed static-ISM config keeps the current deployment (routing the
+    // change through the writer's update()) instead of forcing a redeploy.
+    allowInPlaceStaticUpdate?: boolean;
+  },
 ): ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact {
   const expectedConfig = expectedArtifact.config;
 
@@ -326,7 +346,10 @@ export function mergeIsmArtifacts(
 
   // For static ISMs, check if config changed
   if (STATIC_ISM_TYPES.includes(expectedConfig.type)) {
-    if (shouldDeployNewIsm(currentConfig, expectedConfig)) {
+    if (
+      !options?.allowInPlaceStaticUpdate &&
+      shouldDeployNewIsm(currentConfig, expectedConfig)
+    ) {
       return {
         artifactState: ArtifactState.NEW,
         config: expectedConfig,

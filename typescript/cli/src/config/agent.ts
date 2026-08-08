@@ -10,7 +10,12 @@ import {
   type HyperlaneDeploymentArtifacts,
   buildAgentConfig,
 } from '@hyperlane-xyz/sdk';
-import { objMap, pick, promiseObjAll } from '@hyperlane-xyz/utils';
+import {
+  ProtocolType,
+  objMap,
+  pick,
+  promiseObjAll,
+} from '@hyperlane-xyz/utils';
 
 import { type CommandContext } from '../context/types.js';
 import { errorRed, logBlue, logGreen, warnYellow } from '../logger.js';
@@ -36,7 +41,20 @@ export async function createAgentConfig({
 
   const chainAddresses = filterChainAddresses(addresses, chains);
 
-  const core = HyperlaneCore.fromAddressesMap(chainAddresses, multiProvider);
+  // HyperlaneCore serves only the deployed-block lookup, which is an EVM
+  // call; AltVM chains must carry index.from in their registry metadata.
+  const evmChainAddresses = pick(
+    chainAddresses,
+    Object.keys(chainAddresses).filter((chain) => {
+      const protocol = multiProvider.tryGetChainMetadata(chain)?.protocol;
+      return (
+        protocol === ProtocolType.Ethereum || protocol === ProtocolType.Tron
+      );
+    }),
+  );
+  const core = Object.keys(evmChainAddresses).length
+    ? HyperlaneCore.fromAddressesMap(evmChainAddresses, multiProvider)
+    : undefined;
   const startBlocks = await getStartBlocks(chainAddresses, core, chainMetadata);
 
   await handleMissingInterchainGasPaymaster(chainAddresses, skipConfirmation);
@@ -85,7 +103,7 @@ function filterChainAddresses(
 
 async function getStartBlocks(
   chainAddresses: ChainMap<ChainAddresses>,
-  core: HyperlaneCore,
+  core: HyperlaneCore | undefined,
   chainMetadata: any,
 ): Promise<ChainMap<number | undefined>> {
   return promiseObjAll(
@@ -95,8 +113,11 @@ async function getStartBlocks(
         return indexFrom;
       }
 
-      const mailbox = core.getContracts(chain).mailbox;
       try {
+        if (!core) {
+          throw new Error(`no EVM core available for ${chain}`);
+        }
+        const mailbox = core.getContracts(chain).mailbox;
         const deployedBlock = await mailbox.deployedBlock();
         return deployedBlock.toNumber();
       } catch {

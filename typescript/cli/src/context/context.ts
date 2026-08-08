@@ -232,6 +232,7 @@ export async function getContext({
     ProtocolType.Aleo,
     ProtocolType.Sealevel,
     ProtocolType.Starknet,
+    ProtocolType.Midnight,
   ];
 
   return {

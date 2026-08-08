@@ -12,6 +12,7 @@ import {
   defaultEthersV5ProviderBuilder,
   defaultGnosisTxBuilderProviderBuilder,
 } from './builders/ethersV5.js';
+import { defaultMidnightProviderBuilder } from './builders/midnight.js';
 import { defaultRadixProviderBuilder } from './builders/radix.js';
 import { defaultSolProviderBuilder } from './builders/solana.js';
 import { defaultStarknetJsProviderBuilder } from './builders/starknet.js';
@@ -38,6 +39,7 @@ export const defaultProviderBuilderMap: ProviderBuilderMap = {
   [ProviderType.Radix]: defaultRadixProviderBuilder,
   [ProviderType.Aleo]: defaultAleoProviderBuilder,
   [ProviderType.Tron]: defaultTronProviderBuilder,
+  [ProviderType.Midnight]: defaultMidnightProviderBuilder,
 };
 
 export const protocolToDefaultProviderBuilder: Record<
@@ -52,4 +54,5 @@ export const protocolToDefaultProviderBuilder: Record<
   [ProtocolType.Radix]: defaultRadixProviderBuilder,
   [ProtocolType.Aleo]: defaultAleoProviderBuilder,
   [ProtocolType.Tron]: defaultTronProviderBuilder,
+  [ProtocolType.Midnight]: defaultMidnightProviderBuilder,
 };

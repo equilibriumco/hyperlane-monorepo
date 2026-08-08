@@ -93,6 +93,12 @@ export enum TokenStandard {
   TronHypEverclearCollateral = 'TronHypEverclearCollateral',
   TronHypEverclearEth = 'TronHypEverclearEth',
   TronHypCrossCollateralRouter = 'TronHypCrossCollateralRouter',
+
+  // Midnight
+  MidnightNative = 'MidnightNative',
+  MidnightHypNative = 'MidnightHypNative',
+  MidnightHypCollateral = 'MidnightHypCollateral',
+  MidnightHypSynthetic = 'MidnightHypSynthetic',
 }
 
 // Allows for omission of protocol field in token args
@@ -184,6 +190,12 @@ export const TOKEN_STANDARD_TO_PROTOCOL: Record<
   TronHypEverclearCollateral: ProtocolType.Tron,
   TronHypEverclearEth: ProtocolType.Tron,
   TronHypCrossCollateralRouter: ProtocolType.Tron,
+
+  // Midnight
+  MidnightNative: ProtocolType.Midnight,
+  MidnightHypNative: ProtocolType.Midnight,
+  MidnightHypCollateral: ProtocolType.Midnight,
+  MidnightHypSynthetic: ProtocolType.Midnight,
 };
 
 export const TOKEN_STANDARD_TO_PROVIDER_TYPE: Record<
@@ -228,6 +240,8 @@ export const TOKEN_COLLATERALIZED_STANDARDS = [
   TokenStandard.TronHypRebaseCollateral,
   TokenStandard.TronHypXERC20Lockbox,
   TokenStandard.TronHypVSXERC20Lockbox,
+  TokenStandard.MidnightHypNative,
+  TokenStandard.MidnightHypCollateral,
   TokenStandard.RadixHypCollateral,
   TokenStandard.StarknetHypCollateral,
   TokenStandard.StarknetHypNative,
@@ -327,6 +341,9 @@ export const TOKEN_HYP_STANDARDS = [
   TokenStandard.TronHypCrossCollateralRouter,
   TokenStandard.TronHypEverclearCollateral,
   TokenStandard.TronHypEverclearEth,
+  TokenStandard.MidnightHypNative,
+  TokenStandard.MidnightHypCollateral,
+  TokenStandard.MidnightHypSynthetic,
 ];
 
 export const TOKEN_MULTI_CHAIN_STANDARDS = [
@@ -429,6 +446,21 @@ export const tokenTypeToStandard = (
         `token type ${tokenType} not available on protocol ${protocolType}`,
       );
       return starknetTokenStandard;
+    }
+    case ProtocolType.Midnight: {
+      if (
+        MIDNIGHT_SUPPORTED_TOKEN_TYPES.includes(
+          tokenType as MidnightSupportedTokenTypes,
+        )
+      ) {
+        return MIDNIGHT_TOKEN_TYPE_TO_STANDARD[
+          tokenType as MidnightSupportedTokenTypes
+        ];
+      }
+
+      throw new Error(
+        `token type ${tokenType} not available on protocol ${protocolType}`,
+      );
     }
     default: {
       throw new Error(
@@ -553,6 +585,18 @@ export const ALEO_TOKEN_TYPE_TO_STANDARD: Record<
   [TokenType.synthetic]: TokenStandard.AleoHypSynthetic,
 };
 
+export const MIDNIGHT_SUPPORTED_TOKEN_TYPES = [TokenType.native] as const;
+
+type MidnightSupportedTokenTypes =
+  (typeof MIDNIGHT_SUPPORTED_TOKEN_TYPES)[number];
+
+export const MIDNIGHT_TOKEN_TYPE_TO_STANDARD: Record<
+  MidnightSupportedTokenTypes,
+  TokenStandard
+> = {
+  [TokenType.native]: TokenStandard.MidnightHypNative,
+};
+
 export const TRON_TOKEN_TYPE_TO_STANDARD: Record<
   DeployableTokenType,
   TokenStandard
@@ -591,6 +635,7 @@ export const PROTOCOL_TO_NATIVE_STANDARD: Record<
   [ProtocolType.Radix]: TokenStandard.RadixNative,
   [ProtocolType.Aleo]: TokenStandard.AleoNative,
   [ProtocolType.Tron]: TokenStandard.TronNative,
+  [ProtocolType.Midnight]: TokenStandard.MidnightNative,
 };
 
 export const PROTOCOL_TO_HYP_NATIVE_STANDARD: Record<
@@ -606,4 +651,5 @@ export const PROTOCOL_TO_HYP_NATIVE_STANDARD: Record<
   [ProtocolType.CosmosNative]: TokenStandard.CosmNativeHypCollateral,
   [ProtocolType.Aleo]: TokenStandard.AleoHypNative,
   [ProtocolType.Tron]: TokenStandard.TronHypNative,
+  [ProtocolType.Midnight]: TokenStandard.MidnightHypNative,
 };

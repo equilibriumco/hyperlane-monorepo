@@ -4,6 +4,7 @@ import type { MinimalProviderRegistry } from '@hyperlane-xyz/sdk/providers/Minim
 import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoActiveChain } from './aleoWallet.js';
+import { useMidnightActiveChain } from './midnight.js';
 import { useCosmosActiveChain } from './cosmosWallet.js';
 import { useEthereumActiveChain } from './ethereumWallet.js';
 import { useRadixActiveChain } from './radixWallet.js';
@@ -23,6 +24,7 @@ export function useActiveChains(multiProvider: MinimalProviderRegistry): {
   const radixChain = useRadixActiveChain(multiProvider);
   const aleoChain = useAleoActiveChain(multiProvider);
   const tronChain = useTronActiveChain(multiProvider);
+  const midnightChain = useMidnightActiveChain(multiProvider);
 
   const readyChains = useMemo(
     () =>
@@ -34,6 +36,7 @@ export function useActiveChains(multiProvider: MinimalProviderRegistry): {
         radixChain,
         aleoChain,
         tronChain,
+        midnightChain,
       ].filter((c) => !!c.chainDisplayName),
     [
       evmChain,
@@ -43,6 +46,7 @@ export function useActiveChains(multiProvider: MinimalProviderRegistry): {
       radixChain,
       aleoChain,
       tronChain,
+      midnightChain,
     ],
   );
 
@@ -57,6 +61,7 @@ export function useActiveChains(multiProvider: MinimalProviderRegistry): {
         [ProtocolType.Radix]: radixChain,
         [ProtocolType.Aleo]: aleoChain,
         [ProtocolType.Tron]: tronChain,
+        [ProtocolType.Midnight]: midnightChain,
       },
       readyChains,
     }),
@@ -69,6 +74,7 @@ export function useActiveChains(multiProvider: MinimalProviderRegistry): {
       radixChain,
       aleoChain,
       tronChain,
+      midnightChain,
     ],
   );
 }

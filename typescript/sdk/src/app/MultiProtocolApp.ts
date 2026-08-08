@@ -13,6 +13,7 @@ import { ChainMetadata } from '../metadata/chainMetadataTypes.js';
 import type { MultiProviderAdapter } from '../providers/MultiProviderAdapter.js';
 import {
   AleoProvider,
+  MidnightProvider,
   CosmJsNativeProvider,
   CosmJsProvider,
   CosmJsWasmProvider,
@@ -143,6 +144,14 @@ export class BaseAleoAdapter extends BaseAppAdapter {
 
   public getProvider(): AleoProvider['provider'] {
     return this.multiProvider.getAleoProvider(this.chainName);
+  }
+}
+
+export class BaseMidnightAdapter extends BaseAppAdapter {
+  public readonly protocol: ProtocolType = ProtocolType.Midnight;
+
+  public getProvider(): MidnightProvider['provider'] {
+    return this.multiProvider.getMidnightProvider(this.chainName);
   }
 }
 

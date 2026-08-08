@@ -1,0 +1,69 @@
+{
+  "name": "@hyperlane-xyz/midnight-sdk",
+  "version": "40.0.0",
+  "description": "Hyperlane TypeScript SDK for the Midnight protocol",
+  "keywords": [
+    "blockchain",
+    "hyperlane",
+    "midnight",
+    "sdk"
+  ],
+  "homepage": "https://www.hyperlane.xyz",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/hyperlane-xyz/hyperlane-monorepo",
+  "files": [
+    "/dist",
+    "/artifacts"
+  ],
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "default": "./dist/runtime.js"
+    }
+  },
+  "scripts": {
+    "prebuild": "node scripts/generate-artifacts.js",
+    "build": "pnpm prebuild && rm -rf ./dist && tsc",
+    "format": "oxfmt --write ./src",
+    "lint": "oxlint -c ../../oxlint.json",
+    "clean": "rm -rf ./dist ./cache",
+    "test": "mocha --config .mocharc.json './src/**/*.test.ts' --exit",
+    "test:ci": "mocha --config .mocharc.json './src/**/*.test.ts' --exit"
+  },
+  "dependencies": {
+    "@hyperlane-xyz/provider-sdk": "workspace:*",
+    "@hyperlane-xyz/utils": "workspace:*",
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.6",
+    "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.4",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@midnightntwrk/wallet-sdk": "2.0.0-beta.2",
+    "@noble/hashes": "^2.2.0",
+    "rxjs": "^7.8.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@hyperlane-xyz/tsconfig": "workspace:^",
+    "@types/chai": "catalog:",
+    "@types/mocha": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "chai": "catalog:",
+    "mocha": "catalog:",
+    "oxfmt": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

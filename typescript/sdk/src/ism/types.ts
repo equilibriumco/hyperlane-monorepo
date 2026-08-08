@@ -343,6 +343,10 @@ export const TestIsmConfigSchema = z.object({
 export const MultisigConfigSchema = z.object({
   validators: z.array(ZHash),
   threshold: z.number(),
+  // Chains whose ISM stores full public keys (e.g. Midnight) need the
+  // uncompressed 64-byte secp256k1 pubkey behind each validator address;
+  // addresses are keccak-derived and not reversible.
+  validatorPubkeys: z.array(ZHash).optional(),
 });
 
 export const WeightedMultisigConfigSchema = z.object({
