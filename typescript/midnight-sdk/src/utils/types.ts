@@ -26,6 +26,10 @@ export type MidnightTxReceipt = {
   destinationDomainId?: number;
   // Set when the payForGas follow-up landed; its own transaction id.
   payForGasTxId?: string;
+  // Set instead of payForGasTxId when the follow-up's transaction was found
+  // in ledger state after its confirmation failed: the payment is on chain
+  // and must not be repeated, but only its row index is recoverable.
+  payForGasIndex?: number;
 };
 
 export type MidnightEndpoints = {

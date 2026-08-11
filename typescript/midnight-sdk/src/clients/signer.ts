@@ -8,7 +8,7 @@ import { nativeToken } from '@midnightntwrk/ledger-v9';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
 import type { ISigner, ReqGetBalance } from '@hyperlane-xyz/provider-sdk/altvm';
-import { retryAsync } from '@hyperlane-xyz/utils';
+import { sleep } from '@hyperlane-xyz/utils';
 
 import {
   artifactsPathFor,
@@ -41,9 +41,15 @@ import {
   witnessesFor,
   type MidnightContractName,
 } from './contracts.js';
+import {
+  findLandedGasPayment,
+  payForGasWithLandingCheck,
+  type LandedGasPayment,
+} from './gas-payment.js';
 import { MidnightIndexerClient } from './indexer.js';
 import { MidnightProvider } from './provider.js';
 import { MidnightReadClient } from './read-client.js';
+import { readGasPayments } from './state.js';
 
 // Proving is client-side in Midnight's architecture; public networks expose
 // no proof server, so the default is the operator's own local instance.
@@ -51,6 +57,19 @@ const DEFAULT_PROOF_SERVER_URL = 'http://127.0.0.1:6300';
 // Local private-state DB password (SDK enforces length/charset rules);
 // override via MIDNIGHT_STATE_PASSWORD.
 const DEFAULT_PRIVATE_STATE_PASSWORD = 'Hyperlane-Midnight-2026!';
+
+const PAY_FOR_GAS_ATTEMPTS = 3;
+const PAY_FOR_GAS_RETRY_DELAY_MS = 1000;
+// The landing check has to outlast the transaction, not the error: a
+// confirmation wait can fail seconds after a broadcast that still lands.
+const PAY_FOR_GAS_SETTLE_MS = Number(
+  process.env.MIDNIGHT_PAY_FOR_GAS_SETTLE_MS ?? 60_000,
+);
+const PAY_FOR_GAS_POLL_MS = 3000;
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface MidnightSignerOptions {
   seedHex: string;
@@ -186,31 +205,48 @@ export class MidnightSigner
         );
       }
       const gas = transaction.payForGas;
-      try {
-        const paid = await retryAsync(
-          () =>
-            this.payForGas({
-              igpAddress: gas.igpAddress,
-              messageId: receipt.messageId!,
-              destinationDomainId: gas.destinationDomainId,
-              gasLimit: gas.gasLimit,
-              amount: gas.amount,
-            }),
-          3,
-          1000,
-        );
-        receipt.payForGasTxId = paid.txId;
-      } catch (err) {
+      const outcome = await payForGasWithLandingCheck({
+        pay: () =>
+          this.payForGas({
+            igpAddress: gas.igpAddress,
+            messageId: receipt.messageId!,
+            destinationDomainId: gas.destinationDomainId,
+            gasLimit: gas.gasLimit,
+            amount: gas.amount,
+          }),
+        findLanded: () =>
+          this.awaitLandedGasPayment(
+            gas.igpAddress,
+            receipt.messageId!,
+            BigInt(gas.amount),
+          ),
+        attempts: PAY_FOR_GAS_ATTEMPTS,
+        delayMs: PAY_FOR_GAS_RETRY_DELAY_MS,
+        sleep,
+      });
+
+      if (outcome.kind === 'paid') {
+        receipt.payForGasTxId = outcome.txId;
+      } else if (outcome.kind === 'recovered') {
+        receipt.payForGasIndex = outcome.index;
+      } else {
         // The dispatch already landed; the message is valid but unpaid and a
         // relayer running a payment policy will withhold it. payForGas is
-        // permissionless, so the payment below completes it at any time.
+        // permissionless, so the rescue call completes it at any time.
+        const rescue =
+          `payForGas(igpAddress: ${gas.igpAddress}, messageId: ${receipt.messageId}, ` +
+          `destinationDomainId: ${gas.destinationDomainId}, gasLimit: ${gas.gasLimit}, ` +
+          `amount: ${gas.amount})`;
+        const cause = errorText(outcome.error);
         throw new Error(
-          `message ${receipt.messageId} dispatched (tx ${receipt.txId}) but its gas payment ` +
-            `failed after retries — complete it with payForGas(igpAddress: ${gas.igpAddress}, ` +
-            `messageId: ${receipt.messageId}, destinationDomainId: ${gas.destinationDomainId}, ` +
-            `gasLimit: ${gas.gasLimit}, amount: ${gas.amount}): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+          outcome.verified
+            ? `message ${receipt.messageId} dispatched (tx ${receipt.txId}) but its gas payment ` +
+                `failed and no payment for it reached the ledger — complete it with ${rescue}: ${cause}`
+            : `message ${receipt.messageId} dispatched (tx ${receipt.txId}) but whether its gas ` +
+                `payment landed could not be determined (${errorText(
+                  outcome.checkError,
+                )}) — read gasPaymentAt on IGP ${gas.igpAddress} for messageId ` +
+                `${receipt.messageId} before running ${rescue}, or it may pay twice: ${cause}`,
         );
       }
     }
@@ -243,6 +279,45 @@ export class MidnightSigner
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
     };
+  }
+
+  // Whether a failed payForGas attempt nevertheless landed. Polls rather
+  // than reading once, because the transaction can still be in flight when
+  // the confirmation wait gives up. Resolving undefined means a successful
+  // read proved the payment absent; an indexer that never answered rejects,
+  // since "unknown" must not be taken for "nothing landed".
+  private async awaitLandedGasPayment(
+    igpAddress: string,
+    messageId: string,
+    minPayment: bigint,
+  ): Promise<LandedGasPayment | undefined> {
+    const deadline = Date.now() + PAY_FOR_GAS_SETTLE_MS;
+    let readError: unknown;
+    let read = false;
+    for (;;) {
+      try {
+        const state = await this.requireContractState(igpAddress);
+        read = true;
+        const landed = findLandedGasPayment(
+          readGasPayments(state.data),
+          messageId,
+          minPayment,
+        );
+        if (landed) return landed;
+      } catch (err) {
+        readError = err;
+      }
+      if (Date.now() >= deadline) break;
+      await sleep(PAY_FOR_GAS_POLL_MS);
+    }
+    if (!read) {
+      throw new Error(
+        `could not read IGP ${igpAddress} state to check for a landed gas payment: ${errorText(
+          readError,
+        )}`,
+      );
+    }
+    return undefined;
   }
 
   async sendAndConfirmBatchTransactions(

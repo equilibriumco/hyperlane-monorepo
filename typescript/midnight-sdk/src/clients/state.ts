@@ -113,6 +113,37 @@ export function readRemoteGasData(data: unknown): {
   return entries;
 }
 
+// igp.compact gas_payments at flat slot [5]: an append-only index ->
+// (messageId, destination, gasAmount, payment) log. Guarded by
+// scripts/check-ledger-layout.mjs in hyperlane-midnight. Index 0 and any
+// zero field store as trimmed (possibly absent) atoms.
+const IGP_GAS_PAYMENTS_PATH = [5];
+
+export type GasPaymentRow = {
+  index: number;
+  messageId: string;
+  destination: number;
+  gasAmount: string;
+  payment: string;
+};
+
+export function readGasPayments(data: unknown): GasPaymentRow[] {
+  const map = slotAt(data, IGP_GAS_PAYMENTS_PATH, 'map').asMap();
+  const rows: GasPaymentRow[] = [];
+  for (const key of map.keys()) {
+    const cell = map.get(key)?.asCell();
+    if (!cell) continue;
+    rows.push({
+      index: Number(leBytesToBigint(key.value[0] ?? new Uint8Array(0))),
+      messageId: bytesToHex(cell.value[0] ?? new Uint8Array(0)),
+      destination: Number(leBytesToBigint(cell.value[1] ?? new Uint8Array(0))),
+      gasAmount: leBytesToBigint(cell.value[2] ?? new Uint8Array(0)).toString(),
+      payment: leBytesToBigint(cell.value[3] ?? new Uint8Array(0)).toString(),
+    });
+  }
+  return rows;
+}
+
 // validator-announce.compact seals the night address at flat slot [5]
 // (constructor argument, no reader circuit exposes it).
 const VA_MAILBOX_PATH = [5];
