@@ -369,8 +369,10 @@ fn parse_tx_hash(hex_input: &str, raw: &str) -> Result<H512, HyperlaneMidnightEr
             raw: truncate(raw, 1024),
         });
     }
+    // Right-aligned into the H512, matching the H256 -> H512 widening the
+    // event indexers use, so `h512_to_h256` accepts either form.
     let mut buf = [0u8; 64];
-    buf[..bytes.len()].copy_from_slice(&bytes);
+    buf[64 - bytes.len()..].copy_from_slice(&bytes);
     Ok(H512::from(buf))
 }
 

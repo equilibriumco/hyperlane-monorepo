@@ -72,7 +72,11 @@ impl MidnightProvider {
                 }
             }
         }
-        let balances = toolkit::query_wallet_balance(toolkit_ctx, Some(address)).await?;
+        // An unset MIDNIGHT_RELAYER_ADDRESS reaches here as "": omit the guard
+        // field so the sidecar reads its own wallet instead of string-matching
+        // an empty address.
+        let guard = (!address.is_empty()).then_some(address);
+        let balances = toolkit::query_wallet_balance(toolkit_ctx, guard).await?;
         tracing::debug!(
             address = balances.address,
             night_micro = %balances.night_micro,

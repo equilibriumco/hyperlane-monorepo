@@ -204,7 +204,8 @@ async fn process_returns_tx_outcome_on_success() {
         .unwrap();
     assert!(outcome.executed);
     let raw = outcome.transaction_id.as_bytes();
-    assert_eq!(&raw[..4], &[0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(&raw[60..], &[0xde, 0xad, 0xbe, 0xef]);
+    assert!(raw[..60].iter().all(|b| *b == 0));
 }
 
 #[tokio::test]
