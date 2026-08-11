@@ -8,6 +8,7 @@ import { nativeToken } from '@midnightntwrk/ledger-v9';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
 import type { ISigner, ReqGetBalance } from '@hyperlane-xyz/provider-sdk/altvm';
+import { retryAsync } from '@hyperlane-xyz/utils';
 
 import {
   artifactsPathFor,
@@ -185,16 +186,63 @@ export class MidnightSigner
         );
       }
       const gas = transaction.payForGas;
-      const igp = await this.joinContract('igp', gas.igpAddress);
-      await igp.callTx.payForGas(
-        hexToBytes(receipt.messageId),
-        BigInt(gas.destinationDomainId),
-        BigInt(gas.gasLimit),
-        BigInt(gas.amount),
-      );
+      try {
+        const paid = await retryAsync(
+          () =>
+            this.payForGas({
+              igpAddress: gas.igpAddress,
+              messageId: receipt.messageId!,
+              destinationDomainId: gas.destinationDomainId,
+              gasLimit: gas.gasLimit,
+              amount: gas.amount,
+            }),
+          3,
+          1000,
+        );
+        receipt.payForGasTxId = paid.txId;
+      } catch (err) {
+        // The dispatch already landed; the message is valid but unpaid and a
+        // relayer running a payment policy will withhold it. payForGas is
+        // permissionless, so the payment below completes it at any time.
+        throw new Error(
+          `message ${receipt.messageId} dispatched (tx ${receipt.txId}) but its gas payment ` +
+            `failed after retries — complete it with payForGas(igpAddress: ${gas.igpAddress}, ` +
+            `messageId: ${receipt.messageId}, destinationDomainId: ${gas.destinationDomainId}, ` +
+            `gasLimit: ${gas.gasLimit}, amount: ${gas.amount}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+        );
+      }
     }
 
     return receipt;
+  }
+
+  // Standalone, permissionless gas payment for an already-dispatched
+  // message: the rescue path when the follow-up above failed, and the top-up
+  // path when a relayer's policy needs more than was originally paid.
+  async payForGas(req: {
+    igpAddress: string;
+    messageId: string;
+    destinationDomainId: number;
+    gasLimit: string | bigint;
+    amount: string | bigint;
+  }): Promise<MidnightTxReceipt> {
+    const messageId = hexToBytes(req.messageId);
+    if (messageId.length !== 32) {
+      throw new Error(`messageId must be 32 bytes, got ${req.messageId}`);
+    }
+    const igp = await this.joinContract('igp', req.igpAddress);
+    const txData = await igp.callTx.payForGas(
+      messageId,
+      BigInt(req.destinationDomainId),
+      BigInt(req.gasLimit),
+      BigInt(req.amount),
+    );
+    return {
+      txId: String(txData.public.txId),
+      blockHeight: Number(txData.public.blockHeight ?? 0),
+    };
   }
 
   async sendAndConfirmBatchTransactions(

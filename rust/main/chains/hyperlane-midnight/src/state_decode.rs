@@ -30,39 +30,41 @@ use crate::error::HyperlaneMidnightError;
 
 // Positional paths into the ledger `StateValue::Array`, from the compiled
 // `night` readers. `night`'s state is a 2-element root array: `[0]` holds the
-// ownership commitment + Routes `local_domain` scalars, `[1]` holds the
-// Routes / MessageIdMultisigIsm / Mailbox module maps and scalars. The on-chain
-// incremental merkle tree was removed (the validator reconstructs it off-chain
-// from `dispatched_messages`), so there is no merkle `count` / `current_root`
+// ownership commitment + Routes `local_domain` scalar and the Routes routers
+// map, `[1]` holds the MessageIdMultisigIsm / Mailbox / Scale module fields
+// and the warp `destination_gas` map. The on-chain incremental merkle tree
+// was removed (the validator reconstructs it off-chain from
+// `dispatched_messages`), so there is no merkle `count` / `current_root`
 // slot to decode.
 //
 // The MessageIdMultisigIsm fields are consecutive slots under `[1]`, in
-// source-declaration order: validators(1), validator_count(2), threshold(3),
-// module_type(4).
-const ISM_VALIDATORS_PATH: [usize; 2] = [1, 1];
-const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 2];
-const ISM_THRESHOLD_PATH: [usize; 2] = [1, 3];
-const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 4];
+// source-declaration order: validators(0), validator_count(1), threshold(2),
+// module_type(3).
+const ISM_VALIDATORS_PATH: [usize; 2] = [1, 0];
+const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 1];
+const ISM_THRESHOLD_PATH: [usize; 2] = [1, 2];
+const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 3];
 
-// The Mailbox fields also live under `[1]`: deliveries(8), nonce(9),
-// dispatched_messages(10). Verified two ways:
+// The Mailbox fields also live under `[1]`: deliveries(7), nonce(8),
+// dispatched_messages(9). Verified two ways:
 //   (1) The compiled `night` readers in `managed/night/contract/index.js`
-//       index these exact slots: `isDelivered`/`deliveryCount` -> `[1, 8]`
-//       (`deliveries` Set, `member`/`size`), `nonceValue` -> `[1, 9]`
-//       (`nonce` Counter, `popeq`), `messageAt` -> `[1, 10]` (the
+//       index these exact slots: `isDelivered`/`deliveryCount` -> `[1, 7]`
+//       (`deliveries` Set, `member`/`size`), `nonceValue` -> `[1, 8]`
+//       (`nonce` Counter, `popeq`), `messageAt` -> `[1, 9]` (the
 //       `dispatched_messages` Map, keyed `member`/`idx`).
 //   (2) Decoding a fresh post-dispatch state: root `[1]` is a 15-element array;
-//       `[1, 8]` is a Set, `[1, 9]` a Counter cell, `[1, 10]` a `Bytes<141>`
+//       `[1, 7]` is a Set, `[1, 8]` a Counter cell, `[1, 9]` a `Bytes<141>`
 //       Map. Matches the declaration order in `modules/Mailbox.compact`.
-// The paths are pinned to the compiled layout; adding/removing a module or
-// reordering a field shifts them (removing the merkle module is exactly what
-// moved these from their pre-removal `[1, 2..4]` slots). The contracts-repo
+// The paths are pinned to the compiled layout; adding/removing a field
+// shifts them, and the compiler also rebalances the root cells when the
+// field count grows — adding `destination_gas` moved the Routes routers map
+// to `[0, 6]` and every `[1, *]` entry down by one. The contracts-repo
 // layout guard re-checks the `queryLedgerState` paths on every compile.
-// (The `deliveries` set at `[1, 8]` is no longer decoded: deliveries are
-// indexed from `HYP_PROCESS` events since #95, and the Mailbox `delivered`
-// read goes through the toolkit.)
-const MAILBOX_NONCE_PATH: [usize; 2] = [1, 9];
-const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 10];
+// (The `deliveries` set at `[1, 7]` is no longer decoded: deliveries are
+// indexed from `HYP_PROCESS` events, and the Mailbox `delivered` read goes
+// through the toolkit.)
+const MAILBOX_NONCE_PATH: [usize; 2] = [1, 8];
+const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 9];
 
 /// Length in bytes of an encoded `HyperlaneMessage` stored in the
 /// `dispatched_messages` map (`Bytes<141>`) and carried in `HYP_DISPATCH`
@@ -367,10 +369,10 @@ mod tests {
 
     /// Serialize a synthetic Mailbox `StateValue` tree into the same tagged
     /// `ContractState` wire bytes the live indexer serves. The root mirrors the
-    /// deployed merkle-less layout: a 2-element array whose `[1]` element holds
-    /// the Routes/ISM/Mailbox fields, with `deliveries` at `[1,8]`, `nonce` at
-    /// `[1,9]` and `dispatched_messages` at `[1,10]`. Slots before each field
-    /// are filled with `Null` so the pinned paths line up.
+    /// deployed layout: a 2-element array whose `[1]` element holds the
+    /// ISM/Mailbox fields, with `deliveries` at `[1,7]`, `nonce` at `[1,8]`
+    /// and `dispatched_messages` at `[1,9]`. Slots before each field are
+    /// filled with `Null` so the pinned paths line up.
     fn mailbox_state_bytes(
         deliveries: StateValue<DefaultDB>,
         nonce: StateValue<DefaultDB>,
@@ -384,14 +386,13 @@ mod tests {
             StateValue::Null, // [1,4]
             StateValue::Null, // [1,5]
             StateValue::Null, // [1,6]
-            StateValue::Null, // [1,7]
-            deliveries,       // [1,8]
-            nonce,            // [1,9]
-            dispatched,       // [1,10]
+            deliveries,       // [1,7]
+            nonce,            // [1,8]
+            dispatched,       // [1,9]
         ]);
         let root = array(vec![
-            StateValue::Null, // [0] ownership + Routes local_domain (unused here)
-            mailbox,          // [1] Routes/ISM/Mailbox module fields
+            StateValue::Null, // [0] ownership + Routes fields (unused here)
+            mailbox,          // [1] ISM/Mailbox module fields
         ]);
         let cs = ContractState::<DefaultDB> {
             data: ChargedState::new(root),
@@ -512,11 +513,11 @@ mod tests {
     }
 
     /// Serialize a synthetic ISM `StateValue` tree into the tagged
-    /// `ContractState` wire bytes. The root mirrors the deployed merkle-less
-    /// layout: a 2-element array whose `[1]` element holds the ISM fields, with
-    /// `validators` at `[1,1]`, `validator_count` at `[1,2]`, `threshold` at
-    /// `[1,3]` and `module_type` at `[1,4]`. Slot `[1,0]` (Routes
-    /// `remote_routers`) is `Null` so the pinned paths line up.
+    /// `ContractState` wire bytes. The root mirrors the deployed layout: a
+    /// 2-element array whose `[1]` element holds the ISM fields, with
+    /// `validators` at `[1,0]`, `validator_count` at `[1,1]`, `threshold` at
+    /// `[1,2]` and `module_type` at `[1,3]` (the Routes routers map lives in
+    /// cell `[0]` since the destination_gas rebalance).
     fn ism_state_bytes(
         validators: StateValue<DefaultDB>,
         validator_count: u8,
@@ -524,15 +525,14 @@ mod tests {
         module_type: u8,
     ) -> Vec<u8> {
         let ism = array(vec![
-            StateValue::Null,      // [1,0] Routes remote_routers (unused here)
-            validators,            // [1,1]
-            cell(validator_count), // [1,2]
-            cell(threshold),       // [1,3]
-            cell(module_type),     // [1,4]
+            validators,            // [1,0]
+            cell(validator_count), // [1,1]
+            cell(threshold),       // [1,2]
+            cell(module_type),     // [1,3]
         ]);
         let root = array(vec![
-            StateValue::Null, // [0] ownership + Routes local_domain (unused here)
-            ism,              // [1] Routes/ISM/Mailbox module fields
+            StateValue::Null, // [0] ownership + Routes fields (unused here)
+            ism,              // [1] ISM/Mailbox module fields
         ]);
         let cs = ContractState::<DefaultDB> {
             data: ChargedState::new(root),

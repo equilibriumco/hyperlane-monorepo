@@ -12,9 +12,12 @@ type StateValue = {
   };
 };
 
-// Positional path pinned to the compiled layout, like the Rust decoder's
+// Positional paths pinned to the compiled layout, like the Rust decoder's
 // paths — guarded by scripts/check-ledger-layout.mjs in hyperlane-midnight.
-const NIGHT_REMOTE_ROUTERS_PATH = [1, 0];
+// Adding night's destination_gas rebalanced the compiler's root cells: the
+// routers map moved from [1,0] to [0,6].
+const NIGHT_REMOTE_ROUTERS_PATH = [0, 6];
+const NIGHT_DESTINATION_GAS_PATH = [1, 14];
 
 export function unwrapChargedState(data: unknown): StateValue {
   return (data as { state: StateValue }).state;
@@ -57,19 +60,43 @@ export function readRemoteRouters(
   return routers;
 }
 
+// night.compact destination_gas: domain -> Uint<64> handle-gas defaults for
+// warp quoting. A zero value stores as a trimmed (possibly absent) atom.
+export function readDestinationGas(
+  data: unknown,
+): { domainId: number; gas: string }[] {
+  const map = slotAt(data, NIGHT_DESTINATION_GAS_PATH, 'map').asMap();
+  const entries: { domainId: number; gas: string }[] = [];
+  for (const key of map.keys()) {
+    const cell = map.get(key)?.asCell();
+    if (!cell) continue;
+    entries.push({
+      domainId: Number(leBytesToBigint(key.value[0])),
+      gas: leBytesToBigint(cell.value[0] ?? new Uint8Array(0)).toString(),
+    });
+  }
+  return entries;
+}
+
 // igp.compact remote_gas_data at flat slot [4]; each value is the
-// (exchangeRate, gasPrice) pair as two 16-byte LE atoms. Guarded by
-// scripts/check-ledger-layout.mjs in hyperlane-midnight.
+// (exchangeRate, gasPrice, gasOverhead) struct as two 16-byte LE atoms plus
+// an 8-byte one. Guarded by scripts/check-ledger-layout.mjs in
+// hyperlane-midnight. A zero overhead stores as a trimmed (possibly absent)
+// atom, hence the guard.
 const IGP_REMOTE_GAS_DATA_PATH = [4];
 
-export function readRemoteGasData(
-  data: unknown,
-): { domainId: number; tokenExchangeRate: string; gasPrice: string }[] {
+export function readRemoteGasData(data: unknown): {
+  domainId: number;
+  tokenExchangeRate: string;
+  gasPrice: string;
+  gasOverhead: string;
+}[] {
   const map = slotAt(data, IGP_REMOTE_GAS_DATA_PATH, 'map').asMap();
   const entries: {
     domainId: number;
     tokenExchangeRate: string;
     gasPrice: string;
+    gasOverhead: string;
   }[] = [];
   for (const key of map.keys()) {
     const cell = map.get(key)?.asCell();
@@ -78,6 +105,9 @@ export function readRemoteGasData(
       domainId: Number(leBytesToBigint(key.value[0])),
       tokenExchangeRate: leBytesToBigint(cell.value[0]).toString(),
       gasPrice: leBytesToBigint(cell.value[1]).toString(),
+      gasOverhead: leBytesToBigint(
+        cell.value[2] ?? new Uint8Array(0),
+      ).toString(),
     });
   }
   return entries;

@@ -24,6 +24,8 @@ export type MidnightTxReceipt = {
   // Set when the submission dispatched a message (transferRemote).
   messageId?: string;
   destinationDomainId?: number;
+  // Set when the payForGas follow-up landed; its own transaction id.
+  payForGasTxId?: string;
 };
 
 export type MidnightEndpoints = {

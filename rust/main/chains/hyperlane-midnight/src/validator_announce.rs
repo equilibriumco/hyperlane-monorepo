@@ -9,10 +9,7 @@ use hyperlane_core::{
 };
 
 use crate::toolkit::{self, ToolkitContext};
-use crate::{ConnectionConf, MidnightIndexerClient, MidnightProvider};
-
-const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
-const DEFAULT_NETWORK_ID: &str = "undeployed";
+use crate::{ConnectionConf, MidnightProvider};
 
 /// ValidatorAnnounce backed by the on-chain Midnight ValidatorAnnounce
 /// contract. Reads go through a read-only submitter op (the on-chain
@@ -29,26 +26,8 @@ pub struct MidnightValidatorAnnounce {
 impl MidnightValidatorAnnounce {
     /// Build a new ValidatorAnnounce.
     pub fn new(locator: &ContractLocator<'_>, conf: &ConnectionConf) -> ChainResult<Self> {
-        let indexer = MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-        let provider = MidnightProvider::new(locator.domain.clone(), indexer);
-
-        let binary_path = conf.toolkit_path.clone().unwrap_or_default();
-        let indexer_graphql_url = conf.indexer_graphql_url.to_string();
-        let indexer_ws_url = derive_ws_url(&conf.indexer_graphql_url);
-        let node_rpc_url = std::env::var("MIDNIGHT_NODE_RPC_URL").unwrap_or_default();
-        let proof_server_url = std::env::var("MIDNIGHT_PROOF_SERVER_URL")
-            .unwrap_or_else(|_| DEFAULT_PROOF_SERVER_URL.to_string());
-        let network_id =
-            std::env::var("MIDNIGHT_NETWORK_ID").unwrap_or_else(|_| DEFAULT_NETWORK_ID.to_string());
-
-        let toolkit_ctx = ToolkitContext {
-            binary_path,
-            indexer_graphql_url,
-            indexer_ws_url,
-            node_rpc_url,
-            proof_server_url,
-            network_id,
-        };
+        let provider = MidnightProvider::from_conf(locator.domain.clone(), conf);
+        let toolkit_ctx = ToolkitContext::from_conf(conf);
 
         Ok(Self {
             address: locator.address,
@@ -57,22 +36,6 @@ impl MidnightValidatorAnnounce {
             toolkit_ctx,
         })
     }
-}
-
-/// Derive a websocket indexer url from the GraphQL http url. Mirrors the same
-/// helper in `mailbox.rs`.
-fn derive_ws_url(http: &url::Url) -> String {
-    let mut ws = http.clone();
-    let scheme = match http.scheme() {
-        "https" => "wss",
-        _ => "ws",
-    };
-    let _ = ws.set_scheme(scheme);
-    let path = ws.path().to_string();
-    if !path.ends_with("/ws") {
-        ws.set_path(&format!("{path}/ws"));
-    }
-    ws.to_string()
 }
 
 /// Recover the signer's secp256k1 public key from a 65-byte Ethereum signature
@@ -92,7 +55,9 @@ fn recover_pubkey_body(digest: H256, sig65: &[u8; 65]) -> ChainResult<[u8; 64]> 
     // Hyperlane validators emit legacy {27, 28} recovery bytes; k256 wants {0, 1}.
     let rec_byte = if v >= 27 { v - 27 } else { v };
     let recovery_id = RecoveryId::new(rec_byte).map_err(|err| {
-        ChainCommunicationError::from_other_str(&format!("announce: invalid recovery id {v}: {err}"))
+        ChainCommunicationError::from_other_str(&format!(
+            "announce: invalid recovery id {v}: {err}"
+        ))
     })?;
     let sig = K256Signature::try_from(&sig65[..64]).map_err(|err| {
         ChainCommunicationError::from_other_str(&format!("announce: malformed signature: {err}"))
@@ -212,6 +177,8 @@ mod tests {
     use super::*;
     use hyperlane_core::Signature;
 
+    use crate::MidnightIndexerClient;
+
     fn toolkit_ctx(binary_path: &str) -> ToolkitContext {
         ToolkitContext {
             binary_path: binary_path.to_string(),
@@ -314,7 +281,8 @@ mod tests {
         // The fork expects the agent-padded 480-byte buffer; an unpadded
         // location is rejected before the subprocess.
         let va = va("/usr/bin/true");
-        let signed = signed_announcement(H160::repeat_byte(0x11), "s3://loc".to_string(), valid_sig());
+        let signed =
+            signed_announcement(H160::repeat_byte(0x11), "s3://loc".to_string(), valid_sig());
         let err = va.announce(signed).await.unwrap_err();
         let msg = format!("{err}");
         assert!(
