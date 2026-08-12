@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn passes_without_app_context() {
-        assert!(MidnightApplicationOperationVerifier::verify_message(&None, &msg(vec![0u8; 16])).is_none());
+        assert!(
+            MidnightApplicationOperationVerifier::verify_message(&None, &msg(vec![0u8; 16]))
+                .is_none()
+        );
     }
 
     #[test]

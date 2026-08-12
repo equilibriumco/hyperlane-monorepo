@@ -87,6 +87,8 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'renounceOwnership',
   'setValidatorsAndThreshold',
   'unenrollRemoteRouter',
+  'setDestinationGas',
+  'destinationGasOf',
   // ISM / mailbox verification + state views (agent-facing)
   'verifyMultisig',
   'assertExpectedRoute',

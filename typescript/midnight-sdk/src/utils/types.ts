@@ -24,6 +24,11 @@ export type MidnightTxReceipt = {
   // Set when the submission dispatched a message (transferRemote).
   messageId?: string;
   destinationDomainId?: number;
+  // Set when the payForGas follow-up landed; its own transaction id.
+  payForGasTxId?: string;
+  // Set instead of payForGasTxId when the payment was found in ledger state
+  // after its confirmation failed. It is on chain; do not repeat it.
+  payForGasIndex?: number;
 };
 
 export type MidnightEndpoints = {

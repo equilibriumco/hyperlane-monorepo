@@ -25,10 +25,10 @@ import type { MidnightTransaction } from '../utils/types.js';
 
 import { MidnightIndexerClient } from './indexer.js';
 import { MidnightReadClient } from './read-client.js';
-import { readRemoteRouters } from './state.js';
+import { readDestinationGas, readRemoteRouters } from './state.js';
 
-// Matches the destinationGas the live warp route is configured with; callers
-// override via customHookMetadata.
+// Fallback when the night contract holds no destination_gas for a domain;
+// callers override via customHookMetadata / gasLimit.
 const DEFAULT_TRANSFER_GAS_LIMIT = 200_000n;
 
 export class MidnightProvider implements IProvider<MidnightTransaction> {
@@ -69,6 +69,22 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     args: unknown[] = [],
   ): Promise<T> {
     return this.client.runCircuit<T>('night', stateData, circuitId, args);
+  }
+
+  // The IGP adds its stored per-destination overhead on top of whatever this
+  // returns.
+  protected async resolveTransferGasLimit(
+    tokenAddress: string,
+    destinationDomainId: number,
+    override?: string,
+  ): Promise<bigint> {
+    if (override) return BigInt(override);
+    const state = await this.requireContractState(tokenAddress);
+    const entry = readDestinationGas(state.data).find(
+      (e) => e.domainId === destinationDomainId,
+    );
+    const gas = entry ? BigInt(entry.gas) : 0n;
+    return gas > 0n ? gas : DEFAULT_TRANSFER_GAS_LIMIT;
   }
 
   async isHealthy(): Promise<boolean> {
@@ -154,19 +170,20 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     };
   }
 
-  // Per-destination gas has no on-chain slot on Midnight (remote_routers is
-  // domain -> router only); it lives in warp config.
   async getRemoteRouters(
     req: ReqGetRemoteRouters,
   ): Promise<ResGetRemoteRouters> {
     const state = await this.requireContractState(req.tokenAddress);
+    const destinationGas = new Map(
+      readDestinationGas(state.data).map((e) => [e.domainId, e.gas]),
+    );
     return {
       address: req.tokenAddress,
       remoteRouters: readRemoteRouters(state.data).map(
         ({ domainId, router }) => ({
           receiverDomainId: domainId,
           receiverAddress: router,
-          gas: '0',
+          gas: destinationGas.get(domainId) ?? '0',
         }),
       ),
     };
@@ -202,9 +219,11 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
         `destination ${req.destinationDomainId} has no gas oracle on IGP ${igpAddress}`,
       );
     }
-    const gasLimit = req.customHookMetadata
-      ? BigInt(req.customHookMetadata)
-      : DEFAULT_TRANSFER_GAS_LIMIT;
+    const gasLimit = await this.resolveTransferGasLimit(
+      req.tokenAddress,
+      req.destinationDomainId,
+      req.customHookMetadata,
+    );
     const amount = await this.client.runCircuit<bigint>(
       'igp',
       state.data,
@@ -242,9 +261,11 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
           '(set igpTokenAddressOrDenom on the warp route token)',
       );
     }
-    const gasLimit = req.gasLimit
-      ? BigInt(req.gasLimit)
-      : DEFAULT_TRANSFER_GAS_LIMIT;
+    const gasLimit = await this.resolveTransferGasLimit(
+      req.tokenAddress,
+      req.destinationDomainId,
+      req.gasLimit || undefined,
+    );
     return {
       annotation:
         `Transfer ${req.amount} to domain ${req.destinationDomainId} ` +

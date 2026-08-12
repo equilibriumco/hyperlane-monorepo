@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use hyperlane_core::ChainResult;
+use hyperlane_core::{ChainResult, U256};
 
 use hyperlane_core::H256;
 
@@ -49,17 +49,15 @@ impl TxStatus {
     /// Whether events from a transaction with this status should be served to
     /// the Hyperlane indexers. This is THE single place that decision lives.
     ///
-    /// A devnet probe (2026-07-23) settled the semantics: the indexer can
-    /// only serve events from execution that actually applied. Compact 0.33
-    /// places the whole circuit transcript in the guaranteed segment, and a
-    /// guaranteed-segment failure never enters a block at all; for
-    /// hypothetical partial-success transactions, the ledger collects events
-    /// only from segments that applied (`apply_fallible`'s `Ok` arm). So:
+    /// A failed section drops every effect it produced, events included, and a
+    /// transcript only splits across sections at a `kernel.checkpoint()`, which
+    /// the Hyperlane contracts never emit. An event and the state write it
+    /// reports therefore commit or vanish together.
     ///
     /// - `Success` and `PartialSuccess`: any served event's paired state
     ///   write is applied — index it.
-    /// - `Failure`: unreachable for contract-call events in practice; kept
-    ///   excluded as pure defence in depth.
+    /// - `Failure`: yields no events at all in the ledger; kept excluded as
+    ///   pure defence in depth.
     pub fn is_indexable(self) -> bool {
         match self {
             TxStatus::Success | TxStatus::PartialSuccess => true,
@@ -322,6 +320,42 @@ impl MidnightIndexerClient {
             .transpose()
     }
 
+    /// Native-NIGHT (all-zeros token type) unshielded balance of a deployed
+    /// contract. `None` when the indexer knows no contract at the address.
+    pub async fn contract_native_balance(
+        &self,
+        address: &str,
+    ) -> Result<Option<U256>, HyperlaneMidnightError> {
+        let query = r#"query ($address: HexEncoded!) {
+  contractAction(address: $address) { unshieldedBalances { tokenType amount } }
+}"#;
+        let body = GraphqlRequest {
+            query,
+            variables: serde_json::json!({ "address": address }),
+        };
+        let data = self
+            .post::<ContractActionBalancesData>(&body)
+            .await?
+            .into_data()?;
+        let Some(action) = data.and_then(|d| d.contract_action) else {
+            return Ok(None);
+        };
+        let mut total = U256::zero();
+        for entry in action.unshielded_balances {
+            let token = entry.token_type.trim_start_matches("0x");
+            if !token.is_empty() && token.bytes().all(|b| b == b'0') {
+                let amount = U256::from_dec_str(&entry.amount).map_err(|e| {
+                    HyperlaneMidnightError::IndexerGraphql(format!(
+                        "unshielded balance amount '{}' is not a decimal string: {e}",
+                        entry.amount
+                    ))
+                })?;
+                total = total.saturating_add(amount);
+            }
+        }
+        Ok(Some(total))
+    }
+
     /// Fetch transaction metadata by hash (full 32-byte hex). `None` if the
     /// indexer knows no transaction with that hash.
     pub async fn transaction_by_hash(
@@ -417,6 +451,25 @@ struct ContractActionData {
 #[derive(Debug, Deserialize)]
 struct ContractActionState {
     state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractActionBalancesData {
+    #[serde(rename = "contractAction", default)]
+    contract_action: Option<ContractActionBalances>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractActionBalances {
+    #[serde(rename = "unshieldedBalances", default)]
+    unshielded_balances: Vec<UnshieldedBalanceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnshieldedBalanceEntry {
+    #[serde(rename = "tokenType")]
+    token_type: String,
+    amount: String,
 }
 
 #[derive(Debug, Deserialize)]

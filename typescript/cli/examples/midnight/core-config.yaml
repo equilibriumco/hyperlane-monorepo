@@ -31,8 +31,10 @@ requiredHook:
   owner: '0x0000000000000000000000000000000000000000000000000000000000000000'
   beneficiary: '0x0000000000000000000000000000000000000000000000000000000000000000'
   oracleKey: '0x0000000000000000000000000000000000000000000000000000000000000000'
+  # Added to the caller's gasLimit in every quote (destination mailbox + ISM
+  # processing cost). Stored on-chain alongside the oracle pair.
   overhead:
-    anvil2: 0
+    anvil2: 50000
   oracleConfig:
     anvil2:
       gasPrice: '1'

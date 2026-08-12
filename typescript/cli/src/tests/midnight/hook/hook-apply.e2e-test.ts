@@ -94,4 +94,37 @@ describe('hyperlane midnight hook apply e2e tests', async function () {
     const reverted = await readGasPrice();
     expect(reverted.gasPrice).to.equal('1');
   });
+
+  async function applyOverhead(
+    baseConfig: IgpHookConfig,
+    overhead: number,
+  ): Promise<void> {
+    const applyConfig: IgpHookConfig = {
+      ...baseConfig,
+      overhead: {
+        ...baseConfig.overhead,
+        [REMOTE_CHAIN_NAME]: overhead,
+      },
+    };
+    writeYamlOrJson(HOOK_APPLY_CONFIG_PATH_1, applyConfig);
+    await hyperlaneHook.apply(HYP_KEY, igpAddress, HOOK_APPLY_CONFIG_PATH_1);
+  }
+
+  it('should update the destination gas overhead and revert it', async () => {
+    const initial = await readGasPrice();
+    const initialOverhead = initial.config.overhead[REMOTE_CHAIN_NAME];
+    expect(initialOverhead).to.equal(50000);
+
+    await applyOverhead(initial.config, 60000);
+    const updated = await readGasPrice();
+    expect(updated.config.overhead[REMOTE_CHAIN_NAME]).to.equal(60000);
+    // gasPrice rides along unchanged in the same oracle slot.
+    expect(updated.gasPrice).to.equal(initial.gasPrice);
+
+    await applyOverhead(updated.config, initialOverhead);
+    const reverted = await readGasPrice();
+    expect(reverted.config.overhead[REMOTE_CHAIN_NAME]).to.equal(
+      initialOverhead,
+    );
+  });
 });

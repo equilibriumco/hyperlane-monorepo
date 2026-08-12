@@ -395,9 +395,10 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                let indexer =
-                    h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                // from_conf wires the submit sidecar so the wallet-balance
+                // metric can resolve through its `balance` op.
+                let provider =
+                    h_midnight::MidnightProvider::from_conf(locator.domain.clone(), conf);
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
             }
         }

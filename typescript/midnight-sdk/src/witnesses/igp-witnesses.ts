@@ -5,10 +5,10 @@
 // hyperlane-midnight repo — keep in sync.
 const TOKEN_EXCHANGE_RATE_SCALE = 10n ** 10n;
 
-export function createIgpWitnesses<PS>(privateState: PS) {
+export function createIgpWitnesses<PS>(initialPrivateState: PS) {
   return {
     quoteDivByScaleWitness(
-      _context: unknown,
+      context: { privateState?: PS },
       gasLimit: bigint,
       gasPrice: bigint,
       exchangeRate: bigint,
@@ -16,7 +16,9 @@ export function createIgpWitnesses<PS>(privateState: PS) {
       const num = gasLimit * gasPrice * exchangeRate;
       const q = num / TOKEN_EXCHANGE_RATE_SCALE;
       const r = num - q * TOKEN_EXCHANGE_RATE_SCALE;
-      return [privateState, { q, r }];
+      // Pass the runtime's current private state through unchanged rather
+      // than clobbering the store with the creation-time value.
+      return [context.privateState ?? initialPrivateState, { q, r }];
     },
   };
 }

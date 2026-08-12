@@ -2,7 +2,8 @@ use hyperlane_core::H256;
 
 /// Placeholder signer. Real signing happens inside the submitter
 /// subprocess; this exists only to satisfy `ChainSigner` +
-/// `BuildableWithSignerConf` in `hyperlane-base`.
+/// `BuildableWithSignerConf` in `hyperlane-base`. The address feeds only the
+/// wallet-balance metric, which resolves through the sidecar's `balance` op.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightSigner {
     address: String,
@@ -10,9 +11,13 @@ pub struct MidnightSigner {
 }
 
 impl MidnightSigner {
-    /// Construct a placeholder signer.
+    /// Construct a placeholder signer, taking the metrics address from
+    /// `MIDNIGHT_RELAYER_ADDRESS` when set.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            address: std::env::var("MIDNIGHT_RELAYER_ADDRESS").unwrap_or_default(),
+            address_h256: H256::zero(),
+        }
     }
 
     /// Returns the configured address.
@@ -48,7 +53,9 @@ mod tests {
 
     #[test]
     fn signer_constructs() {
-        let signer = MidnightSigner::new();
+        // `default()` rather than `new()`: the latter reads
+        // MIDNIGHT_RELAYER_ADDRESS from the ambient env.
+        let signer = MidnightSigner::default();
         assert_eq!(signer.address(), "");
         assert_eq!(signer.address_h256(), H256::zero());
     }

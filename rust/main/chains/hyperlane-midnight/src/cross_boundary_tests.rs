@@ -165,8 +165,14 @@ async fn process_request_json_pins_wire_shape() {
     // No zero-padding: the relayer forwards exactly the real signatures; the
     // Midnight submitter pads the on-chain `Vector<4>` by repeating slot 0 (#22).
     assert_eq!(sigs.len(), 2);
-    assert_eq!(sigs[0].as_str().unwrap(), format!("0x{}", hex::encode([0x11; 65])));
-    assert_eq!(sigs[1].as_str().unwrap(), format!("0x{}", hex::encode([0x22; 65])));
+    assert_eq!(
+        sigs[0].as_str().unwrap(),
+        format!("0x{}", hex::encode([0x11; 65]))
+    );
+    assert_eq!(
+        sigs[1].as_str().unwrap(),
+        format!("0x{}", hex::encode([0x22; 65]))
+    );
 }
 
 #[tokio::test]
@@ -181,7 +187,10 @@ async fn delivered_request_json_pins_wire_shape() {
     assert_eq!(req["op"], "isDelivered");
     assert_eq!(req["contractAddress"], format!("{TEST_CONTRACT_ADDRESS:x}"));
     assert_eq!(req["messageId"], format!("0x{msg_id:x}"));
-    assert!(req["indexerGraphqlUrl"].as_str().unwrap().contains("graphql"));
+    assert!(req["indexerGraphqlUrl"]
+        .as_str()
+        .unwrap()
+        .contains("graphql"));
 }
 
 #[tokio::test]
@@ -195,7 +204,8 @@ async fn process_returns_tx_outcome_on_success() {
         .unwrap();
     assert!(outcome.executed);
     let raw = outcome.transaction_id.as_bytes();
-    assert_eq!(&raw[..4], &[0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(&raw[60..], &[0xde, 0xad, 0xbe, 0xef]);
+    assert!(raw[..60].iter().all(|b| *b == 0));
 }
 
 #[tokio::test]
@@ -253,7 +263,10 @@ async fn recipient_ism_returns_contract_address_for_any_recipient() {
     let stub = StubSubmitter::always_returns("{}");
     let mailbox = build_mailbox(&stub);
     assert_eq!(
-        mailbox.recipient_ism(H256::repeat_byte(0xEE)).await.unwrap(),
+        mailbox
+            .recipient_ism(H256::repeat_byte(0xEE))
+            .await
+            .unwrap(),
         TEST_CONTRACT_ADDRESS
     );
 }
@@ -265,11 +278,9 @@ async fn count_returns_zero_for_destination_only_impl() {
     assert_eq!(mailbox.count(&ReorgPeriod::None).await.unwrap(), 0);
 }
 
-// `process_estimate_costs` now dry-runs `handle` (issue #80). A dry-run that
-// accepts the message returns `{"ok":true}` and the estimate keeps the fixed
-// non-zero placeholder cost (Midnight fees are DUST, computed by the wallet at
-// submit time). The request it sends must be the `dryRunHandle` op — proving
-// the estimate actually simulates rather than blindly succeeding.
+// An accepting dry-run returns `{"ok":true}` and the estimate reports zero
+// cost. The request must be the `dryRunHandle` op, proving the estimate
+// simulates rather than blindly succeeding.
 #[tokio::test]
 async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
     let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);
@@ -278,7 +289,7 @@ async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
         .process_estimate_costs(&sample_message(), &sample_metadata())
         .await
         .unwrap();
-    assert!(!estimate.gas_limit.is_zero());
+    assert!(estimate.gas_limit.is_zero());
 
     let req = stub.captured_request();
     assert_eq!(req["op"], "dryRunHandle");
@@ -304,8 +315,14 @@ async fn process_estimate_costs_errs_when_dry_run_detects_revert() {
         .await
         .unwrap_err();
     let display = format!("{err}");
-    assert!(display.contains("contractRevert"), "unexpected error: {display}");
-    assert!(display.contains("not enrolled"), "unexpected error: {display}");
+    assert!(
+        display.contains("contractRevert"),
+        "unexpected error: {display}"
+    );
+    assert!(
+        display.contains("not enrolled"),
+        "unexpected error: {display}"
+    );
 }
 
 // Metadata too short to parse fails before the dry-run, so a structurally

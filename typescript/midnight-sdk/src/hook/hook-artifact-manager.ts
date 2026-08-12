@@ -124,7 +124,7 @@ class MidnightIgpHookReader implements ArtifactReader<
         gasPrice: entry.gasPrice,
         tokenExchangeRate: entry.tokenExchangeRate,
       };
-      overhead[entry.domainId] = 0;
+      overhead[entry.domainId] = Number(entry.gasOverhead);
     }
     const ownerHex = bytesToHex(owner);
     return {
@@ -163,7 +163,7 @@ class MidnightIgpHookWriter
     [ArtifactDeployed<IgpHookConfig, DeployedHookAddress>, TxReceipt[]]
   > {
     const config = artifact.config;
-    assertNoOverhead(config);
+    assertOverheadDomainsHaveOracles(config);
     const receipts: MidnightTxReceipt[] = [];
 
     const deployResult = await this.signer.deployMidnightContract({
@@ -201,6 +201,7 @@ class MidnightIgpHookWriter
           BigInt(domain),
           BigInt(oracle.tokenExchangeRate),
           BigInt(oracle.gasPrice),
+          BigInt(config.overhead?.[domain] ?? 0),
         ],
       };
       receipts.push(await this.signer.sendAndConfirmTransaction(tx));
@@ -237,17 +238,20 @@ class MidnightIgpHookWriter
     artifact: ArtifactDeployed<IgpHookConfig, DeployedHookAddress>,
   ): Promise<MidnightTransaction[]> {
     const expected = artifact.config;
-    assertNoOverhead(expected);
+    assertOverheadDomainsHaveOracles(expected);
     const address = artifact.deployed.address;
     const current = (await this.read(address)).config;
     const txs: MidnightTransaction[] = [];
 
     for (const [domain, oracle] of sortedOracleEntries(expected)) {
       const existing = current.oracleConfig[domain];
+      const expectedOverhead = BigInt(expected.overhead?.[domain] ?? 0);
       if (
         existing &&
         BigInt(existing.gasPrice) === BigInt(oracle.gasPrice) &&
-        BigInt(existing.tokenExchangeRate) === BigInt(oracle.tokenExchangeRate)
+        BigInt(existing.tokenExchangeRate) ===
+          BigInt(oracle.tokenExchangeRate) &&
+        BigInt(current.overhead?.[domain] ?? 0) === expectedOverhead
       ) {
         continue;
       }
@@ -260,6 +264,7 @@ class MidnightIgpHookWriter
           BigInt(domain),
           BigInt(oracle.tokenExchangeRate),
           BigInt(oracle.gasPrice),
+          expectedOverhead,
         ],
       });
     }
@@ -303,15 +308,17 @@ class MidnightIgpHookWriter
   }
 }
 
-function assertNoOverhead(config: IgpHookConfig): void {
-  const nonZero = Object.entries(config.overhead ?? {}).filter(
-    ([, v]) => Number(v) !== 0,
+// Overhead is stored with the oracle pair, and the contract rejects a zero
+// exchangeRate/gasPrice, so an overhead-only domain can never be written.
+function assertOverheadDomainsHaveOracles(config: IgpHookConfig): void {
+  const orphaned = Object.entries(config.overhead ?? {}).filter(
+    ([domain, v]) => Number(v) !== 0 && !config.oracleConfig?.[Number(domain)],
   );
-  if (nonZero.length > 0) {
+  if (orphaned.length > 0) {
     throw new Error(
-      `IGP gas overhead has no on-chain slot on Midnight (quoteDispatch is ` +
-        `gasLimit * gasPrice * exchangeRate) — set overhead to 0 for domains: ` +
-        nonZero.map(([d]) => d).join(', '),
+      `IGP overhead set for domains with no oracleConfig entry (overhead is ` +
+        `stored with the oracle pair): ` +
+        orphaned.map(([d]) => d).join(', '),
     );
   }
 }

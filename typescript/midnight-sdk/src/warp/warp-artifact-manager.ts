@@ -23,7 +23,7 @@ import { bytesToHex, hexToBytes } from '../utils/conversion.js';
 import { unsupportedOnMidnight } from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
-import { readRemoteRouters } from '../clients/state.js';
+import { readDestinationGas, readRemoteRouters } from '../clients/state.js';
 
 class MidnightNativeWarpReader implements ArtifactReader<
   RawWarpArtifactConfigs['native'],
@@ -46,11 +46,13 @@ class MidnightNativeWarpReader implements ArtifactReader<
       this.client.runCircuit<bigint>('night', state.data, 'messageDecimals'),
     ]);
     const remoteRouters: Record<number, { address: string }> = {};
-    // Per-destination gas has no on-chain slot on Midnight; it lives in
-    // warp config only, so the derived config reports none.
+    const gasEntries = new Map(
+      readDestinationGas(state.data).map((e) => [e.domainId, e.gas]),
+    );
     const destinationGas: Record<number, string> = {};
     for (const { domainId, router } of readRemoteRouters(state.data)) {
       remoteRouters[domainId] = { address: router };
+      destinationGas[domainId] = gasEntries.get(domainId) ?? '0';
     }
     const self = {
       artifactState: ArtifactState.UNDERIVED,
@@ -79,7 +81,7 @@ class MidnightNativeWarpReader implements ArtifactReader<
 
 // The night warp route is the mailbox monolith itself, born in core deploy
 // with its ISM/hook/decimals sealed. Mutable surface: remote router
-// enrollment and ownership. Per-destination gas has no on-chain slot.
+// enrollment, per-destination gas, and ownership.
 class MidnightNativeWarpWriter
   extends MidnightNativeWarpReader
   implements
@@ -145,6 +147,19 @@ class MidnightNativeWarpWriter
         contractAddress: address,
         circuit: 'unenrollRemoteRouter',
         args: [BigInt(domain)],
+      });
+    }
+
+    for (const [domain, gas] of Object.entries(expected.destinationGas ?? {})) {
+      const expectedGas = BigInt(gas || 0);
+      const currentGas = BigInt(current.destinationGas?.[Number(domain)] ?? 0);
+      if (expectedGas === currentGas) continue;
+      txs.push({
+        annotation: `Set destination gas for domain ${domain} to ${expectedGas}`,
+        contract: 'night',
+        contractAddress: address,
+        circuit: 'setDestinationGas',
+        args: [BigInt(domain), expectedGas],
       });
     }
 

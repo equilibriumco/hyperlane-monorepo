@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
-use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512};
+use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512, U256};
 
 use crate::HyperlaneMidnightError;
 
@@ -147,6 +147,9 @@ pub struct SubmitResponse {
     #[serde(default)]
     #[allow(dead_code)]
     pub block_height: Option<u64>,
+    /// DUST paid for the transaction, in specks (decimal string).
+    #[serde(default)]
+    pub fee_specks: Option<String>,
     /// Structured error on failure.
     #[serde(default)]
     pub error: Option<SubmitError>,
@@ -161,6 +164,95 @@ pub struct SubmitError {
     pub message: String,
 }
 
+/// JSON payload for the `balance` op. The sidecar reads its own wallet;
+/// `address`, when set, must match that wallet's Bech32m unshielded address.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceRequest<'a> {
+    /// Operation discriminator.
+    pub op: &'static str,
+    /// Expected wallet address, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<&'a str>,
+}
+
+/// JSON envelope returned by the `balance` op.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceResponse {
+    /// Bech32m unshielded address of the sidecar wallet.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Spendable unshielded NIGHT in micro-units (decimal string).
+    #[serde(default)]
+    pub night_micro: Option<String>,
+    /// Generated DUST in specks at read time (decimal string).
+    #[serde(default)]
+    pub dust_specks: Option<String>,
+    /// Structured error on failure.
+    #[serde(default)]
+    pub error: Option<SubmitError>,
+}
+
+/// Balances of the sidecar's own wallet.
+#[derive(Debug, Clone)]
+pub struct WalletBalances {
+    /// Bech32m unshielded address the balances belong to.
+    pub address: String,
+    /// Spendable unshielded NIGHT in micro-units.
+    pub night_micro: U256,
+    /// Generated DUST in specks at read time.
+    pub dust_specks: U256,
+}
+
+/// Read the sidecar wallet's balances. Costs a wallet sync inside the
+/// subprocess, so callers should cache.
+pub async fn query_wallet_balance(
+    ctx: &ToolkitContext,
+    address: Option<&str>,
+) -> ChainResult<WalletBalances> {
+    let request = BalanceRequest {
+        op: "balance",
+        address,
+    };
+    let raw = run_submitter(ctx, &request, submit_timeout()).await?;
+    let response: BalanceResponse =
+        serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
+            message: err.to_string(),
+            raw: truncate(&raw, 1024),
+        })?;
+
+    if let Some(error) = response.error {
+        return Err(HyperlaneMidnightError::SubmitterReported {
+            kind: error.kind,
+            message: error.message,
+        }
+        .into());
+    }
+
+    let malformed = |what: &str| HyperlaneMidnightError::SubmitterMalformed {
+        message: format!("missing or invalid `{what}` in balance response"),
+        raw: truncate(&raw, 1024),
+    };
+    let wallet_address = response.address.ok_or_else(|| malformed("address"))?;
+    let night_micro = response
+        .night_micro
+        .as_deref()
+        .and_then(|s| U256::from_dec_str(s).ok())
+        .ok_or_else(|| malformed("nightMicro"))?;
+    let dust_specks = response
+        .dust_specks
+        .as_deref()
+        .and_then(|s| U256::from_dec_str(s).ok())
+        .unwrap_or_default();
+
+    Ok(WalletBalances {
+        address: wallet_address,
+        night_micro,
+        dust_specks,
+    })
+}
+
 /// Successful submission outcome.
 #[derive(Debug)]
 pub struct ToolkitOutcome {
@@ -168,6 +260,8 @@ pub struct ToolkitOutcome {
     pub transaction_id: H512,
     /// Whether the contract reported success.
     pub executed: bool,
+    /// DUST paid, in specks; `None` when the submitter omits the field.
+    pub fee_specks: Option<U256>,
 }
 
 /// Runtime values needed at spawn time.
@@ -185,6 +279,39 @@ pub struct ToolkitContext {
     pub proof_server_url: String,
     /// Midnight network id.
     pub network_id: String,
+}
+
+const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
+const DEFAULT_NETWORK_ID: &str = "undeployed";
+
+impl ToolkitContext {
+    /// Build the sidecar context from the chain config and the `MIDNIGHT_*` env.
+    pub fn from_conf(conf: &crate::ConnectionConf) -> Self {
+        Self {
+            binary_path: conf.toolkit_path.clone().unwrap_or_default(),
+            indexer_graphql_url: conf.indexer_graphql_url.to_string(),
+            indexer_ws_url: derive_ws_url(&conf.indexer_graphql_url),
+            node_rpc_url: std::env::var("MIDNIGHT_NODE_RPC_URL").unwrap_or_default(),
+            proof_server_url: std::env::var("MIDNIGHT_PROOF_SERVER_URL")
+                .unwrap_or_else(|_| DEFAULT_PROOF_SERVER_URL.to_string()),
+            network_id: std::env::var("MIDNIGHT_NETWORK_ID")
+                .unwrap_or_else(|_| DEFAULT_NETWORK_ID.to_string()),
+        }
+    }
+}
+
+fn derive_ws_url(http: &url::Url) -> String {
+    let mut ws = http.clone();
+    let scheme = match http.scheme() {
+        "https" => "wss",
+        _ => "ws",
+    };
+    let _ = ws.set_scheme(scheme);
+    let path = ws.path().to_string();
+    if !path.ends_with("/ws") {
+        ws.set_path(&format!("{path}/ws"));
+    }
+    ws.to_string()
 }
 
 /// Invoke the submitter for one message and return its outcome.
@@ -214,9 +341,15 @@ pub async fn submit_handle(
             raw: truncate(&raw, 1024),
         })?;
 
+    let fee_specks = response
+        .fee_specks
+        .as_deref()
+        .and_then(|s| U256::from_dec_str(s).ok());
+
     Ok(ToolkitOutcome {
         transaction_id: parse_tx_hash(&tx_hash, &raw)?,
         executed: true,
+        fee_specks,
     })
 }
 
@@ -233,8 +366,10 @@ fn parse_tx_hash(hex_input: &str, raw: &str) -> Result<H512, HyperlaneMidnightEr
             raw: truncate(raw, 1024),
         });
     }
+    // Right-aligned into the H512, matching the H256 -> H512 widening the
+    // event indexers use, so `h512_to_h256` accepts either form.
     let mut buf = [0u8; 64];
-    buf[..bytes.len()].copy_from_slice(&bytes);
+    buf[64 - bytes.len()..].copy_from_slice(&bytes);
     Ok(H512::from(buf))
 }
 
@@ -433,9 +568,15 @@ pub async fn announce_tx(
             raw: truncate(&raw, 1024),
         })?;
 
+    let fee_specks = response
+        .fee_specks
+        .as_deref()
+        .and_then(|s| U256::from_dec_str(s).ok());
+
     Ok(ToolkitOutcome {
         transaction_id: parse_tx_hash(&tx_hash, &raw)?,
         executed: true,
+        fee_specks,
     })
 }
 
@@ -705,6 +846,31 @@ pub async fn dry_run_handle(
 mod tests {
     use super::*;
 
+    #[test]
+    fn derive_ws_url_appends_ws_path_and_swaps_scheme() {
+        let http = url::Url::parse("http://indexer.local/api/v3/graphql").unwrap();
+        assert_eq!(derive_ws_url(&http), "ws://indexer.local/api/v3/graphql/ws");
+
+        let https = url::Url::parse("https://indexer.example/graphql").unwrap();
+        assert_eq!(derive_ws_url(&https), "wss://indexer.example/graphql/ws");
+    }
+
+    #[test]
+    fn balance_response_parses_and_validates() {
+        let ok: BalanceResponse = serde_json::from_str(
+            r#"{"address":"mn_addr_test1qxy","nightMicro":"123456","dustSpecks":"789"}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.address.as_deref(), Some("mn_addr_test1qxy"));
+        assert_eq!(ok.night_micro.as_deref(), Some("123456"));
+        assert_eq!(ok.dust_specks.as_deref(), Some("789"));
+
+        let err: BalanceResponse =
+            serde_json::from_str(r#"{"error":{"kind":"internal","message":"address mismatch"}}"#)
+                .unwrap();
+        assert!(err.error.is_some());
+    }
+
     fn ctx() -> ToolkitContext {
         ToolkitContext {
             binary_path: "/bin/false".to_string(),
@@ -875,7 +1041,8 @@ mod tests {
     #[test]
     fn build_dry_run_request_serializes_to_expected_shape() {
         let msg = sample_message();
-        let request = build_dry_run_request(H256::from_low_u64_be(1), &ctx(), &msg, metadata(), false);
+        let request =
+            build_dry_run_request(H256::from_low_u64_be(1), &ctx(), &msg, metadata(), false);
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"op\":\"dryRunHandle\""));
         assert!(json.contains("\"version\":3"));
@@ -914,8 +1081,14 @@ mod tests {
         let err = dry_run_handle(&ctx, &request).await.unwrap_err();
         let _ = std::fs::remove_file(&script);
         let display = format!("{err}");
-        assert!(display.contains("contractRevert"), "unexpected error: {display}");
-        assert!(display.contains("bad version"), "unexpected error: {display}");
+        assert!(
+            display.contains("contractRevert"),
+            "unexpected error: {display}"
+        );
+        assert!(
+            display.contains("bad version"),
+            "unexpected error: {display}"
+        );
     }
 
     // Neither `ok` nor `error` -> malformed. Defensive: the Node op always

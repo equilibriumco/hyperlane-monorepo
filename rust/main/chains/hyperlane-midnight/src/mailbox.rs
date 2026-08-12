@@ -9,7 +9,7 @@ use hyperlane_core::{
 };
 
 use crate::toolkit::{self, ToolkitContext, WireMetadata};
-use crate::{ConnectionConf, HyperlaneMidnightError, MidnightIndexerClient, MidnightProvider};
+use crate::{ConnectionConf, HyperlaneMidnightError, MidnightProvider};
 
 // Upper bound on how many validator signatures a metadata blob may carry,
 // matching the on-chain `MessageIdMultisigIsm.MAX_VALIDATORS` (#22 reduced this
@@ -21,9 +21,6 @@ use crate::{ConnectionConf, HyperlaneMidnightError, MidnightIndexerClient, Midni
 const MAX_SIGNATURES: usize = 4;
 const SIGNATURE_LEN: usize = 65;
 const METADATA_HEADER_LEN: usize = 32 + 32 + 4;
-
-const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
-const DEFAULT_NETWORK_ID: &str = "undeployed";
 
 /// Destination-side Mailbox.
 #[derive(Debug, Clone)]
@@ -42,26 +39,8 @@ pub struct MidnightMailbox {
 impl MidnightMailbox {
     /// Build a new Mailbox.
     pub fn new(locator: &ContractLocator<'_>, conf: &ConnectionConf) -> ChainResult<Self> {
-        let indexer = MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-        let provider = MidnightProvider::new(locator.domain.clone(), indexer);
-
-        let binary_path = conf.toolkit_path.clone().unwrap_or_default();
-        let indexer_graphql_url = conf.indexer_graphql_url.to_string();
-        let indexer_ws_url = derive_ws_url(&conf.indexer_graphql_url);
-        let node_rpc_url = std::env::var("MIDNIGHT_NODE_RPC_URL").unwrap_or_default();
-        let proof_server_url = std::env::var("MIDNIGHT_PROOF_SERVER_URL")
-            .unwrap_or_else(|_| DEFAULT_PROOF_SERVER_URL.to_string());
-        let network_id =
-            std::env::var("MIDNIGHT_NETWORK_ID").unwrap_or_else(|_| DEFAULT_NETWORK_ID.to_string());
-
-        let toolkit_ctx = ToolkitContext {
-            binary_path,
-            indexer_graphql_url,
-            indexer_ws_url,
-            node_rpc_url,
-            proof_server_url,
-            network_id,
-        };
+        let provider = MidnightProvider::from_conf(locator.domain.clone(), conf);
+        let toolkit_ctx = ToolkitContext::from_conf(conf);
 
         Ok(Self {
             address: locator.address,
@@ -99,20 +78,6 @@ impl MidnightMailbox {
         self.validator_override = Some(validators);
         self
     }
-}
-
-fn derive_ws_url(http: &url::Url) -> String {
-    let mut ws = http.clone();
-    let scheme = match http.scheme() {
-        "https" => "wss",
-        _ => "ws",
-    };
-    let _ = ws.set_scheme(scheme);
-    let path = ws.path().to_string();
-    if !path.ends_with("/ws") {
-        ws.set_path(&format!("{path}/ws"));
-    }
-    ws.to_string()
 }
 
 impl HyperlaneChain for MidnightMailbox {
@@ -175,10 +140,12 @@ impl Mailbox for MidnightMailbox {
 
         let outcome = toolkit::submit_handle(&self.toolkit_ctx, &request).await?;
 
+        // Gas is the DUST actually paid, in specks, at a unit price; zero when
+        // the submitter did not report a fee.
         Ok(TxOutcome {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
-            gas_used: U256::from(1_u32),
+            gas_used: outcome.fee_specks.unwrap_or_default(),
             gas_price: FixedPointNumber::from_str("1")
                 .map_err(|err| ChainCommunicationError::from_other_str(&err.to_string()))?,
         })
@@ -209,24 +176,17 @@ impl Mailbox for MidnightMailbox {
         if !validators.is_empty() {
             sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
         }
-        let request = toolkit::build_dry_run_request(
-            self.address,
-            &self.toolkit_ctx,
-            message,
-            parsed,
-            false,
-        );
+        let request =
+            toolkit::build_dry_run_request(self.address, &self.toolkit_ctx, message, parsed, false);
         toolkit::dry_run_handle(&self.toolkit_ctx, &request).await?;
 
         // The message would be accepted on-chain. Midnight fees are denominated
-        // in DUST and computed by the wallet at submission time, so the cost
-        // fields stay a fixed placeholder — unchanged from the previous stub,
-        // which keeps the gas-payment-enforcement policies that read these
-        // fields behaving exactly as before.
+        // in DUST and computed by the wallet at submission time, so there is no
+        // estimate to report. Zero mirrors Sealevel: it leaves
+        // `onChainFeeQuoting` permissive rather than imposing an arbitrary bar.
         Ok(TxCostEstimate {
-            gas_limit: U256::from(1_000_000_u32),
-            gas_price: FixedPointNumber::from_str("1")
-                .map_err(|err| ChainCommunicationError::from_other_str(&err.to_string()))?,
+            gas_limit: U256::zero(),
+            gas_price: FixedPointNumber::zero(),
             l2_gas_limit: None,
         })
     }
@@ -325,9 +285,8 @@ fn sort_signatures_by_validator_index(
 
     let mut indexed: Vec<(usize, String)> = Vec::with_capacity(reals.len());
     for sig_hex in reals.drain(..) {
-        let bytes = hex::decode(sig_hex.trim_start_matches("0x")).map_err(|e| {
-            HyperlaneMidnightError::Other(format!("signature hex decode: {e}"))
-        })?;
+        let bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+            .map_err(|e| HyperlaneMidnightError::Other(format!("signature hex decode: {e}")))?;
         if bytes.len() != SIGNATURE_LEN {
             return Err(HyperlaneMidnightError::Other(format!(
                 "signature must be {SIGNATURE_LEN} bytes, got {}",
@@ -336,11 +295,14 @@ fn sort_signatures_by_validator_index(
             .into());
         }
         let signer = recover_signer(&inner_hash, &bytes)?;
-        let idx = validators.iter().position(|v| *v == signer).ok_or_else(|| {
-            HyperlaneMidnightError::Other(format!(
-                "signer {signer:?} not in configured validator set"
-            ))
-        })?;
+        let idx = validators
+            .iter()
+            .position(|v| *v == signer)
+            .ok_or_else(|| {
+                HyperlaneMidnightError::Other(format!(
+                    "signer {signer:?} not in configured validator set"
+                ))
+            })?;
         indexed.push((idx, sig_hex));
     }
     indexed.sort_by_key(|(i, _)| *i);
@@ -422,13 +384,22 @@ mod tests {
         }
 
         let parsed = parse_metadata(&bytes).unwrap();
-        assert_eq!(parsed.merkle_tree_hook, format!("0x{}", hex::encode([0xABu8; 32])));
+        assert_eq!(
+            parsed.merkle_tree_hook,
+            format!("0x{}", hex::encode([0xABu8; 32]))
+        );
         assert_eq!(parsed.root, format!("0x{}", hex::encode([0xCDu8; 32])));
         assert_eq!(parsed.index, 42);
         // No padding: exactly the two real signatures the blob carried.
         assert_eq!(parsed.signatures.len(), 2);
-        assert_eq!(parsed.signatures[0], format!("0x{}", hex::encode([0x11u8; SIGNATURE_LEN])));
-        assert_eq!(parsed.signatures[1], format!("0x{}", hex::encode([0x22u8; SIGNATURE_LEN])));
+        assert_eq!(
+            parsed.signatures[0],
+            format!("0x{}", hex::encode([0x11u8; SIGNATURE_LEN]))
+        );
+        assert_eq!(
+            parsed.signatures[1],
+            format!("0x{}", hex::encode([0x22u8; SIGNATURE_LEN]))
+        );
     }
 
     #[test]
@@ -447,34 +418,23 @@ mod tests {
     #[test]
     fn parse_metadata_rejects_too_many_signatures() {
         let mut bytes = vec![0u8; METADATA_HEADER_LEN];
-        bytes.extend(std::iter::repeat_n(0u8, (MAX_SIGNATURES + 1) * SIGNATURE_LEN));
+        bytes.extend(std::iter::repeat_n(
+            0u8,
+            (MAX_SIGNATURES + 1) * SIGNATURE_LEN,
+        ));
         assert!(parse_metadata(&bytes).is_err());
-    }
-
-    #[test]
-    fn derive_ws_url_appends_ws_path_and_swaps_scheme() {
-        let http = url::Url::parse("http://indexer.local/api/v3/graphql").unwrap();
-        assert_eq!(
-            derive_ws_url(&http),
-            "ws://indexer.local/api/v3/graphql/ws"
-        );
-
-        let https = url::Url::parse("https://indexer.example/graphql").unwrap();
-        assert_eq!(derive_ws_url(&https), "wss://indexer.example/graphql/ws");
     }
 
     #[tokio::test]
     async fn sort_signatures_reorders_by_validator_index_and_drops_padding() {
         use ethers::signers::{LocalWallet, Signer};
 
-        let k0: LocalWallet =
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap();
-        let k1: LocalWallet =
-            "2222222222222222222222222222222222222222222222222222222222222222"
-                .parse()
-                .unwrap();
+        let k0: LocalWallet = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let k1: LocalWallet = "2222222222222222222222222222222222222222222222222222222222222222"
+            .parse()
+            .unwrap();
         let v0 = H160::from(k0.address().0);
         let v1 = H160::from(k1.address().0);
         let validators = vec![v0, v1];

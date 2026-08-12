@@ -1,3 +1,6 @@
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 
 use hyperlane_core::{
@@ -7,7 +10,12 @@ use hyperlane_core::{
 
 use crate::events::h512_to_h256;
 use crate::indexer_client::{BlockDetails, TransactionDetails};
-use crate::MidnightIndexerClient;
+use crate::toolkit::{self, ToolkitContext};
+use crate::{ConnectionConf, MidnightIndexerClient};
+
+/// A sidecar `balance` call costs a full wallet sync in a subprocess, so reads
+/// are cached.
+const WALLET_BALANCE_TTL: Duration = Duration::from_secs(300);
 
 /// Chain provider backed by the Midnight indexer's GraphQL API. Serves the
 /// block/transaction lookups the scraper needs (`ensure_blocks` /
@@ -17,18 +25,66 @@ use crate::MidnightIndexerClient;
 pub struct MidnightProvider {
     domain: HyperlaneDomain,
     indexer: MidnightIndexerClient,
+    /// Sidecar context for wallet-balance reads; `None` without a chain config.
+    toolkit_ctx: Option<ToolkitContext>,
+    /// Shared across clones so every consumer sees one TTL window.
+    wallet_balance_cache: Arc<Mutex<Option<(Instant, String, U256)>>>,
 }
 
 impl MidnightProvider {
-    /// Build a new provider.
+    /// Build a new provider with contract-state reads only.
     pub fn new(domain: HyperlaneDomain, indexer: MidnightIndexerClient) -> Self {
-        Self { domain, indexer }
+        Self {
+            domain,
+            indexer,
+            toolkit_ctx: None,
+            wallet_balance_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Build a provider from the chain config, wiring the submit sidecar so
+    /// `get_balance` can also answer the relayer wallet's own address.
+    pub fn from_conf(domain: HyperlaneDomain, conf: &ConnectionConf) -> Self {
+        let indexer = MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
+        let mut provider = Self::new(domain, indexer);
+        provider.toolkit_ctx = Some(ToolkitContext::from_conf(conf));
+        provider
     }
 
     /// Borrow the indexer client, for chain-state reads (e.g. the ISM reading
     /// its validators/threshold/module-type from the deployed contract).
     pub fn indexer(&self) -> &MidnightIndexerClient {
         &self.indexer
+    }
+
+    async fn wallet_balance(&self, address: &str) -> ChainResult<U256> {
+        let Some(toolkit_ctx) = &self.toolkit_ctx else {
+            return Err(crate::HyperlaneMidnightError::NotImplemented(
+                "get_balance for wallet addresses on a provider built without a chain config",
+            )
+            .into());
+        };
+        if let Ok(cache) = self.wallet_balance_cache.lock() {
+            if let Some((at, cached_address, balance)) = cache.as_ref() {
+                if cached_address == address && at.elapsed() < WALLET_BALANCE_TTL {
+                    return Ok(*balance);
+                }
+            }
+        }
+        // An unset MIDNIGHT_RELAYER_ADDRESS arrives as "": omit the guard so the
+        // sidecar reads its own wallet instead of matching an empty address.
+        let guard = (!address.is_empty()).then_some(address);
+        let balances = toolkit::query_wallet_balance(toolkit_ctx, guard).await?;
+        tracing::debug!(
+            address = balances.address,
+            night_micro = %balances.night_micro,
+            dust_specks = %balances.dust_specks,
+            "sidecar wallet balance"
+        );
+        if let Ok(mut cache) = self.wallet_balance_cache.lock() {
+            *cache = Some((Instant::now(), address.to_string(), balances.night_micro));
+        }
+        Ok(balances.night_micro)
     }
 }
 
@@ -119,8 +175,25 @@ impl HyperlaneProvider for MidnightProvider {
         Ok(true)
     }
 
-    async fn get_balance(&self, _address: String) -> ChainResult<U256> {
-        Err(crate::HyperlaneMidnightError::NotImplemented("get_balance").into())
+    async fn get_balance(&self, address: String) -> ChainResult<U256> {
+        // Contract addresses are hex and answerable from the indexer. Wallet
+        // (Bech32m) addresses have no indexer query, so they route through the
+        // sidecar, which only knows its own wallet.
+        let trimmed = address.trim_start_matches("0x");
+        let is_hex = !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_hexdigit());
+        if !is_hex {
+            return self.wallet_balance(&address).await;
+        }
+        self.indexer
+            .contract_native_balance(&address)
+            .await
+            .map_err(Into::<hyperlane_core::ChainCommunicationError>::into)?
+            .ok_or_else(|| {
+                crate::HyperlaneMidnightError::IndexerGraphql(format!(
+                    "no contract found at address {address}"
+                ))
+                .into()
+            })
     }
 
     async fn get_chain_metrics(&self) -> ChainResult<Option<ChainInfo>> {
