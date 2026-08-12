@@ -140,9 +140,8 @@ impl Mailbox for MidnightMailbox {
 
         let outcome = toolkit::submit_handle(&self.toolkit_ctx, &request).await?;
 
-        // Report the DUST actually paid (in specks) as the gas figure, with a
-        // unit price, so the expenditure ledger and metrics carry a real cost.
-        // Zero when the submitter did not surface a fee.
+        // Gas is the DUST actually paid, in specks, at a unit price; zero when
+        // the submitter did not report a fee.
         Ok(TxOutcome {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
@@ -182,11 +181,9 @@ impl Mailbox for MidnightMailbox {
         toolkit::dry_run_handle(&self.toolkit_ctx, &request).await?;
 
         // The message would be accepted on-chain. Midnight fees are denominated
-        // in DUST and computed by the wallet at submission time, so no gas
-        // estimate exists here. Zero mirrors Sealevel's estimate: `minimum`
-        // and `none` policies never read it, and `onChainFeeQuoting` sees a
-        // zero threshold (permissive) instead of the arbitrary 1M-gas bar the
-        // old placeholder imposed on every inbound message.
+        // in DUST and computed by the wallet at submission time, so there is no
+        // estimate to report. Zero mirrors Sealevel: it leaves
+        // `onChainFeeQuoting` permissive rather than imposing an arbitrary bar.
         Ok(TxCostEstimate {
             gas_limit: U256::zero(),
             gas_price: FixedPointNumber::zero(),

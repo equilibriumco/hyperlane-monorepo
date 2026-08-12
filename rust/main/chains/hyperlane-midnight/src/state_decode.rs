@@ -55,10 +55,9 @@ const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 3];
 //   (2) Decoding a fresh post-dispatch state: root `[1]` is a 15-element array;
 //       `[1, 7]` is a Set, `[1, 8]` a Counter cell, `[1, 9]` a `Bytes<141>`
 //       Map. Matches the declaration order in `modules/Mailbox.compact`.
-// The paths are pinned to the compiled layout; adding/removing a field
-// shifts them, and the compiler also rebalances the root cells when the
-// field count grows — adding `destination_gas` moved the Routes routers map
-// to `[0, 6]` and every `[1, *]` entry down by one. The contracts-repo
+// The paths are pinned to the compiled layout; adding or removing a field
+// shifts them, and the compiler rebalances the root cells as the field count
+// grows. The contracts-repo
 // layout guard re-checks the `queryLedgerState` paths on every compile.
 // (The `deliveries` set at `[1, 7]` is no longer decoded: deliveries are
 // indexed from `HYP_PROCESS` events, and the Mailbox `delivered` read goes
@@ -369,10 +368,7 @@ mod tests {
 
     /// Serialize a synthetic Mailbox `StateValue` tree into the same tagged
     /// `ContractState` wire bytes the live indexer serves. The root mirrors the
-    /// deployed layout: a 2-element array whose `[1]` element holds the
-    /// ISM/Mailbox fields, with `deliveries` at `[1,7]`, `nonce` at `[1,8]`
-    /// and `dispatched_messages` at `[1,9]`. Slots before each field are
-    /// filled with `Null` so the pinned paths line up.
+    /// deployed layout, with `Null` in the slots before each pinned field.
     fn mailbox_state_bytes(
         deliveries: StateValue<DefaultDB>,
         nonce: StateValue<DefaultDB>,
@@ -513,11 +509,7 @@ mod tests {
     }
 
     /// Serialize a synthetic ISM `StateValue` tree into the tagged
-    /// `ContractState` wire bytes. The root mirrors the deployed layout: a
-    /// 2-element array whose `[1]` element holds the ISM fields, with
-    /// `validators` at `[1,0]`, `validator_count` at `[1,1]`, `threshold` at
-    /// `[1,2]` and `module_type` at `[1,3]` (the Routes routers map lives in
-    /// cell `[0]` since the destination_gas rebalance).
+    /// `ContractState` wire bytes, laid out so the pinned ISM paths line up.
     fn ism_state_bytes(
         validators: StateValue<DefaultDB>,
         validator_count: u8,

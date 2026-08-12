@@ -49,23 +49,15 @@ impl TxStatus {
     /// Whether events from a transaction with this status should be served to
     /// the Hyperlane indexers. This is THE single place that decision lives.
     ///
-    /// Verified against the ledger sources (semantics.rs / verify.rs /
-    /// construct.rs): a circuit's transcript can only be split across a
-    /// transaction's guaranteed/fallible sections at a `kernel.checkpoint()`,
-    /// per-segment balancing pins a `receiveUnshielded`'s funding coins to
-    /// the same section as its transcript, and a failed section drops every
-    /// effect it produced, events included. The Hyperlane contracts compile
-    /// with zero checkpoint ops (the contracts repo CI-guards this), so an
-    /// event and the value transfer it reports commit or vanish together:
+    /// A failed section drops every effect it produced, events included, and a
+    /// transcript only splits across sections at a `kernel.checkpoint()`, which
+    /// the Hyperlane contracts never emit. An event and the state write it
+    /// reports therefore commit or vanish together.
     ///
     /// - `Success` and `PartialSuccess`: any served event's paired state
-    ///   write is applied — index it. A `PartialSuccess` here means some
-    ///   *other* segment of the transaction failed.
+    ///   write is applied — index it.
     /// - `Failure`: yields no events at all in the ledger; kept excluded as
     ///   pure defence in depth.
-    ///
-    /// Re-verify this reasoning if a checkpoint ever enters the contracts or
-    /// this indexer starts serving events from third-party contracts.
     pub fn is_indexable(self) -> bool {
         match self {
             TxStatus::Success | TxStatus::PartialSuccess => true,
@@ -328,10 +320,8 @@ impl MidnightIndexerClient {
             .transpose()
     }
 
-    /// Native-NIGHT (all-zeros token type) unshielded balance held by a
-    /// deployed contract, from its latest indexed action. `None` when the
-    /// indexer knows no contract at the address. Wallet (Bech32m) addresses
-    /// cannot be answered: the indexer has no wallet-balance query.
+    /// Native-NIGHT (all-zeros token type) unshielded balance of a deployed
+    /// contract. `None` when the indexer knows no contract at the address.
     pub async fn contract_native_balance(
         &self,
         address: &str,

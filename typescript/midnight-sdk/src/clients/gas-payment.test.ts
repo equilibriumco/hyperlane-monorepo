@@ -37,8 +37,7 @@ describe('findLandedGasPayment', () => {
     expect(findLandedGasPayment(rows, MESSAGE_ID, 150000n)).to.be.undefined;
   });
 
-  // A third party can fund the same message for less; treating that as this
-  // call's payment would leave the intended amount short.
+  // A smaller payment from someone else must not pass as ours.
   it('ignores a row that does not cover the intended payment', () => {
     const rows = [row({ payment: '149999' })];
     expect(findLandedGasPayment(rows, MESSAGE_ID, 150000n)).to.be.undefined;
@@ -86,9 +85,8 @@ describe('payForGasWithLandingCheck', () => {
     expect(calls.findLanded).to.equal(0);
   });
 
-  // The regression: a payForGas that was broadcast can still fail its
-  // confirmation wait, and the contract keeps every payment, so a blind
-  // retry charges twice.
+  // The core regression: a broadcast payment whose confirmation failed must
+  // not be paid again.
   it('does not pay again when the failed attempt landed', async () => {
     const { calls, deps } = harness(
       async () => {
@@ -119,9 +117,8 @@ describe('payForGasWithLandingCheck', () => {
     expect(calls.sleep).to.equal(1);
   });
 
-  // The failure that hides a landed payment is usually indexer trouble,
-  // which also breaks the check — so an unreadable ledger must stop the
-  // loop, not license another payment.
+  // Indexer trouble both hides a landed payment and breaks the check, so an
+  // unreadable ledger has to stop the loop.
   it('stops without retrying when state cannot be read', async () => {
     const { calls, deps } = harness(
       async () => {
@@ -155,9 +152,7 @@ describe('payForGasWithLandingCheck', () => {
   });
 });
 
-// Pins the gas_payments slot and its atom order: the decoder is what the
-// landing check reads, so drift there would silently reintroduce the
-// double payment.
+// Pins the slot and atom order the landing check depends on.
 describe('readGasPayments', () => {
   type Atoms = Uint8Array[];
 
@@ -233,12 +228,8 @@ describe('readGasPayments', () => {
     ]);
   });
 
-  // The defect this whole check exists to prevent. A Bytes<32> leaf is stored
-  // with its trailing zero bytes dropped (verified against the ledger type: one
-  // zero byte stores as 31, two as 30), so a messageId ending in 0x00 arrives
-  // short. Hexing the raw atom gave a 62-character string that could never
-  // equal the intended id, the landing check reported the payment unseen, and
-  // the retry paid a second time — roughly one message in 256.
+  // Without the pad a messageId ending in 0x00 decodes short, never matches,
+  // and the retry pays twice. Roughly one message in 256.
   it('right-pads a messageId whose trailing zero byte was trimmed', () => {
     const state = stateWith(
       fakeMap([

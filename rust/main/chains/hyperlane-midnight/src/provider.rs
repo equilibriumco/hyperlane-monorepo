@@ -13,8 +13,8 @@ use crate::indexer_client::{BlockDetails, TransactionDetails};
 use crate::toolkit::{self, ToolkitContext};
 use crate::{ConnectionConf, MidnightIndexerClient};
 
-/// A sidecar `balance` call costs a full wallet sync in a subprocess, so
-/// reads are cached and the agent-metrics loop mostly hits the cache.
+/// A sidecar `balance` call costs a full wallet sync in a subprocess, so reads
+/// are cached.
 const WALLET_BALANCE_TTL: Duration = Duration::from_secs(300);
 
 /// Chain provider backed by the Midnight indexer's GraphQL API. Serves the
@@ -25,8 +25,7 @@ const WALLET_BALANCE_TTL: Duration = Duration::from_secs(300);
 pub struct MidnightProvider {
     domain: HyperlaneDomain,
     indexer: MidnightIndexerClient,
-    /// Sidecar context for wallet-balance reads; `None` when built without a
-    /// chain config (contract-state reads only).
+    /// Sidecar context for wallet-balance reads; `None` without a chain config.
     toolkit_ctx: Option<ToolkitContext>,
     /// Shared across clones so every consumer sees one TTL window.
     wallet_balance_cache: Arc<Mutex<Option<(Instant, String, U256)>>>,
@@ -72,9 +71,8 @@ impl MidnightProvider {
                 }
             }
         }
-        // An unset MIDNIGHT_RELAYER_ADDRESS reaches here as "": omit the guard
-        // field so the sidecar reads its own wallet instead of string-matching
-        // an empty address.
+        // An unset MIDNIGHT_RELAYER_ADDRESS arrives as "": omit the guard so the
+        // sidecar reads its own wallet instead of matching an empty address.
         let guard = (!address.is_empty()).then_some(address);
         let balances = toolkit::query_wallet_balance(toolkit_ctx, guard).await?;
         tracing::debug!(
@@ -178,11 +176,9 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn get_balance(&self, address: String) -> ChainResult<U256> {
-        // Contract addresses are hex and answerable from the indexer's
-        // `contractAction.unshieldedBalances`. Wallet (Bech32m) addresses
-        // have no indexer query, so they route through the submit sidecar,
-        // which reads its own synced wallet — only the relayer wallet is
-        // answerable that way.
+        // Contract addresses are hex and answerable from the indexer. Wallet
+        // (Bech32m) addresses have no indexer query, so they route through the
+        // sidecar, which only knows its own wallet.
         let trimmed = address.trim_start_matches("0x");
         let is_hex = !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_hexdigit());
         if !is_hex {

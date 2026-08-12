@@ -12,10 +12,8 @@ type StateValue = {
   };
 };
 
-// Positional paths pinned to the compiled layout, like the Rust decoder's
-// paths — guarded by scripts/check-ledger-layout.mjs in hyperlane-midnight.
-// Adding night's destination_gas rebalanced the compiler's root cells: the
-// routers map moved from [1,0] to [0,6].
+// Positional paths into the compiled contract layout. Adding a ledger field
+// can move sibling slots, so a guard in the contracts repo re-checks them.
 const NIGHT_REMOTE_ROUTERS_PATH = [0, 6];
 const NIGHT_DESTINATION_GAS_PATH = [1, 14];
 
@@ -31,10 +29,8 @@ function leBytesToBigint(bytes: Uint8Array): bigint {
   return value;
 }
 
-// The runtime trims trailing zero bytes when it stores a `Bytes<N>` leaf, so
-// a value whose tail is zero reads back shorter than N — a messageId ending
-// in 0x00 arrives as 31 bytes. Right-pad to the declared width, matching the
-// Rust decoder; only an over-long value is an error. Leading zeros survive.
+// A stored Bytes<N> leaf drops its trailing zero bytes, so a messageId ending
+// in 0x00 reads back as 31 bytes. Pad it back; only over-long is an error.
 function fixedBytesToHex(atom: Uint8Array | undefined, width: number): string {
   const bytes = atom ?? new Uint8Array(0);
   if (bytes.length > width) {
@@ -94,11 +90,8 @@ export function readDestinationGas(
   return entries;
 }
 
-// igp.compact remote_gas_data at flat slot [4]; each value is the
-// (exchangeRate, gasPrice, gasOverhead) struct as two 16-byte LE atoms plus
-// an 8-byte one. Guarded by scripts/check-ledger-layout.mjs in
-// hyperlane-midnight. A zero overhead stores as a trimmed (possibly absent)
-// atom, hence the guard.
+// igp.compact remote_gas_data at flat slot [4]. Each value holds exchangeRate
+// and gasPrice as 16-byte LE atoms, then gasOverhead as an 8-byte one.
 const IGP_REMOTE_GAS_DATA_PATH = [4];
 
 export function readRemoteGasData(data: unknown): {
@@ -129,10 +122,8 @@ export function readRemoteGasData(data: unknown): {
   return entries;
 }
 
-// igp.compact gas_payments at flat slot [5]: an append-only index ->
-// (messageId, destination, gasAmount, payment) log. Guarded by
-// scripts/check-ledger-layout.mjs in hyperlane-midnight. Index 0 and any
-// zero field store as trimmed (possibly absent) atoms.
+// igp.compact gas_payments at flat slot [5]: an append-only log of
+// (messageId, destination, gasAmount, payment) keyed by index.
 const IGP_GAS_PAYMENTS_PATH = [5];
 
 export type GasPaymentRow = {

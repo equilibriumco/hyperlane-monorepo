@@ -46,9 +46,6 @@ class MidnightNativeWarpReader implements ArtifactReader<
       this.client.runCircuit<bigint>('night', state.data, 'messageDecimals'),
     ]);
     const remoteRouters: Record<number, { address: string }> = {};
-    // night.destination_gas, the on-chain per-destination handle-gas
-    // defaults; reported for every enrolled domain so `warp check` compares
-    // real values (zero when unset).
     const gasEntries = new Map(
       readDestinationGas(state.data).map((e) => [e.domainId, e.gas]),
     );

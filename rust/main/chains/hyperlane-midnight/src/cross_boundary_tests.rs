@@ -278,13 +278,9 @@ async fn count_returns_zero_for_destination_only_impl() {
     assert_eq!(mailbox.count(&ReorgPeriod::None).await.unwrap(), 0);
 }
 
-// `process_estimate_costs` dry-runs `handle` (issue #80). A dry-run that
-// accepts the message returns `{"ok":true}` and the estimate reports zero
-// cost, mirroring Sealevel: Midnight fees are DUST computed by the wallet at
-// submit time, and a zero estimate keeps `onChainFeeQuoting` permissive
-// instead of imposing an arbitrary threshold. The request it sends must be
-// the `dryRunHandle` op — proving the estimate actually simulates rather
-// than blindly succeeding.
+// An accepting dry-run returns `{"ok":true}` and the estimate reports zero
+// cost. The request must be the `dryRunHandle` op, proving the estimate
+// simulates rather than blindly succeeding.
 #[tokio::test]
 async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
     let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);

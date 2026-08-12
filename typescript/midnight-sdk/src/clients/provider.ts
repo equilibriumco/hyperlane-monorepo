@@ -71,10 +71,8 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     return this.client.runCircuit<T>('night', stateData, circuitId, args);
   }
 
-  // Gas-limit resolution for quoting and paying: an explicit override wins,
-  // then the night contract's on-chain destination_gas, then the static
-  // fallback. The IGP adds its stored per-destination overhead on top of
-  // whatever this returns.
+  // The IGP adds its stored per-destination overhead on top of whatever this
+  // returns.
   protected async resolveTransferGasLimit(
     tokenAddress: string,
     destinationDomainId: number,

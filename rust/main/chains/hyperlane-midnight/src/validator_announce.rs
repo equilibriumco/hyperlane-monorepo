@@ -148,9 +148,8 @@ impl ValidatorAnnounce for MidnightValidatorAnnounce {
         Ok(TxOutcome {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
-            // Report the DUST actually paid (in specks) with a unit price,
-            // mirroring `MidnightMailbox::process`. Zero when the submitter
-            // did not surface a fee.
+            // Gas is the DUST actually paid, in specks, at a unit price; zero
+            // when the submitter did not report a fee.
             gas_used: outcome.fee_specks.unwrap_or_default(),
             gas_price: FixedPointNumber::from_str("1")
                 .map_err(|err| ChainCommunicationError::from_other_str(&err.to_string()))?,

@@ -308,9 +308,8 @@ class MidnightIgpHookWriter
   }
 }
 
-// Overhead is written through setRemoteGasData alongside the oracle pair, and
-// the contract rejects a zero exchangeRate/gasPrice, so an overhead-only
-// domain can never be written; failing loudly beats silently dropping it.
+// Overhead is stored with the oracle pair, and the contract rejects a zero
+// exchangeRate/gasPrice, so an overhead-only domain can never be written.
 function assertOverheadDomainsHaveOracles(config: IgpHookConfig): void {
   const orphaned = Object.entries(config.overhead ?? {}).filter(
     ([domain, v]) => Number(v) !== 0 && !config.oracleConfig?.[Number(domain)],

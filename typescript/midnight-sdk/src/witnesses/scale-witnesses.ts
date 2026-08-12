@@ -1,8 +1,6 @@
 // Permanent off-chain implementation of power-of-10 division (Compact has no
 // integer division); the circuit binds each result in Field arithmetic.
-// mulPow10 is native in-circuit since the contracts repo's typed-vectors
-// refactor, so no multiplication witness exists anymore. Mirrors
-// contracts/src/witnesses/scale-witnesses.ts in the hyperlane-midnight
+// Mirrors contracts/src/witnesses/scale-witnesses.ts in the hyperlane-midnight
 // repo — keep in sync.
 export function createScaleWitnesses<PS>(initialPrivateState: PS) {
   return {

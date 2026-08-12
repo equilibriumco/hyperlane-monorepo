@@ -2,10 +2,8 @@ use hyperlane_core::H256;
 
 /// Placeholder signer. Real signing happens inside the submitter
 /// subprocess; this exists only to satisfy `ChainSigner` +
-/// `BuildableWithSignerConf` in `hyperlane-base`. The address feeds nothing
-/// but agent metrics: set `MIDNIGHT_RELAYER_ADDRESS` to the sidecar wallet's
-/// Bech32m unshielded address and the wallet-balance gauge resolves through
-/// the sidecar's `balance` op.
+/// `BuildableWithSignerConf` in `hyperlane-base`. The address feeds only the
+/// wallet-balance metric, which resolves through the sidecar's `balance` op.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightSigner {
     address: String,

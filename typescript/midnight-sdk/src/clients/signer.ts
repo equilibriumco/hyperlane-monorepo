@@ -60,12 +60,8 @@ const DEFAULT_PRIVATE_STATE_PASSWORD = 'Hyperlane-Midnight-2026!';
 
 const PAY_FOR_GAS_ATTEMPTS = 3;
 const PAY_FOR_GAS_RETRY_DELAY_MS = 1000;
-// A broadcast payForGas stays valid for the balancer's 30-minute TTL, so no
-// finite window can prove one will never land. This window only has to
-// outlast ordinary indexer lag (tens of seconds, and a degraded read spends
-// much of that inside the GraphQL retry link); past it the payment is
-// reported as unseen rather than absent, and the caller is told to check
-// before paying again.
+// Long enough to outlast normal indexer lag. It cannot prove a payment will
+// never land: a broadcast transaction stays valid for the 30-minute tx TTL.
 const PAY_FOR_GAS_SETTLE_MS_DEFAULT = 180_000;
 const PAY_FOR_GAS_POLL_MS = 3000;
 
@@ -73,9 +69,8 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Parsed at use time, not import time, so a bad value fails the call that
-// needs it. Number('') is 0 and Number('abc') is NaN, which would silently
-// disable the settle loop or spin it forever.
+// Rejects bad values rather than passing them on: Number('') is 0, which
+// disables the wait, and Number('abc') is NaN, which never reaches a deadline.
 function payForGasSettleMs(): number {
   const raw = process.env.MIDNIGHT_PAY_FOR_GAS_SETTLE_MS;
   if (raw === undefined || raw.trim() === '') {
@@ -250,17 +245,13 @@ export class MidnightSigner
       } else if (outcome.kind === 'recovered') {
         receipt.payForGasIndex = outcome.index;
       } else {
-        // The dispatch already landed; the message is valid but unpaid and a
-        // relayer running a payment policy will withhold it. payForGas is
-        // permissionless, so the rescue call completes it at any time.
+        // The message is dispatched but unpaid, so a relayer with a payment
+        // policy withholds it. payForGas is permissionless and works later.
         const rescue =
           `payForGas(igpAddress: ${gas.igpAddress}, messageId: ${receipt.messageId}, ` +
           `destinationDomainId: ${gas.destinationDomainId}, gasLimit: ${gas.gasLimit}, ` +
           `amount: ${gas.amount})`;
         const cause = errorText(outcome.error);
-        // Neither branch may tell the operator to just pay again: a broadcast
-        // payment stays valid far longer than the settle window, so "not seen"
-        // is not "never landed".
         const verifyFirst =
           `check IGP ${gas.igpAddress} for a recorded gas payment against ` +
           `messageId ${receipt.messageId} before running ${rescue}, or a ` +
@@ -280,9 +271,9 @@ export class MidnightSigner
     return receipt;
   }
 
-  // Standalone, permissionless gas payment for an already-dispatched
-  // message: the rescue path when the follow-up above failed, and the top-up
-  // path when a relayer's policy needs more than was originally paid.
+  // Permissionless gas payment for a message that is already dispatched: the
+  // rescue path when the follow-up failed, and the top-up path for a relayer
+  // policy that wants more than was first paid.
   async payForGas(req: {
     igpAddress: string;
     messageId: string;
@@ -318,13 +309,10 @@ export class MidnightSigner
     }
   }
 
-  // Whether a failed payForGas attempt nevertheless landed. Polls rather than
-  // reading once, because the transaction can still be in flight when the
-  // confirmation wait gives up. Resolving undefined means a fully decoded
-  // read taken at the end of the window did not see the payment — an earlier
-  // read cannot speak for a transaction that had not landed yet, so the flag
-  // is per-attempt, not sticky. Anything less certain rejects, because
-  // "unknown" must never be taken for "nothing landed".
+  // Whether a failed payForGas attempt landed anyway. Polls, because the
+  // transaction may still be in flight when the confirmation wait gives up.
+  // Only a read from the end of the window can report the payment missing;
+  // an unreadable ledger rejects instead, since unknown is not missing.
   private async awaitLandedGasPayment(
     igpAddress: string,
     messageId: string,
@@ -337,10 +325,8 @@ export class MidnightSigner
       readFresh = false;
       const read = await this.readIgpState(igpAddress);
       if (read.ok) {
-        // Decoding sits outside the read's own error handling on purpose: a
-        // decode failure is layout drift between this SDK and the deployed
-        // contract, which no retry fixes and which must not be swallowed into
-        // "nothing landed".
+        // Decoding is deliberately outside the read's error handling: a decode
+        // failure means the contract layout changed, which no retry fixes.
         const landed = findLandedGasPayment(
           readGasPayments(read.data),
           messageId,

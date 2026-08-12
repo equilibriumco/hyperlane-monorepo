@@ -9,10 +9,8 @@ function normalizeHex(hex: string): string {
   return (hex.startsWith('0x') ? hex.slice(2) : hex).toLowerCase();
 }
 
-// Matching on messageId alone is enough for the dispatch follow-up: the id
-// was minted by the dispatch in the same call, so any row carrying it is
-// this call's payment. The amount check keeps a smaller third-party payment
-// for the same message from passing as ours.
+// The dispatch in this same call minted the messageId, so any row carrying it
+// is ours. The amount check ignores a smaller payment someone else made.
 export function findLandedGasPayment(
   rows: GasPaymentRow[],
   messageId: string,
@@ -32,30 +30,25 @@ export type PayForGasOutcome =
   | {
       kind: 'failed';
       error: unknown;
-      /** `not-seen`: a fresh read of the ledger did not show the payment.
-       *  `unknown`: the ledger could not be read, so nothing is known. Neither
-       *  is proof the payment will never land — a broadcast transaction stays
-       *  valid far longer than any check waits. */
+      /** Neither value proves the payment will never land: a broadcast
+       *  transaction stays valid far longer than the check waits. */
       absence: 'not-seen' | 'unknown';
       checkError?: unknown;
     };
 
 export type PayForGasAttemptDeps = {
   pay: () => Promise<{ txId: string }>;
-  /** Resolves this call's payment row, or undefined when a fresh read did not
-   *  see it. Rejects when the state could not be read at all. */
+  /** Undefined means a fresh read did not see the payment. Rejects when the
+   *  ledger could not be read at all. */
   findLanded: () => Promise<LandedGasPayment | undefined>;
   attempts: number;
   delayMs: number;
   sleep: (ms: number) => Promise<void>;
 };
 
-// payForGas can be broadcast and still fail while waiting for confirmation,
-// and the contract appends every payment and keeps overpayment — so a blind
-// retry charges the payer twice. Retry only what the ledger proves is safe
-// to retry: after each failure it decides whether that attempt landed, and
-// a ledger that cannot be read ends the loop instead of risking a second
-// payment.
+// A payment can be broadcast and still fail its confirmation wait, and the
+// contract keeps every payment, so retrying blind charges twice. Retry only
+// when the ledger shows the last attempt did not land.
 export async function payForGasWithLandingCheck(
   deps: PayForGasAttemptDeps,
 ): Promise<PayForGasOutcome> {

@@ -164,9 +164,8 @@ pub struct SubmitError {
     pub message: String,
 }
 
-/// JSON payload for the `balance` op. The sidecar reads its own wallet
-/// (`MIDNIGHT_RELAYER_SEED`); `address` is an optional guard that must match
-/// the wallet's Bech32m unshielded address.
+/// JSON payload for the `balance` op. The sidecar reads its own wallet;
+/// `address`, when set, must match that wallet's Bech32m unshielded address.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceRequest<'a> {
@@ -261,8 +260,7 @@ pub struct ToolkitOutcome {
     pub transaction_id: H512,
     /// Whether the contract reported success.
     pub executed: bool,
-    /// DUST paid, in specks; `None` when the submitter predates the field or
-    /// the value fails to parse.
+    /// DUST paid, in specks; `None` when the submitter omits the field.
     pub fee_specks: Option<U256>,
 }
 
@@ -287,8 +285,7 @@ const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
 const DEFAULT_NETWORK_ID: &str = "undeployed";
 
 impl ToolkitContext {
-    /// Build the sidecar context from the chain config plus the `MIDNIGHT_*`
-    /// env, the same resolution every agent surface uses.
+    /// Build the sidecar context from the chain config and the `MIDNIGHT_*` env.
     pub fn from_conf(conf: &crate::ConnectionConf) -> Self {
         Self {
             binary_path: conf.toolkit_path.clone().unwrap_or_default(),
