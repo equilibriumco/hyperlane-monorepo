@@ -104,7 +104,7 @@ describe('payForGasWithLandingCheck', () => {
     expect(calls.sleep).to.equal(0);
   });
 
-  it('retries when state proves nothing landed', async () => {
+  it('retries when a fresh read does not see the payment', async () => {
     let attempt = 0;
     const { calls, deps } = harness(async () => {
       attempt++;
@@ -136,11 +136,11 @@ describe('payForGasWithLandingCheck', () => {
 
     expect(outcome.kind).to.equal('failed');
     if (outcome.kind !== 'failed') throw new Error('unreachable');
-    expect(outcome.verified).to.be.false;
+    expect(outcome.absence).to.equal('unknown');
     expect(calls.pay).to.equal(1);
   });
 
-  it('reports a verified failure after exhausting attempts', async () => {
+  it('reports the payment unseen after exhausting attempts', async () => {
     const { calls, deps } = harness(async () => {
       throw new Error('proving failed');
     }, never);
@@ -149,7 +149,7 @@ describe('payForGasWithLandingCheck', () => {
 
     expect(outcome.kind).to.equal('failed');
     if (outcome.kind !== 'failed') throw new Error('unreachable');
-    expect(outcome.verified).to.be.true;
+    expect(outcome.absence).to.equal('not-seen');
     expect(calls.pay).to.equal(3);
     expect(calls.findLanded).to.equal(3);
   });
@@ -231,6 +231,47 @@ describe('readGasPayments', () => {
         payment: '300000',
       },
     ]);
+  });
+
+  // The defect this whole check exists to prevent. A Bytes<32> leaf is stored
+  // with its trailing zero bytes dropped (verified against the ledger type: one
+  // zero byte stores as 31, two as 30), so a messageId ending in 0x00 arrives
+  // short. Hexing the raw atom gave a 62-character string that could never
+  // equal the intended id, the landing check reported the payment unseen, and
+  // the retry paid a second time — roughly one message in 256.
+  it('right-pads a messageId whose trailing zero byte was trimmed', () => {
+    const state = stateWith(
+      fakeMap([
+        {
+          key: [new Uint8Array(0)],
+          value: [
+            new Uint8Array(31).fill(0xab),
+            le(11155111n, 4),
+            le(150000n, 8),
+            le(150000n, 16),
+          ],
+        },
+      ]),
+    );
+
+    const rows = readGasPayments(state);
+    const intendedId = `0x${'ab'.repeat(31)}00`;
+
+    expect(rows[0].messageId).to.equal(intendedId);
+    expect(findLandedGasPayment(rows, intendedId, 150000n)?.index).to.equal(0);
+  });
+
+  it('rejects an over-long messageId atom', () => {
+    const state = stateWith(
+      fakeMap([
+        {
+          key: [new Uint8Array(0)],
+          value: [new Uint8Array(33), le(1n, 4), le(1n, 8), le(1n, 16)],
+        },
+      ]),
+    );
+
+    expect(() => readGasPayments(state)).to.throw(/Bytes<32>/);
   });
 
   it('rejects a slot that is not the payments map', () => {

@@ -29,12 +29,21 @@ export function findLandedGasPayment(
 export type PayForGasOutcome =
   | { kind: 'paid'; txId: string }
   | { kind: 'recovered'; index: number }
-  | { kind: 'failed'; error: unknown; verified: boolean; checkError?: unknown };
+  | {
+      kind: 'failed';
+      error: unknown;
+      /** `not-seen`: a fresh read of the ledger did not show the payment.
+       *  `unknown`: the ledger could not be read, so nothing is known. Neither
+       *  is proof the payment will never land — a broadcast transaction stays
+       *  valid far longer than any check waits. */
+      absence: 'not-seen' | 'unknown';
+      checkError?: unknown;
+    };
 
 export type PayForGasAttemptDeps = {
   pay: () => Promise<{ txId: string }>;
-  /** Resolves this call's payment row, or undefined once ledger state has
-   *  proved none landed. Rejects when the state could not be read at all. */
+  /** Resolves this call's payment row, or undefined when a fresh read did not
+   *  see it. Rejects when the state could not be read at all. */
   findLanded: () => Promise<LandedGasPayment | undefined>;
   attempts: number;
   delayMs: number;
@@ -64,9 +73,9 @@ export async function payForGasWithLandingCheck(
     try {
       landed = await deps.findLanded();
     } catch (checkError) {
-      return { kind: 'failed', error, verified: false, checkError };
+      return { kind: 'failed', error, absence: 'unknown', checkError };
     }
     if (landed) return { kind: 'recovered', index: landed.index };
   }
-  return { kind: 'failed', error, verified: true };
+  return { kind: 'failed', error, absence: 'not-seen' };
 }

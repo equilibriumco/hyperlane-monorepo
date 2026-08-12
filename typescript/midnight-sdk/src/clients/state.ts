@@ -31,6 +31,22 @@ function leBytesToBigint(bytes: Uint8Array): bigint {
   return value;
 }
 
+// The runtime trims trailing zero bytes when it stores a `Bytes<N>` leaf, so
+// a value whose tail is zero reads back shorter than N — a messageId ending
+// in 0x00 arrives as 31 bytes. Right-pad to the declared width, matching the
+// Rust decoder; only an over-long value is an error. Leading zeros survive.
+function fixedBytesToHex(atom: Uint8Array | undefined, width: number): string {
+  const bytes = atom ?? new Uint8Array(0);
+  if (bytes.length > width) {
+    throw new Error(
+      `Bytes<${width}> leaf holds ${bytes.length} bytes (layout drift?)`,
+    );
+  }
+  const padded = new Uint8Array(width);
+  padded.set(bytes);
+  return bytesToHex(padded);
+}
+
 function slotAt(data: unknown, path: number[], expected: string): StateValue {
   let slot = unwrapChargedState(data);
   for (const index of path) {
@@ -54,7 +70,7 @@ export function readRemoteRouters(
     if (!cell) continue;
     routers.push({
       domainId: Number(leBytesToBigint(key.value[0])),
-      router: bytesToHex(cell.value[0]),
+      router: fixedBytesToHex(cell.value[0], 32),
     });
   }
   return routers;
@@ -135,7 +151,7 @@ export function readGasPayments(data: unknown): GasPaymentRow[] {
     if (!cell) continue;
     rows.push({
       index: Number(leBytesToBigint(key.value[0] ?? new Uint8Array(0))),
-      messageId: bytesToHex(cell.value[0] ?? new Uint8Array(0)),
+      messageId: fixedBytesToHex(cell.value[0], 32),
       destination: Number(leBytesToBigint(cell.value[1] ?? new Uint8Array(0))),
       gasAmount: leBytesToBigint(cell.value[2] ?? new Uint8Array(0)).toString(),
       payment: leBytesToBigint(cell.value[3] ?? new Uint8Array(0)).toString(),
@@ -150,7 +166,7 @@ const VA_MAILBOX_PATH = [5];
 
 export function readVaMailboxAddress(data: unknown): string {
   const cell = slotAt(data, VA_MAILBOX_PATH, 'cell').asCell();
-  return bytesToHex(cell.value[0]);
+  return fixedBytesToHex(cell.value[0], 32);
 }
 
 export function topLevelArity(data: unknown): number {
