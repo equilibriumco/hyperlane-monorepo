@@ -119,6 +119,13 @@ class MidnightMailboxWriter
         ],
       });
 
+    // The ISM artifact still carries the pre-deploy placeholder address
+    // (see MidnightMultisigIsmWriter.create), and the core orchestrator
+    // reuses that same object when reporting deployed addresses. Stamp the
+    // real address on it now that it exists: the night contract is its own
+    // ISM.
+    config.defaultIsm.deployed.address = address;
+
     return [
       {
         artifactState: ArtifactState.DEPLOYED,
