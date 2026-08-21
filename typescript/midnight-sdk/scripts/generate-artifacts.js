@@ -68,5 +68,11 @@ for (const name of CONTRACTS) {
       }
     }
   }
+  // midnight-js 5.0.0-beta.6 refuses ZK artifacts without the compiler's
+  // integrity manifest (compiler/contract-manifest.json).
+  const compilerSrc = resolve(source, name, 'compiler');
+  if (existsSync(compilerSrc)) {
+    cpSync(compilerSrc, resolve(dest, 'compiler'), { recursive: true });
+  }
 }
 console.log(`midnight-sdk: artifacts copied from ${source}`);
