@@ -4,7 +4,10 @@ import {
   RouterConfigWithoutOwner,
   tokens,
 } from '../../../../../src/config/warp.js';
-import { getWarpFeeOwner } from '../../governance/utils.js';
+import {
+  WARP_FEES_TURNKEY_OWNER,
+  getWarpFeeOwner,
+} from '../../governance/utils.js';
 import { WarpRouteIds } from '../warpIds.js';
 
 import {
@@ -69,6 +72,16 @@ const usdtDecimals = {
   optimism: 6,
   polygon: 6,
   tron: 6,
+} as const;
+
+// ENI's collateral routers use route-specific TokenBridgeCctpV2
+// adapters for the fast CCTP path instead of the fast warp-router addresses.
+const eniUsdcFastCctpAdapters = {
+  arbitrum: '0xb0B8D4C6EF212D76d5079df5Ff7A0888A27e9b32',
+  base: '0x584244d02b0fBf9054A5D5C9e9cE9A2E8adA0e28',
+  ethereum: '0xEE4a09db2C25592C04b8b342CB89f9a7f5E20BD2',
+  optimism: '0xb0B8D4C6EF212D76d5079df5Ff7A0888A27e9b32',
+  polygon: '0x8dadbDE67eD0589d90cdE3C940045F10092AcC11',
 } as const;
 
 function getScaledTokenConfig(
@@ -160,7 +173,7 @@ export async function getEniUsdcWarpConfig(
 
   const rebalancingConfigByChain = getUSDCRebalancingBridgesConfigFor(
     rebalanceableChains,
-    [WarpRouteIds.MainnetCCTPV2Standard, WarpRouteIds.MainnetCCTPV2Fast],
+    [WarpRouteIds.MainnetCCTPV2Standard],
   );
 
   const maxDecimals = 18;
@@ -177,6 +190,14 @@ export async function getEniUsdcWarpConfig(
 
   for (const chain of rebalanceableChains) {
     const rebalancingConfig = rebalancingConfigByChain[chain];
+    const allowedRebalancingBridges = Object.fromEntries(
+      Object.entries(rebalancingConfig.allowedRebalancingBridges).map(
+        ([destination, bridges]) => [
+          destination,
+          [...bridges, { bridge: eniUsdcFastCctpAdapters[chain] }],
+        ],
+      ),
+    );
     const config: HypTokenRouterConfig = {
       ...routerConfig[chain],
       owner: owners[chain],
@@ -189,6 +210,7 @@ export async function getEniUsdcWarpConfig(
         maxDecimals,
       ),
       ...rebalancingConfig,
+      allowedRebalancingBridges,
     };
     configs.push([chain, config]);
   }
@@ -247,7 +269,9 @@ export async function getEniUsdtWarpConfig(
         maxDecimals,
       ),
       tokenFee: getFixedRoutingFeeConfig(
-        getWarpFeeOwner(chain),
+        // Fee contracts on every leg except tron were rotated to Turnkey
+        // treasury custody; tron still uses its WarpFees ICA.
+        chain === 'tron' ? getWarpFeeOwner(chain) : WARP_FEES_TURNKEY_OWNER,
         allCollateralChains.filter((otherChain) => otherChain !== chain),
         USDT_INTER_COLLATERAL_FEE_BPS,
         undefined,
@@ -269,7 +293,8 @@ export async function getEniUsdtWarpConfig(
       maxDecimals,
     ),
     tokenFee: getFixedRoutingFeeConfig(
-      getWarpFeeOwner('eni'),
+      // eni synthetic fee contract was rotated to Turnkey treasury custody.
+      WARP_FEES_TURNKEY_OWNER,
       allCollateralChains,
       WARP_FEE_BPS,
     ),

@@ -36,6 +36,26 @@ export interface WalletEndpoints {
   proofServer: string;
 }
 
+/**
+ * The dust sub-wallet adds this to every fee it computes (`costParameters`
+ * below), so a wallet holding less DUST than this cannot balance any
+ * transaction. It is a floor, not a fee estimate: a large deploy needs more,
+ * and MIDNIGHT_MIN_DUST_SPECKS raises the bar.
+ */
+const DUST_FEE_OVERHEAD_SPECKS = 300_000_000_000_000n;
+
+/** DUST a wallet must hold before a transaction can be balanced. */
+export function minimumDustSpecks(): bigint {
+  const raw = process.env.MIDNIGHT_MIN_DUST_SPECKS;
+  if (!raw) return DUST_FEE_OVERHEAD_SPECKS;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(
+      `MIDNIGHT_MIN_DUST_SPECKS must be a whole number of specks, got "${raw}"`,
+    );
+  }
+  return BigInt(raw);
+}
+
 export type WalletContext = Awaited<ReturnType<typeof createWallet>>;
 
 export function deriveKeys(seedHex: string) {
@@ -120,11 +140,9 @@ export async function createWallet(
       const unshielded = UnshieldedWallet({
         networkId,
         indexerClientConnection: config.indexerClientConnection,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        txHistoryStorage: txHistoryStorage as any,
+        txHistoryStorage,
       }).startWithPublicKey(PublicKey.fromKeyStore(unshieldedKeystore));
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return unshielded as any;
+      return unshielded;
     },
     dust: (config) =>
       DustWallet({
@@ -132,7 +150,7 @@ export async function createWallet(
         // Fee headroom defaults; tx generation hits these when DUST is
         // tight on a fresh wallet.
         costParameters: {
-          additionalFeeOverhead: 300_000_000_000_000n,
+          additionalFeeOverhead: DUST_FEE_OVERHEAD_SPECKS,
           feeBlocksMargin: 5,
         },
       }).startWithSecretKey(
@@ -141,8 +159,7 @@ export async function createWallet(
       ),
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await wallet.start(shieldedSecretKeys as any, dustSecretKey as any);
+  await wallet.start(shieldedSecretKeys, dustSecretKey);
 
   return { wallet, shieldedSecretKeys, dustSecretKey, unshieldedKeystore };
 }
@@ -191,26 +208,40 @@ export async function unshieldedNightBalance(
 export async function getUnshieldedAddress(
   ctx: WalletContext,
 ): Promise<UnshieldedAddress> {
-  // CAST: getAddress() returns the dust-wallet-nested address-format copy;
-  // our public type is the top-level copy. Same class, distinct bundled copy.
-  return (await ctx.wallet.unshielded.getAddress()) as unknown as UnshieldedAddress;
+  return await ctx.wallet.unshielded.getAddress();
 }
 
-async function waitForDust(ctx: WalletContext): Promise<bigint> {
-  return await Rx.firstValueFrom(
-    ctx.wallet.state().pipe(
-      Rx.throttleTime(5000),
-      Rx.filter((s: WalletState) => s.isSynced),
-      Rx.map((s: WalletState) => s.dust?.balance(new Date()) ?? 0n),
-      Rx.filter((b: bigint) => b > 0n),
-    ),
+/**
+ * Throw unless the wallet holds enough DUST to pay a fee.
+ *
+ * NIGHT generates DUST at a fixed rate per unit held, up to a cap also
+ * proportional to NIGHT, so an operator short of DUST either waits or funds
+ * more NIGHT. The error reports both so they can tell which.
+ */
+export async function assertDustForFees(ctx: WalletContext): Promise<void> {
+  const state = await waitForSync(ctx);
+  const held = state.dust?.balance(new Date()) ?? 0n;
+  const needed = minimumDustSpecks();
+  if (held >= needed) return;
+
+  const params = ledger.LedgerParameters.initialParameters().dust;
+  const night = state.unshielded?.balances[ledger.nativeToken().raw] ?? 0n;
+  const cap = night * params.nightDustRatio;
+  const ratePerSec = night * params.generationDecayRate;
+  const advice =
+    cap < needed
+      ? 'fund it with more NIGHT'
+      : `retry in ~${(needed - held + ratePerSec - 1n) / ratePerSec}s`;
+  throw new Error(
+    `not enough DUST to pay fees: holds ${held} specks, needs ${needed}. ` +
+      `${night} micro-NIGHT generates ${ratePerSec} specks/s up to ${cap} — ${advice}.`,
   );
 }
 
 /**
  * Register the wallet's unregistered NIGHT UTXOs for DUST generation.
- * Idempotent. Returns once DUST balance is positive so the caller can
- * immediately submit fee-paying transactions.
+ * Idempotent. Registration only starts generation, so this still throws when
+ * the balance is short: DUST accrues over time, not on submission.
  */
 export async function registerNightForDust(ctx: WalletContext): Promise<void> {
   const state = await waitForSync(ctx);
@@ -220,18 +251,18 @@ export async function registerNightForDust(ctx: WalletContext): Promise<void> {
   );
 
   if (unregistered.length > 0) {
+    // The synced state's coins are a structural view; the facade wants its
+    // own UtxoWithMeta. Same shape, distinct declaration.
     const recipe = await ctx.wallet.registerNightUtxosForDustGeneration(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      unregistered as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ctx.unshieldedKeystore.getPublicKey() as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (payload: Uint8Array) =>
-        ctx.unshieldedKeystore.signDataAsync(payload) as any,
+      unregistered as unknown as Parameters<
+        typeof ctx.wallet.registerNightUtxosForDustGeneration
+      >[0],
+      ctx.unshieldedKeystore.getPublicKey(),
+      (payload: Uint8Array) => ctx.unshieldedKeystore.signDataAsync(payload),
     );
     const finalized = await ctx.wallet.finalizeRecipe(recipe);
     await ctx.wallet.submitTransaction(finalized);
   }
 
-  await waitForDust(ctx);
+  await assertDustForFees(ctx);
 }
