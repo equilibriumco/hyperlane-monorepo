@@ -67,6 +67,7 @@ export {
   isValidTransactionHashMidnight,
   isEmptyAddress,
   isZeroishAddress,
+  isZeroishAddressEvm,
   normalizeAddress,
   normalizeAddressCosmos,
   normalizeAddressEvm,
