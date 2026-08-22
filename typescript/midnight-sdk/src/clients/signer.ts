@@ -7,7 +7,11 @@ import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { nativeToken } from '@midnightntwrk/ledger-v9';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
-import type { ISigner, ReqGetBalance } from '@hyperlane-xyz/provider-sdk/altvm';
+import type {
+  ISigner,
+  ReqGetBalance,
+  ResFeeTokenBalance,
+} from '@hyperlane-xyz/provider-sdk/altvm';
 import { sleep } from '@hyperlane-xyz/utils';
 
 import {
@@ -27,6 +31,7 @@ import {
   createWallet,
   deriveUnshieldedKeystore,
   getUnshieldedAddress,
+  minimumDustSpecks,
   registerNightForDust,
   syncedCoinPublicKeyHex,
   waitForSync,
@@ -141,8 +146,7 @@ export class MidnightSigner
           `set it to the Midnight network id (e.g. 'stagenet', or 'undeployed' for a local devnet)`,
       );
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setNetworkId(networkId as any);
+    setNetworkId(networkId);
 
     const client = MidnightReadClient.fromMetadata(metadata);
     const endpoints: WalletEndpoints = {
@@ -367,6 +371,23 @@ export class MidnightSigner
     return super.getBalance(req);
   }
 
+  // Fees are paid in DUST, which the NIGHT balance never reflects. Reported
+  // in specks, DUST's atomic unit: 1 DUST = 10^15 specks.
+  async getFeeTokenBalance(req: ReqGetBalance): Promise<ResFeeTokenBalance> {
+    if (req.address !== this.signerAddress) {
+      throw new Error(
+        'DUST balance is only readable for the signer wallet address',
+      );
+    }
+    const ctx = await this.walletContext();
+    const state = await waitForSync(ctx);
+    return {
+      balance: state.dust?.balance(new Date()) ?? 0n,
+      symbol: 'DUST',
+      decimals: 15,
+    };
+  }
+
   /**
    * Deploy one of the compiled contracts. Computes the ZOwnablePK owner
    * commitment from the wallet's shielded coinPublicKey plus the persisted
@@ -415,6 +436,12 @@ export class MidnightSigner
       ownerStore: this.ownerStore,
       log,
     });
+    // The agents' index.from (chain metadata) must be at or before this;
+    // nothing else in the deploy flow surfaces the block.
+    const deployBlock = receipts[0]?.blockHeight;
+    if (deployBlock) {
+      log(`${options.name} deployed at block ${deployBlock}`);
+    }
     return { address, ownerId, receipts };
   }
 
@@ -433,12 +460,12 @@ export class MidnightSigner
   }
 
   // Fees are paid in DUST generated from registered NIGHT UTXOs. Registers
-  // unregistered UTXOs (idempotent) and waits for a positive DUST balance;
-  // an empty wallet fails fast instead of waiting forever.
+  // unregistered UTXOs (idempotent) and waits for enough DUST to cover a
+  // fee; an empty wallet fails fast instead of waiting forever.
   private async ensureFeesReady(ctx: WalletContext): Promise<void> {
     const state = await waitForSync(ctx);
     const dust = state.dust?.balance(new Date()) ?? 0n;
-    if (dust > 0n) return;
+    if (dust >= minimumDustSpecks()) return;
     const night = state.unshielded?.balances[nativeToken().raw] ?? 0n;
     if (night === 0n) {
       throw new Error(

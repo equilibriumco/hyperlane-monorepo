@@ -92,8 +92,8 @@ class MidnightMultisigIsmWriter
   // validators/threshold are night constructor args, and the contract does
   // not exist yet when the core deploy orchestrator asks for the ISM. The
   // returned zero-address sentinel keeps the config flowing to the mailbox
-  // writer, which seals it into the constructor and reports the real
-  // (night) address on its own artifact.
+  // writer, which seals it into the constructor and stamps the real (night)
+  // address back on this artifact once it is known.
   async create(
     artifact: ArtifactNew<RawIsmArtifactConfigs['messageIdMultisigIsm']>,
   ): Promise<
