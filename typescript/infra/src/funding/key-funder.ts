@@ -11,6 +11,7 @@ import { DockerImageRepos } from '../../config/docker.js';
 import { NODE_SERVICE_NAMES } from '../utils/consts.js';
 import rebalancerAddresses from '../../config/rebalancer.json' with { type: 'json' };
 import inventoryRebalancerAddresses from '../../config/inventoryRebalancer.json' with { type: 'json' };
+import quoteSubmitterAddresses from '../../config/quotesubmitter.json' with { type: 'json' };
 import stableswapInventoryRebalancerAddresses from '../../config/stableswapInventoryRebalancer.json' with { type: 'json' };
 import { getEnvAddresses } from '../../config/registry.js';
 import { getAgentConfig } from '../../scripts/agent-utils.js';
@@ -26,6 +27,10 @@ import { getInfraPath, isEthereumProtocolChain } from '../utils/utils.js';
 
 const RC_FUNDING_DISCOUNT_NUMERATOR = BigNumber.from(2);
 const RC_FUNDING_DISCOUNT_DENOMINATOR = BigNumber.from(10);
+
+type RoleAddresses = Partial<
+  Record<DeployEnvironment, Partial<Record<Contexts, string>>>
+>;
 
 // Chains to sweep excess funds from (must match fund-keys-from-deployer.ts)
 const CHAINS_TO_SWEEP = new Set([
@@ -164,7 +169,7 @@ export class KeyFunderHelmManager extends HelmManager {
       }
 
       // Add sweep config only for chains in CHAINS_TO_SWEEP with valid thresholds
-      if (CHAINS_TO_SWEEP.has(chain)) {
+      if (this.config.sweepEnabled !== false && CHAINS_TO_SWEEP.has(chain)) {
         const sweepThreshold = this.config.lowUrgencyKeyFunderBalances?.[chain];
         if (!sweepThreshold) {
           throw new Error(`Sweep threshold is missing for chain ${chain}`);
@@ -176,8 +181,7 @@ export class KeyFunderHelmManager extends HelmManager {
 
         const override = this.config.sweepOverrides?.[chain];
         chainConfig.sweep = {
-          // Temporarily disabled; re-enable once sweep destination is confirmed.
-          enabled: false,
+          enabled: true,
           address: override?.sweepAddress ?? DEFAULT_SWEEP_ADDRESS,
           threshold: sweepThreshold,
           targetMultiplier: override?.targetMultiplier ?? 1.5,
@@ -282,30 +286,18 @@ export class KeyFunderHelmManager extends HelmManager {
     return envAddresses?.[environment]?.[context];
   }
 
-  private getRoleAddresses(
-    role: FundableRole,
-  ): Record<DeployEnvironment, Record<Contexts, string>> | undefined {
+  private getRoleAddresses(role: FundableRole): RoleAddresses | undefined {
     switch (role) {
       case Role.Relayer:
-        return relayerAddresses as Record<
-          DeployEnvironment,
-          Record<Contexts, string>
-        >;
+        return relayerAddresses;
       case Role.Rebalancer:
-        return rebalancerAddresses as Record<
-          DeployEnvironment,
-          Record<Contexts, string>
-        >;
+        return rebalancerAddresses;
       case Role.InventoryRebalancer:
-        return inventoryRebalancerAddresses as Record<
-          DeployEnvironment,
-          Record<Contexts, string>
-        >;
+        return inventoryRebalancerAddresses;
+      case Role.QuoteSubmitter:
+        return quoteSubmitterAddresses;
       case Role.StableswapInventoryRebalancer:
-        return stableswapInventoryRebalancerAddresses as Record<
-          DeployEnvironment,
-          Record<Contexts, string>
-        >;
+        return stableswapInventoryRebalancerAddresses;
       default:
         return undefined;
     }
@@ -322,6 +314,8 @@ export class KeyFunderHelmManager extends HelmManager {
         return this.config.desiredRebalancerBalancePerChain?.[chain];
       case Role.InventoryRebalancer:
         return this.config.desiredInventoryRebalancerBalancePerChain?.[chain];
+      case Role.QuoteSubmitter:
+        return this.config.desiredQuoteSubmitterBalancePerChain?.[chain];
       case Role.StableswapInventoryRebalancer:
         return this.config
           .desiredStableswapInventoryRebalancerBalancePerChain?.[chain];

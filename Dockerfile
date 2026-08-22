@@ -32,6 +32,7 @@ COPY typescript/cosmos-sdk/package.json ./typescript/cosmos-sdk/
 COPY typescript/cosmos-types/package.json ./typescript/cosmos-types/
 COPY typescript/deploy-sdk/package.json ./typescript/deploy-sdk/
 COPY typescript/fee-quoting/package.json ./typescript/fee-quoting/
+COPY typescript/forking-sdk/package.json ./typescript/forking-sdk/
 COPY typescript/github-proxy/package.json ./typescript/github-proxy/
 COPY typescript/helloworld/package.json ./typescript/helloworld/
 COPY typescript/http-registry-server/package.json ./typescript/http-registry-server/
@@ -43,6 +44,7 @@ COPY typescript/tron-sdk/package.json ./typescript/tron-sdk/
 COPY typescript/rebalancer/package.json ./typescript/rebalancer/
 COPY typescript/rebalancer-sim/package.json ./typescript/rebalancer-sim/
 COPY typescript/relayer/package.json ./typescript/relayer/
+COPY typescript/scraper-proxy/package.json ./typescript/scraper-proxy/package.json
 COPY typescript/sdk/package.json ./typescript/sdk/
 COPY typescript/svm-sdk/package.json ./typescript/svm-sdk/
 COPY typescript/starknet-sdk/package.json ./typescript/starknet-sdk/

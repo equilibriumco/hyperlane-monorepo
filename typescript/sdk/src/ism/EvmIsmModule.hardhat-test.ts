@@ -3,38 +3,60 @@ import chai, { expect } from 'chai';
 import chaiAsPromised from 'chai-as-promised';
 import { Signer } from 'ethers';
 import hre from 'hardhat';
+import sinon from 'sinon';
 
 import {
   BlacklistIsm__factory,
+  DefaultIsm__factory,
+  DelayedFlowRouterHookIsm__factory,
+  HypERC20__factory,
+  NetFlowRateLimitedHookIsm__factory,
   RateLimitedIsm__factory,
   StaticAggregationIsm__factory,
+  TestLegacyBlacklistIsm__factory,
 } from '@hyperlane-xyz/core';
 
-import { Address, eqAddress } from '@hyperlane-xyz/utils';
+import {
+  Address,
+  addressToBytes32,
+  eqAddress,
+  rootLogger,
+} from '@hyperlane-xyz/utils';
 
 import { TestChainName, testChains } from '../consts/testChains.js';
 import { HyperlaneAddresses, HyperlaneContracts } from '../contracts/types.js';
 import { TestCoreDeployer } from '../core/TestCoreDeployer.js';
 import { HyperlaneProxyFactoryDeployer } from '../deploy/HyperlaneProxyFactoryDeployer.js';
 import { ProxyFactoryFactories } from '../deploy/contracts.js';
+import {
+  DelayedFlowEnrollmentTarget,
+  buildDelayedFlowEnrollmentTxs,
+} from '../deploy/warp.js';
 import { MultiProvider } from '../providers/MultiProvider.js';
+import { AnnotatedEV5Transaction } from '../providers/ProviderType.js';
+import { EvmEventLogsReader } from '../rpc/evm/EvmEventLogsReader.js';
 import {
   randomAddress,
   randomIsmConfig,
   randomMultisigIsmConfig,
 } from '../test/testUtils.js';
-import { normalizeConfig } from '../utils/ism.js';
+import { ChainMap } from '../types.js';
+import { collectHybridIsmNodes, normalizeConfig } from '../utils/ism.js';
 
 import { EvmIsmModule } from './EvmIsmModule.js';
+import { EvmIsmReader } from './EvmIsmReader.js';
 import { HyperlaneIsmFactory } from './HyperlaneIsmFactory.js';
 import {
   AggregationIsmConfig,
   BlacklistIsmConfig,
+  DelayedFlowRouterHookIsmConfig,
   DomainRoutingIsmConfig,
   IsmConfig,
   IsmType,
+  MailboxDefaultIsmConfig,
   ModuleType,
   MultisigIsmConfig,
+  NetFlowRateLimitedHookIsmConfig,
   RateLimitedIsmConfig,
   RoutingIsmConfig,
   TrustedRelayerIsmConfig,
@@ -58,6 +80,11 @@ describe('EvmIsmModule', async () => {
   const chain = TestChainName.test4;
   let factoryAddresses: HyperlaneAddresses<ProxyFactoryFactories>;
   let factoryContracts: HyperlaneContracts<ProxyFactoryFactories>;
+  const legacyDeploymentBlocks = new Map<string, number>();
+  let legacyExplorerMetadataStub: sinon.SinonStub | undefined;
+  let legacyDeploymentBlockStub: sinon.SinonStub | undefined;
+  // paired TokenRouter required by the warp-route hybrid hook/ISM constructors
+  let warpRouterAddress: Address;
 
   before(async () => {
     const [signer, funder] = await hre.ethers.getSigners();
@@ -89,6 +116,10 @@ describe('EvmIsmModule', async () => {
     mailboxAddress = (
       await new TestCoreDeployer(multiProvider, legacyIsmFactory).deployApp()
     ).getContracts(chain).mailbox.address;
+
+    warpRouterAddress = (
+      await new HypERC20__factory(signer).deploy(18, 1, 1, mailboxAddress)
+    ).address;
   });
 
   beforeEach(async () => {
@@ -140,17 +171,24 @@ describe('EvmIsmModule', async () => {
 
   // expect that the ISM matches the config after all tests
   afterEach(async () => {
-    const derivedConfiig = await testIsm.read();
+    try {
+      const derivedConfiig = await testIsm.read();
 
-    const normalizedDerivedConfig = normalizeConfig(derivedConfiig);
-    const normalizedConfig = normalizeConfig(testConfig);
+      const normalizedDerivedConfig = normalizeConfig(derivedConfiig);
+      const normalizedConfig = normalizeConfig(testConfig);
 
-    // recipient is a deploy-time constructor arg not returned by read()
-    if (normalizedConfig.type === IsmType.RATE_LIMITED) {
-      delete normalizedConfig.recipient;
+      // recipient is a deploy-time constructor arg not returned by read()
+      if (normalizedConfig.type === IsmType.RATE_LIMITED) {
+        delete normalizedConfig.recipient;
+      }
+
+      assert.deepStrictEqual(normalizedDerivedConfig, normalizedConfig);
+    } finally {
+      legacyExplorerMetadataStub?.restore();
+      legacyDeploymentBlockStub?.restore();
+      legacyExplorerMetadataStub = undefined;
+      legacyDeploymentBlockStub = undefined;
     }
-
-    assert.deepStrictEqual(normalizedDerivedConfig, normalizedConfig);
   });
 
   // create a new ISM and verify that it matches the config
@@ -167,6 +205,105 @@ describe('EvmIsmModule', async () => {
     testIsm = ism;
     testConfig = config;
     return { ism, initialIsmAddress: ism.serialize().deployedIsm };
+  }
+
+  // Registers an externally built ISM with the afterEach state check.
+  function adoptIsm(ism: EvmIsmModule, config: IsmConfig): EvmIsmModule {
+    testIsm = ism;
+    testConfig = config;
+    return ism;
+  }
+
+  // Builds a StaticAggregationIsm whose blacklist submodule is the pre-audit
+  // contract that is still deployed on mainnet: no `values()`, and an event per
+  // entry even when the entry is already blacklisted.
+  async function deployLegacyBlacklistAggregation(
+    owner: Address,
+    blacklistedIds: string[],
+  ): Promise<{
+    aggregationAddress: Address;
+    multisigConfig: MultisigIsmConfig;
+  }> {
+    const ismFactory = HyperlaneIsmFactory.fromAddressesMap(
+      { [chain]: factoryAddresses },
+      multiProvider,
+    );
+
+    const multisigConfig = randomMultisigIsmConfig(3, 5);
+    const multisigIsm = await ismFactory.deploy({
+      destination: chain,
+      config: multisigConfig,
+    });
+
+    const legacyIsm = await new TestLegacyBlacklistIsm__factory(
+      multiProvider.getSigner(chain),
+    ).deploy(owner);
+    const deploymentReceipt = await legacyIsm.deployTransaction.wait();
+    legacyDeploymentBlocks.set(
+      legacyIsm.address.toLowerCase(),
+      deploymentReceipt.blockNumber,
+    );
+    for (const blacklistedId of blacklistedIds) {
+      await multiProvider.handleTx(chain, legacyIsm.blacklist([blacklistedId]));
+    }
+    // re-add everything so the log replay has to de-duplicate
+    await multiProvider.handleTx(chain, legacyIsm.blacklist(blacklistedIds));
+
+    const aggregationAddress = await ismFactory.deployStaticAddressSet(
+      chain,
+      factoryContracts.staticAggregationIsmFactory,
+      [multisigIsm.address, legacyIsm.address],
+      rootLogger,
+      2,
+    );
+
+    return { aggregationAddress, multisigConfig };
+  }
+
+  function moduleForAggregation(
+    deployedIsm: Address,
+    config: IsmConfig,
+  ): EvmIsmModule {
+    return new EvmIsmModule(multiProvider, {
+      chain,
+      config,
+      addresses: {
+        ...factoryAddresses,
+        mailbox: mailboxAddress,
+        deployedIsm,
+      },
+    });
+  }
+
+  /**
+   * Hybrid hook/ISMs are only valid inside a mandatory aggregation beside an
+   * authenticating ISM, which is also how a warp route always installs them.
+   * The wrapper holds `hybrid` by reference, so tests can keep mutating the
+   * node in place between create and update.
+   */
+  function hybridAgg(hybrid: IsmConfig): IsmConfig {
+    return {
+      type: IsmType.AGGREGATION,
+      threshold: 2,
+      modules: [
+        { type: IsmType.TRUSTED_RELAYER, relayer: mailboxAddress },
+        hybrid,
+      ],
+    };
+  }
+
+  /** Address of the hybrid leaf inside the module's installed tree. */
+  async function hybridLeaf(ism: EvmIsmModule): Promise<Address> {
+    const derived = await new EvmIsmReader(
+      multiProvider,
+      chain,
+    ).deriveIsmConfig(ism.serialize().deployedIsm);
+    const [leaf] = collectHybridIsmNodes(derived);
+    assert(
+      leaf && 'address' in leaf && typeof leaf.address === 'string',
+      'expected a deployed hybrid leaf',
+    );
+    return leaf.address;
   }
 
   describe('create', async () => {
@@ -284,6 +421,66 @@ describe('EvmIsmModule', async () => {
           multiProvider,
         }),
       ).to.be.rejectedWith(BLACKLIST_COMPOSITION_ERROR);
+    });
+
+    it('deploys a mailbox default ism', async () => {
+      const config: MailboxDefaultIsmConfig = {
+        type: IsmType.MAILBOX_DEFAULT,
+      };
+      await createIsm(config);
+    });
+
+    it('deploys a net flow rate limited hook ism and transfers ownership to non-deployer', async () => {
+      const owner = randomAddress();
+      const config: NetFlowRateLimitedHookIsmConfig = {
+        type: IsmType.NET_FLOW_RATE_LIMITED,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 500,
+        duration: 86400n,
+        owner,
+      };
+      const { ism } = await createIsm(hybridAgg(config));
+
+      const netFlowIsm = NetFlowRateLimitedHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect((await netFlowIsm.owner()).toLowerCase()).to.equal(
+        owner.toLowerCase(),
+      );
+      expect((await netFlowIsm.warpRouter()).toLowerCase()).to.equal(
+        warpRouterAddress.toLowerCase(),
+      );
+    });
+
+    it('deploys a delayed flow router hook ism, enrolling routers before transferring ownership', async () => {
+      // owner is a non-deployer EOA: the deploy only succeeds if the
+      // owner-gated enrollment happens BEFORE the ownership transfer
+      const owner = randomAddress();
+      const remoteRouter = addressToBytes32(randomAddress()).toLowerCase();
+      const config: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner,
+        remoteIsms: { [TestChainName.test2]: remoteRouter },
+      };
+      const { ism } = await createIsm(hybridAgg(config));
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect(
+        await delayedIsm.routers(
+          multiProvider.getDomainId(TestChainName.test2),
+        ),
+      ).to.equal(remoteRouter);
+      expect((await delayedIsm.owner()).toLowerCase()).to.equal(
+        owner.toLowerCase(),
+      );
     });
 
     for (let i = 0; i < 16; i++) {
@@ -842,6 +1039,698 @@ describe('EvmIsmModule', async () => {
         }
       }
       expect(blacklistFound).to.be.true;
+    });
+
+    describe('blacklist submodule that predates on-chain enumeration', () => {
+      beforeEach(() => {
+        legacyDeploymentBlocks.clear();
+        legacyDeploymentBlockStub = sinon
+          .stub(
+            EvmEventLogsReader.prototype,
+            'getContractDeploymentBlockFromExplorer',
+          )
+          .callsFake(async (address) => {
+            const block = legacyDeploymentBlocks.get(address.toLowerCase());
+            assert(
+              block !== undefined,
+              `Missing deployment block for ${address}`,
+            );
+            return block;
+          });
+        // The test chain metadata declares an Etherscan explorer with a
+        // placeholder API key, which would send the log reader to the live
+        // Etherscan API before falling back to the RPC.
+        legacyExplorerMetadataStub = sinon
+          .stub(multiProvider, 'tryGetEvmExplorerMetadata')
+          .returns(null);
+      });
+
+      it('derives the submodule as a blacklist ISM with the ids replayed from logs', async () => {
+        const owner = await multiProvider.getSignerAddress(chain);
+        const firstId = randomBytes32();
+        const secondId = randomBytes32();
+        const { aggregationAddress, multisigConfig } =
+          await deployLegacyBlacklistAggregation(owner, [firstId, secondId]);
+
+        const config: AggregationIsmConfig = {
+          type: IsmType.AGGREGATION,
+          modules: [
+            multisigConfig,
+            {
+              type: IsmType.BLACKLIST,
+              owner,
+              blacklistedIds: [firstId, secondId],
+            },
+          ],
+          threshold: 2,
+        };
+        const ism = adoptIsm(
+          moduleForAggregation(aggregationAddress, config),
+          config,
+        );
+
+        const derived = await ism.read();
+        assert(
+          typeof derived !== 'string' && derived.type === IsmType.AGGREGATION,
+          'expected the derived config to be an aggregation',
+        );
+
+        const blacklistModule = derived.modules.find(
+          (module) =>
+            typeof module !== 'string' && module.type === IsmType.BLACKLIST,
+        );
+        assert(
+          blacklistModule !== undefined &&
+            typeof blacklistModule !== 'string' &&
+            blacklistModule.type === IsmType.BLACKLIST,
+          'expected a blacklist submodule in the derived config',
+        );
+        expect(blacklistModule.blacklistedIds).to.have.members([
+          firstId.toLowerCase(),
+          secondId.toLowerCase(),
+        ]);
+      });
+
+      it('applies no transactions when the submodule already matches', async () => {
+        const owner = await multiProvider.getSignerAddress(chain);
+        const blacklistedId = randomBytes32();
+        const { aggregationAddress, multisigConfig } =
+          await deployLegacyBlacklistAggregation(owner, [blacklistedId]);
+
+        const config: AggregationIsmConfig = {
+          type: IsmType.AGGREGATION,
+          modules: [
+            multisigConfig,
+            { type: IsmType.BLACKLIST, owner, blacklistedIds: [blacklistedId] },
+          ],
+          threshold: 2,
+        };
+        const ism = adoptIsm(
+          moduleForAggregation(aggregationAddress, config),
+          config,
+        );
+
+        await expectTxsAndUpdate(ism, config, 0);
+
+        expect(eqAddress(aggregationAddress, ism.serialize().deployedIsm)).to.be
+          .true;
+      });
+
+      it('redeploys instead of blacklisting in place when an id is added', async () => {
+        const owner = await multiProvider.getSignerAddress(chain);
+        const existingId = randomBytes32();
+        const newId = randomBytes32();
+        const { aggregationAddress, multisigConfig } =
+          await deployLegacyBlacklistAggregation(owner, [existingId]);
+
+        const config: AggregationIsmConfig = {
+          type: IsmType.AGGREGATION,
+          modules: [
+            multisigConfig,
+            {
+              type: IsmType.BLACKLIST,
+              owner,
+              blacklistedIds: [existingId, newId],
+            },
+          ],
+          threshold: 2,
+        };
+        const ism = adoptIsm(
+          moduleForAggregation(aggregationAddress, config),
+          config,
+        );
+
+        // update() redeploys internally and emits no txs
+        await expectTxsAndUpdate(ism, config, 0);
+
+        expect(eqAddress(aggregationAddress, ism.serialize().deployedIsm)).to.be
+          .false;
+
+        const provider = multiProvider.getProvider(chain);
+        const [moduleAddresses] = await StaticAggregationIsm__factory.connect(
+          ism.serialize().deployedIsm,
+          provider,
+        ).modulesAndThreshold(hre.ethers.constants.AddressZero);
+
+        let blacklistFound = false;
+        for (const moduleAddress of moduleAddresses) {
+          const blacklistIsm = BlacklistIsm__factory.connect(
+            moduleAddress,
+            provider,
+          );
+          if ((await blacklistIsm.moduleType()) === ModuleType.NULL) {
+            // the replacement exposes on-chain enumeration and carries both ids
+            expect(await blacklistIsm.values()).to.have.members([
+              existingId,
+              newId,
+            ]);
+            blacklistFound = true;
+          }
+        }
+        expect(blacklistFound).to.be.true;
+      });
+    });
+
+    it('no changes to an existing mailbox default ism means no redeployment or updates', async () => {
+      const config: MailboxDefaultIsmConfig = {
+        type: IsmType.MAILBOX_DEFAULT,
+      };
+      const { ism, initialIsmAddress } = await createIsm(config);
+
+      await expectTxsAndUpdate(ism, config, 0);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+    });
+
+    it('redeploys a mailbox default ism that defers to a different mailbox', async () => {
+      const config: MailboxDefaultIsmConfig = {
+        type: IsmType.MAILBOX_DEFAULT,
+      };
+      const { initialIsmAddress } = await createIsm(config);
+
+      // A DefaultIsm's mailbox is an immutable constructor arg the reader
+      // omits, so this module — pointed at the same instance but at a
+      // different mailbox — sees an identical `{ type }` config while the
+      // instance routes through the wrong mailbox's default ISM.
+      const otherMailbox = warpRouterAddress;
+      const reboundModule = new EvmIsmModule(multiProvider, {
+        chain,
+        config,
+        addresses: {
+          ...factoryAddresses,
+          mailbox: otherMailbox,
+          deployedIsm: initialIsmAddress,
+        },
+      });
+
+      // redeploys internally (MAILBOX_DEFAULT is immutable), emitting no txs
+      expect(await reboundModule.update(config)).to.deep.equal([]);
+
+      const redeployedIsm = reboundModule.serialize().deployedIsm;
+      expect(eqAddress(redeployedIsm, initialIsmAddress)).to.be.false;
+      expect(
+        eqAddress(
+          await DefaultIsm__factory.connect(
+            redeployedIsm,
+            multiProvider.getProvider(chain),
+          ).mailbox(),
+          otherMailbox,
+        ),
+      ).to.be.true;
+    });
+
+    it('redeploys when changing a mailbox default ism to another type', async () => {
+      const { ism, initialIsmAddress } = await createIsm({
+        type: IsmType.MAILBOX_DEFAULT,
+      });
+
+      const trustedRelayerConfig: TrustedRelayerIsmConfig = {
+        type: IsmType.TRUSTED_RELAYER,
+        relayer: randomAddress(),
+      };
+      // keep testConfig in sync for the afterEach read-back assertion
+      testConfig = trustedRelayerConfig;
+      // update() redeploys internally and emits no txs
+      await expectTxsAndUpdate(ism, trustedRelayerConfig, 0);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .false;
+    });
+
+    it('transfers netFlowRateLimitedHookIsm ownership in-place on owner change', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const netFlowConfig: NetFlowRateLimitedHookIsmConfig = {
+        type: IsmType.NET_FLOW_RATE_LIMITED,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 500,
+        duration: 86400n,
+        owner: signerAddress,
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(netFlowConfig),
+      );
+
+      const newOwner = randomAddress();
+      // mutate in-place so testConfig (same reference) stays in sync for afterEach
+      netFlowConfig.owner = newOwner;
+
+      // NET_FLOW_RATE_LIMITED is mutable — update() transfers ownership in-place (1 tx)
+      await expectTxsAndUpdate(ism, hybridAgg(netFlowConfig), 1);
+
+      // same contract address — no redeploy
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+
+      const netFlowIsm = NetFlowRateLimitedHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect((await netFlowIsm.owner()).toLowerCase()).to.equal(
+        newOwner.toLowerCase(),
+      );
+    });
+
+    it('redeploys a new netFlowRateLimitedHookIsm on thresholdBps change (immutable)', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const netFlowConfig: NetFlowRateLimitedHookIsmConfig = {
+        type: IsmType.NET_FLOW_RATE_LIMITED,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 500,
+        duration: 86400n,
+        owner: signerAddress,
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(netFlowConfig),
+      );
+
+      // thresholdBps is immutable on-chain; changing it must redeploy
+      netFlowConfig.thresholdBps = 750;
+
+      // update() redeploys internally and emits no txs
+      await expectTxsAndUpdate(ism, hybridAgg(netFlowConfig), 0);
+
+      // different contract address — redeployed
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .false;
+
+      const netFlowIsm = NetFlowRateLimitedHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect((await netFlowIsm.thresholdBps()).toString()).to.equal('750');
+    });
+
+    it('updates netFlowRateLimitedHookIsm owner in-place inside an aggregation ism without redeploying the container', async () => {
+      // the contract mandates composing NetFlowRateLimitedHookIsm under an
+      // authenticating ISM, so aggregation-wrapped is the primary shape
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const netFlowConfig: NetFlowRateLimitedHookIsmConfig = {
+        type: IsmType.NET_FLOW_RATE_LIMITED,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 500,
+        duration: 86400n,
+        owner: signerAddress,
+      };
+      const aggregationConfig: AggregationIsmConfig = {
+        type: IsmType.AGGREGATION,
+        modules: [netFlowConfig, randomMultisigIsmConfig(3, 5)],
+        threshold: 2,
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(aggregationConfig);
+
+      // mutate in-place so testConfig (same reference) stays in sync for afterEach
+      const newOwner = randomAddress();
+      netFlowConfig.owner = newOwner;
+
+      // owner is the netFlow's only mutable field: expect a single in-place
+      // transferOwnership tx, with the aggregation container untouched
+      await expectTxsAndUpdate(ism, aggregationConfig, 1);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+    });
+
+    it('no changes to an existing delayedFlowRouterHookIsm means no redeployment or updates', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {
+          [TestChainName.test2]:
+            addressToBytes32(randomAddress()).toLowerCase(),
+        },
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(delayedConfig),
+      );
+
+      await expectTxsAndUpdate(ism, hybridAgg(delayedConfig), 0);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+    });
+
+    it('does not redeploy a delayedFlowRouterHookIsm when the target omits warpRouter', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(delayedConfig),
+      );
+
+      // warp-route-context configs omit warpRouter (implicitly the token);
+      // the update must treat it as unchanged, not as an immutable-field change
+      const targetWithoutWarpRouter: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+      await expectTxsAndUpdate(ism, hybridAgg(targetWithoutWarpRouter), 0);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+    });
+
+    it('enrolls and unenrolls remote routers on an existing delayedFlowRouterHookIsm', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const test2Router = addressToBytes32(randomAddress()).toLowerCase();
+      const test3Router = addressToBytes32(randomAddress()).toLowerCase();
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: { [TestChainName.test2]: test2Router },
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(delayedConfig),
+      );
+
+      // replace test2 with test3: 1 enroll tx + 1 unenroll tx
+      delayedConfig.remoteIsms = { [TestChainName.test3]: test3Router };
+      await expectTxsAndUpdate(ism, hybridAgg(delayedConfig), 2);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      const test3Domain = multiProvider.getDomainId(TestChainName.test3);
+      expect(await delayedIsm.routers(test3Domain)).to.equal(test3Router);
+      const enrolledDomains = await delayedIsm.domains();
+      expect(enrolledDomains.map((domain) => Number(domain))).to.deep.equal([
+        test3Domain,
+      ]);
+    });
+
+    it('unenrolls a delayed flow domain missing from provider metadata', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+      const { ism } = await createIsm(hybridAgg(delayedConfig));
+      const leafAddress = await hybridLeaf(ism);
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        leafAddress,
+        multiProvider.getSigner(chain),
+      );
+      const unknownDomain = 987654;
+      expect(multiProvider.tryGetChainName(unknownDomain)).to.be.null;
+      await delayedIsm.enrollRemoteRouters(
+        [unknownDomain],
+        [addressToBytes32(randomAddress())],
+      );
+
+      const leafModule = new EvmIsmModule(multiProvider, {
+        chain,
+        config: delayedConfig,
+        addresses: {
+          ...factoryAddresses,
+          mailbox: mailboxAddress,
+          deployedIsm: leafAddress,
+        },
+      });
+      const txs = await leafModule.updateDeployedInstance(delayedConfig);
+      expect(txs).to.have.length(1);
+      for (const tx of txs) {
+        await multiProvider.sendTransaction(chain, tx);
+      }
+      expect(await delayedIsm.domains()).to.deep.equal([]);
+    });
+
+    it('updateDeployedInstance reconciles the hybrid leaf but rejects a composed tree', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+
+      const { ism } = await createIsm(hybridAgg(delayedConfig));
+
+      // Same module shape buildDelayedFlowEnrollmentTxs builds: pointed at the
+      // deployed hybrid leaf, not at the aggregation above it.
+      const leafModule = new EvmIsmModule(multiProvider, {
+        chain,
+        config: delayedConfig,
+        addresses: {
+          ...factoryAddresses,
+          mailbox: mailboxAddress,
+          deployedIsm: await hybridLeaf(ism),
+        },
+      });
+
+      // The escape hatch skips the composition rules, so it must not accept a
+      // config that composes anything.
+      await expect(
+        leafModule.updateDeployedInstance(hybridAgg(delayedConfig)),
+      ).to.be.rejectedWith('composed');
+
+      // ...while the leaf node it exists for still reconciles.
+      delayedConfig.remoteIsms = {
+        [TestChainName.test2]: addressToBytes32(randomAddress()).toLowerCase(),
+      };
+      const txs = await leafModule.updateDeployedInstance(delayedConfig);
+      expect(txs.length).to.equal(1);
+      for (const tx of txs) {
+        await multiProvider.sendTransaction(chain, tx);
+      }
+    });
+
+    it('transfers delayedFlowRouterHookIsm ownership after enrollment updates', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(delayedConfig),
+      );
+
+      // enroll a router AND hand over ownership in the same update: the txs
+      // only execute successfully if enrollment (owner-gated) precedes the
+      // ownership transfer
+      const newOwner = randomAddress();
+      delayedConfig.remoteIsms = {
+        [TestChainName.test2]: addressToBytes32(randomAddress()).toLowerCase(),
+      };
+      delayedConfig.owner = newOwner;
+      await expectTxsAndUpdate(ism, hybridAgg(delayedConfig), 2);
+
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .true;
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect((await delayedIsm.owner()).toLowerCase()).to.equal(
+        newOwner.toLowerCase(),
+      );
+    });
+
+    it('redeploys a new delayedFlowRouterHookIsm on maxDelay change (immutable)', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+
+      const { ism, initialIsmAddress } = await createIsm(
+        hybridAgg(delayedConfig),
+      );
+
+      // maxDelay is immutable on-chain; changing it must redeploy
+      delayedConfig.maxDelay = 7200;
+
+      // update() redeploys internally and emits no txs
+      await expectTxsAndUpdate(ism, hybridAgg(delayedConfig), 0);
+
+      // different contract address — redeployed
+      expect(eqAddress(initialIsmAddress, ism.serialize().deployedIsm)).to.be
+        .false;
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect(await delayedIsm.maxDelay()).to.equal(7200);
+    });
+  });
+
+  describe('delayed flow router cross-chain enrollment', async () => {
+    const remoteChain = TestChainName.test2;
+    const manualChain = TestChainName.test3;
+
+    function registryAddresses(): ChainMap<Record<string, string>> {
+      return { [chain]: { ...factoryAddresses, mailbox: mailboxAddress } };
+    }
+
+    async function enrollmentTxs(
+      allTargets: ChainMap<DelayedFlowEnrollmentTarget>,
+    ) {
+      return buildDelayedFlowEnrollmentTxs({
+        chain,
+        multiProvider,
+        registryAddresses: registryAddresses(),
+        warpRouter: warpRouterAddress,
+        target: allTargets[chain],
+        allTargets,
+      });
+    }
+
+    async function applyTxs(txs: AnnotatedEV5Transaction[]) {
+      for (const tx of txs) {
+        await multiProvider.sendTransaction(chain, tx);
+      }
+    }
+
+    it('enrolls the pairing derived from the route and converges on re-run', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+      };
+      const { ism } = await createIsm(hybridAgg(delayedConfig));
+
+      const remoteIsmAddress = randomAddress();
+      const allTargets: ChainMap<DelayedFlowEnrollmentTarget> = {
+        [chain]: {
+          ismAddress: await hybridLeaf(ism),
+          userNode: delayedConfig,
+        },
+        [remoteChain]: {
+          ismAddress: remoteIsmAddress,
+          userNode: delayedConfig,
+        },
+      };
+
+      const txs = await enrollmentTxs(allTargets);
+      expect(txs.length).to.equal(1);
+      await applyTxs(txs);
+
+      expect((await enrollmentTxs(allTargets)).length).to.equal(0);
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      expect(await delayedIsm.domains()).to.deep.equal([
+        multiProvider.getDomainId(remoteChain),
+      ]);
+
+      // keep testConfig (same reference) in sync for the afterEach read-back
+      delayedConfig.remoteIsms = {
+        [remoteChain]: addressToBytes32(remoteIsmAddress).toLowerCase(),
+      };
+    });
+
+    it('enrolls a configured external remoteIsms alongside the derived pairing and converges on re-run', async () => {
+      const signerAddress = await multiProvider.getSignerAddress(chain);
+      const delayedConfig: DelayedFlowRouterHookIsmConfig = {
+        type: IsmType.DELAYED_FLOW_ROUTER,
+        warpRouter: warpRouterAddress,
+        thresholdBps: 10000,
+        maxDelay: 3600,
+        duration: 86400n,
+        owner: signerAddress,
+        remoteIsms: {},
+      };
+      const { ism } = await createIsm(hybridAgg(delayedConfig));
+
+      // An operator-authored pairing names a chain the route never derives.
+      // It is retained alongside the route-managed counterpart.
+      const manualRouter = addressToBytes32(randomAddress()).toLowerCase();
+      delayedConfig.remoteIsms = { [manualChain]: manualRouter };
+      const derivedRouterAddress = randomAddress();
+      const derivedRouter =
+        addressToBytes32(derivedRouterAddress).toLowerCase();
+
+      const allTargets: ChainMap<DelayedFlowEnrollmentTarget> = {
+        [chain]: {
+          ismAddress: await hybridLeaf(ism),
+          userNode: delayedConfig,
+        },
+        [remoteChain]: {
+          ismAddress: derivedRouterAddress,
+          userNode: delayedConfig,
+        },
+      };
+
+      const txs = await enrollmentTxs(allTargets);
+      expect(txs.length).to.equal(1);
+      await applyTxs(txs);
+
+      expect((await enrollmentTxs(allTargets)).length).to.equal(0);
+
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        await hybridLeaf(ism),
+        multiProvider.getProvider(chain),
+      );
+      const manualDomain = multiProvider.getDomainId(manualChain);
+      const derivedDomain = multiProvider.getDomainId(remoteChain);
+      expect(await delayedIsm.domains()).to.have.members([
+        manualDomain,
+        derivedDomain,
+      ]);
+      expect(await delayedIsm.routers(manualDomain)).to.equal(manualRouter);
+      expect(await delayedIsm.routers(derivedDomain)).to.equal(derivedRouter);
+
+      // keep testConfig (same reference) in sync for the afterEach read-back
+      delayedConfig.remoteIsms = {
+        [manualChain]: manualRouter,
+        [remoteChain]: derivedRouter,
+      };
     });
   });
 });

@@ -9,10 +9,13 @@ import {
   BlacklistIsm__factory,
   CCIPIsm__factory,
   DefaultFallbackRoutingIsm__factory,
+  DefaultIsm__factory,
+  DelayedFlowRouterHookIsm__factory,
   IInterchainSecurityModule__factory,
   IMultisigIsm__factory,
   IOutbox__factory,
   InterchainAccountRouter__factory,
+  NetFlowRateLimitedHookIsm__factory,
   OPStackIsm__factory,
   Ownable__factory,
   PausableIsm__factory,
@@ -36,6 +39,7 @@ import { DEFAULT_CONTRACT_READ_CONCURRENCY } from '../consts/concurrency.js';
 import { DispatchedMessage } from '../core/types.js';
 import { ChainTechnicalStack } from '../metadata/chainMetadataTypes.js';
 import { MultiProvider } from '../providers/MultiProvider.js';
+import { EvmEventLogsReader } from '../rpc/evm/EvmEventLogsReader.js';
 import { ChainMap, ChainNameOrId } from '../types.js';
 import { HyperlaneReader } from '../utils/HyperlaneReader.js';
 import {
@@ -47,16 +51,20 @@ import {
 import {
   AggregationIsmConfig,
   ArbL2ToL1IsmConfig,
+  BlacklistIsmConfig,
   DerivedIsmConfig,
   DomainRoutingIsmConfig,
   IsmConfig,
   IsmType,
+  MailboxDefaultIsmConfig,
   ModuleType,
   MultisigIsmConfig,
   NullIsmConfig,
   OffchainLookupIsmConfig,
   RoutingIsmConfig,
 } from './types.js';
+import { readBlacklistedIds } from './blacklist.js';
+import { deriveDelayedFlowRemoteIsms } from './delayedFlow.js';
 
 const INCREMENTAL_REVERT_STRING =
   'IncrementalDomainRoutingIsm: removal not supported';
@@ -92,6 +100,7 @@ const NON_REDEPLOYABLE_ISM_TYPES = new Set<IsmType>([
 export class EvmIsmReader extends HyperlaneReader implements IsmReader {
   protected readonly logger = rootLogger.child({ module: 'EvmIsmReader' });
   protected isZkSyncChain: boolean;
+  protected readonly evmLogReader: EvmEventLogsReader;
 
   constructor(
     protected readonly multiProvider: MultiProvider,
@@ -108,6 +117,11 @@ export class EvmIsmReader extends HyperlaneReader implements IsmReader {
       this.chain,
     ).technicalStack;
     this.isZkSyncChain = chainTechnicalStack === ChainTechnicalStack.ZkSync;
+
+    this.evmLogReader = EvmEventLogsReader.fromConfig(
+      { chain: this.chain },
+      multiProvider,
+    );
   }
 
   async deriveIsmConfigFromAddress(
@@ -441,7 +455,7 @@ export class EvmIsmReader extends HyperlaneReader implements IsmReader {
 
   private async deriveNonOwnableRoutingConfig(
     address: Address,
-  ): Promise<WithAddress<RoutingIsmConfig>> {
+  ): Promise<WithAddress<RoutingIsmConfig | MailboxDefaultIsmConfig>> {
     const ism = AmountRoutingIsm__factory.connect(address, this.provider);
 
     let lowerIsm: Address;
@@ -455,6 +469,21 @@ export class EvmIsmReader extends HyperlaneReader implements IsmReader {
       ]);
     } catch (error) {
       throwIfNotMissingSelector(error);
+
+      // DefaultIsm exposes a public mailbox() getter; the legacy
+      // InterchainAccountIsm keeps its mailbox private, so this probe cleanly
+      // separates the two remaining ownerless routing ISMs.
+      const defaultIsm = DefaultIsm__factory.connect(address, this.provider);
+      try {
+        await defaultIsm.mailbox();
+        return {
+          type: IsmType.MAILBOX_DEFAULT,
+          address,
+        };
+      } catch (innerError) {
+        throwIfNotMissingSelector(innerError);
+      }
+
       // If we fail to access AmountRoutingIsm properties, this is likely a legacy InterchainAccountIsm
       this.logger.debug(
         'Error accessing AmountRoutingIsm properties, treating as legacy InterchainAccountIsm.',
@@ -680,22 +709,88 @@ export class EvmIsmReader extends HyperlaneReader implements IsmReader {
       );
     }
 
-    const blacklistIsm = BlacklistIsm__factory.connect(address, this.provider);
+    const blacklistConfig = await this.deriveBlacklistConfig(address);
+    if (blacklistConfig) {
+      return blacklistConfig;
+    }
+
+    // Discriminators for the two warp-route hybrid hook/ISMs, checked against
+    // the ABIs of the NULL-type ISMs probed above:
+    //   - warpRouter() is exposed by NetFlowRateLimitedHookIsm and
+    //     DelayedFlowRouterHookIsm, and by neither BlacklistIsm (whose ABI is
+    //     blacklist/blacklistedIds/values/owner/moduleType/verify) nor any
+    //     other ISM probed above, so the two directions cannot shadow.
+    //   - maxDelay() then separates the two hybrids: only
+    //     DelayedFlowRouterHookIsm declares it.
+    // Every probe here calls an output-bearing view, so a contract missing the
+    // selector reverts instead of decoding empty returndata as a match.
+    const netFlowIsm = NetFlowRateLimitedHookIsm__factory.connect(
+      address,
+      this.provider,
+    );
+    let warpRouter: Address | undefined;
     try {
-      await blacklistIsm.blacklistedIds(ethers.constants.HashZero);
-      const owner = await blacklistIsm.owner();
-      return {
-        address,
-        type: IsmType.BLACKLIST,
-        owner,
-        blacklistedIds: await blacklistIsm.values(),
-      };
+      warpRouter = await netFlowIsm.warpRouter();
     } catch (error) {
       throwIfNotMissingSelector(error);
       this.logger.debug(
-        'Error accessing "blacklistedIds" property, implying this is not a Blacklist ISM.',
+        'Error accessing "warpRouter" property, implying this is not a warp-route hybrid hook/ISM.',
         address,
       );
+    }
+    if (warpRouter) {
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        address,
+        this.provider,
+      );
+      let maxDelay: number | undefined;
+      try {
+        maxDelay = await delayedIsm.maxDelay();
+      } catch (error) {
+        throwIfNotMissingSelector(error);
+        this.logger.debug(
+          'Error accessing "maxDelay" property, implying this is a NetFlowRateLimitedHookIsm.',
+          address,
+        );
+      }
+
+      if (maxDelay !== undefined) {
+        const [thresholdBps, duration, owner, remoteIsms] = await Promise.all([
+          delayedIsm.thresholdBps(),
+          delayedIsm.DURATION(),
+          delayedIsm.owner(),
+          deriveDelayedFlowRemoteIsms(
+            delayedIsm,
+            this.multiProvider,
+            this.concurrency,
+            this.logger,
+          ),
+        ]);
+        return {
+          address,
+          type: IsmType.DELAYED_FLOW_ROUTER,
+          warpRouter,
+          thresholdBps: thresholdBps.toNumber(),
+          maxDelay,
+          duration: duration.toBigInt(),
+          owner,
+          remoteIsms,
+        };
+      }
+
+      const [thresholdBps, duration, owner] = await Promise.all([
+        netFlowIsm.thresholdBps(),
+        netFlowIsm.DURATION(),
+        netFlowIsm.owner(),
+      ]);
+      return {
+        address,
+        type: IsmType.NET_FLOW_RATE_LIMITED,
+        warpRouter,
+        thresholdBps: thresholdBps.toNumber(),
+        duration: duration.toBigInt(),
+        owner,
+      };
     }
 
     // no specific properties, must be Test ISM
@@ -703,6 +798,43 @@ export class EvmIsmReader extends HyperlaneReader implements IsmReader {
       address,
       type: IsmType.TEST_ISM,
     };
+  }
+
+  /**
+   * Returns undefined when the contract is not a Blacklist ISM.
+   *
+   * Detection and enumeration are separate probes: deployments that predate
+   * `values()` expose the same `blacklistedIds(bytes32)` getter, so a missing
+   * `values()` selector falls back to replaying the entries from logs rather
+   * than disqualifying the contract. That replay either yields the entries or
+   * throws; it never yields a config without them.
+   */
+  private async deriveBlacklistConfig(
+    address: Address,
+  ): Promise<WithAddress<BlacklistIsmConfig> | undefined> {
+    const blacklistIsm = BlacklistIsm__factory.connect(address, this.provider);
+
+    let owner: Address;
+    try {
+      await blacklistIsm.blacklistedIds(ethers.constants.HashZero);
+      owner = await blacklistIsm.owner();
+    } catch (error) {
+      throwIfNotMissingSelector(error);
+      this.logger.debug(
+        'Error accessing "blacklistedIds" property, implying this is not a Blacklist ISM.',
+        address,
+      );
+      return undefined;
+    }
+
+    const blacklistedIds = await readBlacklistedIds(
+      this.chain,
+      address,
+      this.multiProvider,
+      this.evmLogReader,
+    );
+
+    return { address, type: IsmType.BLACKLIST, owner, blacklistedIds };
   }
 
   async deriveArbL2ToL1Config(

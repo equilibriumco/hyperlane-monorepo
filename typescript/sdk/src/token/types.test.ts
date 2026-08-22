@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { assert } from '@hyperlane-xyz/utils';
 
 import { TokenFeeType } from '../fee/types.js';
+import { IsmType } from '../ism/types.js';
 
 import { TokenType } from './config.js';
 import {
@@ -55,6 +56,31 @@ describe('WarpRouteDeployConfigSchema refine', () => {
     //@ts-ignore
     delete config.arbitrum.mailbox;
     expect(WarpRouteDeployConfigSchema.safeParse(config).success).to.be.true;
+  });
+
+  it('should reject timelock with ownerOverrides.proxyAdmin', () => {
+    const result = WarpRouteDeployConfigSchema.safeParse({
+      arbitrum: {
+        ...config.arbitrum,
+        ownerOverrides: {
+          proxyAdmin: SOME_ADDRESS,
+        },
+        timelock: {
+          delay: 259200,
+          roles: {
+            executor: SOME_ADDRESS,
+            proposer: SOME_ADDRESS,
+          },
+        },
+      },
+    });
+
+    expect(result.success).to.be.false;
+    if (!result.success) {
+      expect(result.error.issues[0].message).to.equal(
+        'Cannot configure timelock with ownerOverrides.proxyAdmin',
+      );
+    }
   });
 
   it('should accept deposit-address bridge config', () => {
@@ -320,6 +346,74 @@ describe('WarpRouteDeployConfigSchema refine', () => {
       'must be syntheticRebase',
     );
     expect(warpConfig.optimism.collateralChainName).to.equal('arbitrum');
+  });
+
+  describe('delayed flow router remoteIsms', () => {
+    const REMOTE_ISM_BYTES32 = ethers.utils.hexZeroPad(
+      '0x3333333333333333333333333333333333333333',
+      32,
+    );
+
+    function configWithDelayedFlow(remoteIsms?: Record<string, string>) {
+      return {
+        arbitrum: {
+          type: TokenType.collateral,
+          token: SOME_ADDRESS,
+          owner: SOME_ADDRESS,
+          mailbox: SOME_ADDRESS,
+          interchainSecurityModule: {
+            type: IsmType.AGGREGATION,
+            threshold: 2,
+            modules: [
+              { type: IsmType.TRUSTED_RELAYER, relayer: SOME_ADDRESS },
+              {
+                type: IsmType.DELAYED_FLOW_ROUTER,
+                thresholdBps: 10000,
+                maxDelay: 3600,
+                duration: 86400n,
+                owner: SOME_ADDRESS,
+                remoteIsms,
+              },
+            ],
+          },
+        },
+      };
+    }
+
+    it('accepts a delayed flow router without remoteIsms', () => {
+      expect(
+        WarpRouteDeployConfigSchema.safeParse(configWithDelayedFlow()).success,
+      ).to.be.true;
+    });
+
+    it('accepts an operator-supplied remoteIsms', () => {
+      // `warp read` emits the field, so rejecting it would break the
+      // read -> edit -> apply round trip; the value is honoured verbatim by
+      // both the expected config and the enrollment transactions.
+      const parseResults = WarpRouteDeployConfigSchema.safeParse(
+        configWithDelayedFlow({ ethereum: REMOTE_ISM_BYTES32 }),
+      );
+      assert(parseResults.success, 'expected remoteIsms to be accepted');
+
+      const ism = parseResults.data.arbitrum.interchainSecurityModule;
+      assert(
+        typeof ism === 'object' && ism.type === IsmType.AGGREGATION,
+        'expected an aggregation ism',
+      );
+      const delayedNode = ism.modules.find(
+        (module) =>
+          typeof module === 'object' &&
+          module.type === IsmType.DELAYED_FLOW_ROUTER,
+      );
+      assert(
+        typeof delayedNode === 'object' &&
+          delayedNode.type === IsmType.DELAYED_FLOW_ROUTER,
+        'expected a delayed flow router node',
+      );
+      expect(delayedNode.remoteIsms).to.deep.equal({
+        ethereum: REMOTE_ISM_BYTES32,
+      });
+    });
   });
 
   describe('tokenFee input schema', () => {

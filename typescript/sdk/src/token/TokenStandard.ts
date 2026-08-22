@@ -29,6 +29,7 @@ export enum TokenStandard {
   EvmHypEverclearCollateral = 'EvmHypEverclearCollateral',
   EvmHypEverclearEth = 'EvmHypEverclearEth',
   EvmHypCrossCollateralRouter = 'EvmHypCrossCollateralRouter',
+  EvmAtomicLocalRebalancingBridge = 'EvmAtomicLocalRebalancingBridge',
 
   // Sealevel (Solana)
   SealevelSpl = 'SealevelSpl',
@@ -93,6 +94,7 @@ export enum TokenStandard {
   TronHypEverclearCollateral = 'TronHypEverclearCollateral',
   TronHypEverclearEth = 'TronHypEverclearEth',
   TronHypCrossCollateralRouter = 'TronHypCrossCollateralRouter',
+  TronAtomicLocalRebalancingBridge = 'TronAtomicLocalRebalancingBridge',
 
   // Midnight
   MidnightNative = 'MidnightNative',
@@ -126,6 +128,7 @@ export const TOKEN_STANDARD_TO_PROTOCOL: Record<
   [TokenStandard.EvmHypEverclearCollateral]: ProtocolType.Ethereum,
   [TokenStandard.EvmHypEverclearEth]: ProtocolType.Ethereum,
   [TokenStandard.EvmHypCrossCollateralRouter]: ProtocolType.Ethereum,
+  [TokenStandard.EvmAtomicLocalRebalancingBridge]: ProtocolType.Ethereum,
 
   // Sealevel (Solana)
   SealevelSpl: ProtocolType.Sealevel,
@@ -190,6 +193,7 @@ export const TOKEN_STANDARD_TO_PROTOCOL: Record<
   TronHypEverclearCollateral: ProtocolType.Tron,
   TronHypEverclearEth: ProtocolType.Tron,
   TronHypCrossCollateralRouter: ProtocolType.Tron,
+  TronAtomicLocalRebalancingBridge: ProtocolType.Tron,
 
   // Midnight
   MidnightNative: ProtocolType.Midnight,
@@ -493,6 +497,8 @@ export const EVM_TOKEN_TYPE_TO_STANDARD: Record<
   [TokenType.collateralEverclear]: TokenStandard.EvmHypEverclearCollateral,
   [TokenType.collateralDepositAddress]: TokenStandard.EvmHypCollateral,
   [TokenType.collateralOft]: TokenStandard.EvmHypCollateral,
+  [TokenType.atomicLocalRebalancing]:
+    TokenStandard.EvmAtomicLocalRebalancingBridge,
   [TokenType.crossCollateral]: TokenStandard.EvmHypCrossCollateralRouter,
 };
 
@@ -620,6 +626,8 @@ export const TRON_TOKEN_TYPE_TO_STANDARD: Record<
   [TokenType.collateralEverclear]: TokenStandard.TronHypEverclearCollateral,
   [TokenType.collateralDepositAddress]: TokenStandard.TronHypCollateral,
   [TokenType.collateralOft]: TokenStandard.TronHypCollateral,
+  [TokenType.atomicLocalRebalancing]:
+    TokenStandard.TronAtomicLocalRebalancingBridge,
   [TokenType.crossCollateral]: TokenStandard.TronHypCrossCollateralRouter,
 };
 

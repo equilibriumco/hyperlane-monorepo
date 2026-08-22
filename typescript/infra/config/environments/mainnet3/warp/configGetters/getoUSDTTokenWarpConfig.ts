@@ -33,16 +33,12 @@ export const deploymentChains = [
   'lisk',
   'worldchain',
   'sonic',
-  'bitlayer',
-  'ronin',
   'mantle',
   'metis',
   'linea',
   'metal',
   'bob',
-  'hashkey',
   'swell',
-  'botanix',
   'zerogravity',
 ] as const;
 const supportedCCIPChains = ['base', 'mode', 'optimism'];
@@ -73,16 +69,12 @@ const productionBufferCapByChain: TypedoUSDTTokenChainMap<string> = {
   lisk: lowerBufferCap,
   worldchain: '0',
   sonic: middleBufferCap,
-  bitlayer: lowerBufferCap,
-  ronin: lowerBufferCap,
   mantle: middleBufferCap,
   metis: lowerBufferCap,
   linea: lowerBufferCap,
   metal: lowerBufferCap,
   bob: lowerBufferCap,
-  hashkey: lowerBufferCap,
   swell: middleBufferCap,
-  botanix: middleBufferCap,
   zerogravity: middleBufferCap,
 };
 const productionDefaultRateLimitPerSecond = '5000000000'; // 5k/s = 5 * 10^3 ^ 10^6
@@ -102,16 +94,12 @@ const productionRateLimitByChain: TypedoUSDTTokenChainMap<string> = {
   lisk: lowerRateLimitPerSecond,
   worldchain: '0',
   sonic: middleRateLimitPerSecond,
-  bitlayer: lowerRateLimitPerSecond,
-  ronin: lowerRateLimitPerSecond,
   mantle: middleRateLimitPerSecond,
   metis: lowerRateLimitPerSecond,
   linea: lowerRateLimitPerSecond,
   metal: lowerRateLimitPerSecond,
   bob: lowerRateLimitPerSecond,
-  hashkey: lowerRateLimitPerSecond,
   swell: middleRateLimitPerSecond,
-  botanix: middleRateLimitPerSecond,
   zerogravity: middleRateLimitPerSecond,
 };
 
@@ -183,14 +171,6 @@ const productionOwnerOverridesByChain: TypedoUSDTTokenChainMap<
     collateralToken: productionOwnerByChain.sonic,
     collateralProxyAdmin: productionOwnerByChain.sonic,
   },
-  bitlayer: {
-    collateralToken: productionOwnerByChain.bitlayer,
-    collateralProxyAdmin: productionOwnerByChain.bitlayer,
-  },
-  ronin: {
-    collateralToken: productionOwnerByChain.ronin,
-    collateralProxyAdmin: productionOwnerByChain.ronin,
-  },
   mantle: {
     collateralToken: productionOwnerByChain.mantle,
     collateralProxyAdmin: productionOwnerByChain.mantle,
@@ -211,17 +191,9 @@ const productionOwnerOverridesByChain: TypedoUSDTTokenChainMap<
     collateralToken: productionOwnerByChain.bob,
     collateralProxyAdmin: productionOwnerByChain.bob,
   },
-  hashkey: {
-    collateralToken: productionOwnerByChain.hashkey,
-    collateralProxyAdmin: productionOwnerByChain.hashkey,
-  },
   swell: {
     collateralToken: productionOwnerByChain.swell,
     collateralProxyAdmin: productionOwnerByChain.swell,
-  },
-  botanix: {
-    collateralToken: productionOwnerByChain.botanix,
-    collateralProxyAdmin: productionOwnerByChain.botanix,
   },
   zerogravity: {
     collateralToken: productionOwnerByChain.zerogravity,
@@ -250,8 +222,6 @@ const productionCCIPTokenPoolAddresses: ChainMap<Address> = {
   sonic: '0x6a21a19aD44542d83F7f7FF45Aa31A62a36200de',
   optimism: '0x6a21a19aD44542d83F7f7FF45Aa31A62a36200de',
   bob: '0xAFEd606Bd2CAb6983fC6F10167c98aaC2173D77f',
-  hashkey: '0x55aeb80Aa6Ab34aA83E1F387903F8Bb2Aa9e2F2d',
-  botanix: '0x0EEFa8b75587bcD4A909a0F3c36180D4441481a0',
   zerogravity: '0xd7502CaBdb70c79382deF58FB6df3CdA69cb2A1b',
 };
 
@@ -326,18 +296,6 @@ const productionExtraBridges: ChainMap<XERC20TokenExtraBridgesLimits[]> = {
       limits: productionCCIPTokenPoolLimits,
     },
   ],
-  hashkey: [
-    {
-      lockbox: productionCCIPTokenPoolAddresses.hashkey,
-      limits: productionCCIPTokenPoolLimits,
-    },
-  ],
-  botanix: [
-    {
-      lockbox: productionCCIPTokenPoolAddresses.botanix,
-      limits: productionCCIPTokenPoolLimits,
-    },
-  ],
   zerogravity: [
     {
       lockbox: productionCCIPTokenPoolAddresses.zerogravity,
@@ -360,16 +318,12 @@ const productionXERC20AddressesByChain: TypedoUSDTTokenChainMap<Address> = {
   lisk: productionXERC20TokenAddress,
   worldchain: productionXERC20TokenAddress,
   sonic: productionXERC20TokenAddress,
-  bitlayer: productionXERC20TokenAddress,
-  ronin: productionXERC20TokenAddress,
   mantle: productionXERC20TokenAddress,
   metis: productionXERC20TokenAddress,
   linea: productionXERC20TokenAddress,
   metal: productionXERC20TokenAddress,
   bob: productionXERC20TokenAddress,
-  hashkey: productionXERC20TokenAddress,
   swell: productionXERC20TokenAddress,
-  botanix: productionXERC20TokenAddress,
   zerogravity: productionXERC20TokenAddress,
 };
 
@@ -389,16 +343,12 @@ const stagingBufferCapByChain: TypedoUSDTTokenChainMap<string> = {
   lisk: stagingDefaultBufferCap,
   worldchain: stagingDefaultBufferCap,
   sonic: stagingDefaultBufferCap,
-  bitlayer: stagingDefaultBufferCap,
-  ronin: stagingDefaultBufferCap,
   mantle: stagingDefaultBufferCap,
   metis: stagingDefaultBufferCap,
   linea: stagingDefaultBufferCap,
   metal: stagingDefaultBufferCap,
   bob: stagingDefaultBufferCap,
-  hashkey: stagingDefaultBufferCap,
   swell: stagingDefaultBufferCap,
-  botanix: stagingDefaultBufferCap,
   zerogravity: stagingDefaultBufferCap,
 };
 const stagingDefaultRateLimitPerSecond = '120000000';
@@ -416,16 +366,12 @@ const stagingRateLimitByChain: TypedoUSDTTokenChainMap<string> = {
   lisk: stagingDefaultRateLimitPerSecond,
   worldchain: stagingDefaultRateLimitPerSecond,
   sonic: stagingDefaultRateLimitPerSecond,
-  bitlayer: stagingDefaultRateLimitPerSecond,
-  ronin: stagingDefaultRateLimitPerSecond,
   mantle: stagingDefaultRateLimitPerSecond,
   metis: stagingDefaultRateLimitPerSecond,
   linea: stagingDefaultRateLimitPerSecond,
   metal: stagingDefaultRateLimitPerSecond,
   bob: stagingDefaultRateLimitPerSecond,
-  hashkey: stagingDefaultRateLimitPerSecond,
   swell: stagingDefaultRateLimitPerSecond,
-  botanix: stagingDefaultRateLimitPerSecond,
   zerogravity: stagingDefaultRateLimitPerSecond,
 };
 
@@ -455,16 +401,12 @@ const stagingXERC20AddressesByChain: TypedoUSDTTokenChainMap<Address> = {
   lisk: stagingXERC20TokenAddress,
   worldchain: stagingXERC20TokenAddress,
   sonic: stagingXERC20TokenAddress,
-  bitlayer: stagingXERC20TokenAddress,
-  ronin: stagingXERC20TokenAddress,
   mantle: stagingXERC20TokenAddress,
   metis: stagingXERC20TokenAddress,
   linea: stagingXERC20TokenAddress,
   metal: stagingXERC20TokenAddress,
   bob: stagingXERC20TokenAddress,
-  hashkey: stagingXERC20TokenAddress,
   swell: stagingXERC20TokenAddress,
-  botanix: stagingXERC20TokenAddress,
   zerogravity: stagingXERC20TokenAddress,
 };
 

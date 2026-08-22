@@ -1,6 +1,6 @@
 {
   "name": "@hyperlane-xyz/cli",
-  "version": "40.0.0",
+  "version": "41.3.1",
   "description": "A command-line utility for common Hyperlane operations",
   "keywords": [
     "CLI",
@@ -57,6 +57,7 @@
     "@hyperlane-xyz/core": "workspace:*",
     "@hyperlane-xyz/cosmos-sdk": "workspace:*",
     "@hyperlane-xyz/deploy-sdk": "workspace:*",
+    "@hyperlane-xyz/forking-sdk": "workspace:*",
     "@hyperlane-xyz/http-registry-server": "workspace:*",
     "@hyperlane-xyz/midnight-sdk": "workspace:*",
     "@hyperlane-xyz/provider-sdk": "workspace:*",

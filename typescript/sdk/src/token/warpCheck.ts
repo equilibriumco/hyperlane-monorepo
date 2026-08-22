@@ -1,11 +1,14 @@
 import { zeroAddress } from 'viem';
+import type { BigNumber } from 'ethers';
 
 import {
   CrossCollateralRouter__factory,
+  DelayedFlowRouterHookIsm__factory,
   IERC4626__factory,
   IXERC20Lockbox__factory,
   Ownable__factory,
   ProxyAdmin__factory,
+  TimelockController__factory,
 } from '@hyperlane-xyz/core';
 import {
   createWarpTokenReader,
@@ -36,15 +39,23 @@ import {
 } from '@hyperlane-xyz/utils';
 
 import { isProxy, proxyAdmin } from '../deploy/proxy.js';
+import { IsmType } from '../ism/types.js';
 import { altVmChainLookup } from '../metadata/ChainMetadataManager.js';
 import { MultiProvider } from '../providers/MultiProvider.js';
 import { resolveRouterMapConfig } from '../router/types.js';
+import {
+  CANCELLER_ROLE,
+  EXECUTOR_ROLE,
+  PROPOSER_ROLE,
+} from '../timelock/evm/constants.js';
+import { isDeterministicTimelockReadError } from '../timelock/evm/errors.js';
 import { ChainName } from '../types.js';
 import {
   type ScaleInput,
   scalesEqual,
   verifyScale,
 } from '../utils/decimals.js';
+import { collectHybridIsmNodes } from '../utils/ism.js';
 import { WarpCoreConfig } from '../warp/types.js';
 
 import { EvmWarpRouteReader } from './EvmWarpRouteReader.js';
@@ -62,6 +73,7 @@ import {
   OwnerStatus,
   TokenMetadata,
   WarpRouteDeployConfigMailboxRequired,
+  assertTimelockConfigHasNoProxyAdminOwnerOverride,
   derivedHookAddress,
   derivedIsmAddress,
   isCollateralTokenConfig,
@@ -299,16 +311,6 @@ function normalizeCrossCollateralRouters(
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-// `collateralDex` is a paradex-only registry annotation for a collateral route
-// that performs a DEX conversion (see registry ETH/paradex & DIME/paradex). It has
-// no matching SDK TokenType, and on-chain the leg is a standard collateral router,
-// so the deriver reports `collateral`. Treat the annotation as its underlying
-// collateral type so the generic altVM diff doesn't false-flag a `type` mismatch.
-const COLLATERAL_DEX_TYPE_ALIAS = 'collateralDex';
-export function normalizeAltVmExpectedTokenType(type: string): string {
-  return type === COLLATERAL_DEX_TYPE_ALIAS ? TokenType.collateral : type;
-}
-
 export function expandedDeployConfigToAltVmCheckConfig(
   chain: ChainName,
   config: WarpRouteDeployConfigMailboxRequired[string],
@@ -366,7 +368,7 @@ export function expandedDeployConfigToAltVmCheckConfig(
   // altVmScaleMismatch (exact bigint fraction compare against the raw expected
   // config.scale), not through this generic diff. See checkWarpRouteDeployConfig.
   const result: AltVmCheckConfig = {
-    type: normalizeAltVmExpectedTokenType(config.type),
+    type: config.type,
     owner: normalizeAddress(config.owner, protocol),
     mailbox: normalizeAddress(config.mailbox, protocol),
     interchainSecurityModule: ismAddress,
@@ -387,7 +389,7 @@ export function expandedDeployConfigToAltVmCheckConfig(
   // core-config decimals is excluded here to keep both sides symmetric.
   if (
     protocol !== ProtocolType.CosmosNative &&
-    normalizeAltVmExpectedTokenType(config.type) !== TokenType.native &&
+    config.type !== TokenType.native &&
     !isNullish(config.decimals)
   ) {
     result.decimals = config.decimals;
@@ -724,6 +726,7 @@ export async function checkWarpRouteDeployConfig({
   const knownWarpCoreTokens = warpCoreConfig.tokens.filter(
     (token) => multiProvider.tryGetProtocol(token.chainName) !== null,
   );
+  assertTimelockSupportedByProtocols({ multiProvider, warpDeployConfig });
   const evmWarpCoreConfig = {
     ...warpCoreConfig,
     tokens: knownWarpCoreTokens.filter((token) =>
@@ -855,9 +858,22 @@ export async function checkWarpRouteDeployConfig({
     warpRouteConfig: evmExpandedWarpDeployConfig,
   });
 
+  await addUnknownDelayedFlowDomainDiffs({
+    multiProvider,
+    diff: rawEvmDiff,
+    onChainWarpConfig: expandedOnChainWarpConfig,
+    warpRouteConfig: evmExpandedWarpDeployConfig,
+  });
+
   await addOwnerOverrideDiffs({
     multiProvider,
     diff: rawEvmDiff,
+    warpRouteConfig: evmExpandedWarpDeployConfig,
+  });
+  await addTimelockDiffs({
+    multiProvider,
+    diff: rawEvmDiff,
+    onChainWarpConfig: expandedOnChainWarpConfig,
     warpRouteConfig: evmExpandedWarpDeployConfig,
   });
 
@@ -925,6 +941,77 @@ export async function checkWarpRouteDeployConfig({
   };
 }
 
+async function addUnknownDelayedFlowDomainDiffs({
+  multiProvider,
+  diff,
+  onChainWarpConfig,
+  warpRouteConfig,
+}: {
+  multiProvider: MultiProvider;
+  diff: Record<string, ObjectDiff>;
+  onChainWarpConfig: DerivedWarpRouteDeployConfig &
+    Record<string, Partial<HypTokenRouterVirtualConfig>>;
+  warpRouteConfig: WarpRouteDeployConfigMailboxRequired &
+    Record<string, Partial<HypTokenRouterVirtualConfig>>;
+}): Promise<void> {
+  for (const [chain, expectedConfig] of Object.entries(warpRouteConfig)) {
+    if (
+      typeof expectedConfig.interchainSecurityModule !== 'object' ||
+      !collectHybridIsmNodes(expectedConfig.interchainSecurityModule).some(
+        (node) =>
+          node.type === IsmType.DELAYED_FLOW_ROUTER &&
+          node.remoteIsms !== undefined,
+      )
+    ) {
+      continue;
+    }
+
+    const actualIsm = onChainWarpConfig[chain]?.interchainSecurityModule;
+    if (typeof actualIsm !== 'object') continue;
+
+    const actualNodes = collectHybridIsmNodes(actualIsm).filter(
+      (node) => node.type === IsmType.DELAYED_FLOW_ROUTER,
+    );
+    for (const node of actualNodes) {
+      if (!('address' in node) || typeof node.address !== 'string') continue;
+      const delayedIsm = DelayedFlowRouterHookIsm__factory.connect(
+        node.address,
+        multiProvider.getProvider(chain),
+      );
+      for (const domainValue of await delayedIsm.domains()) {
+        const domain = Number(domainValue);
+        if (multiProvider.tryGetChainName(domain) !== null) continue;
+        addNestedDiff(
+          diff,
+          chain,
+          ['interchainSecurityModule', 'remoteIsms', String(domain)],
+          {
+            actual: (await delayedIsm.routers(domain)).toLowerCase(),
+            expected: 'not enrolled',
+          },
+        );
+      }
+    }
+  }
+}
+
+function assertTimelockSupportedByProtocols({
+  multiProvider,
+  warpDeployConfig,
+}: {
+  multiProvider: MultiProvider;
+  warpDeployConfig: WarpRouteDeployConfigMailboxRequired;
+}) {
+  for (const [chain, config] of Object.entries(warpDeployConfig)) {
+    assertTimelockConfigHasNoProxyAdminOwnerOverride(config, chain);
+    const protocol = multiProvider.tryGetProtocol(chain);
+    assert(
+      !config.timelock || (protocol && isEVMLike(protocol)),
+      `Timelock config is not supported on Alt-VM chain '${chain}'.`,
+    );
+  }
+}
+
 export function buildWarpRouteDiff({
   warpRouteConfig,
   onChainWarpConfig,
@@ -974,6 +1061,13 @@ export function buildWarpRouteDiff({
         currentDeployedConfig.contractVersion = undefined;
       }
 
+      if (expectedDeployedConfig.timelock && currentDeployedConfig.proxyAdmin) {
+        expectedDeployedConfig.proxyAdmin = {
+          ...expectedDeployedConfig.proxyAdmin,
+          owner: currentDeployedConfig.proxyAdmin.owner,
+        };
+      }
+
       if (!expectedDeployedConfig.proxyAdmin?.address) {
         currentDeployedConfig.proxyAdmin = currentDeployedConfig.proxyAdmin
           ? {
@@ -981,6 +1075,19 @@ export function buildWarpRouteDiff({
               address: undefined,
             }
           : undefined;
+      }
+
+      if (expectedDeployedConfig.type === TokenType.atomicLocalRebalancing) {
+        // ALRBs are bare local bridge adapters. The deploy config still carries
+        // a mailbox because the shared warp schema requires one, but the
+        // contract neither stores nor uses mailbox-client or gas-router state.
+        // Keep checking the operational surface (owner, source, token metadata,
+        // scale, targets, and recipients) without reporting those schema-only
+        // fields as on-chain drift.
+        expectedDeployedConfig.mailbox = undefined;
+        currentDeployedConfig.mailbox = undefined;
+        expectedDeployedConfig.destinationGas = undefined;
+        currentDeployedConfig.destinationGas = undefined;
       }
 
       const { mergedObject, isInvalid } = diffObjMerge(
@@ -996,6 +1103,89 @@ export function buildWarpRouteDiff({
     },
     {} as Record<string, ObjectDiff>, // CAST: reduce incrementally populates chain-keyed ObjectDiff entries
   );
+}
+
+async function addTimelockDiffs({
+  multiProvider,
+  diff,
+  onChainWarpConfig,
+  warpRouteConfig,
+}: {
+  multiProvider: MultiProvider;
+  diff: Record<string, ObjectDiff>;
+  onChainWarpConfig: DerivedWarpRouteDeployConfig &
+    Record<string, Partial<HypTokenRouterVirtualConfig>>;
+  warpRouteConfig: WarpRouteDeployConfigMailboxRequired &
+    Record<string, Partial<HypTokenRouterVirtualConfig>>;
+}) {
+  for (const [chain, config] of Object.entries(warpRouteConfig)) {
+    if (!config.timelock || !isEVMLike(multiProvider.getProtocol(chain))) {
+      continue;
+    }
+
+    const proxyAdminOwner = onChainWarpConfig[chain]?.proxyAdmin?.owner;
+    if (!proxyAdminOwner) {
+      addNestedDiff(diff, chain, ['timelock'], {
+        actual: 'missing',
+        expected: 'present',
+      });
+      continue;
+    }
+
+    let delay: BigNumber;
+    let hasProposer: boolean;
+    let hasExecutor: boolean;
+    let hasCanceller: boolean;
+    let hasAdminSelf: boolean;
+    try {
+      const timelock = TimelockController__factory.connect(
+        proxyAdminOwner,
+        multiProvider.getProvider(chain),
+      );
+      const [timelockDelay, adminRole, proposer, executor, canceller] =
+        await Promise.all([
+          timelock.getMinDelay(),
+          timelock.TIMELOCK_ADMIN_ROLE(),
+          timelock.hasRole(PROPOSER_ROLE, config.timelock.roles.proposer),
+          timelock.hasRole(EXECUTOR_ROLE, config.timelock.roles.executor),
+          timelock.hasRole(CANCELLER_ROLE, config.timelock.roles.proposer),
+        ]);
+      delay = timelockDelay;
+      hasProposer = proposer;
+      hasExecutor = executor;
+      hasCanceller = canceller;
+      hasAdminSelf = await timelock.hasRole(adminRole, proxyAdminOwner);
+    } catch (error) {
+      if (!isDeterministicTimelockReadError(error)) throw error;
+      addNestedDiff(diff, chain, ['timelock', 'address'], {
+        actual: proxyAdminOwner,
+        expected: 'TimelockController',
+      });
+      continue;
+    }
+
+    if (!delay.eq(config.timelock.delay)) {
+      addNestedDiff(diff, chain, ['timelock', 'delay'], {
+        actual: delay.toString(),
+        expected: config.timelock.delay.toString(),
+      });
+    }
+
+    const roleChecks = {
+      proposer: hasProposer,
+      executor: hasExecutor,
+      canceller: hasCanceller,
+      admin: hasAdminSelf,
+    };
+    for (const [role, hasRole] of Object.entries(roleChecks)) {
+      if (!hasRole) {
+        addNestedDiff(diff, chain, ['timelock', 'roles', role], {
+          actual: false,
+          expected: true,
+        });
+      }
+    }
+  }
 }
 
 async function addOwnerOverrideDiffs({

@@ -159,6 +159,13 @@ export class Token extends TokenMetadata implements IToken {
       return new MidnightNativeTokenAdapter(chainName, multiProvider, {
         token: addressOrDenom,
       });
+    } else if (
+      standard === TokenStandard.EvmAtomicLocalRebalancingBridge ||
+      standard === TokenStandard.TronAtomicLocalRebalancingBridge
+    ) {
+      throw new Error(
+        'AtomicLocalRebalancingBridge is operational infrastructure and does not support user token transfers',
+      );
     } else if (this.isHypToken()) {
       return this.getHypAdapter(multiProvider);
     } else if (this.isIbcToken()) {

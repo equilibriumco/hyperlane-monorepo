@@ -23,6 +23,7 @@ import {
   ProtocolType,
   assert,
   convertToProtocolAddress,
+  isNullish,
 } from '@hyperlane-xyz/utils';
 
 import { ChainMetadata } from '../metadata/chainMetadataTypes.js';
@@ -96,10 +97,11 @@ export async function estimateTransactionFeeEthersV5ForGasUnits({
   const feeData = await provider.getFeeData();
   return computeEvmTxFee(
     gasUnits,
-    feeData.gasPrice ? BigInt(feeData.gasPrice.toString()) : undefined,
-    feeData.maxFeePerGas ? BigInt(feeData.maxFeePerGas.toString()) : undefined,
-    feeData.maxPriorityFeePerGas
-      ? BigInt(feeData.maxPriorityFeePerGas.toString())
+    !isNullish(feeData.gasPrice)
+      ? BigInt(feeData.gasPrice.toString())
+      : undefined,
+    !isNullish(feeData.maxFeePerGas)
+      ? BigInt(feeData.maxFeePerGas.toString())
       : undefined,
   );
 }
@@ -119,24 +121,18 @@ export async function estimateTransactionFeeViem({
     account: sender as `0x${string}`,
   } as any); // Cast to silence overly-protective type enforcement from viem here
   const feeData = await provider.provider.estimateFeesPerGas();
-  return computeEvmTxFee(
-    gasUnits,
-    feeData.gasPrice,
-    feeData.maxFeePerGas,
-    feeData.maxPriorityFeePerGas,
-  );
+  return computeEvmTxFee(gasUnits, feeData.gasPrice, feeData.maxFeePerGas);
 }
 
 function computeEvmTxFee(
   gasUnits: bigint,
   gasPrice?: bigint,
   maxFeePerGas?: bigint,
-  maxPriorityFeePerGas?: bigint,
 ): TransactionFeeEstimate {
   let estGasPrice: bigint;
-  if (maxFeePerGas && maxPriorityFeePerGas) {
-    estGasPrice = maxFeePerGas + maxPriorityFeePerGas;
-  } else if (gasPrice) {
+  if (!isNullish(maxFeePerGas)) {
+    estGasPrice = maxFeePerGas;
+  } else if (!isNullish(gasPrice)) {
     estGasPrice = gasPrice;
   } else {
     throw new Error('Invalid fee data, neither 1559 nor legacy');
@@ -157,24 +153,34 @@ export async function estimateTransactionFeeSolanaWeb3({
 }): Promise<TransactionFeeEstimate> {
   const connection = provider.provider;
   const inner = transaction.transaction;
+  const message =
+    inner instanceof VersionedTransaction
+      ? inner.message
+      : inner.compileMessage();
   // The two arms are intentionally identical: `Connection.simulateTransaction`
   // has separate overloads for legacy `Transaction` and `VersionedTransaction`
   // and the union satisfies neither, so we branch purely to narrow `inner` to a
   // concrete type and let overload resolution pick the matching signature.
-  const { value } =
+  const simulation =
     inner instanceof VersionedTransaction
-      ? await connection.simulateTransaction(inner)
-      : await connection.simulateTransaction(inner);
+      ? connection.simulateTransaction(inner)
+      : connection.simulateTransaction(inner);
+  const [{ value }, feeResponse] = await Promise.all([
+    simulation,
+    connection.getFeeForMessage(message),
+  ]);
   assert(!value.err, `Solana gas estimation failed: ${JSON.stringify(value)}`);
-  const gasUnits = BigInt(value.unitsConsumed || 0);
-  const recentFees = await connection.getRecentPrioritizationFees();
-  // prioritizationFee is in micro-lamports per compute unit; divide by 1e6 to get lamports
-  const microLamportsPerCu = BigInt(recentFees[0]?.prioritizationFee ?? 0);
-  const fee = (gasUnits * microLamportsPerCu) / 1_000_000n;
+  const gasUnits = BigInt(value.unitsConsumed ?? 0);
+  assert(
+    feeResponse.value !== null,
+    'Solana transaction fee estimation failed',
+  );
   return {
     gasUnits,
-    gasPrice: microLamportsPerCu,
-    fee,
+    // Solana's message fee includes fixed signature and optional priority fees,
+    // so it cannot be represented as one price per consumed compute unit.
+    gasPrice: 0n,
+    fee: BigInt(feeResponse.value),
   };
 }
 
