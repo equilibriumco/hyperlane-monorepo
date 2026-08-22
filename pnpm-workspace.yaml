@@ -185,6 +185,9 @@ catalog:
   '@prisma/client': 7.8.0
   prisma: 7.8.0
 overrides:
+  # compact-js's ^1.0.0-rc.3 range floats to rc.4; stagenet pairs with rc.3,
+  # and the ledger WASM must stay a single copy.
+  '@midnightntwrk/ledger-v9': 1.0.0-rc.3
   # 0.11.6 requires 18 consensus heights; current Aleo E2E networks provide 17.
   '@provablehq/wasm': 0.11.3
   '@types/react': 18.3.27
