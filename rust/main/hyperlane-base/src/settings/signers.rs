@@ -403,8 +403,9 @@ impl BuildableWithSignerConf for hyperlane_midnight::MidnightSigner {
             _ => bail!(format!(
                 "{conf:?} is not supported by midnight; use signer type `node` \
                  (transaction signing is delegated to the handle-submitter \
-                  subprocess; relayer wallet seed comes from \
-                  `MIDNIGHT_RELAYER_SEED`)"
+                  subprocess; the relayer wallet seed comes from \
+                  `MIDNIGHT_RELAYER_SEED`, the validator's announce wallet \
+                  from `MIDNIGHT_VALIDATOR_SEED`)"
             )),
         }
     }
