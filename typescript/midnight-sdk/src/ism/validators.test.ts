@@ -32,7 +32,7 @@ function multisigConfig(overrides: Partial<MultisigConfig>): MultisigConfig {
     threshold: 2,
     validatorPubkeys: PUBKEYS,
     ...overrides,
-  } as MultisigConfig;
+  };
 }
 
 describe('pubkeyToEthAddress', () => {
