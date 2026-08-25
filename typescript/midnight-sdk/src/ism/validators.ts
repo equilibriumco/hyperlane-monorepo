@@ -27,10 +27,9 @@ export interface ResolvedValidatorSet {
 }
 
 /**
- * Resolve the 64-byte validator pubkeys a Midnight write needs from a
- * multisig ISM config. `validators` carries the canonical eth addresses
- * (what reads and checks compare); `validatorPubkeys` must accompany them
- * for writes, and each pubkey must hash to its validator address.
+ * `validators` holds the canonical eth addresses that reads and checks compare
+ * against; a write additionally needs `validatorPubkeys`, each of which must
+ * hash to its address.
  */
 export function resolveValidatorSet(
   config: RawIsmArtifactConfigs['messageIdMultisigIsm'],

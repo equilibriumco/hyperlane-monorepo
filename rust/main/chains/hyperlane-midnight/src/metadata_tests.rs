@@ -1,33 +1,15 @@
-//! #18: relayer outbound metadata parity — Midnight as the ORIGIN chain.
+//! Outbound metadata parity with Midnight as the origin chain.
 //!
-//! The relayer's two outbound responsibilities are (a) listing pending
-//! Midnight-origin messages and (b) assembling MultisigIsm metadata a STANDARD
-//! destination ISM verifies. Both are chain-agnostic upstream once the Midnight
-//! crate supplies the standard traits (dispatch indexer #16, merkle indexer #15,
-//! validator announce #33, chain-sourced ISM #14) and the validator signs
-//! standard checkpoints (#17) — the relayer's `MessageIdMultisigMetadataBuilder`
-//! contains no chain-specific code (verified: zero `midnight`/`aleo`/`sealevel`
-//! references in `agents/relayer/src`). Enumeration is covered in `indexer.rs`
-//! (`dispatch_enumerates_committed_fixture_in_sequence`).
-//!
-//! This module closes the second half: it proves that the MessageIdMultisig
-//! metadata blob built from a Midnight-origin checkpoint is byte-shaped exactly
-//! as a stock EVM `MessageIdMultisigIsm` expects, and that the destination's
-//! forward-only two-pointer verification accepts it. #17's checkpoint vector
-//! already pins the SINGLE checkpoint digest + one signature against the EVM
-//! oracle; this goes one layer out to the assembled M-of-N metadata structure:
+//! Proves that the MessageIdMultisig metadata assembled from a Midnight-origin
+//! checkpoint has the byte layout a stock EVM `MessageIdMultisigIsm` expects:
 //!
 //!   merkleTreeHook(32) || root(32) || index(u32 BE, 4) || signature(65) * M
 //!
-//! The committed `hyperlane-metadata-vector.json` is generated offline (no node,
-//! no proof) by `contracts/tests/utils/generate-metadata-vector.ts` from the
-//! SAME two-dispatch scenario as `night-state-dispatched.hex`, with digests and
-//! signatures produced by the independent `@hyperlane-xyz/utils` oracle. This
-//! test first drift-guards the fixture against the vector (one dispatch state),
-//! then asserts the digest parity and runs the exact destination-side
-//! verification. The signing subset is chosen to be descending by address while
-//! ascending by set index, so the ordering requirement is exercised
-//! adversarially (a verifier matching by address would reject it).
+//! and that the destination's forward-only verification accepts it. Digests and
+//! signatures in the committed vector come from the independent
+//! `@hyperlane-xyz/utils` oracle. The signing subset is deliberately descending
+//! by address while ascending by set index, so a verifier that matched by
+//! address instead of index would fail here.
 
 use hyperlane_core::{
     accumulator::incremental::IncrementalMerkle, Checkpoint, CheckpointWithMessageId, Signable,
@@ -45,15 +27,14 @@ struct MetadataVector {
     root: String,
     index: u32,
     message_id: String,
-    /// Inner checkpoint digest (`BaseValidator.messageHash`) from the oracle.
+    /// Inner checkpoint digest (`BaseValidator.messageHash`).
     inner: String,
-    /// EIP-191-wrapped digest the validators signed, from the oracle.
+    /// EIP-191-wrapped digest the validators signed.
     digest: String,
     threshold: usize,
-    /// Full validator set in configured (index) order, as the destination ISM
-    /// walks it.
+    /// Full validator set in index order, as the destination ISM walks it.
     validators: Vec<String>,
-    /// Signatures in ascending validator-index order (the subset that signed).
+    /// The subset that signed, in ascending validator-index order.
     signatures: Vec<String>,
     /// The assembled MessageIdMultisig metadata blob.
     metadata: String,
@@ -77,16 +58,14 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
     ))
     .expect("vector json parses");
 
-    // --- Drift guard: the committed fixture and this vector are one dispatch ---
+    // Drift guard: the committed fixture and this vector must describe one
+    // dispatch state.
     let fixture = hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
         .expect("fixture is valid hex");
 
     let mut messages = decode_dispatched_messages(&fixture).expect("decode dispatched messages");
     messages.sort_by_key(|(nonce, _)| *nonce);
 
-    // A local replica rebuilt from the dispatch leaves reproduces the vector's
-    // root input. The contract keeps no on-chain root, so this reconstruction
-    // is the sole source — exactly the root the validator signs.
     let mut tree = IncrementalMerkle::default();
     for (_nonce, message) in &messages {
         tree.ingest(message.id());
@@ -108,7 +87,6 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         "fixture tip messageId must match the vector (fixture/vector drift)"
     );
 
-    // --- Byte layout the destination MessageIdMultisigIsm reads ---
     let blob = bytes(&vector.metadata);
     assert_eq!(
         blob.len(),
@@ -116,8 +94,8 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         "metadata length is 68 + 65*threshold"
     );
 
-    // Parse the checkpoint fields straight out of the blob, exactly as the
-    // destination ISM does, and confirm they equal the vector's fields.
+    // Parse the checkpoint fields out of the blob the way the destination ISM
+    // does.
     let blob_mth = H256::from_slice(&blob[0..32]);
     let blob_root = H256::from_slice(&blob[32..64]);
     let blob_index = u32::from_be_bytes(blob[64..68].try_into().unwrap());
@@ -129,7 +107,6 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
     assert_eq!(blob_root, h256(&vector.root), "root");
     assert_eq!(blob_index, vector.index, "index is big-endian u32");
 
-    // The flat `signatures` list must equal the blob's signature section.
     for (i, sig_hex) in vector.signatures.iter().enumerate() {
         let start = METADATA_PREFIX_LEN + i * SIGNATURE_LEN;
         assert_eq!(
@@ -139,11 +116,8 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         );
     }
 
-    // --- Destination-side verification: reconstruct the checkpoint from the
-    //     blob + the delivered message's id (what the ISM has), recover each
-    //     signature, and match the validator set with a forward-only pointer.
-    //     This is exactly the EVM MessageIdMultisigIsm check; passing it means
-    //     the Midnight-origin metadata is consumable unchanged. ---
+    // Destination-side verification: rebuild the checkpoint from the blob plus
+    // the delivered message's id, which is all the ISM has.
     let checkpoint = CheckpointWithMessageId {
         checkpoint: Checkpoint {
             merkle_tree_hook_address: blob_mth,
@@ -151,16 +125,12 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
             root: blob_root,
             index: blob_index,
         },
-        // The destination computes the messageId from the delivered message, not
-        // from the metadata (the blob carries no messageId field). Use the
-        // fixture's tip id, already asserted equal to the vector's.
+        // The blob carries no messageId field, so the destination computes it
+        // from the delivered message.
         message_id: tip.1.id(),
     };
-    // Digest parity: the checkpoint the destination reconstructs hashes to the
-    // same inner + EIP-191 digest the validators signed (produced by the
-    // independent `@hyperlane-xyz/utils` oracle). Asserting this here localises a
-    // digest-construction regression to a clear failure, instead of surfacing as
-    // a confusing "signer not in set" once recovery runs against a wrong digest.
+    // Checked before recovery: a digest bug surfaces here rather than as a
+    // confusing "signer not in set" further down.
     assert_eq!(
         checkpoint.signing_hash(),
         h256(&vector.inner),
@@ -178,7 +148,6 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         .map(|v| H160::from_slice(&bytes(v)))
         .collect();
 
-    // Recover signers from the blob's signature section, in blob order.
     let mut recovered: Vec<H160> = Vec::with_capacity(vector.threshold);
     for i in 0..vector.threshold {
         let start = METADATA_PREFIX_LEN + i * SIGNATURE_LEN;
@@ -193,10 +162,8 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         recovered.push(signed.recover().expect("recover signer"));
     }
 
-    // Forward-only two-pointer over the validator set: each recovered signer
-    // matches a validator at a strictly increasing index. This enforces both the
-    // ascending-order requirement and implicit duplicate rejection — identical to
-    // the destination ISM's walk.
+    // The destination ISM's walk: each signer must match a validator at a
+    // strictly increasing index, which also rejects duplicates.
     let mut vptr = 0usize;
     let mut matched = 0usize;
     for signer in &recovered {
@@ -215,20 +182,16 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         "all signatures matched distinct validators in ascending index order"
     );
 
-    // Concretely: the vector's signers are validators 0 and 2 (index 1 skipped),
-    // so the two-pointer walk must have skipped the middle validator.
+    // The vector's signers are validators 0 and 2, so the walk had to skip the
+    // middle one.
     assert_eq!(
         recovered,
         vec![validators[0], validators[2]],
         "signers are the ascending set-index subset {{0, 2}} the vector encodes"
     );
 
-    // Sharpened ordering check: those signers are DESCENDING by address (the
-    // vector's validator set is ordered so index 0 has a larger address than
-    // index 2). A verifier that matched by address order rather than set index
-    // would have rejected this order. Passing the forward-only walk above while
-    // this holds proves the ordering requirement is enforced by SET INDEX, not by
-    // address — a subset ascending under both orderings could not prove that.
+    // Those two signers descend by address, so passing the walk above proves
+    // the ordering is enforced by set index and not by address.
     assert!(
         recovered[0] > recovered[1],
         "signing subset must be descending by address so the index-order requirement is adversarial"

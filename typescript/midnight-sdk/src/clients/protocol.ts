@@ -48,7 +48,7 @@ export class MidnightProtocolProvider implements ProtocolProvider {
     _config: TConfig,
   ): Promise<ITransactionSubmitter> {
     throw new Error(
-      'MidnightProtocolProvider.createSubmitter: not implemented yet (#105)',
+      'MidnightProtocolProvider.createSubmitter: not implemented yet',
     );
   }
 

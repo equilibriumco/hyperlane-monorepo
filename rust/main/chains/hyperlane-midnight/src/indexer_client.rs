@@ -12,52 +12,35 @@ use hyperlane_core::H256;
 use crate::state_decode::{decode_ism_state, decode_nonce_count, IsmState};
 use crate::HyperlaneMidnightError;
 
-/// How long a decoded ISM state is reused before re-reading from the indexer.
-/// Short on purpose: it collapses the per-delivery read burst (the Mailbox
-/// re-reads the validator set to sort signatures on every `process`) while
-/// staying well under the relayer's 120s ISM cache, so an on-chain validator
-/// rotation is still picked up quickly.
+/// How long a decoded ISM state is reused before re-reading. Short on purpose:
+/// long enough to collapse the per-delivery read burst, short enough that an
+/// on-chain validator rotation is still picked up quickly.
 const ISM_STATE_TTL: Duration = Duration::from_secs(5);
 
-/// Page size for paginated `contractEvents` queries. The indexer orders
-/// results by the monotonic event `id`, so `limit`/`offset` paging over the
-/// append-only event log is stable; a page shorter than this marks the end.
+/// The indexer orders by the monotonic event `id`, so offset paging over the
+/// append-only log is stable and a short page marks the end.
 const CONTRACT_EVENTS_PAGE_SIZE: usize = 200;
 
-/// Fixed width of a Misc event name (Compact `Bytes<32>`), zero-padded by the
-/// indexer before serving.
+/// Compact `Bytes<32>`, zero-padded by the indexer before serving.
 pub const MISC_NAME_LEN: usize = 32;
 
-/// Fixed width of a Misc event payload (Compact `Bytes<256>`), zero-padded by
-/// the indexer before serving — consumers slice fixed offsets directly.
+/// Compact `Bytes<256>`, zero-padded by the indexer before serving.
 pub const MISC_PAYLOAD_LEN: usize = 256;
 
-/// The application status of the transaction an event was emitted from, as
-/// reported by the indexer's `transactionResult.status`.
+/// From the indexer's `transactionResult.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TxStatus {
-    /// Every segment of the transaction applied.
     Success,
-    /// Some segments applied, some failed.
     PartialSuccess,
-    /// Nothing applied.
     Failure,
 }
 
 impl TxStatus {
-    /// Whether events from a transaction with this status should be served to
-    /// the Hyperlane indexers. This is THE single place that decision lives.
-    ///
     /// A failed section drops every effect it produced, events included, and a
-    /// transcript only splits across sections at a `kernel.checkpoint()`, which
-    /// the Hyperlane contracts never emit. An event and the state write it
-    /// reports therefore commit or vanish together.
-    ///
-    /// - `Success` and `PartialSuccess`: any served event's paired state
-    ///   write is applied — index it.
-    /// - `Failure`: yields no events at all in the ledger; kept excluded as
-    ///   pure defence in depth.
+    /// transcript only splits at a `kernel.checkpoint()`, which the Hyperlane
+    /// contracts never emit. So an event and the state write it reports always
+    /// commit or vanish together, which makes `PartialSuccess` safe to index.
     pub fn is_indexable(self) -> bool {
         match self {
             TxStatus::Success | TxStatus::PartialSuccess => true,
@@ -66,54 +49,37 @@ impl TxStatus {
     }
 }
 
-/// A decoded `MiscContractEvent` (a Compact `emit` from a contract call),
-/// together with the transaction/block metadata the Hyperlane `LogMeta`
-/// needs. Only events whose transaction status is indexable (see
-/// [`TxStatus::is_indexable`]) are surfaced by the client.
+/// A Compact `emit` from a contract call, with the metadata a `LogMeta` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MiscEvent {
-    /// Contract-defined event name, zero-padded to 32 bytes (e.g.
-    /// `HYP_DISPATCH`).
     pub name: [u8; MISC_NAME_LEN],
-    /// Opaque zero-padded payload, always [`MISC_PAYLOAD_LEN`] bytes;
-    /// consumers slice fixed offsets.
+    /// Always [`MISC_PAYLOAD_LEN`] bytes; consumers slice fixed offsets.
     pub payload: Vec<u8>,
-    /// Chain-global monotonic event id. SPARSE per contract: other event
+    /// Chain-global monotonic event id. Sparse per contract, since other event
     /// kinds share the sequence, so never assume contiguity.
     pub id: u64,
-    /// Hash of the transaction the event was emitted from.
     pub tx_hash: H256,
     /// Indexer-global transaction id (a monotonic integer, not per-block).
     pub tx_id: u64,
-    /// Hash of the block containing the transaction.
     pub block_hash: H256,
-    /// Height of the block containing the transaction.
     pub block_height: u64,
     /// Block timestamp in unix milliseconds.
     pub block_timestamp_ms: u64,
-    /// The transaction's application status.
     pub tx_status: TxStatus,
 }
 
-/// Block metadata from `Query.block`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockDetails {
-    /// Block hash.
     pub hash: H256,
-    /// Block height.
     pub height: u64,
     /// Block timestamp in unix milliseconds (Substrate `Timestamp::set`).
     pub timestamp_ms: u64,
 }
 
-/// Transaction metadata from `Query.transactions`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionDetails {
-    /// Transaction hash.
     pub hash: H256,
-    /// Indexer-global transaction id.
     pub id: u64,
-    /// The block containing the transaction.
     pub block: BlockDetails,
     /// Application status; `None` for transaction kinds that carry no
     /// `transactionResult` (system transactions).
@@ -123,11 +89,9 @@ pub struct TransactionDetails {
     pub fee_specks: Option<hyperlane_core::U256>,
 }
 
-/// GraphQL selection for `contractEvents`. The filter always narrows to
-/// `types: [MISC]`, so every element is a `MiscContractEvent`; `name`/
-/// `payload` live behind the inline fragment because they are not on the
-/// `ContractEvent` interface, and `transactionResult` needs the
-/// `RegularTransaction` fragment (system transactions carry no result).
+/// GraphQL selection for `contractEvents`. `name`/`payload` sit behind an
+/// inline fragment because they are not on the `ContractEvent` interface, and
+/// `transactionResult` only exists on `RegularTransaction`.
 const CONTRACT_EVENTS_QUERY: &str = r#"query ($filter: ContractEventFilter!, $limit: Int!, $offset: Int!) {
   contractEvents(filter: $filter, limit: $limit, offset: $offset) {
     __typename
@@ -147,11 +111,9 @@ const CONTRACT_EVENTS_QUERY: &str = r#"query ($filter: ContractEventFilter!, $li
 pub struct MidnightIndexerClient {
     endpoint: Url,
     http: reqwest::Client,
-    /// Per-address cache of the decoded ISM state, shared across clones of
-    /// this client (it is cloned into the provider). Caches successful decodes
-    /// only. Note: the Mailbox and the ISM build separate client instances, so
-    /// they do not share this cache with each other — it removes the
-    /// per-delivery re-read within a single long-lived client.
+    /// Per-address cache of successfully decoded ISM state, shared across
+    /// clones of this client. The Mailbox and the ISM build separate clients,
+    /// so each caches its own reads.
     ism_cache: Arc<Mutex<HashMap<String, (IsmState, Instant)>>>,
 }
 
@@ -177,14 +139,8 @@ impl MidnightIndexerClient {
         Ok(data.and_then(|d| d.block.map(|b| b.height)))
     }
 
-    /// Fetch the full serialized ledger state of a deployed contract at the
-    /// indexer's latest observed block, hex-decoded into raw bytes. This is a
-    /// one-shot `contractAction(address)` HTTP query returning the latest
-    /// state, not the streaming `contractActions` subscription. No `offset` is
-    /// passed, so the read is not pinned to a fixed block; the schema's
-    /// `offset: ContractActionOffset` supports block-pinned reads if a future
-    /// caller needs them. `address` is the contract address as the indexer's
-    /// `HexEncoded` scalar (hex, with or without `0x`).
+    /// The full serialized ledger state at the indexer's latest observed block.
+    /// No `offset` is passed, so the read is not pinned to a block.
     pub async fn contract_state(&self, address: &str) -> Result<Vec<u8>, HyperlaneMidnightError> {
         let query =
             r#"query ($address: HexEncoded!) { contractAction(address: $address) { state } }"#;
@@ -207,10 +163,9 @@ impl MidnightIndexerClient {
         })
     }
 
-    /// Read and decode the MessageIdMultisigIsm config (validators, threshold,
-    /// module type) from the deployed `night` contract's on-chain state.
-    /// Cached for `ISM_STATE_TTL` to avoid a fresh network read + decode on
-    /// every Mailbox delivery.
+    /// Read and decode the MessageIdMultisigIsm config from the deployed
+    /// contract's state. Cached for `ISM_STATE_TTL` so a Mailbox delivery does
+    /// not pay for a fresh read and decode.
     pub async fn read_ism_state(&self, address: &str) -> ChainResult<IsmState> {
         if let Ok(cache) = self.ism_cache.lock() {
             if let Some((state, fetched_at)) = cache.get(address) {
@@ -228,19 +183,15 @@ impl MidnightIndexerClient {
         Ok(state)
     }
 
-    /// Read the Mailbox `nonce` counter (the number of messages dispatched so
-    /// far) from the deployed `night` contract's state. The dispatch and
-    /// merkle indexers use this as the sequence tip — a single state fetch
-    /// plus a one-counter decode, no per-message decoding.
+    /// The dispatch and merkle indexers use this as their sequence tip: one
+    /// state fetch and one counter decode, with no per-message work.
     pub async fn read_nonce_count(&self, address: &str) -> ChainResult<u32> {
         let bytes = self.contract_state(address).await?;
         decode_nonce_count(&bytes)
     }
 
-    /// Fetch every Misc contract event `address` emitted in the inclusive
-    /// block range, in monotonic event-id order, paginated transparently.
-    /// Events from `FAILURE` transactions are excluded (see
-    /// [`TxStatus::is_indexable`]).
+    /// In event-id order, paginated transparently, with failed transactions
+    /// excluded (see [`TxStatus::is_indexable`]).
     pub async fn misc_events_in_range(
         &self,
         address: &str,
@@ -256,9 +207,7 @@ impl MidnightIndexerClient {
         self.misc_events_filtered(filter).await
     }
 
-    /// Fetch every Misc contract event `address` emitted from the transaction
-    /// with the given hash (the `transactionHash` filter). Events from
-    /// `FAILURE` transactions are excluded (see [`TxStatus::is_indexable`]).
+    /// Failed transactions are excluded (see [`TxStatus::is_indexable`]).
     pub async fn misc_events_by_tx_hash(
         &self,
         address: &str,
@@ -272,8 +221,6 @@ impl MidnightIndexerClient {
         self.misc_events_filtered(filter).await
     }
 
-    /// Run the paginated `contractEvents` query for the given filter, looping
-    /// pages until a short page marks the end of the result set.
     async fn misc_events_filtered(
         &self,
         filter: serde_json::Value,
@@ -419,8 +366,6 @@ struct GraphqlResponse<T> {
 }
 
 impl<T> GraphqlResponse<T> {
-    /// Surface any GraphQL-level errors as a single error, otherwise yield the
-    /// `data` payload. Keeps error handling in one place for every query.
     fn into_data(self) -> Result<Option<T>, HyperlaneMidnightError> {
         if let Some(errors) = self.errors {
             if !errors.is_empty() {
@@ -530,14 +475,12 @@ struct TransactionsData {
     transactions: Vec<RawTransaction>,
 }
 
-/// Decode a `HexEncoded` scalar (with or without `0x`) into raw bytes.
 fn hex_bytes(value: &str, what: &str) -> Result<Vec<u8>, HyperlaneMidnightError> {
     hex::decode(value.trim_start_matches("0x")).map_err(|e| {
         HyperlaneMidnightError::IndexerGraphql(format!("{what} is not valid hex: {e}"))
     })
 }
 
-/// Decode a `HexEncoded` scalar into an exact 32-byte hash.
 fn hex_h256(value: &str, what: &str) -> Result<H256, HyperlaneMidnightError> {
     let bytes = hex_bytes(value, what)?;
     if bytes.len() != 32 {
@@ -549,9 +492,8 @@ fn hex_h256(value: &str, what: &str) -> Result<H256, HyperlaneMidnightError> {
     Ok(H256::from_slice(&bytes))
 }
 
-/// Decode a `HexEncoded` scalar into a fixed-width buffer, right-padding with
-/// zeros. The indexer already re-pads Misc names/payloads to their declared
-/// widths, so the pad is defensive; only an over-long value is an error.
+/// The indexer already re-pads names and payloads to their declared widths, so
+/// the padding here is belt-and-braces; only an over-long value is an error.
 fn hex_padded(value: &str, width: usize, what: &str) -> Result<Vec<u8>, HyperlaneMidnightError> {
     let mut bytes = hex_bytes(value, what)?;
     if bytes.len() > width {
@@ -597,19 +539,14 @@ impl RawTransaction {
     }
 }
 
-/// Convert raw `contractEvents` rows into [`MiscEvent`]s, applying the
-/// status filter ([`TxStatus::is_indexable`]). Rows that are not
-/// `MiscContractEvent` are skipped defensively — the filter always narrows to
-/// `types: [MISC]`, so none are expected. A transaction kind without a
-/// `transactionResult` cannot be a contract call, so such rows are skipped
-/// too (contract events only come from `RegularTransaction`s).
+/// Rows that are not `MiscContractEvent`, or that carry no `transactionResult`
+/// and so cannot be a contract call, are skipped.
 fn misc_events_from_raw(
     raw: Vec<RawContractEvent>,
 ) -> Result<Vec<MiscEvent>, HyperlaneMidnightError> {
     let mut out = Vec::with_capacity(raw.len());
     for event in raw {
         let (Some(name), Some(payload)) = (event.name.as_deref(), event.payload.as_deref()) else {
-            // Not a MiscContractEvent (no inline-fragment fields).
             if event.typename == "MiscContractEvent" {
                 return Err(HyperlaneMidnightError::IndexerGraphql(format!(
                     "MiscContractEvent {} is missing name/payload",
@@ -621,7 +558,6 @@ fn misc_events_from_raw(
         let Some(result) = &event.transaction.transaction_result else {
             continue;
         };
-        // THE status decision lives in `TxStatus::is_indexable`.
         if !result.status.is_indexable() {
             continue;
         }
@@ -648,13 +584,8 @@ fn misc_events_from_raw(
 mod tests {
     use super::*;
 
-    /// Parse the committed `contractEvents` GraphQL response fixture through
-    /// the exact serde structs + conversion the client uses. The fixture has
-    /// five Misc events: two SUCCESS dispatches, a SUCCESS gas payment, a
-    /// PARTIAL_SUCCESS dispatch, and a FAILURE dispatch — so it pins the
-    /// status filter (FAILURE dropped, PARTIAL_SUCCESS kept for now), the
-    /// zero-padded name/payload widths, `0x`-prefixed and bare hex hashes,
-    /// and the tx/block metadata mapping.
+    /// The fixture carries one event of every status, so it pins the filter,
+    /// the padded widths, both hash spellings, and the metadata mapping.
     #[test]
     fn parses_contract_events_fixture() {
         let response: GraphqlResponse<ContractEventsData> = serde_json::from_str(include_str!(
@@ -669,7 +600,6 @@ mod tests {
         assert_eq!(raw.len(), 5, "fixture has five raw events");
 
         let events = misc_events_from_raw(raw).expect("convert events");
-        // The FAILURE event (id 27) is dropped; PARTIAL_SUCCESS (id 19) kept.
         assert_eq!(events.len(), 4, "FAILURE event is excluded");
         assert_eq!(
             events.iter().map(|e| e.id).collect::<Vec<_>>(),
@@ -689,7 +619,6 @@ mod tests {
         assert_eq!(dispatch.block_timestamp_ms, 1_700_000_000_000);
         assert_eq!(dispatch.tx_status, TxStatus::Success);
 
-        // The PARTIAL_SUCCESS dispatch is included (see TxStatus::is_indexable).
         assert_eq!(events[2].tx_status, TxStatus::PartialSuccess);
 
         // The HYP_PROCESS event's hashes are 0x-prefixed in the fixture.
@@ -699,25 +628,21 @@ mod tests {
     }
 
     #[test]
-    fn tx_status_filter_is_the_single_decision_point() {
+    fn tx_status_filter_excludes_only_failures() {
         assert!(TxStatus::Success.is_indexable());
-        // PARTIAL_SUCCESS is included FOR NOW; segment attribution is being
-        // verified separately (devnet probe). Flip in `is_indexable`.
         assert!(TxStatus::PartialSuccess.is_indexable());
         assert!(!TxStatus::Failure.is_indexable());
     }
 
     #[test]
     fn hex_padded_pads_short_and_rejects_long() {
-        // Short values right-pad with zeros (defensive; the indexer re-pads).
         let padded = hex_padded("aabb", 4, "test").expect("pad");
         assert_eq!(padded, vec![0xaa, 0xbb, 0x00, 0x00]);
         // Over-long values are an error, not a truncation.
         assert!(hex_padded("aabbccddee", 4, "test").is_err());
     }
 
-    /// Parse a `transactions(offset: {hash})` response, including the
-    /// RegularTransaction-only `transactionResult` + `fee` fields.
+    /// Covers the `RegularTransaction`-only `transactionResult` and `fee`.
     #[test]
     fn parses_transaction_details() {
         let json = r#"{
@@ -749,11 +674,8 @@ mod tests {
         assert_eq!(details.fee_specks, Some(hyperlane_core::U256::from(123456)));
     }
 
-    /// Live integration test: read the deployed `night` contract's ISM state
-    /// from a running Midnight indexer and assert it decodes to a valid,
-    /// internally-consistent MessageIdMultisig config — i.e. the live
-    /// `contractAction` query + native decode work end-to-end against a real
-    /// standalone node. Ignored by default; run with the devnet up:
+    /// Live check that the `contractAction` query and the native decode work
+    /// end to end. Run with the devnet up:
     ///
     ///   MIDNIGHT_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
     ///   MIDNIGHT_NIGHT_ADDRESS=<deployed night address hex> \
@@ -774,18 +696,15 @@ mod tests {
 
         println!("decoded ISM state from chain: {ism:?}");
 
-        // MessageIdMultisig is discriminant 5 in Hyperlane's ModuleType enum.
         assert_eq!(
             ism.module_type, 5,
             "module_type should be MessageIdMultisig"
         );
-        // Decoded slot count must match the validators map.
         assert_eq!(
             ism.validator_count as usize,
             ism.validators.len(),
             "validator_count must match decoded validator slots"
         );
-        // A usable multisig: >= 1 validator and 1 <= threshold <= count.
         assert!(
             !ism.validators.is_empty(),
             "expected at least one validator"

@@ -53,8 +53,7 @@ mod tests {
 
     #[test]
     fn signer_constructs() {
-        // `default()` rather than `new()`: the latter reads
-        // MIDNIGHT_RELAYER_ADDRESS from the ambient env.
+        // `default()` rather than `new()`, which reads the ambient env.
         let signer = MidnightSigner::default();
         assert_eq!(signer.address(), "");
         assert_eq!(signer.address_h256(), H256::zero());

@@ -41,12 +41,10 @@ describe('hyperlane midnight core apply e2e tests', async function () {
     ownerCommitment = coreConfig.owner;
   });
 
-  // Static multisig ISMs are immutable on EVM, but the night contract
-  // rotates validators in place via setValidatorsAndThreshold. The apply
-  // config mirrors the deploy config except: owner pinned to the on-chain
-  // commitment (avoids a spurious ownership transfer) and requiredHook as
-  // a plain address reference (the IGP block is deploy-time input only —
-  // repeating it here would deploy a second IGP).
+  // Mirrors the deploy config with two changes: the owner is pinned to the
+  // on-chain commitment, which avoids a spurious ownership transfer, and
+  // requiredHook is a plain address, since repeating the IGP block here would
+  // deploy a second IGP.
   function applyConfig(threshold: number): CoreConfig {
     const inputConfig: CoreConfig = readYamlOrJson(CORE_CONFIG_PATH);
     const ism = inputConfig.defaultIsm as MultisigIsmConfig;

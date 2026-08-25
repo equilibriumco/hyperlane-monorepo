@@ -54,9 +54,9 @@ export async function readHookConfig({
       );
       const metadata = context.multiProvider.getChainMetadata(chain);
       const addresses = await context.registry.getChainAddresses(chain);
-      // MultiProvider structurally satisfies ChainLookup but its
-      // getChainName throws on unknown domains instead of returning null,
-      // which breaks the reader's skip-unknown-domain handling.
+      // MultiProvider structurally satisfies ChainLookup, but its
+      // `getChainName` throws on an unknown domain instead of returning null,
+      // which breaks the reader's skip handling.
       const hookReader = createHookReader(
         metadata,
         altVmChainLookup(context.multiProvider),

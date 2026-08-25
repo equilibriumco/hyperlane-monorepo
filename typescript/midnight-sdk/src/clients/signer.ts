@@ -56,11 +56,10 @@ import { MidnightProvider } from './provider.js';
 import { MidnightReadClient } from './read-client.js';
 import { readGasPayments } from './state.js';
 
-// Proving is client-side in Midnight's architecture; public networks expose
-// no proof server, so the default is the operator's own local instance.
+// Proving is client-side and public networks expose no proof server, so the
+// default is the operator's own local instance.
 const DEFAULT_PROOF_SERVER_URL = 'http://127.0.0.1:6300';
-// Local private-state DB password (SDK enforces length/charset rules);
-// override via MIDNIGHT_STATE_PASSWORD.
+// Local private-state DB password; the SDK enforces length and charset rules.
 const DEFAULT_PRIVATE_STATE_PASSWORD = 'Hyperlane-Midnight-2026!';
 
 const PAY_FOR_GAS_ATTEMPTS = 3;
@@ -74,8 +73,8 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Rejects bad values rather than passing them on: Number('') is 0, which
-// disables the wait, and Number('abc') is NaN, which never reaches a deadline.
+// Rejects bad values rather than passing them on: `Number('')` is 0, which
+// disables the wait, and `Number('abc')` is NaN, which never hits a deadline.
 function payForGasSettleMs(): number {
   const raw = process.env.MIDNIGHT_PAY_FOR_GAS_SETTLE_MS;
   if (raw === undefined || raw.trim() === '') {
@@ -206,9 +205,9 @@ export class MidnightSigner
       blockHeight: Number(txData.public.blockHeight ?? 0),
     };
 
-    // transferRemote returns the dispatched messageId as its circuit
-    // result; the payForGas follow-up needs it, and core adapters read it
-    // off the receipt (there is no dispatch log to parse).
+    // transferRemote returns the dispatched messageId as its circuit result.
+    // The payForGas follow-up needs it, and core adapters read it off the
+    // receipt since there is no dispatch log to parse.
     const result = txData.private?.result;
     if (result instanceof Uint8Array && result.length === 32) {
       receipt.messageId = bytesToHex(result);
@@ -313,10 +312,10 @@ export class MidnightSigner
     }
   }
 
-  // Whether a failed payForGas attempt landed anyway. Polls, because the
-  // transaction may still be in flight when the confirmation wait gives up.
-  // Only a read from the end of the window can report the payment missing;
-  // an unreadable ledger rejects instead, since unknown is not missing.
+  // Whether a failed payForGas attempt landed anyway. It polls because the
+  // transaction may still be in flight when the confirmation wait gives up, and
+  // only a successful read at the end of the window can report it missing —
+  // unknown is not the same as missing.
   private async awaitLandedGasPayment(
     igpAddress: string,
     messageId: string,
@@ -329,8 +328,8 @@ export class MidnightSigner
       readFresh = false;
       const read = await this.readIgpState(igpAddress);
       if (read.ok) {
-        // Decoding is deliberately outside the read's error handling: a decode
-        // failure means the contract layout changed, which no retry fixes.
+        // Kept outside the read's error handling: a decode failure means the
+        // contract layout changed, which no retry fixes.
         const landed = findLandedGasPayment(
           readGasPayments(read.data),
           messageId,
@@ -371,8 +370,8 @@ export class MidnightSigner
     return super.getBalance(req);
   }
 
-  // Fees are paid in DUST, which the NIGHT balance never reflects. Reported
-  // in specks, DUST's atomic unit: 1 DUST = 10^15 specks.
+  // Fees are paid in DUST, which the NIGHT balance never reflects. Reported in
+  // specks: 1 DUST = 10^15 specks.
   async getFeeTokenBalance(req: ReqGetBalance): Promise<ResFeeTokenBalance> {
     if (req.address !== this.signerAddress) {
       throw new Error(
@@ -389,10 +388,8 @@ export class MidnightSigner
   }
 
   /**
-   * Deploy one of the compiled contracts. Computes the ZOwnablePK owner
-   * commitment from the wallet's shielded coinPublicKey plus the persisted
-   * (or freshly generated) per-contract secretNonce, then runs the deploy —
-   * chunked for the night monolith, single-shot otherwise.
+   * The ZOwnablePK owner commitment comes from the wallet's shielded
+   * coinPublicKey plus the per-contract secretNonce, persisted or generated.
    */
   async deployMidnightContract(options: {
     name: MidnightContractName;
@@ -436,8 +433,8 @@ export class MidnightSigner
       ownerStore: this.ownerStore,
       log,
     });
-    // The agents' index.from (chain metadata) must be at or before this;
-    // nothing else in the deploy flow surfaces the block.
+    // The agents' `index.from` must be at or before this, and nothing else in
+    // the deploy flow surfaces the block.
     const deployBlock = receipts[0]?.blockHeight;
     if (deployBlock) {
       log(`${options.name} deployed at block ${deployBlock}`);
@@ -459,9 +456,8 @@ export class MidnightSigner
     return this.walletPromise;
   }
 
-  // Fees are paid in DUST generated from registered NIGHT UTXOs. Registers
-  // unregistered UTXOs (idempotent) and waits for enough DUST to cover a
-  // fee; an empty wallet fails fast instead of waiting forever.
+  // Registers any unregistered NIGHT UTXOs and waits for enough DUST to cover
+  // a fee. An empty wallet fails fast rather than waiting forever.
   private async ensureFeesReady(ctx: WalletContext): Promise<void> {
     const state = await waitForSync(ctx);
     const dust = state.dust?.balance(new Date()) ?? 0n;
@@ -494,16 +490,16 @@ export class MidnightSigner
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly joinedContracts = new Map<string, Promise<any>>();
 
-  // Join a deployed contract for proven circuit calls. The stored private
-  // state (from a local deploy) wins over initialPrivateState; on a fresh
-  // machine the persisted owner-state nonce restores the owner identity.
+  // Join a deployed contract for proven circuit calls. Private state stored by
+  // a local deploy wins over `initialPrivateState`; on a fresh machine the
+  // persisted owner-state nonce restores the owner identity.
   private joinContract(
     name: MidnightContractName,
     rawContractAddress: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any> {
-    // Registry configs carry 0x-prefixed addresses; the ledger's address
-    // parser rejects the prefix.
+    // Registry configs carry 0x-prefixed addresses, which the ledger's address
+    // parser rejects.
     const contractAddress = rawContractAddress.startsWith('0x')
       ? rawContractAddress.slice(2)
       : rawContractAddress;
@@ -539,9 +535,8 @@ export class MidnightSigner
   }
 }
 
-// Midnight writers need signer capabilities beyond the ISigner interface
-// (contract deploys, owner state); same downcast pattern as the other
-// protocol SDKs.
+// Midnight writers need capabilities beyond ISigner, like contract deploys and
+// owner state. Same downcast the other protocol SDKs use.
 export function requireMidnightSigner(signer: unknown): MidnightSigner {
   if (!(signer instanceof MidnightSigner)) {
     throw new Error(

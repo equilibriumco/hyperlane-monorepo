@@ -26,10 +26,9 @@ import {
 import type { OwnerStateStore } from './owner-state.js';
 import type { ContractProviders } from './providers.js';
 
-// The packaged artifacts carry the contract module + verifier keys only.
-// Proving (deploys, circuit calls) additionally needs the multi-GB prover
-// keys and zkir circuits, which stay in a compiled hyperlane-midnight tree
-// pointed at via HYPERLANE_MIDNIGHT_CONTRACTS.
+// The packaged artifacts hold the contract module and verifier keys only.
+// Proving also needs the multi-GB prover keys and zkir circuits, which stay in
+// a compiled contracts tree that `HYPERLANE_MIDNIGHT_CONTRACTS` points at.
 export function artifactsPathFor(name: MidnightContractName): string {
   const compiled = process.env.HYPERLANE_MIDNIGHT_CONTRACTS;
   if (compiled) {
@@ -111,10 +110,9 @@ export async function deployContractInstance(
   ];
   log(`${name} deployed at ${address}`);
 
-  // Keep a visible, backupable copy of the maintenance-authority signing
-  // key the SDK sampled at deploy time — the level private-state DB is its
-  // only other home, and without the key no verifier key can ever be added
-  // or replaced on this instance again.
+  // A visible, backupable copy of the maintenance-authority signing key: its
+  // only other home is the level private-state DB, and losing it means no
+  // verifier key can ever be added or replaced on this instance again.
   const signingKey: unknown =
     await req.providers.privateStateProvider.getSigningKey(address);
   if (signingKey != null) {

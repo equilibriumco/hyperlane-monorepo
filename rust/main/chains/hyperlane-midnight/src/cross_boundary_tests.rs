@@ -114,8 +114,8 @@ async fn delivered_propagates_submitter_error_as_structured_kind() {
 
 #[tokio::test]
 async fn is_contract_returns_true_for_monolithic_warp_route() {
-    // Returning false makes `pending_message` drop every inbound message
-    // at the `is_recipient_contract` gate before `Mailbox::process` runs.
+    // `false` would make the relayer drop every inbound message at its
+    // `is_recipient_contract` gate, before `process` ever runs.
     let stub = StubSubmitter::always_returns("{}");
     let mailbox = build_mailbox(&stub);
     let is_contract = mailbox
@@ -162,8 +162,7 @@ async fn process_request_json_pins_wire_shape() {
     assert_eq!(md["index"], 7);
 
     let sigs = md["signatures"].as_array().unwrap();
-    // No zero-padding: the relayer forwards exactly the real signatures; the
-    // Midnight submitter pads the on-chain `Vector<4>` by repeating slot 0 (#22).
+    // Forwarded unpadded; the submitter pads the on-chain `Vector<4>`.
     assert_eq!(sigs.len(), 2);
     assert_eq!(
         sigs[0].as_str().unwrap(),
@@ -278,9 +277,8 @@ async fn count_returns_zero_for_destination_only_impl() {
     assert_eq!(mailbox.count(&ReorgPeriod::None).await.unwrap(), 0);
 }
 
-// An accepting dry-run returns `{"ok":true}` and the estimate reports zero
-// cost. The request must be the `dryRunHandle` op, proving the estimate
-// simulates rather than blindly succeeding.
+// The request must be the `dryRunHandle` op, or the estimate is succeeding
+// blindly rather than simulating.
 #[tokio::test]
 async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
     let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);
@@ -300,10 +298,8 @@ async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
     assert!(req.get("proofServerUrl").is_none());
 }
 
-// The #80 fix, at the mailbox seam: a dry-run that detects a revert returns
-// `Err`, which `pending_message::prepare` maps to `ErrorEstimatingGas` and then
-// backs off — instead of the revert only surfacing at submit time on the
-// no-backoff path where it would busy-loop and starve other deliveries.
+// A detected revert has to error here, so the relayer maps it to
+// `ErrorEstimatingGas` and backs off instead of busy-looping at submit time.
 #[tokio::test]
 async fn process_estimate_costs_errs_when_dry_run_detects_revert() {
     let stub = StubSubmitter::always_returns(
@@ -325,8 +321,8 @@ async fn process_estimate_costs_errs_when_dry_run_detects_revert() {
     );
 }
 
-// Metadata too short to parse fails before the dry-run, so a structurally
-// broken message also errors (backs off) rather than reaching submit.
+// Unparseable metadata fails before the dry run, so a structurally broken
+// message backs off too rather than reaching submit.
 #[tokio::test]
 async fn process_estimate_costs_errs_on_unparseable_metadata() {
     let stub = StubSubmitter::always_returns(r#"{"ok":true}"#);

@@ -264,12 +264,10 @@ export interface IRawIsmArtifactManager extends IArtifactManager<
   readIsm(address: string): Promise<DeployedRawIsmArtifact>;
 
   /**
-   * Whether "static" ISM types (multisig, test) are mutable in place on this
-   * protocol. Defaults to false (EVM semantics: static ISMs are immutable and
-   * a config change means a new deployment). Protocols whose multisig ISM
-   * exposes an on-chain rotation entry point (e.g. Midnight's
-   * setValidatorsAndThreshold) return true so config changes route through
-   * the writer's update() instead of a redeploy.
+   * Whether "static" ISM types are mutable in place on this protocol. Defaults
+   * to false, matching EVM, where a config change means a new deployment.
+   * Protocols whose multisig ISM has an on-chain rotation entry point return
+   * true, routing config changes through `update()` instead of a redeploy.
    */
   supportsInPlaceStaticIsmUpdates?(): boolean;
 }
@@ -321,9 +319,8 @@ export function mergeIsmArtifacts(
   currentArtifact: DeployedIsmArtifact | undefined,
   expectedArtifact: ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact,
   options?: {
-    // See IRawIsmArtifactManager.supportsInPlaceStaticIsmUpdates: when true,
-    // a changed static-ISM config keeps the current deployment (routing the
-    // change through the writer's update()) instead of forcing a redeploy.
+    // When true, a changed static-ISM config keeps the current deployment and
+    // routes the change through the writer's `update()`.
     allowInPlaceStaticUpdate?: boolean;
   },
 ): ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact {

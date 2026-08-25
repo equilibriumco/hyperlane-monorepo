@@ -1,8 +1,7 @@
 /**
- * Deployer wallet construction, ported from hyperlane-midnight. Builds the
- * WalletFacade (shielded + unshielded + dust sub-wallets) from an HD seed;
- * the unshielded keystore signs unshielded-offer inputs and pays fees in
- * DUST generated from registered NIGHT UTXOs.
+ * Builds the WalletFacade (shielded, unshielded, and dust sub-wallets) from an
+ * HD seed. The unshielded keystore signs unshielded-offer inputs and pays fees
+ * in DUST generated from registered NIGHT UTXOs.
  */
 import * as Rx from 'rxjs';
 import { WebSocket } from 'ws';
@@ -24,9 +23,9 @@ import {
 } from '@midnightntwrk/wallet-sdk';
 import type { UnshieldedAddress } from '@midnightntwrk/wallet-sdk';
 
-// Wallet SDK uses a global WebSocket to drive indexer GraphQL
-// subscriptions; Node has no DOM-style WebSocket so we polyfill from `ws`.
-// @ts-expect-error — DOM WebSocket vs `ws` types differ but the runtime contract holds.
+// The wallet SDK drives indexer subscriptions off a global WebSocket, which
+// Node does not have.
+// @ts-expect-error — DOM WebSocket vs `ws` types differ but the runtime agrees.
 globalThis.WebSocket ??= WebSocket;
 
 export interface WalletEndpoints {
@@ -37,10 +36,9 @@ export interface WalletEndpoints {
 }
 
 /**
- * The dust sub-wallet adds this to every fee it computes (`costParameters`
- * below), so a wallet holding less DUST than this cannot balance any
- * transaction. It is a floor, not a fee estimate: a large deploy needs more,
- * and MIDNIGHT_MIN_DUST_SPECKS raises the bar.
+ * The dust sub-wallet adds this to every fee it computes, so a wallet holding
+ * less cannot balance any transaction at all. It is a floor, not an estimate: a
+ * large deploy needs more, and `MIDNIGHT_MIN_DUST_SPECKS` raises the bar.
  */
 const DUST_FEE_OVERHEAD_SPECKS = 300_000_000_000_000n;
 
@@ -76,9 +74,9 @@ export function deriveKeys(seedHex: string) {
 }
 
 /**
- * Derive the unshielded (NightExternal role) keystore alone — enough for a
- * synchronous signer address without starting or syncing a full wallet.
- * `setNetworkId` must have been called first.
+ * Derive just the unshielded keystore, which is enough for a synchronous signer
+ * address without starting or syncing a full wallet. `setNetworkId` must have
+ * been called first.
  */
 export function deriveUnshieldedKeystore(seedHex: string) {
   const keys = deriveKeys(seedHex);
@@ -102,9 +100,8 @@ export async function createWallet(
     networkId,
   );
 
-  // wallet-sdk beta.2 reads `configuration.txHistoryStorage` at the FACADE
-  // level; without it post-submit bookkeeping throws. Shared with the
-  // unshielded sub-wallet below.
+  // Read at the facade level, not just per sub-wallet: without it here,
+  // post-submit bookkeeping throws.
   const txHistoryStorage = new InMemoryTransactionHistoryStorage(
     WalletEntrySchema,
     mergeWalletEntries,
@@ -119,17 +116,15 @@ export async function createWallet(
     provingServerUrl: new URL(endpoints.proofServer),
     relayURL: new URL(endpoints.node.replace(/^http/, 'ws')),
     txHistoryStorage,
-    // CAST: `DefaultConfiguration` requires fields the SDK accepts as a
-    // partial structure at runtime via per-sub-wallet configuration
-    // callbacks.
+    // `DefaultConfiguration` demands fields the SDK actually accepts as a
+    // partial structure, filled in by the sub-wallet callbacks below.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 
   const wallet = await WalletFacade.init({
     configuration: walletConfig,
-    // CASTs below bridge nested SDK-internal copies of types that don't
-    // reconcile nominally with the top-level exports; one published SDK,
-    // identical runtime shapes.
+    // The casts bridge nested SDK-internal copies of types that do not
+    // reconcile with the top-level exports, despite identical runtime shapes.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     shielded: (config) =>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,8 +142,7 @@ export async function createWallet(
     dust: (config) =>
       DustWallet({
         ...config,
-        // Fee headroom defaults; tx generation hits these when DUST is
-        // tight on a fresh wallet.
+        // Fee headroom, which tx generation hits on a fresh wallet.
         costParameters: {
           additionalFeeOverhead: DUST_FEE_OVERHEAD_SPECKS,
           feeBlocksMargin: 5,
@@ -168,8 +162,8 @@ export async function closeWallet(ctx: WalletContext): Promise<void> {
   await ctx.wallet.stop();
 }
 
-// WalletFacade.state() emits a complex generic type the wallet-sdk doesn't
-// export cleanly; treat the state object as a structural subset.
+// `WalletFacade.state()` emits a generic the SDK does not export cleanly, so
+// this is a structural subset of it.
 export interface WalletState {
   isSynced: boolean;
   shielded?: { coinPublicKey: { toHexString(): string } };
@@ -212,11 +206,10 @@ export async function getUnshieldedAddress(
 }
 
 /**
- * Throw unless the wallet holds enough DUST to pay a fee.
- *
- * NIGHT generates DUST at a fixed rate per unit held, up to a cap also
- * proportional to NIGHT, so an operator short of DUST either waits or funds
- * more NIGHT. The error reports both so they can tell which.
+ * Throw unless the wallet holds enough DUST to pay a fee. NIGHT generates DUST
+ * at a fixed rate up to a cap, both proportional to the amount held, so someone
+ * short of DUST either waits or funds more NIGHT — the error reports both rates
+ * so they can tell which.
  */
 export async function assertDustForFees(ctx: WalletContext): Promise<void> {
   const state = await waitForSync(ctx);
@@ -240,8 +233,8 @@ export async function assertDustForFees(ctx: WalletContext): Promise<void> {
 
 /**
  * Register the wallet's unregistered NIGHT UTXOs for DUST generation.
- * Idempotent. Registration only starts generation, so this still throws when
- * the balance is short: DUST accrues over time, not on submission.
+ * Idempotent, and still throws when the balance is short: registration only
+ * starts generation, and DUST accrues over time rather than on submission.
  */
 export async function registerNightForDust(ctx: WalletContext): Promise<void> {
   const state = await waitForSync(ctx);
@@ -251,8 +244,8 @@ export async function registerNightForDust(ctx: WalletContext): Promise<void> {
   );
 
   if (unregistered.length > 0) {
-    // The synced state's coins are a structural view; the facade wants its
-    // own UtxoWithMeta. Same shape, distinct declaration.
+    // The synced state's coins are a structural view of the facade's own
+    // UtxoWithMeta: same shape, separate declaration.
     const recipe = await ctx.wallet.registerNightUtxosForDustGeneration(
       unregistered as unknown as Parameters<
         typeof ctx.wallet.registerNightUtxosForDustGeneration

@@ -1,21 +1,9 @@
-//! Decoding of the WarpRoute/IGP contracts' `HYP_*` Misc events into
-//! Hyperlane domain types, plus the shared [`LogMeta`] mapping and the
-//! event-reader seam the dispatch/delivery/IGP/merkle indexers share.
+//! Decoding of the `HYP_*` Misc events into Hyperlane domain types, plus the
+//! shared [`LogMeta`] mapping and the reader seam the indexers share.
 //!
-//! The contracts emit one Misc event per state transition, atomically with
-//! the corresponding ledger write:
-//!
-//!   - `HYP_DISPATCH`: payload `[0..141)` is the encoded `HyperlaneMessage`
-//!     wire form (the exact bytes `HyperlaneMessage::read_from` decodes;
-//!     the nonce is inside it).
-//!   - `HYP_PROCESS`: payload `[0..32)` is the delivered message id.
-//!   - `HYP_GAS_PAYMENT`: payload `[0..32)` messageId, `[32..36)`
-//!     destination u32 BE, `[36..44)` gasAmount u64 BE, `[44..60)` payment
-//!     u128 BE.
-//!
-//! Payloads are zero-padded to 256 bytes by the indexer, so decoding is a
-//! fixed-offset slice. The standard `Paused`/`Unpaused` ledger events have no
-//! Hyperlane consumer and are filtered out server-side (`types: [MISC]`).
+//! The contracts emit one event per state transition, atomically with the
+//! matching ledger write. Payloads are zero-padded to 256 bytes, so every
+//! decode is a fixed-offset slice.
 
 use async_trait::async_trait;
 
@@ -27,21 +15,15 @@ use crate::indexer_client::{MidnightIndexerClient, MiscEvent};
 use crate::state_decode::ENCODED_MESSAGE_LEN;
 use crate::HyperlaneMidnightError;
 
-/// Event name for a Mailbox dispatch.
 pub(crate) const HYP_DISPATCH: &str = "HYP_DISPATCH";
-/// Event name for a Mailbox delivery.
 pub(crate) const HYP_PROCESS: &str = "HYP_PROCESS";
-/// Event name for an IGP gas payment.
 pub(crate) const HYP_GAS_PAYMENT: &str = "HYP_GAS_PAYMENT";
 
-/// Length of a `HYP_PROCESS` payload's message id.
 const PROCESS_PAYLOAD_LEN: usize = 32;
-/// Length of a `HYP_GAS_PAYMENT` payload record.
 const GAS_PAYMENT_PAYLOAD_LEN: usize = 60;
 
-/// Whether `event` carries the given ASCII name (zero-padded to the 32-byte
-/// wire width). A name that merely shares the prefix (e.g. a hypothetical
-/// `HYP_DISPATCH2`) does NOT match: the padding must be all zeros.
+/// A name that merely shares the prefix does not match: the padding out to the
+/// 32-byte wire width has to be all zeros.
 pub(crate) fn has_name(event: &MiscEvent, name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.len() > event.name.len() {
@@ -50,15 +32,9 @@ pub(crate) fn has_name(event: &MiscEvent, name: &str) -> bool {
     event.name[..bytes.len()] == *bytes && event.name[bytes.len()..].iter().all(|b| *b == 0)
 }
 
-/// Build the real per-event [`LogMeta`]:
-///
-///   - `block_number`/`block_hash`: the block the emitting tx landed in;
-///   - `transaction_id`: the tx hash, widened `H256` -> `H512` (right-aligned,
-///     as other non-EVM chains do);
-///   - `transaction_index`: the indexer-global transaction `id` (monotonic
-///     integer, not a per-block index — Midnight's stable per-tx ordinal);
-///   - `log_index`: the chain-global monotonic event `id` (sparse per
-///     contract; other event kinds share the sequence).
+/// Two fields do not mean what their names suggest: `transaction_index` is the
+/// indexer-global transaction id rather than a per-block index, and `log_index`
+/// is the chain-global event id, which is sparse per contract.
 pub(crate) fn event_log_meta(event: &MiscEvent, address: H256) -> LogMeta {
     LogMeta {
         address,
@@ -70,25 +46,20 @@ pub(crate) fn event_log_meta(event: &MiscEvent, address: H256) -> LogMeta {
     }
 }
 
-/// Decode a `HYP_DISPATCH` payload into the dispatched [`HyperlaneMessage`].
-/// The wire form is exactly [`ENCODED_MESSAGE_LEN`] bytes, so the slice must
-/// be exact: `read_from` treats everything after the fixed header as the
-/// body, and the zero padding beyond 141 is NOT part of the message.
+/// The slice has to be exactly [`ENCODED_MESSAGE_LEN`] bytes: `read_from` treats
+/// everything after the header as body, so trailing padding would be swallowed
+/// into it.
 pub(crate) fn decode_dispatch_event(event: &MiscEvent) -> ChainResult<HyperlaneMessage> {
     let payload = payload_slice(event, ENCODED_MESSAGE_LEN, HYP_DISPATCH)?;
     HyperlaneMessage::read_from(&mut &payload[..])
         .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()).into())
 }
 
-/// Decode a `HYP_PROCESS` payload into the delivered message id.
 pub(crate) fn decode_process_event(event: &MiscEvent) -> ChainResult<H256> {
     let payload = payload_slice(event, PROCESS_PAYLOAD_LEN, HYP_PROCESS)?;
     Ok(H256::from_slice(payload))
 }
 
-/// Decode a `HYP_GAS_PAYMENT` payload into an [`InterchainGasPayment`]
-/// (big-endian fields, mirroring `HyperlaneEvents.compact`'s u32BE/u64BE/
-/// u128BE encoders).
 pub(crate) fn decode_gas_payment_event(event: &MiscEvent) -> ChainResult<InterchainGasPayment> {
     let payload = payload_slice(event, GAS_PAYMENT_PAYLOAD_LEN, HYP_GAS_PAYMENT)?;
     let destination =
@@ -108,9 +79,6 @@ pub(crate) fn decode_gas_payment_event(event: &MiscEvent) -> ChainResult<Interch
     })
 }
 
-/// The leading `len` bytes of the event's zero-padded payload. Errors on a
-/// short payload (the indexer pads to 256, so this only fires on a malformed
-/// response) instead of panicking on slice bounds.
 fn payload_slice<'a>(event: &'a MiscEvent, len: usize, what: &str) -> ChainResult<&'a [u8]> {
     event.payload.get(..len).ok_or_else(|| {
         HyperlaneMidnightError::StateDecode(format!(
@@ -121,9 +89,8 @@ fn payload_slice<'a>(event: &'a MiscEvent, len: usize, what: &str) -> ChainResul
     })
 }
 
-/// Narrow a framework `H512` tx hash to Midnight's 32-byte hash. Hyperlane
-/// widens 32-byte hashes right-aligned (`From<H256> for H512`), so the upper
-/// 32 bytes must be zero; anything else cannot be a Midnight tx hash.
+/// Hyperlane widens 32-byte hashes right-aligned, so a non-zero upper half
+/// cannot be a Midnight tx hash.
 pub(crate) fn h512_to_h256(hash: H512) -> Option<H256> {
     if hash[..32].iter().any(|b| *b != 0) {
         return None;
@@ -131,41 +98,28 @@ pub(crate) fn h512_to_h256(hash: H512) -> Option<H256> {
     Some(H256::from(hash))
 }
 
-/// Render an `H256` contract address as the lowercase bare-hex string the
-/// indexer's `HexEncoded` scalar accepts, matching the convention every
-/// Midnight state/event read uses.
+/// The indexer's `HexEncoded` scalar takes bare hex, with no `0x`.
 pub(crate) fn address_hex(address: &H256) -> String {
     format!("{address:x}")
 }
 
-/// Map an indexer-reported block height to a `u32` tip. The indexer reports a
-/// `u64`; heights beyond `u32::MAX` saturate rather than truncate/wrap, and
-/// "no block observed yet" (`None`) maps to `0`.
 pub(crate) fn height_to_tip(height: Option<u64>) -> u32 {
     height
         .map(|h| u32::try_from(h).unwrap_or(u32::MAX))
         .unwrap_or(0)
 }
 
-/// The minimal reads the event-based indexers need from the Midnight indexer.
-/// Abstracting them behind a trait lets the dispatch/delivery/IGP/merkle
-/// indexer logic be unit-tested against synthetic in-memory events without
-/// network IO; production uses the [`MidnightIndexerClient`] impl below.
+/// Behind a trait so the indexer logic can be unit-tested against synthetic
+/// events with no network IO. Events from failed transactions never appear.
 #[async_trait]
 pub(crate) trait MidnightEventReader: Send + Sync {
-    /// Latest observed block height as a `u32` tip; heights beyond `u32::MAX`
-    /// saturate, and "no block seen yet" maps to `0`.
     async fn read_tip(&self) -> ChainResult<u32>;
-    /// Misc events the contract emitted in the inclusive block range, in
-    /// monotonic event-id order, FAILURE transactions already excluded.
     async fn misc_events(
         &self,
         address: &str,
         from_block: u32,
         to_block: u32,
     ) -> ChainResult<Vec<MiscEvent>>;
-    /// Misc events the contract emitted from the given transaction, FAILURE
-    /// transactions already excluded.
     async fn misc_events_by_tx(&self, address: &str, tx_hash: &H256)
         -> ChainResult<Vec<MiscEvent>>;
 }
@@ -207,9 +161,8 @@ pub(crate) mod test_util {
     use super::*;
     use crate::indexer_client::{TxStatus, MISC_NAME_LEN, MISC_PAYLOAD_LEN};
 
-    /// Build a synthetic [`MiscEvent`] with the given name and payload
-    /// content (zero-padded to the wire widths) and deterministic metadata
-    /// derived from `id`.
+    /// Metadata is derived from `id`, so a synthetic event sits at block
+    /// `1000 + id`.
     pub(crate) fn misc_event(id: u64, name: &str, payload_content: &[u8]) -> MiscEvent {
         let mut name_bytes = [0u8; MISC_NAME_LEN];
         name_bytes[..name.len()].copy_from_slice(name.as_bytes());
@@ -228,10 +181,6 @@ pub(crate) mod test_util {
         }
     }
 
-    /// A synthetic in-memory event reader: the unit-test seam that lets the
-    /// indexer logic run without network IO. `misc_events` honors the block
-    /// range against each event's `block_height`, mirroring the server-side
-    /// `fromBlock`/`toBlock` filter; `misc_events_by_tx` honors the tx hash.
     pub(crate) struct FakeEventReader {
         pub tip: u32,
         pub events: Vec<MiscEvent>,
@@ -286,9 +235,8 @@ mod tests {
             sender: H256::repeat_byte(0xAA),
             destination: 99,
             recipient: H256::repeat_byte(0xBB),
-            // 64-byte body ending in zeros: the message wire form ends in
-            // 0x00 bytes, pinning that the decoder slices the fixed 141-byte
-            // offset out of the zero-padded payload rather than trimming.
+            // A zero tail pins the fixed-offset slicing: trimming instead would
+            // read into the payload padding.
             body: {
                 let mut b = vec![0u8; 64];
                 b[0] = 0x11;
@@ -303,10 +251,8 @@ mod tests {
         let event = misc_event(1, HYP_DISPATCH, &[]);
         assert!(has_name(&event, HYP_DISPATCH));
         assert!(!has_name(&event, HYP_PROCESS));
-        // A shared prefix does not match: the tail must be all zeros.
         assert!(!has_name(&event, "HYP_"));
 
-        // A name with a non-zero byte after the ASCII prefix is different.
         let mut noisy = misc_event(2, HYP_DISPATCH, &[]);
         noisy.name[HYP_DISPATCH.len()] = 0x01;
         assert!(!has_name(&noisy, HYP_DISPATCH));
@@ -317,8 +263,6 @@ mod tests {
         let message = sample_message(7);
         let wire = message.to_vec();
         assert_eq!(wire.len(), ENCODED_MESSAGE_LEN);
-        // The wire form ends in 0x00 (zero body tail) and the payload pads
-        // with further zeros; only the exact 141-byte slice decodes right.
         assert_eq!(*wire.last().expect("non-empty"), 0);
 
         let event = misc_event(1, HYP_DISPATCH, &wire);
@@ -359,7 +303,6 @@ mod tests {
         assert_eq!(meta.address, address);
         assert_eq!(meta.block_number, event.block_height);
         assert_eq!(meta.block_hash, event.block_hash);
-        // H256 -> H512 widening is right-aligned, so it round-trips back.
         assert_eq!(meta.transaction_id, H512::from(event.tx_hash));
         assert_eq!(H256::from(meta.transaction_id), event.tx_hash);
         assert_eq!(meta.transaction_index, event.tx_id);
@@ -379,12 +322,9 @@ mod tests {
 
     #[test]
     fn tip_saturates_above_u32_max() {
-        // No block seen yet -> 0.
         assert_eq!(height_to_tip(None), 0);
-        // In-range height passes through unchanged.
         assert_eq!(height_to_tip(Some(12345)), 12345);
         assert_eq!(height_to_tip(Some(u32::MAX as u64)), u32::MAX);
-        // A height above u32::MAX saturates (does NOT wrap/truncate).
         assert_eq!(height_to_tip(Some(u32::MAX as u64 + 1)), u32::MAX);
         assert_eq!(height_to_tip(Some(u64::MAX)), u32::MAX);
     }

@@ -1,15 +1,8 @@
 /**
- * Populates ./artifacts with the compiled Compact contract modules the SDK
- * executes locally (state reads run circuits against fetched contract state;
- * deploys additionally need the verifier keys).
- *
- * Source resolution:
- *   1. HYPERLANE_MIDNIGHT_CONTRACTS env var — path to a compiled
- *      `contracts/src/managed` tree of the hyperlane-midnight repo.
- *   2. A sibling `hyperlane-midnight` checkout next to this monorepo.
- *
- * If neither source exists but ./artifacts is already populated, the
- * existing artifacts are kept (CI / clean-checkout builds).
+ * Populates ./artifacts with the compiled Compact contract modules the SDK runs
+ * locally. Sources them from `HYPERLANE_MIDNIGHT_CONTRACTS` or a sibling
+ * hyperlane-midnight checkout, and keeps whatever is already in ./artifacts if
+ * neither is present, so a clean CI checkout still builds.
  */
 import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -55,10 +48,9 @@ for (const name of CONTRACTS) {
   for (const file of ['index.js', 'index.d.ts']) {
     cpSync(resolve(contractSrc, file), resolve(dest, 'contract', file));
   }
-  // Verifier keys are only present on a full (non --skip-zk) compile and
-  // are small; prover keys and zkir circuits are multi-GB and stay in the
-  // compiled tree — proving flows point at it via HYPERLANE_MIDNIGHT_CONTRACTS
-  // at runtime instead of bundling.
+  // Verifier keys only exist after a full compile and are small. Prover keys
+  // and zkir circuits are multi-GB, so they stay in the compiled tree and
+  // proving flows point at it at runtime.
   const keysSrc = resolve(source, name, 'keys');
   if (existsSync(keysSrc)) {
     mkdirSync(resolve(dest, 'keys'), { recursive: true });
@@ -68,8 +60,7 @@ for (const name of CONTRACTS) {
       }
     }
   }
-  // midnight-js 5.0.0-beta.6 refuses ZK artifacts without the compiler's
-  // integrity manifest (compiler/contract-manifest.json).
+  // midnight-js refuses ZK artifacts without the compiler's integrity manifest.
   const compilerSrc = resolve(source, name, 'compiler');
   if (existsSync(compilerSrc)) {
     cpSync(compilerSrc, resolve(dest, 'compiler'), { recursive: true });

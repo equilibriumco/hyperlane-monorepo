@@ -14,10 +14,9 @@ import type {
 } from './types.js';
 
 /**
- * Midnight has no browser wallet integration yet (transactions require a
- * proof-server pipeline that browser wallets do not provide). These hooks
- * satisfy the per-protocol wallet maps with inert values; any attempt to
- * actually transact fails loudly.
+ * Midnight has no browser wallet integration yet: transactions need a
+ * proof-server pipeline browser wallets do not provide. These hooks fill the
+ * per-protocol wallet maps with inert values and throw if actually used.
  */
 
 const NO_WALLET_MSG =

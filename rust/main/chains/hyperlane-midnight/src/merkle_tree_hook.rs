@@ -1,38 +1,13 @@
-//! `MerkleTreeHook` + `MerkleTreeHookIndexer` for Midnight.
+//! `MerkleTreeHook` + `MerkleTreeHookIndexer` for Midnight, fused onto one
+//! struct the way Aleo and Radix do it.
 //!
-//! Both the contract abstraction (root/count/checkpoint reads) and the
-//! sequence-aware indexer (leaf insertions) are implemented on one
-//! `MidnightMerkleTreeHook` struct — the fused shape Aleo and Radix use, and
-//! the one the fork already scopes under #15 (`build_merkle_tree_hook`
-//! errored with "see issue #15" and `build_merkle_tree_hook_indexer` carried
-//! a `TODO(#15)`).
-//!
-//! The WarpRoute (`night`) contract is monolithic, so there is no separate
-//! merkle-tree-hook contract: the Mailbox module lives in the same contract as
-//! the ISM. The `night` contract does NOT maintain an on-chain merkle tree
-//! (Hyperlane's MessageId security model never reads an origin-chain root, and
-//! the in-circuit keccak walk that a replicated tree needs dominated the
-//! outbound proving key), so the CONTRACT half of this hook (`tree()` /
-//! `count()` / `latest_checkpoint()`) reconstructs the tree entirely off-chain
-//! by ingesting the append-only `dispatched_messages` map read from the
-//! deployed contract's state via the #14 indexer client, decoded by
-//! [`crate::state_decode`]. Sealevel likewise rebuilds its tree from the
-//! mailbox/outbox account; we mirror that.
-//!
-//! The INDEXER half is event-based (#95): it derives one
-//! `MerkleTreeInsertion(nonce, message.id())` per `HYP_DISPATCH` Misc event,
-//! fetched over block ranges — the same events the dispatch indexer replays,
-//! so the leaves it emits are exactly the messages the state reconstruction
-//! ingests.
-//!
-//! How the validator uses this (`agents/validator/src/submit.rs`): it feeds
-//! the `MerkleTreeInsertion`s emitted by the indexer into its local RocksDB
-//! merkle replica, then compares the replica's root against the root returned
-//! by [`MerkleTreeHook::latest_checkpoint`]. Both come from the same off-chain
-//! reconstruction (`tree()` -> `checkpoint_from_tree`), so the cross-check is
-//! self-consistent. The leaves match because the on-chain message id is
-//! `keccak256(message)` (real in-circuit keccak, #21), so `HyperlaneMessage::id()`
-//! on the Rust side reproduces the exact leaf the destination ISM re-derives.
+//! The WarpRoute contract keeps no on-chain merkle tree — Hyperlane's
+//! MessageId security model never reads an origin-chain root, and the
+//! in-circuit keccak walk a replicated tree needs dominated the outbound
+//! proving key. So the contract reads (`tree` / `count` /
+//! `latest_checkpoint`) rebuild the tree off-chain from the append-only
+//! `dispatched_messages` map, as Sealevel does from its outbox account, while
+//! the indexer half derives one leaf per `HYP_DISPATCH` event.
 
 use std::ops::RangeInclusive;
 
@@ -53,10 +28,9 @@ use crate::indexer_client::MiscEvent;
 use crate::state_decode::decode_dispatched_messages;
 use crate::MidnightProvider;
 
-/// Midnight reads only finalized contract state (BFT finality; the runtime API
-/// exposes block-final state), so a configured `reorg_period` is ignored. Log
-/// it rather than silently dropping it, so an operator who set one sees why it
-/// has no effect (Sealevel asserts instead; we prefer not to panic).
+/// Midnight has BFT finality and the indexer serves only finalized state, so a
+/// configured `reorg_period` has no effect. Log it rather than drop it
+/// silently, so an operator who set one finds out why.
 fn note_reorg_ignored(reorg_period: &ReorgPeriod) {
     if !reorg_period.is_none() {
         tracing::debug!(
@@ -66,13 +40,6 @@ fn note_reorg_ignored(reorg_period: &ReorgPeriod) {
     }
 }
 
-/// Build a checkpoint from the off-chain reconstructed merkle tree. The
-/// WarpRoute does not maintain an on-chain merkle tree — Hyperlane's MessageId
-/// security model never reads an origin-chain root — so the validator's local
-/// replica is the sole source of the root. The checkpoint root is therefore
-/// `tree.root()`, exactly what the validator signs in `submit.rs`, so its
-/// local-vs-anchor cross-check is self-consistent. Errors on an empty tree
-/// (nothing to sign yet); `index = count - 1`.
 fn checkpoint_from_tree(
     tree: &IncrementalMerkle,
     merkle_tree_hook_address: H256,
@@ -94,14 +61,9 @@ fn checkpoint_from_tree(
     })
 }
 
-/// Build a `MerkleTreeInsertion` for every `HYP_DISPATCH` event in a
-/// Misc-event batch. Every dispatch inserts exactly one leaf, so
-/// `leaf_index == nonce` (decoded from the 141-byte message wire form) and
-/// `message_id == HyperlaneMessage::id()` (keccak of those bytes — the same
-/// leaf the destination ISM re-derives). `insertion.into()` sets
-/// `Indexed.sequence = leaf_index`, which the sequence-aware cursor keys on.
-/// Non-dispatch events are skipped; a dispatch that fails to decode is an
-/// error, not a skip.
+/// Every dispatch inserts exactly one leaf, so `leaf_index == nonce` and the
+/// leaf is the message's keccak id — the same one the destination ISM
+/// re-derives.
 fn insertions_from_events(
     events: &[MiscEvent],
     address: H256,
@@ -117,10 +79,7 @@ fn insertions_from_events(
         .collect()
 }
 
-/// Chain-sourced `MerkleTreeHook` + indexer for Midnight's monolithic
-/// WarpRoute. Reads the append-only `dispatched_messages` map from the deployed
-/// contract's on-chain state and reconstructs the incremental merkle tree from
-/// it off-chain; the contract keeps no on-chain tree.
+/// `MerkleTreeHook` + indexer for Midnight's monolithic WarpRoute.
 #[derive(Debug, Clone)]
 pub struct MidnightMerkleTreeHook {
     address: H256,
@@ -129,9 +88,7 @@ pub struct MidnightMerkleTreeHook {
 }
 
 impl MidnightMerkleTreeHook {
-    /// Construct a handle to the WarpRoute's merkle tree hook. `address` is the
-    /// monolithic `night` contract (the same address used for the mailbox and
-    /// ISM).
+    /// `address` is the monolithic contract, shared with the mailbox and ISM.
     pub fn new(address: H256, domain: HyperlaneDomain, provider: MidnightProvider) -> Self {
         Self {
             address,
@@ -140,13 +97,10 @@ impl MidnightMerkleTreeHook {
         }
     }
 
-    /// Contract address as the indexer's bare-hex scalar (no `0x`), matching
-    /// the form `MidnightInterchainSecurityModule` already uses.
     fn address_hex(&self) -> String {
         format!("{:x}", self.address)
     }
 
-    /// Fetch + decode the dispatched messages, sorted by nonce.
     async fn dispatched_messages(
         &self,
     ) -> ChainResult<Vec<(u32, hyperlane_core::HyperlaneMessage)>> {
@@ -158,9 +112,6 @@ impl MidnightMerkleTreeHook {
         decode_dispatched_messages(&bytes)
     }
 
-    /// Latest indexer block height, narrowed to the `u32` Hyperlane uses for
-    /// block numbers. Saturates rather than truncating; Midnight devnet
-    /// heights are far below `u32::MAX`.
     async fn latest_height_u32(&self) -> ChainResult<u32> {
         let height = self
             .provider
@@ -190,11 +141,6 @@ impl HyperlaneContract for MidnightMerkleTreeHook {
 
 #[async_trait]
 impl MerkleTreeHook for MidnightMerkleTreeHook {
-    /// Reconstruct the incremental merkle tree by ingesting every dispatched
-    /// message id in nonce order. Reproduces the on-chain tree (same leaves,
-    /// same Hyperlane incremental-merkle algorithm). Midnight has no
-    /// point-in-time state reads (the indexer `offset` is deferred), so
-    /// `reorg_period` is ignored — Midnight has BFT finality and no reorgs.
     async fn tree(&self, reorg_period: &ReorgPeriod) -> ChainResult<IncrementalMerkleAtBlock> {
         note_reorg_ignored(reorg_period);
         let messages = self.dispatched_messages().await?;
@@ -210,15 +156,11 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
 
     async fn count(&self, reorg_period: &ReorgPeriod) -> ChainResult<u32> {
         note_reorg_ignored(reorg_period);
-        // The contract keeps no on-chain leaf count; derive it from the
-        // off-chain reconstruction (same source as `tree()`).
         Ok(self.tree(reorg_period).await?.tree.count() as u32)
     }
 
-    /// The latest checkpoint, built from the off-chain reconstructed tree. The
-    /// contract keeps no on-chain root, and this root is exactly the one the
-    /// validator signs (`submit.rs` `tree.root()`), so the validator's
-    /// correctness cross-check is self-consistent. Errors on an empty tree.
+    /// This root is the one the validator signs, so its local cross-check is
+    /// against the same reconstruction.
     async fn latest_checkpoint(
         &self,
         reorg_period: &ReorgPeriod,
@@ -228,9 +170,8 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
         checkpoint_from_tree(&tree, self.address, self.domain.id())
     }
 
-    /// Midnight cannot read point-in-time state yet (indexer `offset` is
-    /// deferred), so this returns the latest checkpoint regardless of height,
-    /// the same stance as Sealevel.
+    /// Midnight cannot read point-in-time state yet, so this returns the latest
+    /// checkpoint regardless of height.
     async fn latest_checkpoint_at_block(&self, _height: u64) -> ChainResult<CheckpointAtBlock> {
         self.latest_checkpoint(&ReorgPeriod::None).await
     }
@@ -238,10 +179,6 @@ impl MerkleTreeHook for MidnightMerkleTreeHook {
 
 #[async_trait]
 impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
-    /// Midnight indexes insertions over BLOCK ranges (`IndexMode::Block`, EVM
-    /// parity, #95): replay the `HYP_DISPATCH` events in the range and derive
-    /// one leaf per dispatch. The sequence-aware cursor validates leaf-index
-    /// contiguity across ranges.
     async fn fetch_logs_in_range(
         &self,
         range: RangeInclusive<u32>,
@@ -255,8 +192,6 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     }
 
     /// Midnight has BFT finality, so the latest observed height is final.
-    /// Returns it (rather than panicking like Sealevel's merkle indexer) so
-    /// any framework path that reads it gets a sane watermark.
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
         self.latest_height_u32().await
     }
@@ -265,9 +200,8 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
         &self,
         tx_hash: H512,
     ) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
-        // The relayer broadcasts dispatch txids from the message sync task to
-        // the merkle sync task; the dispatch and the insertion are the same
-        // event on Midnight, so the transactionHash filter serves both.
+        // A dispatch and its insertion are the same event on Midnight, so the
+        // transactionHash filter serves both sync tasks.
         let Some(tx_hash) = h512_to_h256(tx_hash) else {
             return Ok(Vec::new());
         };
@@ -283,11 +217,9 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
 #[async_trait]
 impl SequenceAwareIndexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // Every dispatch inserts exactly one leaf, so the Mailbox `nonce`
-        // counter IS the leaf count — a cheap state read (one fetch, one
-        // counter decode) instead of rebuilding the whole tree per cursor
-        // tick. `count()` (the MerkleTreeHook contract read) still derives
-        // from the full reconstruction above.
+        // Every dispatch inserts one leaf, so the Mailbox `nonce` counter is
+        // the leaf count — one cheap state read instead of rebuilding the whole
+        // tree on every cursor tick.
         let tip = self.latest_height_u32().await?;
         let count = self
             .provider
@@ -310,9 +242,8 @@ mod tests {
         H256::repeat_byte(0xaa)
     }
 
-    // Empty tree (count == 0) is the day-one state of every deployment, before
-    // the first dispatch — the validator hits it at startup. `latest_checkpoint`
-    // must surface "no checkpoint", not index-underflow.
+    // The validator hits this at startup, so it must surface "no checkpoint"
+    // rather than an index underflow.
     #[test]
     fn checkpoint_errors_on_empty_tree() {
         let tree = IncrementalMerkle::default();
@@ -339,12 +270,8 @@ mod tests {
         assert_eq!(cp.checkpoint.merkle_tree_hook_address, test_addr());
     }
 
-    // The core indexer logic the validator consumes: every HYP_DISPATCH event
-    // yields one leaf with `sequence == leaf_index == nonce` and
-    // `message_id == HyperlaneMessage::id()`, carried with the real per-event
-    // LogMeta. The leaves are cross-checked against the SAME messages decoded
-    // from the committed state fixture, proving the event-derived leaves match
-    // what the state reconstruction (`tree()`) ingests.
+    // Cross-checks the event-derived leaves against the same messages decoded
+    // from the state fixture, which is the parity `tree()` depends on.
     #[test]
     fn insertions_derive_from_dispatch_events() {
         use hyperlane_core::{Encode as _, U256};
@@ -358,10 +285,8 @@ mod tests {
         messages.sort_by_key(|(nonce, _)| *nonce);
         assert_eq!(messages.len(), 2, "fixture has two dispatches");
 
-        // The wire bytes the contract emits are exactly the encoded message.
         let events = vec![
             misc_event(1, HYP_DISPATCH, &messages[0].1.to_vec()),
-            // A non-dispatch event in the same range is not an insertion.
             misc_event(2, HYP_PROCESS, H256::repeat_byte(0x11).as_bytes()),
             misc_event(3, HYP_DISPATCH, &messages[1].1.to_vec()),
         ];
@@ -380,7 +305,6 @@ mod tests {
             MerkleTreeInsertion::new(1, messages[1].1.id())
         );
 
-        // Real per-event LogMeta.
         assert_eq!(all[0].1.address, test_addr());
         assert_eq!(all[0].1.block_number, events[0].block_height);
         assert_eq!(all[0].1.block_hash, events[0].block_hash);
@@ -389,17 +313,9 @@ mod tests {
         assert_eq!(all[0].1.log_index, U256::from(events[0].id));
     }
 
-    /// Live integration test against a running Midnight devnet with at least
-    /// one dispatch. Exercises the full merkle path end to end: the leaf
-    /// count, that `fetch_logs_in_range` over the whole block range yields
-    /// one insertion per leaf (from the HYP_DISPATCH events), and that a
-    /// local `IncrementalMerkle` rebuilt from those insertions matches the
-    /// root returned by `latest_checkpoint` (which reconstructs from the
-    /// `dispatched_messages` state) — the event/state parity the validator
-    /// relies on. This is the "roots match on synthetic traffic" acceptance
-    /// check; the panic-on-mismatch half lives in the upstream validator
-    /// submitter and is covered by the outbound E2E (#26). Ignored by
-    /// default; run after a `transferRemote`:
+    /// Live check that a tree rebuilt from the indexer's insertions matches the
+    /// root `latest_checkpoint` reconstructs from state — the event/state
+    /// parity the validator relies on. Run after a `transferRemote`:
     ///
     ///   MIDNIGHT_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
     ///   MIDNIGHT_NIGHT_ADDRESS=<deployed night address hex> \
@@ -429,7 +345,6 @@ mod tests {
             "dispatch at least one message before running this"
         );
 
-        // Block-range fetch (IndexMode::Block): the whole chain so far.
         let logs = hook
             .fetch_logs_in_range(0..=tip)
             .await
@@ -457,19 +372,10 @@ mod tests {
         );
     }
 
-    // #17: the validator signs Midnight-origin checkpoints with the upstream,
-    // chain-agnostic signing path. This proves, offline (no node, no proof),
-    // that the checkpoint a Midnight validator produces is byte-identical to an
-    // EVM-origin checkpoint and that a standard Hyperlane signature over it
-    // recovers to the expected validator address.
-    //
-    // The committed `hyperlane-checkpoint-vector.json` is generated by
-    // `contracts/tests/utils/generate-checkpoint-vector.ts` from the SAME
-    // two-dispatch scenario as `night-state-dispatched.hex`, with the digest +
-    // signature produced by the independent `@hyperlane-xyz/utils` oracle. This
-    // test first cross-checks that the committed fixture and the committed
-    // vector describe one dispatch state (drift guard), then asserts the Rust
-    // signing path matches the EVM oracle byte-for-byte.
+    // Proves offline that a Midnight-origin checkpoint is byte-identical to an
+    // EVM-origin one and that a standard Hyperlane signature over it recovers
+    // to the expected validator. The committed vector's digests and signature
+    // come from the independent `@hyperlane-xyz/utils` oracle.
     #[test]
     fn checkpoint_signing_matches_evm_reference_vector() {
         use hyperlane_core::{CheckpointWithMessageId, Signable, Signature, SignedType, H160};
@@ -499,17 +405,14 @@ mod tests {
         ))
         .expect("vector json parses");
 
-        // --- Drift guard: the committed fixture and vector are one dispatch ---
+        // Drift guard: the committed fixture and vector must describe one
+        // dispatch state.
         let bytes =
             hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
                 .expect("fixture is valid hex");
         let mut messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
         messages.sort_by_key(|(nonce, _)| *nonce);
 
-        // Local tree rebuilt from the indexer's leaves reproduces the EVM
-        // vector's `root` input. The contract keeps no on-chain root, so this
-        // off-chain reconstruction is the sole source — exactly the root the
-        // validator signs.
         let mut tree = IncrementalMerkle::default();
         for (_nonce, message) in &messages {
             tree.ingest(message.id());
@@ -531,7 +434,6 @@ mod tests {
             "fixture tip messageId must match the vector (fixture/vector drift)"
         );
 
-        // --- Build the checkpoint the validator would sign ---
         let checkpoint = CheckpointWithMessageId {
             checkpoint: Checkpoint {
                 merkle_tree_hook_address: h256(&vector.merkle_tree_hook),
@@ -542,9 +444,8 @@ mod tests {
             message_id: h256(&vector.message_id),
         };
 
-        // Domain hash matches `domain_hash(merkle_tree_hook, origin)` — a redundant
-        // layer (it also feeds `inner` below), but it localises a domain-hash bug
-        // one step earlier instead of only surfacing in the inner-digest assert.
+        // Redundant with the inner digest below, but it localises a domain-hash
+        // bug one step earlier.
         assert_eq!(
             hyperlane_core::utils::domain_hash(
                 checkpoint.merkle_tree_hook_address,
@@ -554,8 +455,6 @@ mod tests {
             "domain_hash(merkle_tree_hook, origin) must equal the EVM reference domainHash"
         );
 
-        // Rust signing hash == EVM oracle inner hash (BaseValidator.messageHash);
-        // EIP-191 wrap == oracle digest. Byte-identical => format parity.
         assert_eq!(
             checkpoint.signing_hash(),
             h256(&vector.inner),
@@ -567,8 +466,6 @@ mod tests {
             "EIP-191 digest must equal the EVM reference digest"
         );
 
-        // A standard Hyperlane signature over that checkpoint recovers to the
-        // expected validator address — the exact destination-side verify path.
         let sig_bytes = hex::decode(vector.signature.trim_start_matches("0x")).expect("sig hex");
         let signature: Signature = ethers::core::types::Signature::try_from(sig_bytes.as_slice())
             .expect("65-byte signature")

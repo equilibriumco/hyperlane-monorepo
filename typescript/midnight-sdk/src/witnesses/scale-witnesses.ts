@@ -1,7 +1,6 @@
-// Permanent off-chain implementation of power-of-10 division (Compact has no
-// integer division); the circuit binds each result in Field arithmetic.
-// Mirrors contracts/src/witnesses/scale-witnesses.ts in the hyperlane-midnight
-// repo — keep in sync.
+// Compact has no integer division, so power-of-10 division stays off-chain and
+// the circuit binds each result in Field arithmetic. Mirrors the contracts
+// repo's own witnesses — keep in sync.
 export function createScaleWitnesses<PS>(initialPrivateState: PS) {
   return {
     divRemPow10Witness(

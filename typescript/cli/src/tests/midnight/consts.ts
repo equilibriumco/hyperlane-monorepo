@@ -20,9 +20,9 @@ export const HOOK_READ_CONFIG_PATH_1 = `${TEMP_PATH}/${CHAIN_NAME_1}/hook-config
 export const HOOK_APPLY_CONFIG_PATH_1 = `${TEMP_PATH}/${CHAIN_NAME_1}/hook-config-apply.yaml`;
 export const WARP_READ_OUTPUT_PATH_1 = `${TEMP_PATH}/${CHAIN_NAME_1}/warp-config-read.yaml`;
 
-// The signer's private state (owner nonces, maintenance signing keys) lives
-// here for the duration of a test run; e2e-test.setup.ts resets it together
-// with the chain addresses so every run starts from a fresh deploy.
+// Owner nonces and maintenance signing keys for the duration of a test run.
+// The setup hook resets this with the chain addresses, so every run starts from
+// a fresh deploy.
 export const MIDNIGHT_STATE_DIR = `${TEMP_PATH}/${CHAIN_NAME_1}/state`;
 
 // A remote domain for router-enrollment and gas-oracle entries. The chain
@@ -34,13 +34,11 @@ export const REMOTE_DOMAIN_ID = 31338;
 export const REMOTE_ROUTER_ADDRESS =
   '0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266';
 
-// Ethereum key for the remote chain entry in warp deploy configs: chains
-// marked foreignDeployment are never written to, but the signer middleware
-// still requires a key for them. Anvil dev key #0.
+// Anvil dev key #0. The remote chain is never written to, but the signer
+// middleware still requires a key for it.
 export const REMOTE_HYP_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
-// Every state change on Midnight is a real proof: wallet balancing proofs
-// for deploys, circuit proofs for owner-gated updates. Minutes each, not
-// seconds — hence the dedicated timeout.
+// Every state change costs a real proof, which takes minutes rather than
+// seconds.
 export const MIDNIGHT_E2E_TEST_TIMEOUT = 1_200_000;

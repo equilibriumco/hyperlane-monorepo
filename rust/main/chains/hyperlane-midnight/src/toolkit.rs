@@ -9,12 +9,9 @@ use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512, U256};
 
 use crate::HyperlaneMidnightError;
 
-/// How long an agent waits for the submitter subprocess to build a proof and
-/// land the tx — the relayer's `handle` submissions and the validator's
-/// self-announce alike. A real proof (multisig + ZK verify) can take many
-/// minutes on a RAM-constrained host, so this is overridable via
-/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` (default 120s) — mirrors the proof server's
-/// own `MIDNIGHT_PROOF_SERVER_JOB_TIMEOUT`.
+/// How long an agent waits for the submitter subprocess to prove and land a
+/// transaction. A real proof takes minutes on a RAM-constrained host, so
+/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` overrides the default.
 fn submit_timeout() -> Duration {
     Duration::from_secs(
         std::env::var("MIDNIGHT_SUBMIT_TIMEOUT_SECS")
@@ -25,142 +22,94 @@ fn submit_timeout() -> Duration {
 }
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
-// Dry-run fetches state and executes `handle` locally (keccak/ecrecover
-// witnesses, no proving, no broadcast) — heavier than the `isDelivered`
-// read but far cheaper than a real submission.
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Maximum byte length of a storage location, matching the on-chain
-/// `Bytes<480>` buffer and the `MAX_STORAGE_LOCATION_LEN` circuit. A location
-/// longer than this is rejected before spawning the submitter.
+/// Matches the contract's `Bytes<480>` location buffer.
 pub const MAX_STORAGE_LOCATION_LEN: usize = 480;
 
-/// JSON payload for the `submit` op.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitRequest<'a> {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Deployed WarpRoute contract address.
     pub contract_address: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight node RPC endpoint.
     pub node_rpc_url: String,
-    /// Proof server endpoint.
     pub proof_server_url: String,
-    /// Midnight network id.
     pub network_id: String,
-    /// Hyperlane message.
     pub message: WireMessage<'a>,
-    /// MessageIdMultisigIsm metadata.
     pub metadata: WireMetadata,
-    /// Whether the recipient is a contract address.
     pub is_contract_recipient: bool,
 }
 
-/// Wire-format HyperlaneMessage.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireMessage<'a> {
-    /// Hyperlane protocol version.
     pub version: u8,
     /// Origin-chain dispatch nonce (decimal string for JS BigInt safety).
     pub nonce: String,
-    /// Origin domain id.
     pub origin: u32,
-    /// `0x`-prefixed 32-byte hex.
     pub sender: String,
-    /// Destination domain id.
     pub destination: u32,
-    /// `0x`-prefixed 32-byte hex.
     pub recipient: String,
-    /// `0x`-prefixed 64-byte hex (TokenMessage payload).
     pub body: String,
     /// Avoids cloning the body bytes during serialization.
     #[serde(skip)]
     pub _marker: std::marker::PhantomData<&'a HyperlaneMessage>,
 }
 
-/// Wire-format ISM metadata.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireMetadata {
-    /// Origin-chain merkle tree hook address.
     pub merkle_tree_hook: String,
-    /// Validator-signed merkle root.
     pub root: String,
-    /// Merkle tree index.
     pub index: u32,
-    /// Validator signatures — the real, quorum-sized set the metadata carried
-    /// (at most `MAX_VALIDATORS`), forwarded unpadded. The Midnight submitter
-    /// pads the on-chain `Vector<4>` by repeating slot 0.
+    /// Validator signatures, forwarded unpadded. The submitter pads the
+    /// on-chain `Vector<4>` by repeating slot 0.
     pub signatures: Vec<String>,
 }
 
-/// JSON payload for the `dryRunHandle` op — same message + metadata as
-/// `submit`, minus the node/proof endpoints (no transaction is built).
+/// Same message and metadata as `submit`, minus the node and proof endpoints:
+/// no transaction is built.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunHandleRequest<'a> {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Deployed WarpRoute contract address.
     pub contract_address: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight network id.
     pub network_id: String,
-    /// Hyperlane message.
     pub message: WireMessage<'a>,
-    /// MessageIdMultisigIsm metadata.
     pub metadata: WireMetadata,
-    /// Whether the recipient is a contract address.
     pub is_contract_recipient: bool,
 }
 
-/// JSON envelope returned by the `dryRunHandle` op.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunResponse {
-    /// `true` when the message would be accepted on-chain (no revert).
     #[serde(default)]
     pub ok: Option<bool>,
-    /// Structured error when the message would revert, or on a transport
-    /// failure talking to the indexer.
     #[serde(default)]
     pub error: Option<SubmitError>,
 }
 
-/// JSON envelope returned by the `submit` op.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResponse {
-    /// Transaction hash on success.
     #[serde(default)]
     pub tx_hash: Option<String>,
-    /// Block height on success.
     #[serde(default)]
     #[allow(dead_code)]
     pub block_height: Option<u64>,
-    /// DUST paid for the transaction, in specks (decimal string).
     #[serde(default)]
     pub fee_specks: Option<String>,
-    /// Structured error on failure.
     #[serde(default)]
     pub error: Option<SubmitError>,
 }
 
-/// Structured error from the submitter.
 #[derive(Debug, Deserialize)]
 pub struct SubmitError {
-    /// Short kind tag.
     pub kind: String,
-    /// Human-readable message.
     pub message: String,
 }
 
@@ -169,39 +118,28 @@ pub struct SubmitError {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceRequest<'a> {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Expected wallet address, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<&'a str>,
 }
 
-/// JSON envelope returned by the `balance` op.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceResponse {
-    /// Bech32m unshielded address of the sidecar wallet.
     #[serde(default)]
     pub address: Option<String>,
-    /// Spendable unshielded NIGHT in micro-units (decimal string).
     #[serde(default)]
     pub night_micro: Option<String>,
-    /// Generated DUST in specks at read time (decimal string).
     #[serde(default)]
     pub dust_specks: Option<String>,
-    /// Structured error on failure.
     #[serde(default)]
     pub error: Option<SubmitError>,
 }
 
-/// Balances of the sidecar's own wallet.
 #[derive(Debug, Clone)]
 pub struct WalletBalances {
-    /// Bech32m unshielded address the balances belong to.
     pub address: String,
-    /// Spendable unshielded NIGHT in micro-units.
     pub night_micro: U256,
-    /// Generated DUST in specks at read time.
     pub dust_specks: U256,
 }
 
@@ -253,31 +191,22 @@ pub async fn query_wallet_balance(
     })
 }
 
-/// Successful submission outcome.
 #[derive(Debug)]
 pub struct ToolkitOutcome {
     /// Transaction hash (Midnight 32 bytes packed into the low end of H512).
     pub transaction_id: H512,
-    /// Whether the contract reported success.
     pub executed: bool,
     /// DUST paid, in specks; `None` when the submitter omits the field.
     pub fee_specks: Option<U256>,
 }
 
-/// Runtime values needed at spawn time.
 #[derive(Debug, Clone)]
 pub struct ToolkitContext {
-    /// Path to the submitter binary.
     pub binary_path: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight node RPC endpoint.
     pub node_rpc_url: String,
-    /// Proof server endpoint.
     pub proof_server_url: String,
-    /// Midnight network id.
     pub network_id: String,
 }
 
@@ -314,7 +243,6 @@ fn derive_ws_url(http: &url::Url) -> String {
     ws.to_string()
 }
 
-/// Invoke the submitter for one message and return its outcome.
 pub async fn submit_handle(
     ctx: &ToolkitContext,
     request: &SubmitRequest<'_>,
@@ -383,37 +311,26 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// JSON payload for the `isDelivered` op.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IsDeliveredRequest {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Deployed WarpRoute contract address.
     pub contract_address: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight network id.
     pub network_id: String,
-    /// Message id to check.
     pub message_id: String,
 }
 
-/// JSON envelope returned by the `isDelivered` op.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IsDeliveredResponse {
-    /// Membership flag on success.
     #[serde(default)]
     pub delivered: Option<bool>,
-    /// Structured error on failure.
     #[serde(default)]
     pub error: Option<SubmitError>,
 }
 
-/// Query on-chain `deliveries` membership via the submitter.
 pub async fn query_delivered(
     ctx: &ToolkitContext,
     contract_address: H256,
@@ -421,10 +338,9 @@ pub async fn query_delivered(
 ) -> ChainResult<bool> {
     let request = IsDeliveredRequest {
         op: "isDelivered",
-        // Midnight contract addresses are bare hex — `@midnight-ntwrk/midnight-js-utils`
-        // throws TypeError on any leading `0x`. Hyperlane addresses elsewhere
-        // (EVM, Substrate, our own config parser) are `0x`-prefixed, so we
-        // strip only at the Midnight-SDK seam.
+        // Midnight contract addresses are bare hex; the SDK throws on a
+        // leading `0x`. Hyperlane addresses carry one everywhere else, so the
+        // prefix is stripped only at this seam.
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
@@ -456,45 +372,31 @@ pub async fn query_delivered(
         .map_err(Into::into)
 }
 
-/// JSON payload for the `announce` op (write tx).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnounceRequest {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Deployed ValidatorAnnounce contract address.
     pub contract_address: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight node RPC endpoint.
     pub node_rpc_url: String,
-    /// Proof server endpoint.
     pub proof_server_url: String,
-    /// Midnight network id.
     pub network_id: String,
-    /// `0x`-prefixed 20-byte validator address.
     pub validator: String,
-    /// `0x`-prefixed hex of the FULL zero-padded `Bytes<480>` location buffer
-    /// — the exact bytes the validator signed over (#90). The submitter
-    /// forwards it verbatim; the on-chain digest hashes the padded buffer.
+    /// `0x`-prefixed hex of the whole zero-padded `Bytes<480>` buffer — the
+    /// exact bytes the validator signed over, since the on-chain digest hashes
+    /// the padding too.
     pub storage_location: String,
-    /// `0x`-prefixed 65-byte ECDSA signature (r || s || v).
     pub signature: String,
     /// `0x`-prefixed 64-byte secp256k1 public-key body (X_be || Y_be, no 0x04
-    /// SEC1 tag), recovered off-chain from the signature. Midnight's Compact
-    /// has no in-circuit ecrecover, so the verify-based `announce` circuit
-    /// takes the pubkey and derives the validator address from it (#90).
+    /// SEC1 tag), recovered off-chain. Compact has no in-circuit ecrecover, so
+    /// the `announce` circuit derives the validator address from the pubkey.
     pub pubkey: String,
 }
 
-/// Submit an `announce` write tx via the submitter. Expects `storage_location`
-/// to be the padded `MAX_STORAGE_LOCATION_LEN`-byte buffer the validator signed
-/// over (the shared validator agent pads before signing, #90) with a trailing
-/// NUL, and `pubkey` to be the 64-byte body recovered off-chain. Validates both
-/// before spawning the subprocess so the on-chain asserts never fire on input
-/// we can catch.
+/// Submit an `announce` write tx. Both the padded location buffer and the
+/// recovered pubkey are validated before spawning the subprocess, so the
+/// on-chain asserts never fire on input catchable here.
 pub async fn announce_tx(
     ctx: &ToolkitContext,
     contract_address: H256,
@@ -580,37 +482,26 @@ pub async fn announce_tx(
     })
 }
 
-/// JSON payload for the `getStorageLocations` op (read).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageLocationsRequest {
-    /// Operation discriminator.
     pub op: &'static str,
-    /// Deployed ValidatorAnnounce contract address.
     pub contract_address: String,
-    /// Indexer GraphQL endpoint (HTTP).
     pub indexer_graphql_url: String,
-    /// Indexer GraphQL endpoint (WebSocket).
     pub indexer_ws_url: String,
-    /// Midnight network id.
     pub network_id: String,
-    /// `0x`-prefixed 20-byte validator addresses to query.
     pub validators: Vec<String>,
 }
 
-/// JSON envelope returned by the `getStorageLocations` op.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageLocationsResponse {
-    /// One list of locations per requested validator, in request order.
     #[serde(default)]
     pub locations: Option<Vec<Vec<String>>>,
-    /// Structured error on failure.
     #[serde(default)]
     pub error: Option<SubmitError>,
 }
 
-/// Read announced storage locations for `validators` via the submitter.
 pub async fn query_storage_locations(
     ctx: &ToolkitContext,
     contract_address: H256,
@@ -661,11 +552,9 @@ pub async fn query_storage_locations(
         .into());
     }
 
-    // Defence-in-depth: the on-chain buffer is zero-padded to 480 bytes and the
-    // TS read op already trims at the first NUL, but trim again here so a padded
-    // string can never leak through — the validator agent compares the returned
-    // location against its own UNPADDED `announcement_location()` and would
-    // re-announce forever on a mismatch.
+    // The read op already trims at the first NUL, but trim again here: the
+    // validator compares this against its own unpadded location and would
+    // re-announce forever if padding leaked through.
     let trimmed = locations
         .into_iter()
         .map(|per_validator| {
@@ -746,8 +635,8 @@ async fn run_submitter<R: Serialize>(
 }
 
 /// Build the wire-format message shared by the `submit` and `dryRunHandle`
-/// payloads. `sender`/`recipient` keep the `0x` prefix (only the contract
-/// address is bare-hex at the Midnight-SDK seam — see `query_delivered`).
+/// payloads. Only the contract address is bare hex; everything else keeps its
+/// `0x` prefix.
 fn wire_message(message: &HyperlaneMessage) -> WireMessage<'_> {
     WireMessage {
         version: message.version,
@@ -761,7 +650,6 @@ fn wire_message(message: &HyperlaneMessage) -> WireMessage<'_> {
     }
 }
 
-/// Build a `SubmitRequest` from a HyperlaneMessage + metadata.
 pub fn build_request<'a>(
     contract_address: H256,
     ctx: &ToolkitContext,
@@ -784,9 +672,8 @@ pub fn build_request<'a>(
     }
 }
 
-/// Build a `DryRunHandleRequest` mirroring `build_request` so the dry-run
-/// executes exactly what `process` would submit — only the op and the
-/// absence of node/proof endpoints differ.
+/// Build a `DryRunHandleRequest` mirroring `build_request`, so the dry run
+/// executes exactly what `process` would submit.
 pub fn build_dry_run_request<'a>(
     contract_address: H256,
     ctx: &ToolkitContext,
@@ -806,12 +693,7 @@ pub fn build_dry_run_request<'a>(
     }
 }
 
-/// Dry-run `handle` against current chain state via the submitter, WITHOUT
-/// proving or submitting. `Ok(())` means the message would be accepted
-/// on-chain; `Err` means it would revert (mapped from the submitter's
-/// structured error) or the submitter failed. The relayer's
-/// `process_estimate_costs` uses this so a reverting message is caught at
-/// prepare time and backs off instead of busy-looping (issue #80).
+/// `Err` means the message would revert on-chain, or the submitter failed.
 pub async fn dry_run_handle(
     ctx: &ToolkitContext,
     request: &DryRunHandleRequest<'_>,
@@ -944,12 +826,8 @@ mod tests {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Mock submitter: echo a well-formed `getStorageLocations` envelope
-        // whose `locations` array has fewer entries than the validators we
-        // request. This guards the positional validator->location mapping:
-        // the results must line up with the requested order, so a length
-        // mismatch has to surface as a clear error rather than silently
-        // misaligning.
+        // The results are mapped to validators positionally, so a short
+        // `locations` array must error rather than silently misalign.
         let tmp = std::env::temp_dir().join(format!(
             "midnight-toolkit-locmismatch-{}.sh",
             std::process::id()
@@ -972,7 +850,6 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
 
-        // The guard reports the expected vs. actual list counts.
         let msg = format!("{err}");
         assert!(
             msg.contains("expected 2 location lists, got 1"),
@@ -1012,8 +889,8 @@ mod tests {
         assert!(display.contains("timeout") || display.contains("SIGKILL"));
     }
 
-    // Write an executable mock submitter that prints `json_response` on
-    // stdout, mirroring the inline scripts above. Caller removes the file.
+    // An executable mock submitter that prints `json_response` on stdout. The
+    // caller removes the file.
     fn write_mock_submitter(tag: &str, json_response: &str) -> std::path::PathBuf {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
@@ -1047,13 +924,11 @@ mod tests {
         assert!(json.contains("\"op\":\"dryRunHandle\""));
         assert!(json.contains("\"version\":3"));
         assert!(json.contains("\"isContractRecipient\":false"));
-        // The dry-run payload omits the node/proof endpoints — no tx is built.
+        // No tx is built, so the node/proof endpoints are absent.
         assert!(!json.contains("nodeRpcUrl"));
         assert!(!json.contains("proofServerUrl"));
     }
 
-    // `{"ok":true}` -> the message would be accepted -> `Ok(())`, which the
-    // relayer reads as "gas estimate succeeded, proceed".
     #[tokio::test]
     async fn dry_run_ok_response_is_ok() {
         let script = write_mock_submitter("dryrun-ok", "{\"ok\":true}");
@@ -1066,8 +941,8 @@ mod tests {
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
-    // A structured revert error -> `Err` carrying the kind + message, which
-    // the relayer turns into `ErrorEstimatingGas` -> exponential backoff.
+    // A revert must carry the kind and message through, since the relayer turns
+    // that into `ErrorEstimatingGas` and backs off.
     #[tokio::test]
     async fn dry_run_error_response_maps_to_submitter_reported() {
         let script = write_mock_submitter(
@@ -1091,8 +966,7 @@ mod tests {
         );
     }
 
-    // Neither `ok` nor `error` -> malformed. Defensive: the Node op always
-    // sends one or the other, so this only fires on a protocol drift.
+    // The op always sends one or the other, so this only fires on drift.
     #[tokio::test]
     async fn dry_run_missing_ok_and_error_is_malformed() {
         let script = write_mock_submitter("dryrun-empty", "{}");
@@ -1108,7 +982,4 @@ mod tests {
             "unexpected error: {display}"
         );
     }
-
-    // The submitter-timeout / SIGKILL path is shared with all ops via
-    // `run_submitter`, covered by `timeout_elapses_and_kills_child` above.
 }

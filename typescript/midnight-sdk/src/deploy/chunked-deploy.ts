@@ -1,21 +1,13 @@
 /**
- * Chunked contract deploy, ported from hyperlane-midnight (#94): deploy
- * `night` with a minimal set of verifier keys, then add the remaining keys
- * in follow-up maintenance transactions so every tx stays under the chain's
- * per-block `bytes_written` budget. Stagenet's stock limits reject the
- * monolithic 30-circuit deploy (~51 KB of verifier keys; empirical
- * acceptance ceiling ~25 KB bytesWritten per tx), and raising them needs a
- * chain governance motion — chunking needs none.
+ * Chunked contract deploy: deploy `night` with a minimal set of verifier keys,
+ * then add the rest in follow-up maintenance transactions so every tx stays
+ * under the chain's per-block `bytes_written` budget. Stagenet's stock limits
+ * reject the monolithic deploy outright, and raising them needs a governance
+ * motion.
  *
- * Why this is hand-built at the ledger level instead of the SDK's
- * `addOrReplaceContractOperation` / `submitInsertVerifierKeyTx`:
- * compact-js 2.5.5-rc.6 hardcodes ledger operation version 'v3'
- * (`verifier-key[v6]`), which rejects compactc 0.33.0-rc.2 output
- * (`verifier-key[v7]` = version 'v4') before the tx is ever built.
- * Everything else — providers, wallet fee balancing, submission,
- * finalization watching — reuses the stock SDK via `submitTx`.
- * Maintenance updates carry no ZK proof; they are authorized purely by
- * the contract maintenance authority's signature.
+ * Built at the ledger level rather than through the SDK's insert helpers
+ * because compact-js pins ledger operation version 'v3' and rejects newer
+ * compiler output before the tx is even built.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -38,7 +30,6 @@ export function totalKeyBytes(entries: readonly VerifierKeyEntry[]): number {
   return entries.reduce((sum, e) => sum + e.key.length, 0);
 }
 
-/** Read every `keys/<circuit>.verifier` under a contract's artifacts dir. */
 export function readVerifierKeys(managedDir: string): VerifierKeyEntry[] {
   const keysDir = path.join(managedDir, 'keys');
   if (!fs.existsSync(keysDir)) {
@@ -59,8 +50,7 @@ export function readVerifierKeys(managedDir: string): VerifierKeyEntry[] {
     }));
 }
 
-// Circuits carried by the initial deploy tx itself (alongside the
-// constructor state): the bridge essentials, per the #94 scope.
+// Circuits carried by the initial deploy tx, alongside the constructor state.
 export const NIGHT_DEPLOY_CIRCUITS = [
   'handle',
   'transferRemote',
@@ -68,16 +58,12 @@ export const NIGHT_DEPLOY_CIRCUITS = [
   'enrollRemoteRouter',
 ] as const;
 
-// Every remaining exported circuit, in maintenance-insert priority order:
-// operator safety/admin first, then the verification/state surface the
-// agents read, then the sealed-config read views. The planner hard-fails
-// if this list and the compiled keys ever drift apart, so a night.compact
-// surface change must update it.
+// Every remaining circuit, in insert order. The planner fails if this drifts
+// from the compiled keys, so a contract surface change has to update it.
 //
-// Deploy-order safety: the constructor enrolls NO remote routers, so
-// `handle` / `transferRemote` reject everything until `enrollRemoteRouter`
-// is CALLED — enrollment comes after the last maintenance tx, making the
-// partially-populated window inert.
+// The partially-populated window is inert: the constructor enrolls no remote
+// routers, so `handle` and `transferRemote` reject everything until
+// `enrollRemoteRouter` is called after the last maintenance tx.
 export const NIGHT_MAINTENANCE_PRIORITY = [
   // admin & safety
   'pause',
@@ -112,11 +98,9 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'isPaused',
 ] as const;
 
-// Default per-tx budget for RAW verifier-key bytes. Live stagenet
-// measurements (2026-07-16, node 2.0.0-rc.4 defaults): 24,885 bytesWritten
-// accepted, 33,522 rejected. The deploy tx adds ~7 KB of constructor state
-// and a maintenance tx only ~100 B of structure, so 18 KB of keys keeps
-// every tx comfortably under the observed ceiling.
+// Per-tx budget for raw verifier-key bytes. Stagenet accepted ~25 KB
+// bytesWritten and rejected ~33 KB, and the deploy tx carries another ~7 KB of
+// constructor state on top of the keys.
 export const DEFAULT_CHUNK_BUDGET_BYTES = 18_000;
 
 export interface ChunkPlan {
@@ -131,12 +115,6 @@ export interface ChunkPlanOptions {
   budgetBytes: number;
 }
 
-/**
- * Split a contract's verifier keys into the deploy set plus greedy
- * budget-packed maintenance batches that preserve `priority` order.
- * Fails loudly on any drift between the compiled keys and the plan
- * inputs, or on a single key exceeding the budget.
- */
 export function planChunks(
   entries: readonly VerifierKeyEntry[],
   options: ChunkPlanOptions,
@@ -213,14 +191,10 @@ export function planChunks(
 }
 
 /**
- * Subclass a generated contract constructor so only `circuitIds` remain in
- * `provableCircuits` AND in the initial contract state's operation table.
- * `deployContract` then fetches/embeds verifier keys for just that subset,
- * and the deploy tx carries no keyless operations — the node rejects those
- * with `MalformedError::VerifierKeyNotSet` (custom error 110). The other
- * entry points don't exist on-chain until a maintenance tx inserts them.
- * `circuits` / `impureCircuits` stay intact — call interfaces work as soon
- * as the matching key lands.
+ * Strips everything but `circuitIds` from `provableCircuits` and the initial
+ * state's operation table, so the deploy tx carries no keyless operations — the
+ * node rejects those with `VerifierKeyNotSet` (error 110). Call interfaces stay
+ * intact, so each entry point works as soon as its key lands.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function filteredContractClass<C extends new (...args: any[]) => any>(
@@ -260,11 +234,10 @@ export function filteredContractClass<C extends new (...args: any[]) => any>(
   };
 }
 
-// compactc's key files carry their ledger version in an ASCII header tag;
-// the ledger API names the enclosing ContractOperation slot one off from
-// the tag (verifier-key[v7] lives in the 'v4' slot). Sniffing the tag
-// (instead of hardcoding like compact-js does) keeps the builder honest
-// across compiler bumps — an unknown tag fails loudly.
+// Key files carry their ledger version in an ASCII header tag, and the ledger
+// API names the enclosing slot one off from that tag. Sniffing the tag rather
+// than hardcoding a version means an unknown one fails loudly on a compiler
+// bump instead of building a rejected tx.
 const KEY_TAG_TO_OPERATION_VERSION: Record<string, 'v3' | 'v4'> = {
   'midnight:verifier-key[v6]': 'v3',
   'midnight:verifier-key[v7]': 'v4',
@@ -284,10 +257,8 @@ export function operationVersionForKey(key: Uint8Array): 'v3' | 'v4' {
 }
 
 /**
- * Build, sign, and submit ONE maintenance tx inserting the batch's
- * verifier keys. Reads the maintenance-authority replay counter from the
- * CURRENT on-chain state, so batches must be submitted strictly
- * sequentially (each update bumps the counter by one).
+ * The replay counter is read from current chain state and each update bumps it,
+ * so batches have to be submitted strictly in sequence.
  */
 export async function insertVerifierKeys(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -325,8 +296,7 @@ export async function insertVerifierKeys(
     updates,
     counter,
   );
-  // deployContract creates a 1-of-1 authority from the sampled signing
-  // key, so a single signature at committee index 0 carries the update.
+  // The authority is 1-of-1, so one signature at committee index 0 carries it.
   const signed = unsigned.addSignature(
     0n,
     ledger.signData(signingKey, unsigned.dataToSign),
@@ -335,8 +305,7 @@ export async function insertVerifierKeys(
   const intent = ledger.Intent.new(
     new Date(Date.now() + 60 * 60 * 1000),
   ).addMaintenanceUpdate(signed);
-  // Maintenance updates sit in the fallible segment; guaranteed/fallible
-  // coin offers stay empty and the wallet's balanceTx adds the fee dust.
+  // Both coin offers stay empty; the wallet's balanceTx adds the fee dust.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const unprovenTx = (ledger.Transaction as any).fromParts(
     getNetworkId(),
@@ -349,10 +318,8 @@ export async function insertVerifierKeys(
 }
 
 /**
- * Assert every compiled verifier key is present and byte-identical in the
- * CURRENT on-chain contract state. Mirrors the SDK check that
- * `findDeployedContract` runs, so a contract passing here is joinable by
- * any caller with the full compiled artifact.
+ * The same check `findDeployedContract` runs, so a contract passing here is
+ * joinable by any caller holding the full artifact.
  */
 export async function verifyFullSurface(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

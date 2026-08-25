@@ -7,9 +7,8 @@ import {
   TEMP_PATH,
 } from './consts.js';
 
-// The devnet itself (node + indexer + proof server) is externally managed;
-// run-e2e-test.sh verifies it is reachable before mocha starts. This file
-// only resets the on-disk state so every run begins with a fresh deploy.
+// The devnet is externally managed and run-e2e-test.sh checks it is reachable
+// before mocha starts, so this only resets on-disk state.
 before(function () {
   if (fs.existsSync(CHAIN_1_ADDRESSES_PATH)) {
     fs.rmSync(CHAIN_1_ADDRESSES_PATH, { force: true });

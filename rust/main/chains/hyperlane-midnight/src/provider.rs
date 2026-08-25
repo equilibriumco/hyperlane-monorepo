@@ -17,22 +17,18 @@ use crate::{ConnectionConf, MidnightIndexerClient};
 /// are cached.
 const WALLET_BALANCE_TTL: Duration = Duration::from_secs(300);
 
-/// Chain provider backed by the Midnight indexer's GraphQL API. Serves the
-/// block/transaction lookups the scraper needs (`ensure_blocks` /
-/// `ensure_txns` in `agents/scraper/src/store/storage.rs`) plus the contract
-/// state reads the other Midnight abstractions share.
+/// Chain provider backed by the Midnight indexer's GraphQL API.
 #[derive(Debug, Clone)]
 pub struct MidnightProvider {
     domain: HyperlaneDomain,
     indexer: MidnightIndexerClient,
-    /// Sidecar context for wallet-balance reads; `None` without a chain config.
     toolkit_ctx: Option<ToolkitContext>,
     /// Shared across clones so every consumer sees one TTL window.
     wallet_balance_cache: Arc<Mutex<Option<(Instant, String, U256)>>>,
 }
 
 impl MidnightProvider {
-    /// Build a new provider with contract-state reads only.
+    /// Contract-state reads only; `get_balance` cannot answer wallet addresses.
     pub fn new(domain: HyperlaneDomain, indexer: MidnightIndexerClient) -> Self {
         Self {
             domain,
@@ -42,8 +38,8 @@ impl MidnightProvider {
         }
     }
 
-    /// Build a provider from the chain config, wiring the submit sidecar so
-    /// `get_balance` can also answer the relayer wallet's own address.
+    /// Wires the sidecar too, so `get_balance` can answer the relayer wallet's
+    /// own address.
     pub fn from_conf(domain: HyperlaneDomain, conf: &ConnectionConf) -> Self {
         let indexer = MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
         let mut provider = Self::new(domain, indexer);
@@ -51,8 +47,7 @@ impl MidnightProvider {
         provider
     }
 
-    /// Borrow the indexer client, for chain-state reads (e.g. the ISM reading
-    /// its validators/threshold/module-type from the deployed contract).
+    /// The indexer client, for chain-state reads.
     pub fn indexer(&self) -> &MidnightIndexerClient {
         &self.indexer
     }
@@ -88,9 +83,8 @@ impl MidnightProvider {
     }
 }
 
-/// Map indexer block details onto the `BlockInfo` the scraper stores.
-/// `BlockInfo.timestamp` is unix SECONDS per the trait contract; the indexer
-/// reports unix milliseconds (Substrate `Timestamp::set`).
+/// `BlockInfo.timestamp` is unix seconds per the trait contract, but the indexer
+/// reports milliseconds.
 fn block_info_from(details: BlockDetails) -> BlockInfo {
     BlockInfo {
         hash: details.hash,
@@ -99,13 +93,9 @@ fn block_info_from(details: BlockDetails) -> BlockInfo {
     }
 }
 
-/// Map indexer transaction details onto the `TxnInfo` the scraper stores.
-/// Midnight has no gas market: fees are paid in DUST (SPECK), so the paid fee
-/// stands in for `gas_limit`/`gas_used` (the Aleo stance) and the price
-/// fields are unset. There is no public sender/nonce (shielded transactions),
-/// so `sender` is zero and `nonce` 0. `receipt` must be `Some` — the
-/// scraper's `store_txns` rejects receipt-less transactions as "not yet
-/// included", and everything the indexer serves is final.
+/// Midnight has no gas market, so the paid DUST fee stands in for the gas fields;
+/// transactions are shielded, so there is no public sender or nonce. The receipt
+/// must be `Some` or the scraper treats the transaction as not yet included.
 fn txn_info_from(hash: H512, details: TransactionDetails) -> TxnInfo {
     let fee = details.fee_specks.unwrap_or_default();
     TxnInfo {
@@ -154,8 +144,6 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn get_txn_by_hash(&self, hash: &H512) -> ChainResult<TxnInfo> {
-        // Hyperlane widens 32-byte hashes right-aligned; a non-zero upper
-        // half cannot be a Midnight tx hash.
         let narrow = h512_to_h256(*hash)
             .ok_or(HyperlaneProviderError::CouldNotFindTransactionByHash(*hash))?;
         let details = self
@@ -168,10 +156,9 @@ impl HyperlaneProvider for MidnightProvider {
     }
 
     async fn is_contract(&self, _address: &H256) -> ChainResult<bool> {
-        // Returning false makes `pending_message` drop every inbound message
-        // at the `is_recipient_contract` gate. Every routable recipient on
-        // Midnight is the monolithic WarpRoute contract, so `true` is correct
-        // until non-WarpRoute recipients exist.
+        // Every routable recipient on Midnight is the monolithic WarpRoute
+        // contract, and `false` would make the relayer drop every inbound
+        // message at its `is_recipient_contract` gate.
         Ok(true)
     }
 
@@ -239,8 +226,6 @@ mod tests {
         );
         assert_eq!(info.hash, hash);
         assert_eq!(info.gas_limit, U256::from(12345), "paid fee stands in");
-        // The scraper's store_txns requires a receipt ("not yet included"
-        // otherwise); Midnight only serves final transactions.
         let receipt = info.receipt.expect("receipt is mandatory");
         assert_eq!(receipt.gas_used, U256::from(12345));
         assert_eq!(receipt.cumulative_gas_used, U256::from(12345));

@@ -11,13 +11,10 @@ use hyperlane_core::{
 use crate::toolkit::{self, ToolkitContext, WireMetadata};
 use crate::{ConnectionConf, HyperlaneMidnightError, MidnightProvider};
 
-// Upper bound on how many validator signatures a metadata blob may carry,
-// matching the on-chain `MessageIdMultisigIsm.MAX_VALIDATORS` (#22 reduced this
-// from 16 to 4 to keep the handle proof tractable). The relayer forwards the
-// real, quorum-sized signature set (typically `threshold` entries) verbatim;
-// the Midnight submitter (`relayer/src/checkpoint-digest.ts`) is what pads the
-// on-chain `Vector<4, ...>` by repeating slot 0, so DO NOT pad here — a
-// zero-signature pad would recover to a garbage pubkey and be rejected.
+// Matches the contract's `MessageIdMultisigIsm.MAX_VALIDATORS`, kept small to
+// keep the handle proof tractable. Signatures are forwarded verbatim: the
+// submitter is what pads the on-chain `Vector<4>` by repeating slot 0, and a
+// zero-signature pad added here would recover to a garbage pubkey.
 const MAX_SIGNATURES: usize = 4;
 const SIGNATURE_LEN: usize = 65;
 const METADATA_HEADER_LEN: usize = 32 + 32 + 4;
@@ -29,9 +26,8 @@ pub struct MidnightMailbox {
     domain: HyperlaneDomain,
     provider: MidnightProvider,
     toolkit_ctx: ToolkitContext,
-    /// Test-only override for the on-chain validator order. Production reads
-    /// the set from chain state in [`Self::validator_order`]; tests set this
-    /// (to an empty vec) so `process` can run offline without an indexer.
+    /// Test-only override for the on-chain validator order, so `process` can
+    /// run offline without an indexer.
     #[cfg(test)]
     validator_override: Option<Vec<H160>>,
 }
@@ -52,8 +48,6 @@ impl MidnightMailbox {
         })
     }
 
-    /// Read the on-chain validator set (in slot order) from the deployed
-    /// contract, used to sort signatures by validator index before submitting.
     async fn validator_order(&self) -> ChainResult<Vec<H160>> {
         #[cfg(test)]
         if let Some(validators) = &self.validator_override {
@@ -122,14 +116,10 @@ impl Mailbox for MidnightMailbox {
     ) -> ChainResult<TxOutcome> {
         let mut parsed = parse_metadata(metadata.as_ref())?;
 
-        // The on-chain MessageIdMultisigIsm requires signatures in
-        // validator-set-index order (a two-pointer match). The relayer's
-        // metadata builder emits them in checkpoint-syncer fetch order, which
-        // only incidentally matches validator-index order within a single
-        // batch and is not guaranteed (only the Aleo destination gets an
-        // explicit ordering pass in `hyperlane-base/src/types/multisig.rs`).
-        // So read the on-chain validator set and sort here. An empty set means
-        // nothing to sort against (also the offline cross-boundary test path).
+        // The on-chain ISM matches signatures against the validator set with a
+        // forward-only walk, so they must arrive in set-index order. The
+        // relayer emits them in checkpoint-syncer fetch order, which only
+        // incidentally matches, so sort against the on-chain set here.
         let validators = self.validator_order().await?;
         if !validators.is_empty() {
             sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
@@ -140,8 +130,7 @@ impl Mailbox for MidnightMailbox {
 
         let outcome = toolkit::submit_handle(&self.toolkit_ctx, &request).await?;
 
-        // Gas is the DUST actually paid, in specks, at a unit price; zero when
-        // the submitter did not report a fee.
+        // Gas is the DUST actually paid, in specks, at a unit price.
         Ok(TxOutcome {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
@@ -156,21 +145,10 @@ impl Mailbox for MidnightMailbox {
         message: &HyperlaneMessage,
         metadata: &Metadata,
     ) -> ChainResult<TxCostEstimate> {
-        // Dry-run `handle` against current chain state (no proving, no
-        // submission). A message that would revert (unenrolled sender, amount
-        // over escrow, paused, replay, failed ISM, ...) returns `Err` here, so
-        // the relayer catches it at prepare time and applies the standard
-        // exponential backoff — rather than the revert only surfacing at submit
-        // time on the no-backoff `ErrorSubmitting` path, where it would
-        // busy-loop and starve every other inbound delivery (issue #80). This
-        // mirrors every other Hyperlane chain, whose `process_estimate_costs`
-        // simulates the call.
-        //
-        // Prepare the metadata exactly as `process` does (parse + sort by
-        // validator index + pad) so the dry-run executes what a real
-        // submission would — in particular the on-chain ISM's forward-only
-        // two-pointer walk requires signatures in validator-set order, so an
-        // unsorted vector would spuriously "revert".
+        // A message that would revert errors here, so the relayer backs off at
+        // prepare time instead of busy-looping on the no-backoff submit path.
+        // The metadata is prepared exactly as `process` prepares it, or an
+        // unsorted signature vector would revert spuriously.
         let mut parsed = parse_metadata(metadata.as_ref())?;
         let validators = self.validator_order().await?;
         if !validators.is_empty() {
@@ -180,10 +158,9 @@ impl Mailbox for MidnightMailbox {
             toolkit::build_dry_run_request(self.address, &self.toolkit_ctx, message, parsed, false);
         toolkit::dry_run_handle(&self.toolkit_ctx, &request).await?;
 
-        // The message would be accepted on-chain. Midnight fees are denominated
-        // in DUST and computed by the wallet at submission time, so there is no
-        // estimate to report. Zero mirrors Sealevel: it leaves
-        // `onChainFeeQuoting` permissive rather than imposing an arbitrary bar.
+        // Fees are DUST the wallet computes at submission time, so there is no
+        // estimate to report. Zero leaves `onChainFeeQuoting` permissive rather
+        // than imposing an arbitrary bar.
         Ok(TxCostEstimate {
             gas_limit: U256::zero(),
             gas_price: FixedPointNumber::zero(),
@@ -237,7 +214,7 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
     index_be.copy_from_slice(&bytes[64..68]);
     let index = u32::from_be_bytes(index_be);
 
-    let mut signatures: Vec<String> = (0..sig_count)
+    let signatures: Vec<String> = (0..sig_count)
         .map(|i| {
             let start = i * SIGNATURE_LEN;
             format!(
@@ -247,8 +224,6 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
         })
         .collect();
 
-    // No padding: forward exactly the real signatures the metadata carried.
-    // The Midnight submitter pads the on-chain `Vector<4>` by repeating slot 0.
     Ok(WireMetadata {
         merkle_tree_hook,
         root,
@@ -257,14 +232,9 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
     })
 }
 
-/// Reorder the real signatures in `metadata` by their signer's index in
-/// `validators`. No padding is added — the Midnight submitter pads the
-/// on-chain `Vector<4>` by repeating slot 0.
-/// Errors if any signature recovers to an address not present in
-/// `validators` — that indicates either a malformed validator config or a
-/// genuinely invalid signature; either way the on-chain ISM would reject
-/// the call so failing fast here surfaces the issue with a clearer error
-/// than a Compact `assert` revert.
+/// Drops any zero padding. A signature recovering to an unknown address is an
+/// error: the on-chain ISM would reject the call anyway, and failing here gives
+/// a clearer message than a Compact assert.
 fn sort_signatures_by_validator_index(
     message: &HyperlaneMessage,
     metadata: &mut WireMetadata,
@@ -311,11 +281,9 @@ fn sort_signatures_by_validator_index(
     Ok(())
 }
 
-/// keccak(domainHash || root || index_be || messageId), where
-/// domainHash = keccak(origin_domain_be32 || merkle_tree_hook || "HYPERLANE").
-/// Matches the on-chain Midnight MessageIdMultisigIsm digest pre-EIP-191
-/// (validators sign the EIP-191 wrap of this; ecrecover with
-/// RecoveryMessage::Data applies the same wrap).
+/// keccak(domainHash || root || index_be || messageId), where domainHash =
+/// keccak(origin_domain_be32 || merkle_tree_hook || "HYPERLANE"). This is the
+/// digest before the EIP-191 wrap that validators actually sign.
 fn compute_checkpoint_inner_hash(
     message: &HyperlaneMessage,
     metadata: &WireMetadata,
@@ -360,8 +328,7 @@ fn recover_signer(inner_hash: &[u8; 32], sig_bytes: &[u8]) -> ChainResult<H160> 
     let recovered = sig
         .recover(inner_hash.to_vec())
         .map_err(|e| HyperlaneMidnightError::Other(format!("ecrecover failed: {e}")))?;
-    // ethers::types::H160 and hyperlane_core::H160 are both 20-byte primitive
-    // hashes but distinct types; convert through the inner byte array.
+    // ethers' H160 and hyperlane_core's are distinct types; go via the bytes.
     Ok(H160::from(recovered.0))
 }
 
@@ -390,7 +357,6 @@ mod tests {
         );
         assert_eq!(parsed.root, format!("0x{}", hex::encode([0xCDu8; 32])));
         assert_eq!(parsed.index, 42);
-        // No padding: exactly the two real signatures the blob carried.
         assert_eq!(parsed.signatures.len(), 2);
         assert_eq!(
             parsed.signatures[0],
@@ -462,13 +428,12 @@ mod tests {
         let sig1_hex = format!("0x{}", hex::encode(<[u8; 65]>::from(sig1)));
         let zero_hex = format!("0x{}", hex::encode([0u8; SIGNATURE_LEN]));
 
-        // Insert signatures in REVERSE validator-index order, plus a stale zero
-        // pad that the sort must drop (it never re-pads).
+        // Reverse validator-index order, plus a stale zero pad the sort must
+        // drop without re-padding.
         metadata.signatures = vec![sig1_hex.clone(), sig0_hex.clone(), zero_hex.clone()];
 
         sort_signatures_by_validator_index(&message, &mut metadata, &validators).unwrap();
 
-        // Reordered to validator-index order, zero padding dropped, no re-pad.
         assert_eq!(metadata.signatures.len(), 2);
         assert_eq!(metadata.signatures[0], sig0_hex);
         assert_eq!(metadata.signatures[1], sig1_hex);
@@ -486,7 +451,6 @@ mod tests {
             "9999999999999999999999999999999999999999999999999999999999999999"
                 .parse()
                 .unwrap();
-        // Validator set knows only k_known; k_rogue must be rejected.
         let validators = vec![H160::from(k_known.address().0)];
 
         let message = HyperlaneMessage {
