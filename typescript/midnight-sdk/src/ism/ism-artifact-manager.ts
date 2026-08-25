@@ -88,12 +88,11 @@ class MidnightMultisigIsmWriter
       DeployedIsmAddress
     >
 {
-  // The ISM is a facet of the night monolith and cannot deploy standalone:
-  // validators/threshold are night constructor args, and the contract does
-  // not exist yet when the core deploy orchestrator asks for the ISM. The
-  // returned zero-address sentinel keeps the config flowing to the mailbox
-  // writer, which seals it into the constructor and stamps the real (night)
-  // address back on this artifact once it is known.
+  // The ISM is a facet of the night monolith and cannot deploy standalone: its
+  // validators and threshold are constructor args, and the contract does not
+  // exist yet when the orchestrator asks. The zero-address sentinel keeps the
+  // config flowing to the mailbox writer, which seals it in and stamps the real
+  // address back here.
   async create(
     artifact: ArtifactNew<RawIsmArtifactConfigs['messageIdMultisigIsm']>,
   ): Promise<

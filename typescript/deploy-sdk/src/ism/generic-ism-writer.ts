@@ -112,10 +112,9 @@ export class IsmWriter
 
   /**
    * Updates an existing ISM to match the desired configuration.
-   * Routing ISMs support updates (domain enrollment/unenrollment, owner
-   * changes). Multisig and test ISMs are immutable - returns empty array -
-   * unless the artifact manager reports in-place static updates, in which
-   * case the typed writer diffs current state and emits update transactions.
+   * Routing ISMs support updates. Multisig and test ISMs are immutable and
+   * return an empty array, unless the artifact manager reports in-place static
+   * updates, in which case the typed writer diffs and emits transactions.
    *
    * @param artifact The desired ISM state (must include deployed address)
    * @returns Array of transactions needed to perform the update

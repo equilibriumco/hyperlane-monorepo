@@ -1,25 +1,10 @@
-//! Native Rust decode of the WarpRoute (`night`) contract's ledger state
-//! as served by the Midnight indexer (the `contractAction.state` hex blob).
+//! Native decode of the WarpRoute (`night`) contract's ledger state as served
+//! by the Midnight indexer.
 //!
-//! The `night` contract has no usable generated decoder — its compiled TS
-//! `Ledger` type is empty because its ledger fields live in imported
-//! modules. So we deserialize the tagged ledger state with the same crates
-//! the indexer uses (`midnight-onchain-state` / `midnight-serialize`) and
-//! navigate the resulting `StateValue::Array` positionally.
-//!
-//! Field positions are taken from the compiled `night` readers'
-//! `queryLedgerState` paths and verified against live deployed state in the
-//! tests below: `_validatorCount_0` -> `[0, 8]`, `_thresholdValue_0` ->
-//! `[0, 9]`, `_moduleType_0` -> `[0, 10]`, and the `validators` map at
-//! `[0, 7]`. Slots `[0, 11..13]` are the module's private `_verify_*` scratch
-//! fields, so `module_type` sits one slot from scratch state. The paths are
-//! pinned to the field declaration order in `MessageIdMultisigIsm.compact`;
-//! any reorder/insert above or between these fields shifts them. To
-//! re-verify after a contract change, recompile `night.compact` and grep the
-//! `queryLedgerState` paths in `managed/night/contract/index.js`. The
-//! contracts-repo CI asserts these paths on every compile, and
-//! `decode_ism_state` below fails loudly if the decoded fields are mutually
-//! inconsistent.
+//! The contract has no usable generated decoder — its compiled TS `Ledger`
+//! type is empty because the ledger fields live in imported modules. So the
+//! tagged state is deserialized with the same crates the indexer uses and the
+//! resulting `StateValue::Array` is navigated positionally.
 
 use hyperlane_core::{ChainResult, HyperlaneMessage};
 use midnight_onchain_state::state::{ContractState, StateValue};
@@ -28,57 +13,32 @@ use midnight_storage_core::DefaultDB;
 
 use crate::error::HyperlaneMidnightError;
 
-// Positional paths into the ledger `StateValue::Array`, from the compiled
-// `night` readers. `night`'s state is a 2-element root array: `[0]` holds the
-// ownership commitment + Routes `local_domain` scalar and the Routes routers
-// map, `[1]` holds the MessageIdMultisigIsm / Mailbox / Scale module fields
-// and the warp `destination_gas` map. The on-chain incremental merkle tree
-// was removed (the validator reconstructs it off-chain from
-// `dispatched_messages`), so there is no merkle `count` / `current_root`
-// slot to decode.
-//
-// The MessageIdMultisigIsm fields are consecutive slots under `[1]`, in
-// source-declaration order: validators(0), validator_count(1), threshold(2),
-// module_type(3).
+// Positional paths into the ledger `StateValue::Array`. Root `[0]` holds the
+// ownership commitment and the Routes fields, `[1]` the
+// MessageIdMultisigIsm / Mailbox / Scale module fields. Paths follow each
+// module's field declaration order, so inserting or reordering a field shifts
+// them; the contracts repo re-checks them on every compile.
 const ISM_VALIDATORS_PATH: [usize; 2] = [1, 0];
 const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 1];
 const ISM_THRESHOLD_PATH: [usize; 2] = [1, 2];
 const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 3];
 
-// The Mailbox fields also live under `[1]`: deliveries(7), nonce(8),
-// dispatched_messages(9). Verified two ways:
-//   (1) The compiled `night` readers in `managed/night/contract/index.js`
-//       index these exact slots: `isDelivered`/`deliveryCount` -> `[1, 7]`
-//       (`deliveries` Set, `member`/`size`), `nonceValue` -> `[1, 8]`
-//       (`nonce` Counter, `popeq`), `messageAt` -> `[1, 9]` (the
-//       `dispatched_messages` Map, keyed `member`/`idx`).
-//   (2) Decoding a fresh post-dispatch state: root `[1]` is a 15-element array;
-//       `[1, 7]` is a Set, `[1, 8]` a Counter cell, `[1, 9]` a `Bytes<141>`
-//       Map. Matches the declaration order in `modules/Mailbox.compact`.
-// The paths are pinned to the compiled layout; adding or removing a field
-// shifts them, and the compiler rebalances the root cells as the field count
-// grows. The contracts-repo
-// layout guard re-checks the `queryLedgerState` paths on every compile.
-// (The `deliveries` set at `[1, 7]` is no longer decoded: deliveries are
-// indexed from `HYP_PROCESS` events, and the Mailbox `delivered` read goes
-// through the toolkit.)
+// Mailbox fields, also under `[1]`. Slot 7 is the `deliveries` set, which is
+// not decoded here: deliveries come from `HYP_PROCESS` events and the
+// `delivered` read goes through the toolkit.
 const MAILBOX_NONCE_PATH: [usize; 2] = [1, 8];
 const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 9];
 
-/// Length in bytes of an encoded `HyperlaneMessage` stored in the
-/// `dispatched_messages` map (`Bytes<141>`) and carried in `HYP_DISPATCH`
-/// event payloads: version(1) + nonce(4) + origin(4) + sender(32) +
-/// destination(4) + recipient(32) + body(64).
+/// Length of an encoded `HyperlaneMessage`: version(1) + nonce(4) + origin(4)
+/// + sender(32) + destination(4) + recipient(32) + body(64).
 pub(crate) const ENCODED_MESSAGE_LEN: usize = 141;
 
 /// The MessageIdMultisigIsm configuration read from on-chain state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsmState {
-    /// Validator addresses (20-byte ETH addresses), ordered by on-chain
-    /// slot index 0..validator_count. The on-chain registry stores each
-    /// validator as a `Bytes<64>` secp256k1 public key (X_be || Y_be, the
-    /// uncompressed SEC1 body without the 0x04 tag, #22); the decoder
-    /// derives the address as `keccak256(pubkey)[12..]`.
+    /// Validator addresses, in on-chain slot order. The registry stores
+    /// 64-byte secp256k1 public keys; the address is
+    /// `keccak256(pubkey)[12..]`.
     pub validators: Vec<[u8; 20]>,
     /// Number of populated validator slots.
     pub validator_count: u8,
@@ -88,14 +48,13 @@ pub struct IsmState {
     pub module_type: u8,
 }
 
-/// Deserialize the raw indexer-served state bytes into a `ContractState`.
+/// Deserialize the raw indexer-served state bytes.
 pub fn decode_contract_state(bytes: &[u8]) -> ChainResult<ContractState<DefaultDB>> {
     let mut reader = bytes;
     tagged_deserialize(&mut reader)
         .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()).into())
 }
 
-/// Navigate a positional path through nested `StateValue::Array`s.
 fn nav<'a>(
     root: &'a StateValue<DefaultDB>,
     path: &[usize],
@@ -117,9 +76,8 @@ fn nav<'a>(
     Ok(node)
 }
 
-/// Raw atom bytes of a leaf `Cell`'s aligned value. Compact integers are
-/// little-endian with trailing zero bytes trimmed; byte arrays (`Bytes<N>`)
-/// are stored verbatim.
+/// Compact integers are little-endian with trailing zero bytes trimmed;
+/// `Bytes<N>` is stored verbatim.
 fn cell_atom(node: &StateValue<DefaultDB>) -> ChainResult<&[u8]> {
     match node {
         StateValue::Cell(sp) => {
@@ -136,7 +94,7 @@ fn cell_atom(node: &StateValue<DefaultDB>) -> ChainResult<&[u8]> {
     }
 }
 
-/// Read a `Uint<8>` leaf (value like 5; `0` is an empty atom).
+/// A zero `Uint<8>` is stored as an empty atom.
 fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     let bytes = cell_atom(node)?;
     match bytes.len() {
@@ -148,13 +106,8 @@ fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     }
 }
 
-/// Read a `Bytes<64>` leaf (a validator's secp256k1 public key, stored as
-/// X_be(32) || Y_be(32) — the uncompressed SEC1 body without the 0x04 tag).
-/// The runtime trims trailing zero bytes from a stored `Bytes<N>` leaf
-/// (`From<[u8; N]> for ValueAtom` drops them), so a pubkey whose Y coordinate
-/// ends in zero bytes is stored shorter than 64; right-pad back to the fixed
-/// width, the same trim/pad handling as the `Bytes<141>` message and
-/// `Bytes<32>` atom decoders. Only an over-long value is an error.
+/// A stored `Bytes<N>` leaf has its trailing zero bytes trimmed, so a key ending
+/// in zeros comes back short and has to be right-padded.
 fn read_bytes64(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 64]> {
     let bytes = cell_atom(node)?;
     if bytes.len() > 64 {
@@ -169,12 +122,7 @@ fn read_bytes64(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 64]> {
     Ok(pubkey)
 }
 
-/// Read the `validators: Map<Uint<8>, Bytes<64>>` ledger field — each value
-/// is a secp256k1 public key (X_be || Y_be, the uncompressed SEC1 body the
-/// in-circuit `secp256k1EcdsaVerify` checks against) — and derive each
-/// validator's 20-byte ETH address as `keccak256(pubkey)[12..]`, the standard
-/// Ethereum address derivation. Returned in ascending slot-index order (the
-/// order the on-chain multisig expects).
+/// Ascending slot-index order is what the on-chain multisig expects.
 fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
     let map = match node {
         StateValue::Map(m) => m,
@@ -188,7 +136,6 @@ fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
     let mut entries: Vec<(u8, [u8; 20])> = Vec::with_capacity(map.size());
     for entry in map.iter() {
         let pair = &*entry;
-        // key is an AlignedValue (the Uint<8> slot index); read its first byte.
         let key_av = &*pair.0;
         let idx = key_av
             .value
@@ -207,8 +154,7 @@ fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
     Ok(entries.into_iter().map(|(_, addr)| addr).collect())
 }
 
-/// Decode the MessageIdMultisigIsm config (validators, threshold, module
-/// type) from the `night` contract's serialized ledger state.
+/// Decode the MessageIdMultisigIsm config from the serialized ledger state.
 pub fn decode_ism_state(bytes: &[u8]) -> ChainResult<IsmState> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
@@ -219,11 +165,8 @@ pub fn decode_ism_state(bytes: &[u8]) -> ChainResult<IsmState> {
         module_type: read_u8(nav(root, &ISM_MODULE_TYPE_PATH)?)?,
     };
 
-    // Structural sanity: the decoded slots must be mutually consistent. A
-    // mismatch means the positional paths read the wrong slots (e.g. a
-    // contract layout shift), not a legitimate on-chain state. `module_type`
-    // is validated separately in `ism::module_type_from_u8`, which keeps this
-    // decoder agnostic to which ISM variants the agent supports.
+    // Mutually inconsistent slots mean the positional paths read the wrong
+    // fields, not a legitimate on-chain state.
     if state.validator_count as usize != state.validators.len() {
         return Err(HyperlaneMidnightError::StateDecode(format!(
             "validator_count {} does not match decoded validator set size {}",
@@ -243,9 +186,7 @@ pub fn decode_ism_state(bytes: &[u8]) -> ChainResult<IsmState> {
     Ok(state)
 }
 
-/// Read a little-endian unsigned integer leaf (a Compact `Counter`/`Uint<64>`)
-/// as a `u64`. The on-chain runtime trims trailing zero bytes, so a zero
-/// counter is an empty atom and any value is at most 8 bytes.
+/// A zero counter is stored as an empty atom.
 fn read_counter_u64(node: &StateValue<DefaultDB>) -> ChainResult<u64> {
     let bytes = cell_atom(node)?;
     if bytes.len() > 8 {
@@ -260,10 +201,8 @@ fn read_counter_u64(node: &StateValue<DefaultDB>) -> ChainResult<u64> {
     Ok(u64::from_le_bytes(le))
 }
 
-/// Read the `nonce` Counter from the Mailbox state and return it as a `u32`.
-/// This is the number of messages dispatched so far (valid dispatch keys are
-/// `0..nonce`), mirroring upstream `Mailbox.nonce`. The on-chain circuit caps
-/// the counter below `2^32`, so the cast cannot truncate a legitimate value.
+/// The number of messages dispatched so far. The on-chain circuit caps the
+/// counter below `2^32`, so the cast cannot truncate a legitimate value.
 pub fn decode_nonce_count(bytes: &[u8]) -> ChainResult<u32> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
@@ -273,12 +212,8 @@ pub fn decode_nonce_count(bytes: &[u8]) -> ChainResult<u32> {
     })
 }
 
-/// Decode the append-only `dispatched_messages: Map<Uint<32>, Bytes<141>>`
-/// ledger field into `(nonce, message)` pairs sorted by nonce. Each map value
-/// is the wire-format encoded `HyperlaneMessage`; the decoder re-parses it and
-/// asserts the encoded nonce matches the map key — the same binding
-/// `Mailbox.recordDispatch` enforces on-chain, here as defence-in-depth
-/// against a malformed state read. Shared with the dispatch indexer (#16).
+/// Sorted by nonce. Each message's encoded nonce must match its map key, the
+/// same binding `Mailbox.recordDispatch` enforces on-chain.
 pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, HyperlaneMessage)>> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
@@ -295,7 +230,7 @@ pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, Hyperla
     let mut out: Vec<(u32, HyperlaneMessage)> = Vec::with_capacity(map.size());
     for entry in map.iter() {
         let pair = &*entry;
-        // Map key is a little-endian `Uint<32>` nonce.
+        // The key is a little-endian `Uint<32>` nonce.
         let key_av = &*pair.0;
         let key_bytes = key_av
             .value
@@ -308,14 +243,9 @@ pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, Hyperla
         kb[..n].copy_from_slice(&key_bytes[..n]);
         let nonce = u32::from_le_bytes(kb);
 
-        // Map value is the wire-format encoded message. Compact trims trailing
-        // zero bytes from the stored `Bytes<141>` leaf, so a message whose tail
-        // is zero (e.g. a decimal-scaled amount ending in zero bytes — 10^17
-        // for a 6->18 decimal route ends in 0x0000) is stored as < 141 bytes.
-        // Right-pad back to the fixed width before decoding (the trimmed bytes
-        // were zeros); only an over-long value is an error. Mirrors
-        // `decode_single_message`. (The #15 simulator fixture used an identity
-        // scale, so its amount kept a non-zero tail and never triggered this.)
+        // Trailing zero bytes are trimmed on store, so a message whose tail is
+        // zero (a scaled amount ending in 0x00, say) comes back short and has
+        // to be right-padded before decoding.
         let value = cell_atom(&pair.1)?;
         if value.len() > ENCODED_MESSAGE_LEN {
             return Err(HyperlaneMidnightError::StateDecode(format!(
@@ -355,20 +285,15 @@ mod tests {
         <[u8; 20]>::try_from(v.as_slice()).unwrap()
     }
 
-    /// A `Cell` leaf wrapping the given `AlignedValue`-convertible value, as the
-    /// runtime stores scalar/byte ledger fields.
     fn cell<V: Into<AlignedValue>>(value: V) -> StateValue<DefaultDB> {
         StateValue::Cell(Sp::new(value.into()))
     }
 
-    /// Wrap a sequence of state values into a fixed-size `Array` node.
     fn array(values: Vec<StateValue<DefaultDB>>) -> StateValue<DefaultDB> {
         StateValue::Array(Array::from(values))
     }
 
-    /// Serialize a synthetic Mailbox `StateValue` tree into the same tagged
-    /// `ContractState` wire bytes the live indexer serves. The root mirrors the
-    /// deployed layout, with `Null` in the slots before each pinned field.
+    /// Produces the same tagged wire bytes the indexer serves.
     fn mailbox_state_bytes(
         deliveries: StateValue<DefaultDB>,
         nonce: StateValue<DefaultDB>,
@@ -407,7 +332,7 @@ mod tests {
             sender: H256::repeat_byte(0xAB),
             destination: 5678,
             recipient: H256::repeat_byte(0xCD),
-            // 64-byte body; trailing zeros exercise the right-pad path.
+            // Trailing zeros exercise the right-pad path.
             body: {
                 let mut b = vec![0u8; 64];
                 b[0] = 0x11;
@@ -429,7 +354,6 @@ mod tests {
 
     #[test]
     fn decodes_synthetic_nonce_count_zero() {
-        // A zero counter is stored as an empty atom (trailing zeros trimmed).
         let bytes = mailbox_state_bytes(
             StateValue::Map(HashMap::new()),
             cell(0u64),
@@ -440,9 +364,8 @@ mod tests {
 
     #[test]
     fn decodes_dispatched_messages_sorted_by_nonce() {
-        // Multiple map entries exercise the key parse + sort: the merkle
-        // reconstruction ingests leaves in nonce order, so a wrong key parse
-        // or ordering bug would produce a different root.
+        // The merkle reconstruction ingests leaves in nonce order, so a wrong
+        // key parse or ordering bug would produce a different root.
         let mut map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new();
         let mut expected = Vec::new();
         for nonce in [7u32, 0, 42, 1] {
@@ -464,18 +387,10 @@ mod tests {
 
     #[test]
     fn decode_dispatched_messages_right_pads_trimmed_value() {
-        // Regression for the merkle-hook / dispatch-indexer batch path
-        // (`decode_dispatched_messages`, used by
-        // `MidnightMerkleTreeHook::fetch_logs_in_range`). The runtime trims
-        // trailing zero bytes from a `Bytes<141>` leaf, so a real dispatch
-        // whose decimal-scaled amount ends in zero bytes is stored as < 141
-        // bytes (a 6->18-decimal route scales 10^5 to 10^17, which ends in
-        // 0x0000 -> a 139-byte on-chain value). This path previously asserted
-        // exactly 141 and rejected such messages with
-        // "dispatched message ... is 139 bytes, expected 141"; it must right-pad
-        // like the singular decoder. The #15 simulator fixture used an identity
-        // scale (non-zero amount tail -> full 141 bytes), so it never caught
-        // this. An all-zero body trims the most and pins the branch.
+        // A real dispatch whose scaled amount ends in zero bytes is stored
+        // shorter than 141 (a 6->18-decimal route scales 10^5 to 10^17, which
+        // ends in 0x0000). An all-zero body trims the most and pins the pad
+        // branch.
         let msg = HyperlaneMessage {
             version: 3,
             nonce: 0,
@@ -508,8 +423,7 @@ mod tests {
         );
     }
 
-    /// Serialize a synthetic ISM `StateValue` tree into the tagged
-    /// `ContractState` wire bytes, laid out so the pinned ISM paths line up.
+    /// Laid out so the ISM paths line up.
     fn ism_state_bytes(
         validators: StateValue<DefaultDB>,
         validator_count: u8,
@@ -535,12 +449,8 @@ mod tests {
         bytes
     }
 
-    /// Real secp256k1 keypair for the pubkey-registry tests: the 64-byte
-    /// registry value (X_be || Y_be, the uncompressed SEC1 body without the
-    /// 0x04 tag — exactly what the contract's `enrollValidator` stores) plus
-    /// the ETH address derived from it, cross-checked against ethers' own
-    /// independent secret-key -> address path so the derivation under test
-    /// cannot silently drift.
+    /// The derivation under test is cross-checked against ethers' own
+    /// key -> address path, so it cannot silently drift.
     fn validator_keypair(priv_hex: &str) -> ([u8; 64], [u8; 20]) {
         use ethers::core::k256::elliptic_curve::sec1::ToEncodedPoint;
         use ethers::core::k256::PublicKey;
@@ -550,16 +460,13 @@ mod tests {
         let point = PublicKey::from(&wallet.signer().verifying_key()).to_encoded_point(false);
         assert_eq!(point.as_bytes()[0], 0x04, "uncompressed SEC1 tag");
         let pubkey: [u8; 64] = point.as_bytes()[1..].try_into().unwrap();
-        // The registry-value -> identity derivation under test.
         let derived: [u8; 20] = ethers::utils::keccak256(pubkey)[12..].try_into().unwrap();
         assert_eq!(derived, wallet.address().0, "keccak256(pubkey)[12..]");
         (pubkey, derived)
     }
 
-    // The validators registry stores `Bytes<64>` secp256k1 pubkeys (#22);
-    // the decoder must derive each ETH address as `keccak256(pubkey)[12..]`
-    // and return them in ascending slot-index order regardless of the map's
-    // iteration order (entries are inserted out of order here).
+    // Addresses must come back in ascending slot-index order regardless of the
+    // map's iteration order, so the entries are inserted out of order here.
     #[test]
     fn decodes_synthetic_ism_state_from_pubkey_registry() {
         let (pk0, addr0) =
@@ -567,8 +474,6 @@ mod tests {
         let (pk1, addr1) =
             validator_keypair("2222222222222222222222222222222222222222222222222222222222222222");
 
-        // `validators: Map<Uint<8>, Bytes<64>>`, keyed by slot index; slot 1
-        // inserted first to exercise the sort-by-key ordering.
         let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
             .insert(AlignedValue::from(1u8), cell(pk1))
             .insert(AlignedValue::from(0u8), cell(pk0));
@@ -585,18 +490,14 @@ mod tests {
         );
     }
 
-    // The runtime trims trailing zero bytes from a stored `Bytes<64>` leaf
-    // (`From<[u8; N]> for ValueAtom` drops them), so a pubkey whose Y
-    // coordinate ends in 0x00 is stored SHORT; `read_bytes64` must right-pad
-    // back to 64 before hashing, or such a validator (~1 in 256 keys) would
-    // fail to decode. Synthetic bytes rather than a real curve point — the
-    // decoder never validates the point, and forcing a zero tail pins the
-    // pad branch deterministically.
+    // A pubkey whose Y coordinate ends in 0x00 is stored short, and roughly
+    // one key in 256 does. Synthetic bytes rather than a real curve point: the
+    // decoder never validates the point, and a forced zero tail pins the pad
+    // branch.
     #[test]
     fn decodes_pubkey_with_trailing_zeros_trimmed_on_store() {
         let mut pubkey = [0x5Au8; 64];
         pubkey[61..].fill(0);
-        // Confirm the store actually trims, so this exercises the pad branch.
         assert_eq!(
             ValueAtom::from(pubkey).0.len(),
             61,
@@ -616,20 +517,12 @@ mod tests {
         );
     }
 
-    // Real `night` state captured from the local devnet indexer
-    // (deploy with validators 0x19e7../0x1563../0x5cbd.., threshold 2,
-    // module_type 5).
-    //
-    // IGNORED until the fixture is regenerated: this blob predates #22, so
-    // its `validators` map still stores 20-byte ETH addresses. The decoder
-    // now expects `Bytes<64>` secp256k1 pubkeys and derives the address via
-    // `keccak256(pubkey)[12..]`, so decoding the stale blob yields garbage
-    // addresses. Once the contracts repo regenerates `night-state.hex` from
-    // a deploy that enrolls the SAME three validator keys as 64-byte pubkeys,
-    // the derived addresses below are unchanged — drop the `#[ignore]`
-    // without touching the assertions.
+    // Real `night` state captured from a devnet indexer. Ignored because the
+    // committed blob predates the switch to 64-byte pubkey validators, so it
+    // decodes to garbage addresses. Regenerating it from a deploy of the same
+    // three keys leaves the assertions below valid.
     #[test]
-    #[ignore = "night-state.hex is a live-captured fixture predating #22 (32-byte validators) and the merkle-removal layout; regenerate from a fresh deploy of the same 3 validators — see contracts repo"]
+    #[ignore = "night-state.hex predates the 64-byte pubkey validator registry; regenerate from a fresh deploy of the same 3 validators"]
     fn decodes_live_night_ism_state() {
         let hex = include_str!("../tests/fixtures/night-state.hex").trim();
         let bytes = hex::decode(hex).expect("fixture is valid hex");

@@ -27,11 +27,10 @@ import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
 import { readRemoteGasData, topLevelArity } from '../clients/state.js';
 
-// Midnight has no dispatch-coupled hooks. This manager exists because the
-// CLI's data model carries two things as "hooks": the checkpoint format's
-// merkle_tree_hook identity (the night address — the tree itself is rebuilt
-// off-chain by validators) and the IGP config (the IGP is a standalone
-// contract here; gas payment is a separate, decoupled transaction).
+// Midnight has no dispatch-coupled hooks. This manager exists because the CLI
+// models two other things as hooks: the checkpoint format's merkle_tree_hook
+// identity, and the IGP, which here is a standalone contract paid in a separate
+// transaction.
 const NIGHT_STATE_ARITY = 2;
 const IGP_STATE_ARITY = 8;
 
@@ -169,10 +168,9 @@ class MidnightIgpHookWriter
     const deployResult = await this.signer.deployMidnightContract({
       name: 'igp',
       buildArgs: ({ ownerId, instanceSalt, deployerUnshielded }) => {
-        // The sealed `claim` beneficiary. Config values are treated as
-        // unshielded user addresses; absent/zero falls back to the
-        // deployer's own unshielded address. Re-pointable later via
-        // setBeneficiary.
+        // The sealed `claim` beneficiary, treated as an unshielded user
+        // address. Falls back to the deployer's own, and `setBeneficiary`
+        // re-points it later.
         const beneficiary = resolveBeneficiaryBytes(
           config.beneficiary,
           deployerUnshielded,

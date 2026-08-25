@@ -1,12 +1,7 @@
 //! Application-level message verification for Midnight.
 //!
-//! The relayer calls into [`ApplicationOperationVerifier`] before delivering a
-//! message to its destination, so each chain integration can reject messages
-//! that its on-chain runtime would refuse anyway (e.g. malformed bodies).
-//!
-//! For Midnight, the only structural constraint we enforce at this layer is
-//! that warp-route messages must carry a parseable [`TokenMessage`]. Anything
-//! else is left to the on-chain Mailbox + ISM + WarpRoute to handle.
+//! The only constraint enforced here is that warp-route messages carry a
+//! parseable [`TokenMessage`]; everything else is left to the contract.
 
 use std::io::Cursor;
 

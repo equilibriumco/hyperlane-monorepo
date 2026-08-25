@@ -11,9 +11,9 @@ import {
 
 export interface ProviderOptions {
   endpoints: WalletEndpoints;
-  // Absolute path of the level DB directory. This must be midnightDbName —
-  // the provider's privateStateStoreName option is only a sublevel name
-  // inside the DB, and the DB itself would land in the process cwd.
+  // Absolute path of the level DB directory, which must be `midnightDbName`:
+  // `privateStateStoreName` only names a sublevel inside the DB, so the DB
+  // itself would otherwise land in the process cwd.
   privateStateDbPath: string;
   privateStatePassword: string;
 }
@@ -22,9 +22,9 @@ export interface ProviderOptions {
 export type ContractProviders = any;
 
 /**
- * Build the provider bundle that `deployContract` / `findDeployedContract`
- * consume. `zkConfigPath` points to the per-contract artifacts dir so the
- * zk-config provider can locate prover/verifier keys.
+ * Build the provider bundle `deployContract` and `findDeployedContract`
+ * consume. `zkConfigPath` is the per-contract artifacts dir holding the
+ * prover/verifier keys.
  */
 export async function createProviders(
   walletCtx: WalletContext,
@@ -37,10 +37,8 @@ export async function createProviders(
   }
   const shielded = state.shielded;
 
-  // CAST: `balanceTx` and `submitTx` straddle two SDK packages —
-  // midnight-js-contracts types its provider's tx parameters against
-  // classes that aren't nominally compatible with the wallet-sdk's. The
-  // runtime contract holds; the types don't reconcile across packages.
+  // `balanceTx` and `submitTx` straddle two SDK packages whose tx types are not
+  // nominally compatible. The runtime shapes match; the types do not.
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const walletProvider = {
     getCoinPublicKey: () => shielded.coinPublicKey.toHexString(),
@@ -59,10 +57,8 @@ export async function createProviders(
         },
         { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
       );
-      // signRecipe signs the unshielded-offer inputs that any
-      // `receiveUnshielded`-using circuit produces (e.g. `night.fund`).
-      // Without it the chain rejects with
-      // `MalformedError::InputsSignaturesLengthMismatch` (error 192).
+      // Signs the unshielded-offer inputs any `receiveUnshielded` circuit
+      // produces; without it the chain rejects with error 192.
       const signed = await walletCtx.wallet.signRecipe(recipe, (payload) =>
         walletCtx.unshieldedKeystore.signDataAsync(payload),
       );

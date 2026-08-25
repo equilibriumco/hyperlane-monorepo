@@ -1,11 +1,9 @@
 /**
- * Per-contract owner state, ported from hyperlane-midnight. The ZOwnablePK
- * substrate binds the owner id to `secretNonce` (private state) +
- * `instanceSalt` (constructor immutable). Both are generated once per
- * contract and persisted so admin tooling can use the same identity later.
- * The maintenance-authority signing key sampled at deploy time is persisted
- * too — losing it means never being able to add or replace verifier keys
- * on that contract instance again.
+ * Per-contract owner state. ZOwnablePK binds the owner id to a `secretNonce` in
+ * private state plus an immutable `instanceSalt`, both generated once per
+ * contract and persisted so admin tooling keeps the same identity later. The
+ * maintenance-authority signing key is persisted too: losing it means never
+ * being able to add or replace verifier keys on that instance again.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';

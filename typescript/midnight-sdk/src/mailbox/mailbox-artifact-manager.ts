@@ -27,9 +27,9 @@ import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
 import { resolveValidatorSet } from '../ism/validators.js';
 
-// Wire-format precision of warp transfer amounts (the max decimals in the
-// route), NOT the remote chain's local token decimals. See the Scale
-// module in hyperlane-midnight before changing this.
+// Wire-format precision of warp transfer amounts, meaning the max decimals in
+// the route rather than the remote chain's local token decimals. Check the
+// contracts repo's Scale module before changing this.
 const MESSAGE_DECIMALS = 18n;
 
 class MidnightMailboxReader implements ArtifactReader<
@@ -44,12 +44,10 @@ class MidnightMailboxReader implements ArtifactReader<
       this.client.runCircuit<Uint8Array>('night', state.data, 'owner'),
       this.client.runCircuit<bigint>('night', state.data, 'localDomain'),
     ]);
-    // The night contract is a monolith and is its own default ISM. Midnight
-    // has no dispatch-coupled hooks: the merkle tree lives off-chain
-    // (validators rebuild it from dispatched_messages), and the night
-    // address fills the checkpoint format's merkle_tree_hook slot — so the
-    // "defaultHook" here is that protocol identity, not a contract. There
-    // is no required hook.
+    // The night contract is a monolith and its own default ISM. There are no
+    // dispatch-coupled hooks here, so `defaultHook` is the merkle_tree_hook
+    // identity the checkpoint format wants, not a contract, and nothing fills
+    // the required hook.
     const self = {
       artifactState: ArtifactState.UNDERIVED,
       deployed: { address },
@@ -82,11 +80,10 @@ class MidnightMailboxWriter
     super(client);
   }
 
-  // Deploys the night monolith (mailbox + ISM + native warp route in one
-  // contract). The multisig ISM config is consumed here: validators,
-  // threshold, and decimals are night constructor args, sealed at deploy
-  // time. Hook placeholders from the orchestrator are ignored — Midnight
-  // has no dispatch-coupled hooks to attach.
+  // Deploys the night monolith: mailbox, ISM, and native warp route in one
+  // contract. The multisig ISM config is consumed here, since validators,
+  // threshold, and decimals are constructor args sealed at deploy time. Hook
+  // placeholders from the orchestrator are ignored.
   async create(
     artifact: ArtifactNew<MailboxOnChain>,
   ): Promise<[DeployedRawMailboxArtifact, TxReceipt[]]> {
@@ -119,11 +116,9 @@ class MidnightMailboxWriter
         ],
       });
 
-    // The ISM artifact still carries the pre-deploy placeholder address
-    // (see MidnightMultisigIsmWriter.create), and the core orchestrator
-    // reuses that same object when reporting deployed addresses. Stamp the
-    // real address on it now that it exists: the night contract is its own
-    // ISM.
+    // The ISM artifact still carries its pre-deploy placeholder address, and the
+    // orchestrator reuses that same object when reporting deployed addresses.
+    // The night contract is its own ISM, so stamp the real address on now.
     config.defaultIsm.deployed.address = address;
 
     return [

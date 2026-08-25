@@ -818,12 +818,10 @@ export function buildAgentConfig(
           ? formatMidnightAddress(addresses[chain])
           : addresses[chain];
 
-    // Midnight agents read chain state via the indexer GraphQL endpoint,
-    // which travels in the metadata's gatewayUrls. The node signer marks
-    // that transaction signing is delegated to the submit-handle subprocess;
-    // its presence is what lets the validator self-announce. toolkitPath
-    // (the subprocess binary) is a host-local path the operator supplies
-    // via additionalConfig or by editing the rendered file.
+    // The indexer GraphQL endpoint travels in the metadata's gatewayUrls. The
+    // node signer marks that signing is delegated to the submitter subprocess,
+    // and its presence is what lets the validator self-announce. `toolkitPath`
+    // is host-local, so the operator supplies it separately.
     const midnightConfig =
       metadata?.protocol === ProtocolType.Midnight
         ? {

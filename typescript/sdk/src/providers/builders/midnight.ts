@@ -7,9 +7,8 @@ import { ProviderType } from '../ProviderType.js';
 import type { ProviderBuilderFn } from './types.js';
 
 /**
- * Midnight has no JSON-RPC interface; the read provider runs contract
- * circuits locally against state fetched from the chain's GraphQL indexer
- * (gatewayUrls). Construction never dials the network.
+ * Midnight has no JSON-RPC interface: the read provider runs contract circuits
+ * locally against state fetched from the GraphQL indexer in `gatewayUrls`.
  */
 export const defaultMidnightProviderBuilder: ProviderBuilderFn<
   MidnightProvider

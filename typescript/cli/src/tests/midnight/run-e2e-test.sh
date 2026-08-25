@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-# Midnight e2e tests run against an externally managed local devnet: the
-# node, indexer, and proof server from the hyperlane-midnight repo's
-# docker compose, with contract size limits already raised (its devnet-up
-# script handles all of that). They also prove every state change for
-# real, which needs the full compiled contracts tree (prover keys are
-# multi-GB and are not packaged with the sdk).
+# These tests need an externally managed devnet (node, indexer, proof server)
+# and prove every state change for real, so they also need the full compiled
+# contracts tree: prover keys are multi-GB and are not packaged with the SDK.
 
 if [ -z "${HYPERLANE_MIDNIGHT_CONTRACTS}" ]; then
   echo "HYPERLANE_MIDNIGHT_CONTRACTS is not set."

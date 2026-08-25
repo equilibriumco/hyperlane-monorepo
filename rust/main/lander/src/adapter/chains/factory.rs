@@ -71,10 +71,8 @@ impl AdapterFactory {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(_) => todo!(
-                "Issue #20: Midnight uses the Classic submitter by default. \
-                 This arm is only reached if a chain config explicitly sets `submitter: lander`. \
-                 If Lander support becomes desirable, implement `AdaptsChain` for Midnight here \
-                 (spawning `midnight-node-toolkit` as a subprocess)."
+                "Midnight uses the Classic submitter; this arm is only reached \
+                 if a chain config explicitly sets `submitter: lander`."
             ),
         };
         Ok(adapter)

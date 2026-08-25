@@ -10,9 +10,8 @@ pub struct ConnectionConf {
 }
 
 impl ConnectionConf {
-    /// Construct a new `ConnectionConf`. Validators and threshold are no
-    /// longer config-sourced — the ISM reads them from on-chain state via
-    /// the indexer.
+    /// Construct a new `ConnectionConf`. Validators and threshold are not
+    /// configured here; the ISM reads them from chain state.
     pub fn new(indexer_graphql_url: Url, toolkit_path: Option<String>) -> Self {
         Self {
             indexer_graphql_url,

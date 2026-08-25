@@ -395,8 +395,8 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // from_conf wires the submit sidecar so the wallet-balance
-                // metric can resolve through its `balance` op.
+                // `from_conf` also wires the sidecar, which is what answers the
+                // wallet-balance metric.
                 let provider =
                     h_midnight::MidnightProvider::from_conf(locator.domain.clone(), conf);
                 Ok(Box::new(provider) as Box<dyn HyperlaneProvider>)
@@ -570,8 +570,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // The monolithic WarpRoute embeds the merkle tree; read its
-                // count / current_root from chain state via the indexer (#14).
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
@@ -673,9 +671,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Replays the WarpRoute contract's HYP_DISPATCH events over
-                // block ranges via the Midnight indexer's `contractEvents`
-                // query (#95); the `nonce` counter is the sequence tip.
                 let client =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let indexer = h_midnight::MidnightDispatchIndexer::new(client, &locator);
@@ -768,10 +763,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Replays the WarpRoute contract's HYP_PROCESS events over
-                // block ranges via the Midnight indexer's `contractEvents`
-                // query (#95); driven by the rate-limited (watermark) cursor
-                // like EVM deliveries.
                 let client =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let indexer = h_midnight::MidnightDeliveryIndexer::new(client, &locator);
@@ -856,11 +847,8 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // The IGP indexer struct doubles as the paymaster marker
-                // (the Aleo/Radix/CosmosNative pattern). It reads the IGP
-                // contract's `gas_payments` state via the indexer client
-                // (#14); the relayer never calls the paymaster trait itself,
-                // but every configured chain must supply the boxed object.
+                // One struct serves as both the paymaster marker and the
+                // indexer, as on Aleo/Radix/CosmosNative.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
@@ -953,10 +941,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Replays the IGP contract's HYP_GAS_PAYMENT events over
-                // block ranges via the Midnight indexer's `contractEvents`
-                // query (#95); no sequence, matching EVM. Same struct as
-                // build_interchain_gas_paymaster above.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
@@ -1098,9 +1082,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Derives leaf insertions from the WarpRoute contract's
-                // HYP_DISPATCH events over block ranges (#95). Same struct as
-                // build_merkle_tree_hook above.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
@@ -1281,8 +1262,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // The ISM reads its module type from chain state (via the
-                // indexer) on each `module_type` call, not from config.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
@@ -1360,8 +1339,6 @@ impl ChainConf {
             }
             #[cfg(feature = "midnight")]
             ChainConnectionConf::Midnight(conf) => {
-                // Validators + threshold are read from chain state by the ISM
-                // itself (via the indexer), not sourced from config.
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
                 let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);

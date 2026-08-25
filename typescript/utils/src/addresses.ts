@@ -131,9 +131,9 @@ export function getAddressProtocolType(address: Address) {
   } else if (isAddressRadix(address)) {
     return ProtocolType.Radix;
   } else if (isAddressMidnight(address)) {
-    // Unreachable for 0x-prefixed input: CosmosNative shares the 32-byte hex
-    // shape and is checked first (Starknet has the same shadowing). Explicit
-    // protocol dispatch is the supported path for Midnight addresses.
+    // Unreachable for 0x-prefixed input, since CosmosNative shares the 32-byte
+    // hex shape and is checked first. Midnight addresses are meant to be
+    // dispatched by explicit protocol instead.
     return ProtocolType.Midnight;
   } else {
     return undefined;

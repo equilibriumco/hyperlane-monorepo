@@ -71,11 +71,9 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
   function writeRouteConfigs(
     remoteRouters: Record<string, { address: string }>,
   ): void {
-    // The remote chain entry is reference data only (foreignDeployment):
-    // the CLI never submits there, but the signer middleware still wants a
-    // key for it — REMOTE_HYP_KEY satisfies that.
-    // Token metadata rides the config: non-EVM native entries are not
-    // derived from chain metadata by the shared token-metadata code.
+    // The remote entry is foreignDeployment reference data, but the signer
+    // middleware still wants a key for it. Token metadata has to be spelled out
+    // here too: non-EVM native entries derive nothing from chain metadata.
     const deployConfig: WarpRouteDeployConfig = {
       [CHAIN_NAME_1]: {
         type: TokenType.native,

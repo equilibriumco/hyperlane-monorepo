@@ -38,8 +38,8 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     protected readonly indexer: MidnightIndexerClient,
   ) {}
 
-  // Construction never dials the network, so a sync factory is safe; the
-  // async connect stays for the ProtocolProvider interface.
+  // Construction never dials the network, so a sync factory is safe; the async
+  // connect is only there for the interface.
   static fromMetadata(metadata: ChainMetadataForAltVM): MidnightProvider {
     const client = MidnightReadClient.fromMetadata(metadata);
     return new MidnightProvider(
@@ -104,10 +104,8 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     return this.indexer.getBlockHeight();
   }
 
-  // Contract balances live on the ContractState balance map;
-  // queryUnshieldedBalances returns an empty list for contract addresses.
-  // Wallet (mn_...) addresses need a synced wallet, which the read-only
-  // provider does not have.
+  // Contract balances live on the ContractState balance map, since
+  // queryUnshieldedBalances returns nothing for a contract address.
   async getBalance(req: ReqGetBalance): Promise<bigint> {
     if (req.address.startsWith('mn')) {
       throw new Error(
@@ -145,10 +143,9 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     return Boolean(result);
   }
 
-  // The night contract is a monolith: mailbox, ISM, hook, and warp token
+  // The night contract is a monolith, so mailbox, ISM, hook, and warp token all
   // share one address. Owner is the ZOwnablePK commitment, not a wallet
-  // address. Native NIGHT has no on-chain token metadata, so name/symbol
-  // come from chain metadata.
+  // address, and NIGHT's name/symbol come from chain metadata.
   async getToken(req: ReqGetToken): Promise<ResGetToken> {
     const state = await this.requireContractState(req.tokenAddress);
     const [owner, localDecimals] = await Promise.all([
@@ -243,9 +240,9 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     return 0n;
   }
 
-  // Not part of IProvider; consumed by the SDK token adapter (aleo
-  // precedent). Builds the transferRemote call plus the payForGas
-  // follow-up the signer runs once the messageId is known.
+  // Not part of IProvider; the SDK token adapter calls it, following aleo.
+  // Builds the transferRemote call plus the payForGas follow-up the signer runs
+  // once the messageId is known.
   async getRemoteTransferTransaction(
     req: ReqRemoteTransfer,
   ): Promise<MidnightTransaction> {
@@ -284,9 +281,8 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
   }
 }
 
-// The balance map is keyed by TokenType objects, so get() by identity cannot
-// match; iterate and compare tag+raw against nativeToken() (the all-zeros
-// unshielded color).
+// The map is keyed by TokenType objects, so a `get()` by identity never
+// matches; compare tag and raw against `nativeToken()` instead.
 function readNativeBalance(balanceMap: unknown): bigint {
   if (!(balanceMap instanceof Map)) {
     return 0n;

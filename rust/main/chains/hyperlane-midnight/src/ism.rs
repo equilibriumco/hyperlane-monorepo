@@ -1,15 +1,8 @@
 //! `InterchainSecurityModule` + `MultisigIsm` impls for Midnight.
 //!
-//! Both read from the deployed `night` contract's on-chain state via the
-//! indexer (a one-shot `contractAction` HTTP query returning the latest
-//! state), decoded by [`crate::state_decode`]. `validators`, `threshold`,
-//! and `module_type` all come from one such read, so the relayer always
-//! signs against the set the on-chain ISM will check — no config/chain drift.
-//!
-//! `module_type` is read from chain rather than hardcoded: the Midnight
-//! WarpRoute only implements `MessageIdMultisig` today, so any other value
-//! means the deployed contract uses verification logic this agent build
-//! does not support, and we error rather than guess.
+//! Validators, threshold, and module type all come from a single read of the
+//! deployed contract's state, so the relayer always signs against the set the
+//! on-chain ISM will check and nothing can drift out of config.
 
 use async_trait::async_trait;
 
@@ -20,10 +13,8 @@ use hyperlane_core::{
 
 use crate::{HyperlaneMidnightError, MidnightProvider};
 
-/// Map the on-chain `module_type` discriminant to a Hyperlane [`ModuleType`].
-/// The Midnight WarpRoute only implements `MessageIdMultisig`; any other
-/// value means the deployed contract uses verification logic this agent
-/// build does not support.
+/// The WarpRoute only implements `MessageIdMultisig`, so any other value means
+/// the deployed contract verifies in a way this build does not support.
 fn module_type_from_u8(value: u8) -> ChainResult<ModuleType> {
     if value == ModuleType::MessageIdMultisig as u8 {
         Ok(ModuleType::MessageIdMultisig)
@@ -36,8 +27,7 @@ fn module_type_from_u8(value: u8) -> ChainResult<ModuleType> {
     }
 }
 
-/// Chain-sourced `InterchainSecurityModule` for Midnight. Reads the module
-/// type from the deployed contract's on-chain state.
+/// `InterchainSecurityModule` for Midnight.
 #[derive(Debug)]
 pub struct MidnightInterchainSecurityModule {
     address: H256,
@@ -85,16 +75,14 @@ impl InterchainSecurityModule for MidnightInterchainSecurityModule {
         _message: &HyperlaneMessage,
         _metadata: &Metadata,
     ) -> ChainResult<Option<U256>> {
-        // Midnight uses DUST-based fees the wallet computes at submission
-        // time (same pattern as `MidnightMailbox::process_estimate_costs`).
-        // Returning `None` signals "I can't estimate" — the relayer falls
-        // back to its own logic without dry-running, which is fine.
+        // Fees are DUST the wallet computes at submission time, so there is
+        // nothing to estimate; `None` lets the relayer fall back to its own
+        // logic without dry-running.
         Ok(None)
     }
 }
 
-/// Chain-sourced `MultisigIsm` for Midnight. Reads validators + threshold
-/// from the deployed contract's on-chain state.
+/// `MultisigIsm` for Midnight.
 #[derive(Debug)]
 pub struct MidnightMultisigIsm {
     address: H256,
@@ -103,8 +91,8 @@ pub struct MidnightMultisigIsm {
 }
 
 impl MidnightMultisigIsm {
-    /// Construct an ISM handle. Validators + threshold are read from chain
-    /// state on each `validators_and_threshold` call, not from config.
+    /// Validators and threshold are read from chain state on each
+    /// `validators_and_threshold` call, not from config.
     pub fn new(address: H256, domain: HyperlaneDomain, provider: MidnightProvider) -> Self {
         Self {
             address,
@@ -138,13 +126,8 @@ impl MultisigIsm for MidnightMultisigIsm {
     ) -> ChainResult<(Vec<H256>, u8)> {
         let address = format!("{:x}", self.address);
         let state = self.provider.indexer().read_ism_state(&address).await?;
-        // On-chain validators are `Bytes<64>` secp256k1 pubkeys (#22); the
-        // state decoder derives each 20-byte ETH address as
-        // `keccak256(pubkey)[12..]`. The multisig metadata pipeline expects
-        // H256, so left-pad each with 12 zero bytes — Ethereum's standard
-        // `addressToBytes32` convention used elsewhere in the codebase.
-        // Validators and threshold come from the same single read, so they
-        // cannot drift apart.
+        // The metadata pipeline wants H256, so left-pad each address with 12
+        // zero bytes — the standard `addressToBytes32` convention.
         let padded: Vec<H256> = state
             .validators
             .iter()

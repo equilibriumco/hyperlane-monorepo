@@ -1,30 +1,8 @@
-//! `InterchainGasPaymaster` + IGP payment indexer for Midnight (#95).
+//! `InterchainGasPaymaster` + IGP payment indexer for Midnight.
 //!
-//! The IGP contract emits one `HYP_GAS_PAYMENT` Misc event per `payForGas`,
-//! atomically with the state write. This indexer replays those events over
-//! BLOCK ranges through the Midnight indexer's `contractEvents` query —
-//! matching the EVM IGP indexer exactly:
-//!
-//!   - gas payments are NOT sequence-indexed: `Indexed::new(payment)` carries
-//!     no sequence and `latest_sequence_count_and_tip` returns `(None, tip)`,
-//!     so the framework drives this indexer with the rate-limited (watermark)
-//!     cursor, the same as EVM (`Indexable for InterchainGasPayment`).
-//!   - each event carries its transaction + block metadata, so the emitted
-//!     [`LogMeta`] is real (block number/hash, tx hash, indexer-global tx id,
-//!     chain-global event id).
-//!
-//! Following Aleo/Radix/CosmosNative, one struct serves both roles the
-//! framework builds: the [`InterchainGasPaymaster`] marker (a boxed trait
-//! object every configured chain must provide, though the relayer never calls
-//! it) and the indexer that actually feeds payments into the relayer's DB.
-//!
-//! The relayer's gas-payment *enforcement* (the None / Minimum /
-//! OnChainFeeQuoting policies + matching lists) is entirely chain-agnostic and
-//! lives in `agents/relayer/src/msg/gas_payment/`: it reads the
-//! `InterchainGasPayment`s this indexer wrote into RocksDB and never touches
-//! the chain crate. So this indexer only needs to produce the same
-//! `InterchainGasPayment` data the EVM event indexer produces — the policies
-//! work unchanged.
+//! The IGP emits one `HYP_GAS_PAYMENT` event per `payForGas`, atomically with
+//! the state write, and this replays them over block ranges. Payments carry no
+//! sequence, so the watermark cursor drives it.
 
 use std::ops::RangeInclusive;
 
@@ -43,11 +21,7 @@ use crate::events::{
 use crate::indexer_client::MiscEvent;
 use crate::MidnightProvider;
 
-/// Decode the `HYP_GAS_PAYMENT` events out of a Misc-event batch. Non-payment
-/// events (dispatches from a shared-contract deployment, future kinds) are
-/// skipped; a payment event that fails to decode is an error, not a skip.
-/// No sequence is attached — gas payments are not sequence-indexed (EVM
-/// parity; the watermark cursor tracks progress by block, not sequence).
+/// A payment that fails to decode is an error rather than a skip.
 fn igp_logs_from_events(
     events: &[MiscEvent],
     address: H256,
@@ -62,9 +36,7 @@ fn igp_logs_from_events(
         .collect()
 }
 
-/// Serve a block `range` of gas payments. Generic over the event reader so
-/// unit tests can drive the indexer logic with synthetic in-memory events;
-/// production uses the provider's [`crate::MidnightIndexerClient`].
+/// Generic over the event reader so unit tests can drive this without network IO.
 async fn fetch_igp_logs<R: MidnightEventReader>(
     reader: &R,
     address: H256,
@@ -76,8 +48,6 @@ async fn fetch_igp_logs<R: MidnightEventReader>(
     igp_logs_from_events(&events, address)
 }
 
-/// Serve the gas payments emitted by one transaction (the `transactionHash`
-/// filter); the relayer broadcasts dispatch txids to the IGP sync task.
 async fn fetch_igp_logs_by_tx<R: MidnightEventReader>(
     reader: &R,
     address: H256,
@@ -92,9 +62,7 @@ async fn fetch_igp_logs_by_tx<R: MidnightEventReader>(
     igp_logs_from_events(&events, address)
 }
 
-/// Chain-sourced `InterchainGasPaymaster` + IGP payment indexer for Midnight.
-/// Replays the IGP contract's `HYP_GAS_PAYMENT` events via the Midnight
-/// indexer's `contractEvents` query.
+/// `InterchainGasPaymaster` + IGP payment indexer for Midnight.
 #[derive(Debug, Clone)]
 pub struct MidnightInterchainGasPaymaster {
     address: H256,
@@ -133,9 +101,6 @@ impl InterchainGasPaymaster for MidnightInterchainGasPaymaster {}
 
 #[async_trait]
 impl Indexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
-    /// Midnight indexes gas payments over block ranges (`IndexMode::Block` +
-    /// the rate-limited cursor, EVM parity), so `range` is a block range and
-    /// the `fromBlock`/`toBlock` event filter honors it.
     async fn fetch_logs_in_range(
         &self,
         range: RangeInclusive<u32>,
@@ -144,9 +109,8 @@ impl Indexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        // Midnight has BFT finality and the indexer exposes only finalized
-        // blocks, so the latest height is the finalized height. The watermark
-        // cursor reads this as its tip.
+        // Midnight has BFT finality and the indexer serves only finalized
+        // blocks, so the latest height is the finalized height.
         self.provider.indexer().read_tip().await
     }
 
@@ -161,8 +125,6 @@ impl Indexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
 #[async_trait]
 impl SequenceAwareIndexer<InterchainGasPayment> for MidnightInterchainGasPaymaster {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // Gas payments are not sequence-indexed; `(None, tip)` matches the
-        // EVM IGP indexer (the rate-limited cursor never reads the count).
         let tip = self.provider.indexer().read_tip().await?;
         Ok((None, tip))
     }
@@ -180,8 +142,7 @@ mod tests {
     const ADDRESS: H256 = H256::repeat_byte(0x42);
     const TIP: u32 = 2000;
 
-    /// A `HYP_GAS_PAYMENT` event at block `1000 + id` (see `misc_event`),
-    /// with all four record fields derived from `seed`.
+    /// All four record fields are derived from `seed`.
     fn payment_event(id: u64, seed: u8) -> MiscEvent {
         let mut content = Vec::with_capacity(60);
         content.extend_from_slice(H256::repeat_byte(seed).as_bytes());
@@ -197,7 +158,6 @@ mod tests {
             tip: TIP,
             events: vec![
                 payment_event(1, 0),
-                // A dispatch interleaved in the same range: not a payment.
                 misc_event(2, HYP_DISPATCH, &[0u8; 141]),
                 payment_event(3, 7),
             ],
@@ -208,7 +168,6 @@ mod tests {
             .expect("fetch igp logs");
 
         assert_eq!(logs.len(), 2, "only HYP_GAS_PAYMENT events are served");
-        // EVM parity: no sequence on gas payments.
         assert!(logs.iter().all(|(indexed, _)| indexed.sequence.is_none()));
 
         let p = logs[1].0.inner();
@@ -220,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn honors_block_range() {
-        // Events sit at blocks 1001 and 1003 (misc_event: 1000 + id).
+        // These sit at blocks 1001 and 1003.
         let reader = FakeEventReader {
             tip: TIP,
             events: vec![payment_event(1, 0), payment_event(3, 1)],
@@ -270,7 +229,6 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].0.inner().message_id, H256::repeat_byte(0));
 
-        // A non-Midnight H512 (non-zero upper half) matches nothing.
         let mut foreign: H512 = wanted.tx_hash.into();
         foreign.0[0] = 1;
         let logs = fetch_igp_logs_by_tx(&reader, ADDRESS, foreign)

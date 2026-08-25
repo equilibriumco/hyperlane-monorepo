@@ -746,12 +746,9 @@ impl PendingMessage {
         origin_db: Arc<dyn HyperlaneDb>,
         message: &HyperlaneMessage,
     ) -> PendingOperationStatus {
-        // Level for the db-status trace events: DEBUG under test-utils (so
-        // E2E tests can assert on the log) and TRACE otherwise. Defined as a
-        // cfg-selected const rather than an inline `if cfg!(...)` inside the
-        // event! macro: the inline conditional creates a temporary that fails
-        // to compile on rustc >= 1.89 (E0716 "temporary value dropped while
-        // borrowed"). This const form compiles on 1.88 and 1.89 alike.
+        // A const rather than an inline `if cfg!(...)` in the `event!` macro:
+        // the inline form creates a temporary that fails to compile on rustc
+        // 1.89 with E0716.
         #[cfg(feature = "test-utils")]
         const DB_STATUS_LEVEL: Level = Level::DEBUG;
         #[cfg(not(feature = "test-utils"))]

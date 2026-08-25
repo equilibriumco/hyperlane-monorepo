@@ -5,9 +5,8 @@ import { type Address, ProtocolType } from '@hyperlane-xyz/utils';
 import { type CommandContext } from '../context/types.js';
 import { errorRed, logBlue, logGreen, warnYellow } from '../logger.js';
 
-// Storage locations and the latest checkpoint index, resolved per protocol.
-// The merkle tree on Midnight lives off-chain (validators rebuild it from
-// dispatched messages), so the mailbox nonce stands in for the tree size.
+// Storage locations and the latest checkpoint index, per protocol. Midnight's
+// merkle tree lives off-chain, so the mailbox nonce stands in for the tree size.
 async function getOnChainValidatorState(
   context: CommandContext,
   chain: string,
