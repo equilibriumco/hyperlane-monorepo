@@ -54,7 +54,7 @@ export async function createProviders(
       const recipe = await walletCtx.wallet.balanceUnboundTransaction(
         tx,
         {
-          shieldedSecretKeys: walletCtx.shieldedSecretKeys as any,
+          shieldedSecretKeys: walletCtx.shieldedSecretKeys,
           dustSecretKey: walletCtx.dustSecretKey,
         },
         { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
@@ -63,9 +63,8 @@ export async function createProviders(
       // `receiveUnshielded`-using circuit produces (e.g. `night.fund`).
       // Without it the chain rejects with
       // `MalformedError::InputsSignaturesLengthMismatch` (error 192).
-      const signed = await walletCtx.wallet.signRecipe(
-        recipe,
-        (payload) => walletCtx.unshieldedKeystore.signDataAsync(payload) as any,
+      const signed = await walletCtx.wallet.signRecipe(recipe, (payload) =>
+        walletCtx.unshieldedKeystore.signDataAsync(payload),
       );
       return walletCtx.wallet.finalizeRecipe(signed);
     },

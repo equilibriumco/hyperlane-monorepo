@@ -321,8 +321,7 @@ export async function insertVerifierKeys(
   );
   const counter: bigint = contractState.maintenanceAuthority.counter;
   const unsigned = new ledger.MaintenanceUpdate(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    contractAddress as any,
+    contractAddress,
     updates,
     counter,
   );

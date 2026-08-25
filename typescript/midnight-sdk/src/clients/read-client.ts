@@ -57,7 +57,7 @@ export class MidnightReadClient {
         publicDataProvider,
         strip0x(contractAddress),
       );
-      return publicStates.contractState as unknown as FetchedContractState;
+      return publicStates.contractState;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (CONTRACT_NOT_FOUND_RE.test(message)) {
