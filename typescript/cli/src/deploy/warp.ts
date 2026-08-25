@@ -450,6 +450,7 @@ function generateTokenConfigs(
       standard: tokenTypeToStandard(protocol as ProtocolType, config.type),
       tokenType: config.type,
       decimals: tokenMetadataMap.getDecimals(chainName)!,
+      scale: tokenMetadataMap.getScale(chainName),
       symbol: config.symbol || tokenMetadataMap.getSymbol(chainName)!,
       name: tokenMetadataMap.getName(chainName)!,
       addressOrDenom: contracts[chainName],
