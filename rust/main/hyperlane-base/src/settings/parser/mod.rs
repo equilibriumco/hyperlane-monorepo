@@ -239,6 +239,7 @@ fn parse_chain(
                 .and_then(|d| match d.domain_protocol() {
                     HyperlaneDomainProtocol::Ethereum => Some(IndexMode::Block),
                     HyperlaneDomainProtocol::Sealevel => Some(IndexMode::Sequence),
+                    HyperlaneDomainProtocol::Midnight => Some(IndexMode::Block),
                     _ => None,
                 })
                 .unwrap_or_default()
@@ -585,6 +586,9 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
         Some("cosmosKey") => parse_signer!(cosmosKey),
         Some("starkKey") => parse_signer!(starkKey),
         Some("radixKey") => parse_signer!(radixKey),
+        // The TS SDK emits an explicit `{"type": "node"}`, so accept that
+        // alongside the bare `{}` form.
+        Some("node") => Ok(SignerConf::Node),
         Some(t) => {
             Err(eyre!("Unknown signer type `{t}`")).into_config_result(|| (&signer.cwp).add("type"))
         }

@@ -11,6 +11,7 @@ import { TypedTransactionReceipt } from '../providers/ProviderType.js';
 import { ChainMap, ChainName } from '../types.js';
 
 import { AleoCoreAdapter } from './adapters/AleoCoreAdapter.js';
+import { MidnightCoreAdapter } from './adapters/MidnightCoreAdapter.js';
 import { CosmNativeCoreAdapter } from './adapters/CosmNativeCoreAdapter.js';
 import { CosmWasmCoreAdapter } from './adapters/CosmWasmCoreAdapter.js';
 import { EvmCoreAdapter } from './adapters/EvmCoreAdapter.js';
@@ -52,6 +53,7 @@ export class MultiProtocolCore extends MultiProtocolApp<
     if (protocol === ProtocolType.Starknet) return StarknetCoreAdapter;
     if (protocol === ProtocolType.Radix) return RadixCoreAdapter;
     if (protocol === ProtocolType.Aleo) return AleoCoreAdapter;
+    if (protocol === ProtocolType.Midnight) return MidnightCoreAdapter;
     throw new Error(`No adapter for protocol ${protocol}`);
   }
 

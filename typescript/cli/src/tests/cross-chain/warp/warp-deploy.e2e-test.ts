@@ -202,6 +202,7 @@ describe('hyperlane warp deploy e2e tests', async function () {
       ProtocolType,
       | ProtocolType.Radix
       | ProtocolType.Aleo
+      | ProtocolType.Midnight
       | ProtocolType.Tron
       | ProtocolType.Unknown
     >,

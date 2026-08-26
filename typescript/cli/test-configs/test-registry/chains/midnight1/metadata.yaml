@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=../schema.json
+blocks:
+  confirmations: 0
+  estimateBlockTime: 6
+  reorgPeriod: 1
+chainId: 1234
+displayName: Midnight Devnet 1
+domainId: 1234
+gatewayUrls:
+  - http: http://127.0.0.1:8088/api/v3/graphql
+index:
+  from: 0
+  mode: block
+isTestnet: true
+midnightNetworkId: undeployed
+name: midnight1
+nativeToken:
+  decimals: 6
+  denom: night
+  name: NIGHT
+  symbol: NIGHT
+proofServerUrl: http://127.0.0.1:6300
+protocol: midnight
+rpcUrls:
+  - http: http://127.0.0.1:9944
+technicalStack: polkadotsubstrate

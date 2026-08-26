@@ -4,6 +4,7 @@ import type { MultiProviderAdapter } from '@hyperlane-xyz/sdk/providers/MultiPro
 import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoWatchAsset } from './aleo.js';
+import { useMidnightWatchAsset } from './midnight.js';
 import { useCosmosWatchAsset } from './cosmos.js';
 import { useEthereumWatchAsset } from './ethereum.js';
 import { useRadixWatchAsset } from './radix.js';
@@ -21,6 +22,7 @@ export function useWatchAsset(
   const { addAsset: starknetAddAsset } = useStarknetWatchAsset(multiProvider);
   const { addAsset: radixAddAsset } = useRadixWatchAsset(multiProvider);
   const { addAsset: aleoAddAsset } = useAleoWatchAsset(multiProvider);
+  const { addAsset: midnightAddAsset } = useMidnightWatchAsset(multiProvider);
   const { addAsset: tronAddAsset } = useTronWatchAsset(multiProvider);
 
   return useMemo(
@@ -46,6 +48,9 @@ export function useWatchAsset(
       [ProtocolType.Aleo]: {
         addAsset: aleoAddAsset,
       },
+      [ProtocolType.Midnight]: {
+        addAsset: midnightAddAsset,
+      },
       [ProtocolType.Tron]: {
         addAsset: tronAddAsset,
       },
@@ -57,6 +62,7 @@ export function useWatchAsset(
       starknetAddAsset,
       radixAddAsset,
       aleoAddAsset,
+      midnightAddAsset,
       tronAddAsset,
     ],
   );

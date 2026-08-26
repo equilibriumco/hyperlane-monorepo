@@ -315,7 +315,9 @@ export class WarpTokenWriter
 
     if (expectedIsm && !isArtifactUnderived(expectedIsm)) {
       // NEW or DEPLOYED: Merge with current and decide deploy vs update
-      const mergedIsmConfig = mergeIsmArtifacts(currentIsm, expectedIsm);
+      const mergedIsmConfig = mergeIsmArtifacts(currentIsm, expectedIsm, {
+        allowInPlaceStaticUpdate: this.ismWriter.supportsInPlaceStaticUpdates(),
+      });
 
       if (isArtifactNew(mergedIsmConfig)) {
         // Deploy new ISM

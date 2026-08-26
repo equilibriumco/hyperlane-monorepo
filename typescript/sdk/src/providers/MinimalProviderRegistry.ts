@@ -8,6 +8,7 @@ import type { ChainMap, ChainName, ChainNameOrId } from '../types.js';
 
 import {
   AleoProvider,
+  MidnightProvider,
   CosmJsNativeProvider,
   CosmJsProvider,
   CosmJsWasmProvider,
@@ -192,6 +193,15 @@ export class MinimalProviderRegistry<
     return this.getSpecificProvider<AleoProvider['provider']>(
       chainNameOrId,
       ProviderType.Aleo,
+    );
+  }
+
+  getMidnightProvider(
+    chainNameOrId: ChainNameOrId,
+  ): MidnightProvider['provider'] {
+    return this.getSpecificProvider<MidnightProvider['provider']>(
+      chainNameOrId,
+      ProviderType.Midnight,
     );
   }
 

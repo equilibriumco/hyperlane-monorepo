@@ -38,6 +38,9 @@ export interface ChainMetadataForAltVM {
   // Used in radix tests after deploying
   // the package address to the local chain
   packageAddress?: string;
+  // Prover endpoint for chains with client-side ZK proving (e.g. Midnight,
+  // where proving is local and the network exposes no public proof server).
+  proofServerUrl?: string;
 }
 
 /**

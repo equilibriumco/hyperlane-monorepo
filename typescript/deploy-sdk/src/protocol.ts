@@ -44,6 +44,12 @@ export async function loadProtocolProviders(
         registerProtocol(protocol, () => new StarknetProtocolProvider());
         break;
       }
+      case ProtocolType.Midnight: {
+        const { MidnightProtocolProvider } =
+          await import('@hyperlane-xyz/midnight-sdk');
+        registerProtocol(protocol, () => new MidnightProtocolProvider());
+        break;
+      }
     }
   }
 }
