@@ -87,7 +87,7 @@ hyperlane address to-bytes32 --address <address> [--protocol <protocol>]
 **Flags:**
 
 - `--address, -a` - The address to convert (required)
-- `--protocol, -p` (optional) - Protocol type: ethereum, sealevel, cosmos, cosmosnative, starknet, radix, aleo, tron. Auto-detected if not specified.
+- `--protocol, -p` (optional) - Protocol type: ethereum, sealevel, cosmos, cosmosnative, starknet, radix, aleo, tron, midnight. Auto-detected if not specified.
 
 **Examples:**
 
@@ -148,3 +148,4 @@ hyperlane address from-bytes32 -b 0x00000000000000000000000071b24bf8489d5785c850
 - `radix` - Radix DLT
 - `aleo` - Aleo
 - `tron` - Tron
+- `midnight` - Midnight
