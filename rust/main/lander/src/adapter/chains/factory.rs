@@ -69,6 +69,11 @@ impl AdapterFactory {
                 let adapter = TronAdapter::from_conf(conf, core_metrics, &connection_conf).await?;
                 Arc::new(adapter)
             }
+            #[cfg(feature = "midnight")]
+            ChainConnectionConf::Midnight(_) => todo!(
+                "Midnight uses the Classic submitter; this arm is only reached \
+                 if a chain config explicitly sets `submitter: lander`."
+            ),
         };
         Ok(adapter)
     }

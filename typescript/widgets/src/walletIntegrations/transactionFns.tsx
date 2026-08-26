@@ -4,6 +4,7 @@ import type { MultiProviderAdapter } from '@hyperlane-xyz/sdk/providers/MultiPro
 import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoTransactionFns } from './aleo.js';
+import { useMidnightTransactionFns } from './midnight.js';
 import { useCosmosTransactionFns } from './cosmos.js';
 import { useEthereumTransactionFns } from './ethereum.js';
 import { useRadixTransactionFns } from './radix.js';
@@ -45,6 +46,11 @@ export function useTransactionFns(
     sendTransaction: onSendAleoTx,
     sendMultiTransaction: onSendMultiAleoTx,
   } = useAleoTransactionFns(multiProvider);
+  const {
+    switchNetwork: onSwitchMidnightNetwork,
+    sendTransaction: onSendMidnightTx,
+    sendMultiTransaction: onSendMultiMidnightTx,
+  } = useMidnightTransactionFns(multiProvider);
   const {
     switchNetwork: onSwitchTronNetwork,
     sendTransaction: onSendTronTx,
@@ -88,6 +94,11 @@ export function useTransactionFns(
         sendMultiTransaction: onSendMultiAleoTx,
         switchNetwork: onSwitchAleoNetwork,
       },
+      [ProtocolType.Midnight]: {
+        sendTransaction: onSendMidnightTx,
+        sendMultiTransaction: onSendMultiMidnightTx,
+        switchNetwork: onSwitchMidnightNetwork,
+      },
       [ProtocolType.Tron]: {
         sendTransaction: onSendTronTx,
         sendMultiTransaction: onSendMultiTronTx,
@@ -113,6 +124,9 @@ export function useTransactionFns(
       onSendAleoTx,
       onSendMultiAleoTx,
       onSwitchAleoNetwork,
+      onSendMidnightTx,
+      onSendMultiMidnightTx,
+      onSwitchMidnightNetwork,
       onSendTronTx,
       onSendMultiTronTx,
       onSwitchTronNetwork,

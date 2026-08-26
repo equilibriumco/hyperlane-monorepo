@@ -222,6 +222,7 @@ pub enum KnownHyperlaneDomain {
     SealevelTest2 = 13376,
     RadixTest0 = 9913374,
     RadixTest1 = 9913375,
+    Midnight = 1234,
     CosmosTest99990 = 99990,
     CosmosTest99991 = 99991,
     StarknetTest23448593 = 23448593,
@@ -304,6 +305,8 @@ pub enum HyperlaneDomainProtocol {
     Aleo,
     /// Tron chain
     Tron,
+    /// Midnight chain
+    Midnight,
 }
 
 impl HyperlaneDomainProtocol {
@@ -368,10 +371,9 @@ impl KnownHyperlaneDomain {
             | SonicSvmTestnet
             | StarknetSepolia => HyperlaneDomainType::Testnet,
             Test1 | Test2 | Test3 | Test4 | FuelTest1 | SealevelTest1 | SealevelTest2
-            | RadixTest0 | RadixTest1 | CosmosTest99990 | CosmosTest99991 | CosmosTestNative1
-            | CosmosTestNative2 | StarknetTest23448593 | StarknetTest23448594 => {
-                HyperlaneDomainType::LocalTestChain
-            }
+            | RadixTest0 | RadixTest1 | Midnight | CosmosTest99990 | CosmosTest99991
+            | CosmosTestNative1 | CosmosTestNative2 | StarknetTest23448593
+            | StarknetTest23448594 => HyperlaneDomainType::LocalTestChain,
             _ => HyperlaneDomainType::Mainnet,
         }
     }
@@ -407,6 +409,7 @@ impl KnownHyperlaneDomain {
             | ParadexSepolia => HyperlaneDomainProtocol::Starknet,
             Radix | RadixTestnet | RadixTest0 | RadixTest1 => HyperlaneDomainProtocol::Radix,
             Aleo | AleoTestnet => HyperlaneDomainProtocol::Aleo,
+            Midnight => HyperlaneDomainProtocol::Midnight,
             _ => HyperlaneDomainProtocol::Ethereum
         }
     }
@@ -613,7 +616,7 @@ impl HyperlaneDomain {
         use HyperlaneDomainProtocol::*;
         let protocol = self.domain_protocol();
         match protocol {
-            Ethereum | Cosmos | CosmosNative | Starknet | Tron => IndexMode::Block,
+            Ethereum | Cosmos | CosmosNative | Starknet | Tron | Midnight => IndexMode::Block,
             Fuel | Sealevel | Radix | Aleo => IndexMode::Sequence,
         }
     }

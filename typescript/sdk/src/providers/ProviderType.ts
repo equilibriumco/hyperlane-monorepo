@@ -40,6 +40,11 @@ import type {
   AleoReceipt as AleoSDKReceipt,
   AleoTransaction as AleoSDKTransaction,
 } from '@hyperlane-xyz/aleo-sdk/runtime';
+import type {
+  MidnightProvider as MidnightSDKProvider,
+  MidnightTransaction as MidnightSDKTransaction,
+  MidnightTxReceipt as MidnightSDKReceipt,
+} from '@hyperlane-xyz/midnight-sdk/runtime';
 import type { CosmosNativeProvider } from '@hyperlane-xyz/cosmos-sdk/runtime';
 import type {
   RadixProvider as RadixSDKProvider,
@@ -77,6 +82,7 @@ export enum ProviderType {
   Radix = 'radix',
   Aleo = 'aleo',
   Tron = 'tron',
+  Midnight = 'midnight',
 }
 
 export type { KnownProtocolType };
@@ -93,6 +99,7 @@ export const PROTOCOL_TO_DEFAULT_PROVIDER_TYPE: Record<
   [ProtocolType.Radix]: ProviderType.Radix,
   [ProtocolType.Aleo]: ProviderType.Aleo,
   [ProtocolType.Tron]: ProviderType.Tron,
+  [ProtocolType.Midnight]: ProviderType.Midnight,
 };
 
 export type ProviderMap<Value> = Partial<Record<ProviderType, Value>>;
@@ -145,6 +152,12 @@ type ProtocolTypesMapping = {
     provider: TronProvider;
     contract: null;
     receipt: EthersV5TransactionReceipt;
+  };
+  [ProtocolType.Midnight]: {
+    transaction: MidnightTransaction;
+    provider: MidnightProvider;
+    contract: null;
+    receipt: MidnightTransactionReceipt;
   };
   [ProtocolType.Unknown]: {
     transaction: never;
@@ -253,6 +266,11 @@ export interface TronProvider extends TypedProviderBase<EV5Providers.Provider> {
   provider: EV5Providers.Provider;
 }
 
+export interface MidnightProvider extends TypedProviderBase<MidnightSDKProvider> {
+  type: ProviderType.Midnight;
+  provider: MidnightSDKProvider;
+}
+
 export interface ZKSyncProvider extends TypedProviderBase<ZKSyncBaseProvider> {
   type: ProviderType.ZkSync;
   provider: ZKSyncBaseProvider;
@@ -276,7 +294,8 @@ export type TypedProvider =
   | GnosisTxBuilderProvider
   | RadixProvider
   | AleoProvider
-  | TronProvider;
+  | TronProvider
+  | MidnightProvider;
 
 /**
  * Contracts with discriminated union of provider type
@@ -399,6 +418,11 @@ export interface TronTransaction extends TypedTransactionBase<EV5Transaction> {
   transaction: EV5Transaction;
 }
 
+export interface MidnightTransaction extends TypedTransactionBase<MidnightSDKTransaction> {
+  type: ProviderType.Midnight;
+  transaction: MidnightSDKTransaction;
+}
+
 export type TypedTransaction =
   | EthersV5Transaction
   // | EthersV6Transaction
@@ -411,7 +435,8 @@ export type TypedTransaction =
   | ZKSyncTransaction
   | RadixTransaction
   | AleoTransaction
-  | TronTransaction;
+  | TronTransaction
+  | MidnightTransaction;
 
 export type AnnotatedEV5Transaction = Annotated<EV5Transaction>;
 
@@ -510,6 +535,11 @@ export interface TronTransactionReceipt extends TypedTransactionReceiptBase<EV5P
   receipt: EV5Providers.TransactionReceipt;
 }
 
+export interface MidnightTransactionReceipt extends TypedTransactionReceiptBase<MidnightSDKReceipt> {
+  type: ProviderType.Midnight;
+  receipt: MidnightSDKReceipt;
+}
+
 export type TypedTransactionReceipt =
   | EthersV5TransactionReceipt
   | ViemTransactionReceipt
@@ -521,4 +551,5 @@ export type TypedTransactionReceipt =
   | ZKSyncTransactionReceipt
   | RadixTransactionReceipt
   | AleoTransactionReceipt
-  | TronTransactionReceipt;
+  | TronTransactionReceipt
+  | MidnightTransactionReceipt;

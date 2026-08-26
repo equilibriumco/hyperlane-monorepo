@@ -394,6 +394,34 @@ impl ChainSigner for hyperlane_aleo::AleoSigner {
     }
 }
 
+#[cfg(feature = "midnight")]
+#[async_trait]
+impl BuildableWithSignerConf for hyperlane_midnight::MidnightSigner {
+    async fn build(conf: &SignerConf) -> Result<Self, Report> {
+        match conf {
+            SignerConf::Node => Ok(hyperlane_midnight::MidnightSigner::new()),
+            _ => bail!(format!(
+                "{conf:?} is not supported by midnight; use signer type `node` \
+                 (transaction signing is delegated to the handle-submitter \
+                  subprocess; the relayer wallet seed comes from \
+                  `MIDNIGHT_RELAYER_SEED`, the validator's announce wallet \
+                  from `MIDNIGHT_VALIDATOR_SEED`)"
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "midnight")]
+impl ChainSigner for hyperlane_midnight::MidnightSigner {
+    fn address_string(&self) -> String {
+        self.address().to_owned()
+    }
+
+    fn address_h256(&self) -> H256 {
+        self.address_h256()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

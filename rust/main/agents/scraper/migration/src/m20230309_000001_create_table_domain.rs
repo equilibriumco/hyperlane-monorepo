@@ -520,6 +520,27 @@ const DOMAINS: &[RawDomain] = &[
         chain_id: 1212538671,
         is_test_net: true,
         is_deprecated: false,
+    },
+    // Midnight has no EVM chain id, so `chain_id` mirrors the domain: a NULL
+    // leaves `message_view.origin_chain_id` unset, which the Explorer's message
+    // queries read as non-nullable.
+    RawDomain {
+        name: "midnight",
+        token: "NIGHT",
+        domain: 1234,
+        chain_id: 1234,
+        is_test_net: true,
+        is_deprecated: false,
+    },
+    // The Anvil chain the Midnight E2E environments pair with, scraped
+    // alongside it so the delivery half of `message_view` resolves.
+    RawDomain {
+        name: "test4",
+        token: "ETH",
+        domain: 31337,
+        chain_id: 31337,
+        is_test_net: true,
+        is_deprecated: false,
     }, // ---------- End: E2E tests chains ----------------
 ];
 

@@ -1405,7 +1405,10 @@ impl Validator {
 
     fn announcement_location(&self) -> Result<String> {
         let location = self.checkpoint_syncer.announcement_location();
-        if self.origin_chain.domain_protocol() == hyperlane_core::HyperlaneDomainProtocol::Aleo {
+        let protocol = self.origin_chain.domain_protocol();
+        if protocol == hyperlane_core::HyperlaneDomainProtocol::Aleo
+            || protocol == hyperlane_core::HyperlaneDomainProtocol::Midnight
+        {
             Self::aleo_announcement_location(location)
         } else {
             Ok(location)

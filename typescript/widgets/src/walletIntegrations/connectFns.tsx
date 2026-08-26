@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 
 import { useAleoConnectFn } from './aleoWallet.js';
+import { useMidnightConnectFn } from './midnight.js';
 import { useCosmosConnectFn } from './cosmosWallet.js';
 import { useEthereumConnectFn } from './ethereumWallet.js';
 import { useRadixConnectFn } from './radixWallet.js';
@@ -17,6 +18,7 @@ export function useConnectFns(): Record<KnownProtocolType, () => void> {
   const onConnectStarknet = useStarknetConnectFn();
   const onConnectRadix = useRadixConnectFn();
   const onConnectAleo = useAleoConnectFn();
+  const onConnectMidnight = useMidnightConnectFn();
   const onConnectTron = useTronConnectFn();
 
   return useMemo(
@@ -28,6 +30,7 @@ export function useConnectFns(): Record<KnownProtocolType, () => void> {
       [ProtocolType.Starknet]: onConnectStarknet,
       [ProtocolType.Radix]: onConnectRadix,
       [ProtocolType.Aleo]: onConnectAleo,
+      [ProtocolType.Midnight]: onConnectMidnight,
       [ProtocolType.Tron]: onConnectTron,
     }),
     [
@@ -37,6 +40,7 @@ export function useConnectFns(): Record<KnownProtocolType, () => void> {
       onConnectStarknet,
       onConnectRadix,
       onConnectAleo,
+      onConnectMidnight,
       onConnectTron,
     ],
   );

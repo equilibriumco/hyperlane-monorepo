@@ -450,6 +450,7 @@ function generateTokenConfigs(
       standard: tokenTypeToStandard(protocol as ProtocolType, config.type),
       tokenType: config.type,
       decimals: tokenMetadataMap.getDecimals(chainName)!,
+      scale: tokenMetadataMap.getScale(chainName),
       symbol: config.symbol || tokenMetadataMap.getSymbol(chainName)!,
       name: tokenMetadataMap.getName(chainName)!,
       addressOrDenom: contracts[chainName],
@@ -911,6 +912,12 @@ async function updateExistingWarpRoute(
 
   await promiseObjAll(
     objMap(expandedWarpDeployConfig, async (chain, config) => {
+      // A foreignDeployment chain supplies reference data only; its deployment
+      // is managed elsewhere and must not be updated from this route.
+      if (warpDeployConfig[chain]?.foreignDeployment) {
+        logBlue(`Skipping foreign deployment chain ${chain}`);
+        return;
+      }
       const protocolType = multiProvider.getProtocol(chain);
       if (!isEVMLike(protocolType) && !altVmSigners[chain]) {
         logBlue(`Skipping non-compatible chain ${chain}`);

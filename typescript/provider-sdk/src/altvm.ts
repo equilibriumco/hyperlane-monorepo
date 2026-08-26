@@ -6,6 +6,12 @@ import type { WarpArtifactConfig } from './warp.js';
 // ### QUERY BASE ###
 export type ReqGetBalance = { address: string; denom?: string };
 
+export type ResFeeTokenBalance = {
+  balance: bigint;
+  symbol: string;
+  decimals: number;
+};
+
 export type ReqGetTotalSupply = { denom?: string };
 
 export type ReqEstimateTransactionFee<T> = {
@@ -212,6 +218,11 @@ export interface IProvider<T = any> {
 
 export interface ISigner<T, R> extends IProvider<T> {
   getSignerAddress(): string;
+
+  // Implemented by chains whose transaction fees are paid in a resource
+  // other than the native token, so fee accounting can diff the balance
+  // that actually moves.
+  getFeeTokenBalance?(req: ReqGetBalance): Promise<ResFeeTokenBalance>;
 
   supportsTransactionBatching(): boolean;
 

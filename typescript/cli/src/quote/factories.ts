@@ -90,6 +90,7 @@ export function createQuoteArtifactManagerForChain(
     case ProtocolType.Starknet:
     case ProtocolType.Radix:
     case ProtocolType.Aleo:
+    case ProtocolType.Midnight:
     case ProtocolType.Unknown:
       return null;
 
@@ -130,6 +131,7 @@ export function resolveTxSignerForChain(args: {
     case ProtocolType.Starknet:
     case ProtocolType.Radix:
     case ProtocolType.Aleo:
+    case ProtocolType.Midnight:
     case ProtocolType.Unknown:
       return undefined;
     default: {
@@ -160,6 +162,7 @@ export function createDefaultQuoteSignerForChain(
     case ProtocolType.Starknet:
     case ProtocolType.Radix:
     case ProtocolType.Aleo:
+    case ProtocolType.Midnight:
     case ProtocolType.Unknown:
       return null;
 

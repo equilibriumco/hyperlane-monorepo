@@ -832,6 +832,38 @@ pub fn build_aleo_connection_conf(
     }
 }
 
+#[cfg(feature = "midnight")]
+pub fn build_midnight_connection_conf(
+    _rpcs: &[Url],
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+    _operation_batch: OpSubmissionConfig,
+) -> Option<ChainConnectionConf> {
+    let mut local_err = ConfigParsingError::default();
+
+    let indexer_graphql_url: Option<Url> = chain
+        .chain(&mut local_err)
+        .get_key("indexerGraphqlUrl")
+        .parse_from_str("Invalid Midnight indexer GraphQL URL")
+        .end();
+
+    let toolkit_path: Option<String> = chain
+        .chain(&mut local_err)
+        .get_opt_key("toolkitPath")
+        .parse_string()
+        .end()
+        .map(|s| s.to_string());
+
+    if !local_err.is_ok() {
+        err.merge(local_err);
+        None
+    } else {
+        Some(ChainConnectionConf::Midnight(
+            hyperlane_midnight::ConnectionConf::new(indexer_graphql_url?, toolkit_path),
+        ))
+    }
+}
+
 pub fn build_connection_conf(
     domain_protocol: HyperlaneDomainProtocol,
     rpcs: &[Url],
@@ -872,6 +904,10 @@ pub fn build_connection_conf(
         HyperlaneDomainProtocol::Aleo => {
             build_aleo_connection_conf(rpcs, chain, err, operation_batch)
         }
+        #[cfg(feature = "midnight")]
+        HyperlaneDomainProtocol::Midnight => {
+            build_midnight_connection_conf(rpcs, chain, err, operation_batch)
+        }
         #[allow(unreachable_patterns)]
         _ => unreachable!("Unsupported protocol chains are pre-filtered"),
     }
@@ -883,7 +919,8 @@ pub fn is_protocol_supported(protocol: HyperlaneDomainProtocol) -> bool {
     use HyperlaneDomainProtocol::*;
     match protocol {
         Ethereum | Fuel | Sealevel | Cosmos | CosmosNative | Starknet | Radix | Tron => true,
-        // Aleo is feature-gated - only supported when the "aleo" feature is enabled
+        // Aleo and Midnight are feature-gated - only supported when their feature is enabled
         Aleo => cfg!(feature = "aleo"),
+        Midnight => cfg!(feature = "midnight"),
     }
 }

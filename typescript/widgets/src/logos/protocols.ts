@@ -5,6 +5,7 @@ import { KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 import { AleoLogo } from './Aleo.js';
 import { CosmosLogo } from './Cosmos.js';
 import { EthereumLogo } from './Ethereum.js';
+import { MidnightLogo } from './Midnight.js';
 import { RadixLogo } from './Radix.js';
 import { SolanaLogo } from './Solana.js';
 import { StarknetLogo } from './Starknet.js';
@@ -22,4 +23,5 @@ export const PROTOCOL_TO_LOGO: Record<
   [ProtocolType.Radix]: RadixLogo,
   [ProtocolType.Aleo]: AleoLogo,
   [ProtocolType.Tron]: TronLogo,
+  [ProtocolType.Midnight]: MidnightLogo,
 };

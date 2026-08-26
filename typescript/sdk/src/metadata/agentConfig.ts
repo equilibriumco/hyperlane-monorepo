@@ -765,6 +765,23 @@ function formatAleoAddress(
   };
 }
 
+// The agents' address parser accepts only 0x-prefixed hex — bare hex falls
+// through to bech32/base58 decoding, which rejects it. The registry stores
+// Midnight addresses bare, so prefix them on the way out.
+function formatMidnightAddress(
+  addresses: HyperlaneDeploymentArtifacts,
+): HyperlaneDeploymentArtifacts {
+  const hex0x = (value: string): string =>
+    value && !value.startsWith('0x') ? `0x${value}` : value;
+  return {
+    ...addresses,
+    mailbox: hex0x(addresses.mailbox),
+    merkleTreeHook: hex0x(addresses.merkleTreeHook),
+    interchainGasPaymaster: hex0x(addresses.interchainGasPaymaster),
+    validatorAnnounce: hex0x(addresses.validatorAnnounce),
+  };
+}
+
 // Note this works well for EVM chains only, and likely needs some love
 // before being useful for non-EVM chains.
 export function buildAgentConfig(
@@ -797,14 +814,37 @@ export function buildAgentConfig(
     const coreAddresses =
       metadata?.protocol == ProtocolType.Aleo
         ? formatAleoAddress(addresses[chain])
-        : addresses[chain];
+        : metadata?.protocol === ProtocolType.Midnight
+          ? formatMidnightAddress(addresses[chain])
+          : addresses[chain];
+
+    // The indexer GraphQL endpoint travels in the metadata's gatewayUrls. The
+    // node signer marks that signing is delegated to the submitter subprocess,
+    // and its presence is what lets the validator self-announce. `toolkitPath`
+    // is host-local, so the operator supplies it separately.
+    const midnightConfig =
+      metadata?.protocol === ProtocolType.Midnight
+        ? {
+            indexerGraphqlUrl: (
+              metadata as { gatewayUrls?: { http: string }[] }
+            ).gatewayUrls?.[0]?.http,
+            signer: { type: AgentSignerKeyType.Node },
+          }
+        : {};
+
+    // Registry metadata may carry agent index settings beyond `from`
+    // (e.g. `mode`); preserve them when stamping the start block.
+    const metadataIndex = (metadata as { index?: Record<string, unknown> })
+      ?.index;
 
     const chainConfig: AgentChainMetadata = {
       ...metadata,
       ...coreAddresses,
+      ...midnightConfig,
       ...(additionalConfig ? additionalConfig[chain] : {}),
       ...(startBlocks[chain] !== undefined && {
         index: {
+          ...metadataIndex,
           from: startBlocks[chain],
         },
       }),

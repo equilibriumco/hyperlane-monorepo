@@ -52,6 +52,10 @@ export interface MultisigIsmConfig {
   type: 'merkleRootMultisigIsm' | 'messageIdMultisigIsm';
   validators: string[];
   threshold: number;
+  // Uncompressed 64-byte secp256k1 pubkeys (hex), one per validator, for
+  // chains whose ISM stores pubkeys instead of addresses (e.g. Midnight).
+  // Addresses are keccak-derived from pubkeys and not reversible.
+  validatorPubkeys?: string[];
 }
 
 export interface TestIsmConfig {
@@ -258,6 +262,14 @@ export interface IRawIsmArtifactManager extends IArtifactManager<
    * @returns The artifact configuration and deployment data
    */
   readIsm(address: string): Promise<DeployedRawIsmArtifact>;
+
+  /**
+   * Whether "static" ISM types are mutable in place on this protocol. Defaults
+   * to false, matching EVM, where a config change means a new deployment.
+   * Protocols whose multisig ISM has an on-chain rotation entry point return
+   * true, routing config changes through `update()` instead of a redeploy.
+   */
+  supportsInPlaceStaticIsmUpdates?(): boolean;
 }
 
 /**
@@ -306,6 +318,11 @@ export function shouldDeployNewIsm(
 export function mergeIsmArtifacts(
   currentArtifact: DeployedIsmArtifact | undefined,
   expectedArtifact: ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact,
+  options?: {
+    // When true, a changed static-ISM config keeps the current deployment and
+    // routes the change through the writer's `update()`.
+    allowInPlaceStaticUpdate?: boolean;
+  },
 ): ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact {
   const expectedConfig = expectedArtifact.config;
 
@@ -326,7 +343,10 @@ export function mergeIsmArtifacts(
 
   // For static ISMs, check if config changed
   if (STATIC_ISM_TYPES.includes(expectedConfig.type)) {
-    if (shouldDeployNewIsm(currentConfig, expectedConfig)) {
+    if (
+      !options?.allowInPlaceStaticUpdate &&
+      shouldDeployNewIsm(currentConfig, expectedConfig)
+    ) {
       return {
         artifactState: ArtifactState.NEW,
         config: expectedConfig,

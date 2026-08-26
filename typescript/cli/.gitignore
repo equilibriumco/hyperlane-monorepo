@@ -13,3 +13,5 @@
 # Test artifacts
 /test-configs/**/addresses.yaml
 /test-configs/*/deployments
+# level private-state DB the midnight SDK dependency drops in cwd
+midnight-level-db/

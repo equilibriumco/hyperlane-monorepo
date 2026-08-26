@@ -9,6 +9,7 @@ import {
 } from '@hyperlane-xyz/utils';
 
 import { useAleoAccount } from './aleoWallet.js';
+import { useMidnightAccount } from './midnight.js';
 import { getAccountAddressForChain } from './accountUtils.js';
 import { useCosmosAccount } from './cosmosWallet.js';
 import { useEthereumAccount } from './ethereumWallet.js';
@@ -32,6 +33,7 @@ export function useAccounts(
   const radixAccountInfo = useRadixAccount(multiProvider);
   const aleoAccountInfo = useAleoAccount(multiProvider);
   const tronAccountInfo = useTronAccount(multiProvider);
+  const midnightAccountInfo = useMidnightAccount(multiProvider);
 
   const readyAccounts = useMemo(
     () =>
@@ -43,6 +45,7 @@ export function useAccounts(
         radixAccountInfo,
         aleoAccountInfo,
         tronAccountInfo,
+        midnightAccountInfo,
       ].filter((a) => a.isReady),
     [
       evmAccountInfo,
@@ -52,6 +55,7 @@ export function useAccounts(
       radixAccountInfo,
       aleoAccountInfo,
       tronAccountInfo,
+      midnightAccountInfo,
     ],
   );
 
@@ -77,6 +81,7 @@ export function useAccounts(
         [ProtocolType.Radix]: radixAccountInfo,
         [ProtocolType.Aleo]: aleoAccountInfo,
         [ProtocolType.Tron]: tronAccountInfo,
+        [ProtocolType.Midnight]: midnightAccountInfo,
       },
       readyAccounts,
     }),
@@ -88,6 +93,7 @@ export function useAccounts(
       radixAccountInfo,
       aleoAccountInfo,
       tronAccountInfo,
+      midnightAccountInfo,
       readyAccounts,
     ],
   );
