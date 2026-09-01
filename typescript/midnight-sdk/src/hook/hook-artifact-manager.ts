@@ -20,7 +20,11 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/module';
 import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
-import { bytesToHex, hexToBytes } from '../utils/conversion.js';
+import {
+  bytesToHex,
+  hexToBytes,
+  normalizeHexForCompare,
+} from '../utils/conversion.js';
 import { unsupportedOnMidnight } from '../utils/errors.js';
 import type { MidnightTransaction, MidnightTxReceipt } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
@@ -209,7 +213,7 @@ class MidnightIgpHookWriter
     if (
       config.owner &&
       config.owner !== ZERO_ADDRESS_HEX_32 &&
-      config.owner.toLowerCase() !== ownerHex.toLowerCase()
+      normalizeHexForCompare(config.owner) !== normalizeHexForCompare(ownerHex)
     ) {
       receipts.push(
         await this.signer.sendAndConfirmTransaction({
@@ -269,7 +273,8 @@ class MidnightIgpHookWriter
 
     if (
       expected.beneficiary &&
-      expected.beneficiary.toLowerCase() !== current.beneficiary.toLowerCase()
+      normalizeHexForCompare(expected.beneficiary) !==
+        normalizeHexForCompare(current.beneficiary)
     ) {
       txs.push({
         annotation: `Set IGP beneficiary to ${expected.beneficiary}`,
@@ -291,7 +296,8 @@ class MidnightIgpHookWriter
     if (
       expected.owner &&
       expected.owner !== ZERO_ADDRESS_HEX_32 &&
-      expected.owner.toLowerCase() !== current.owner.toLowerCase()
+      normalizeHexForCompare(expected.owner) !==
+        normalizeHexForCompare(current.owner)
     ) {
       txs.push({
         annotation: `Transfer IGP ownership to ${expected.owner}`,

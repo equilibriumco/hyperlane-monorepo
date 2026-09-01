@@ -21,7 +21,11 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/module';
 import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
-import { bytesToHex, hexToBytes } from '../utils/conversion.js';
+import {
+  bytesToHex,
+  hexToBytes,
+  normalizeHexForCompare,
+} from '../utils/conversion.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
@@ -157,7 +161,10 @@ class MidnightMailboxWriter
       );
     }
     const current = await this.read(address);
-    if (current.config.owner.toLowerCase() === expectedOwner.toLowerCase()) {
+    if (
+      normalizeHexForCompare(current.config.owner) ===
+      normalizeHexForCompare(expectedOwner)
+    ) {
       return [];
     }
     return [
