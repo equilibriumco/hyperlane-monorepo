@@ -17,3 +17,11 @@ export function bytesToHex(bytes: Uint8Array): string {
   }
   return out;
 }
+
+// Canonicalize hex for equality checks: lowercase and drop a leading 0x so an
+// un-prefixed commitment and a 0x-prefixed one compare equal. Guards the owner
+// round-trip brick that a prefix-only mismatch would otherwise let through.
+export function normalizeHexForCompare(hex: string): string {
+  const lower = hex.toLowerCase();
+  return lower.startsWith('0x') ? lower.slice(2) : lower;
+}

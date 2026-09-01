@@ -86,6 +86,30 @@ describe('resolveValidatorSet', () => {
     ).to.throw('derives address');
   });
 
+  it('rejects duplicate validators', () => {
+    expect(() =>
+      resolveValidatorSet(
+        multisigConfig({
+          validators: [VALIDATORS[0], VALIDATORS[0], VALIDATORS[1]],
+          validatorPubkeys: [PUBKEYS[0], PUBKEYS[0], PUBKEYS[1]],
+        }),
+      ),
+    ).to.throw('must be distinct');
+    // EIP-55 checksum casing does not make two equal addresses distinct.
+    expect(() =>
+      resolveValidatorSet(
+        multisigConfig({
+          validators: [
+            VALIDATORS[0],
+            VALIDATORS[0].toLowerCase(),
+            VALIDATORS[1],
+          ],
+          validatorPubkeys: [PUBKEYS[0], PUBKEYS[0], PUBKEYS[1]],
+        }),
+      ),
+    ).to.throw('must be distinct');
+  });
+
   it('rejects an out-of-range threshold', () => {
     expect(() =>
       resolveValidatorSet(multisigConfig({ threshold: 4 })),

@@ -19,7 +19,11 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/warp';
 import { ZERO_ADDRESS_HEX_32, addressToBytes32 } from '@hyperlane-xyz/utils';
 
-import { bytesToHex, hexToBytes } from '../utils/conversion.js';
+import {
+  bytesToHex,
+  hexToBytes,
+  normalizeHexForCompare,
+} from '../utils/conversion.js';
 import { unsupportedOnMidnight } from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
@@ -166,7 +170,8 @@ class MidnightNativeWarpWriter
     if (
       expected.owner &&
       expected.owner !== ZERO_ADDRESS_HEX_32 &&
-      expected.owner.toLowerCase() !== current.owner.toLowerCase()
+      normalizeHexForCompare(expected.owner) !==
+        normalizeHexForCompare(current.owner)
     ) {
       const ownerBytes = hexToBytes(expected.owner);
       if (ownerBytes.length !== 32) {

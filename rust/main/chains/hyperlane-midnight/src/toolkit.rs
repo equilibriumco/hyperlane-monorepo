@@ -10,19 +10,21 @@ use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512, U256};
 use crate::HyperlaneMidnightError;
 
 /// How long an agent waits for the submitter subprocess to prove and land a
-/// transaction. A real proof takes minutes on a RAM-constrained host, so
-/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` overrides the default.
+/// transaction. Governs the heavy `submit` and `announce` proofs, which take
+/// minutes on a RAM-constrained host, so the default is 1800s and
+/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` overrides it.
 fn submit_timeout() -> Duration {
     Duration::from_secs(
         std::env::var("MIDNIGHT_SUBMIT_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(120),
+            .unwrap_or(1800),
     )
 }
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(60);
+const BALANCE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Matches the contract's `Bytes<480>` location buffer.
 pub const MAX_STORAGE_LOCATION_LEN: usize = 480;
@@ -153,7 +155,7 @@ pub async fn query_wallet_balance(
         op: "balance",
         address,
     };
-    let raw = run_submitter(ctx, &request, submit_timeout()).await?;
+    let raw = run_submitter(ctx, &request, BALANCE_TIMEOUT).await?;
     let response: BalanceResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),

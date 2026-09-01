@@ -45,6 +45,16 @@ export function resolveValidatorSet(
       `threshold ${threshold} out of range for ${validators.length} validators`,
     );
   }
+  // The contract counts matched registry positions, not distinct identities,
+  // so a repeated validator lets one signature satisfy two slots and collapses
+  // the threshold. The contract now rejects this too; fail early with a clearer
+  // message. Compare case-insensitively: EIP-55 casing is not an identity.
+  const loweredValidators = validators.map((v) => v.toLowerCase());
+  if (new Set(loweredValidators).size !== loweredValidators.length) {
+    throw new Error(
+      `multisig ISM validators must be distinct, got duplicates in [${validators.join(', ')}]`,
+    );
+  }
   if (!validatorPubkeys || validatorPubkeys.length === 0) {
     throw new Error(
       `Midnight enrolls validators as 64-byte secp256k1 pubkeys, which cannot ` +
