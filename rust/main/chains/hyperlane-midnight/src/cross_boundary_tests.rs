@@ -293,8 +293,7 @@ async fn process_estimate_costs_dry_runs_and_returns_placeholder_on_accept() {
     assert_eq!(req["op"], "dryRunHandle");
     assert_eq!(req["contractAddress"], format!("{TEST_CONTRACT_ADDRESS:x}"));
     assert_eq!(req["isContractRecipient"], false);
-    // No transaction is built, so the node/proof endpoints are absent.
-    assert!(req.get("nodeRpcUrl").is_none());
+    // No transaction is built, so the proof endpoint is absent.
     assert!(req.get("proofServerUrl").is_none());
 }
 

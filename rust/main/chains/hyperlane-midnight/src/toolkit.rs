@@ -36,9 +36,7 @@ pub struct SubmitRequest<'a> {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub node_rpc_url: String,
     pub proof_server_url: String,
-    pub network_id: String,
     pub message: WireMessage<'a>,
     pub metadata: WireMetadata,
     pub is_contract_recipient: bool,
@@ -80,7 +78,6 @@ pub struct DryRunHandleRequest<'a> {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub network_id: String,
     pub message: WireMessage<'a>,
     pub metadata: WireMetadata,
     pub is_contract_recipient: bool,
@@ -207,13 +204,10 @@ pub struct ToolkitContext {
     pub binary_path: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub node_rpc_url: String,
     pub proof_server_url: String,
-    pub network_id: String,
 }
 
 const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
-const DEFAULT_NETWORK_ID: &str = "undeployed";
 
 impl ToolkitContext {
     /// Build the sidecar context from the chain config and the `MIDNIGHT_*` env.
@@ -222,11 +216,8 @@ impl ToolkitContext {
             binary_path: conf.toolkit_path.clone().unwrap_or_default(),
             indexer_graphql_url: conf.indexer_graphql_url.to_string(),
             indexer_ws_url: derive_ws_url(&conf.indexer_graphql_url),
-            node_rpc_url: std::env::var("MIDNIGHT_NODE_RPC_URL").unwrap_or_default(),
             proof_server_url: std::env::var("MIDNIGHT_PROOF_SERVER_URL")
                 .unwrap_or_else(|_| DEFAULT_PROOF_SERVER_URL.to_string()),
-            network_id: std::env::var("MIDNIGHT_NETWORK_ID")
-                .unwrap_or_else(|_| DEFAULT_NETWORK_ID.to_string()),
         }
     }
 }
@@ -320,7 +311,6 @@ pub struct IsDeliveredRequest {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub network_id: String,
     pub message_id: String,
 }
 
@@ -346,7 +336,6 @@ pub async fn query_delivered(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        network_id: ctx.network_id.clone(),
         message_id: format!("0x{message_id:x}"),
     };
 
@@ -381,9 +370,7 @@ pub struct AnnounceRequest {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub node_rpc_url: String,
     pub proof_server_url: String,
-    pub network_id: String,
     pub validator: String,
     /// `0x`-prefixed hex of the whole zero-padded `Bytes<480>` buffer — the
     /// exact bytes the validator signed over, since the on-chain digest hashes
@@ -441,9 +428,7 @@ pub async fn announce_tx(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        node_rpc_url: ctx.node_rpc_url.clone(),
         proof_server_url: ctx.proof_server_url.clone(),
-        network_id: ctx.network_id.clone(),
         validator: format!("0x{validator:x}"),
         storage_location: format!("0x{}", hex::encode(bytes)),
         signature: format!("0x{}", hex::encode(signature)),
@@ -491,7 +476,6 @@ pub struct StorageLocationsRequest {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub network_id: String,
     pub validators: Vec<String>,
 }
 
@@ -515,7 +499,6 @@ pub async fn query_storage_locations(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        network_id: ctx.network_id.clone(),
         validators: validators.iter().map(|v| format!("0x{v:x}")).collect(),
     };
 
@@ -665,9 +648,7 @@ pub fn build_request<'a>(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        node_rpc_url: ctx.node_rpc_url.clone(),
         proof_server_url: ctx.proof_server_url.clone(),
-        network_id: ctx.network_id.clone(),
         message: wire_message(message),
         metadata,
         is_contract_recipient,
@@ -688,7 +669,6 @@ pub fn build_dry_run_request<'a>(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        network_id: ctx.network_id.clone(),
         message: wire_message(message),
         metadata,
         is_contract_recipient,
@@ -760,9 +740,7 @@ mod tests {
             binary_path: "/bin/false".to_string(),
             indexer_graphql_url: "http://indexer/graphql".to_string(),
             indexer_ws_url: "ws://indexer/graphql".to_string(),
-            node_rpc_url: "http://node:9944".to_string(),
             proof_server_url: "http://proof:6300".to_string(),
-            network_id: "undeployed".to_string(),
         }
     }
 
@@ -926,8 +904,7 @@ mod tests {
         assert!(json.contains("\"op\":\"dryRunHandle\""));
         assert!(json.contains("\"version\":3"));
         assert!(json.contains("\"isContractRecipient\":false"));
-        // No tx is built, so the node/proof endpoints are absent.
-        assert!(!json.contains("nodeRpcUrl"));
+        // No tx is built, so the proof endpoint is absent.
         assert!(!json.contains("proofServerUrl"));
     }
 

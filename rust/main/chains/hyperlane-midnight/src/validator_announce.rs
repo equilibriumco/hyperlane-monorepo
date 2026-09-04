@@ -167,9 +167,7 @@ mod tests {
             binary_path: binary_path.to_string(),
             indexer_graphql_url: "http://indexer/graphql".to_string(),
             indexer_ws_url: "ws://indexer/graphql/ws".to_string(),
-            node_rpc_url: "http://node:9944".to_string(),
             proof_server_url: "http://proof:6300".to_string(),
-            network_id: "undeployed".to_string(),
         }
     }
 
