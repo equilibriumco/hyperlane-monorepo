@@ -302,6 +302,13 @@ export const ChainMetadataSchemaObject = z.object({
       'A URI to a logo image for this chain for use in user interfaces.',
     ),
 
+  midnightNetworkId: z
+    .string()
+    .optional()
+    .describe(
+      "The Midnight network id, e.g. 'stagenet', or 'undeployed' for a local devnet.",
+    ),
+
   name: ZChainName.describe(
     'The unique string identifier of the chain, used as the key in ChainMap dictionaries.',
   ),

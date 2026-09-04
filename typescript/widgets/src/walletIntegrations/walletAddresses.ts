@@ -16,6 +16,7 @@ const WALLET_ADDRESS_PROTOCOLS: ReadonlyArray<KnownProtocolType> = [
   ProtocolType.Radix,
   ProtocolType.Aleo,
   ProtocolType.Tron,
+  ProtocolType.Midnight,
 ];
 
 export function getAddressForChain(

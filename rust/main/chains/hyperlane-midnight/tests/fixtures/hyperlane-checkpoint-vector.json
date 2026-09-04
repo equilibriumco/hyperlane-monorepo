@@ -1,0 +1,15 @@
+{
+  "testName": "midnight-outbound-tip-checkpoint",
+  "source": "generate-checkpoint-vector.ts: Compact simulator dispatch + @hyperlane-xyz/utils digest",
+  "origin": 1234,
+  "merkleTreeHook": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "root": "0x7a752a1d00d045b1e6dc4ab76528cf9143fd6b685e2786905662ec8fe9cc8bc3",
+  "index": 1,
+  "messageId": "0x4a9ac37cc83286d316213f8a6e9d4e78146a72a859df696872ff538ec01036b5",
+  "domainHash": "0xb3c4c6946d72ae172cc3a37ec4640b3945d0abf8b5b19829050f54d82a05b610",
+  "inner": "0x40f8718ee54be99dacec1cc7e9b913ec8703c8ef3419da622ffbe4607111fdcf",
+  "digest": "0x898b207152fa7e1f8fcbcdcd4192f5e92df530db37f157632d2a06854f0fc1aa",
+  "validatorKey": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "validator": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+  "signature": "0x761a5742e1c18b4e83248d682a539b737f7eb0e2192a5c722ac44991d57ac1a84ec4acdb5e9516a43046d09de0e8191a7c6e935dc20b404ba87c94b2eaa013c71c"
+}

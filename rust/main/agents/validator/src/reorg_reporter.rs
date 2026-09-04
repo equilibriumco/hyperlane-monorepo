@@ -150,6 +150,8 @@ impl LatestCheckpointReorgReporter {
     ) -> Vec<(Url, ValidatorSettings)> {
         #[cfg(feature = "aleo")]
         use ChainConnectionConf::Aleo;
+        #[cfg(feature = "midnight")]
+        use ChainConnectionConf::Midnight;
         use ChainConnectionConf::{
             Cosmos, CosmosNative, Ethereum, Fuel, Radix, Sealevel, Starknet, Tron,
         };
@@ -214,6 +216,16 @@ impl LatestCheckpointReorgReporter {
                     Tron(updated_conn)
                 })
             }
+            #[cfg(feature = "midnight")]
+            Midnight(conn) => Self::map_urls_to_connections(
+                vec![conn.indexer_graphql_url.clone()],
+                conn,
+                |conn, url| {
+                    let mut updated_conn = conn.clone();
+                    updated_conn.indexer_graphql_url = url;
+                    Midnight(updated_conn)
+                },
+            ),
         };
 
         chain_conn_confs

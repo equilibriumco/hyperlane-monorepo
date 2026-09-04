@@ -746,26 +746,28 @@ impl PendingMessage {
         origin_db: Arc<dyn HyperlaneDb>,
         message: &HyperlaneMessage,
     ) -> PendingOperationStatus {
+        // A const rather than an inline `if cfg!(...)` in the `event!` macro:
+        // the inline form creates a temporary that fails to compile on rustc
+        // 1.89 with E0716.
+        #[cfg(feature = "test-utils")]
+        const DB_STATUS_LEVEL: Level = Level::DEBUG;
+        #[cfg(not(feature = "test-utils"))]
+        const DB_STATUS_LEVEL: Level = Level::TRACE;
+
         // Attempt to fetch status about message from database
         if let Ok(Some(status)) = origin_db.retrieve_status_by_message_id(&message.id()) {
             // This event is used for E2E tests to ensure message statuses
             // are being properly loaded from the db
-            if cfg!(feature = "test-utils") {
-                tracing::event!(Level::DEBUG, ?status, id=?message.id(), RETRIEVED_MESSAGE_LOG);
-            } else {
-                tracing::event!(Level::TRACE, ?status, id=?message.id(), RETRIEVED_MESSAGE_LOG);
-            }
+            tracing::event!(
+                DB_STATUS_LEVEL,
+                ?status,
+                id=?message.id(),
+                RETRIEVED_MESSAGE_LOG,
+            );
             return status;
         }
 
-        tracing::event!(
-            if cfg!(feature = "test-utils") {
-                Level::DEBUG
-            } else {
-                Level::TRACE
-            },
-            "Message status not found in db"
-        );
+        tracing::event!(DB_STATUS_LEVEL, "Message status not found in db");
         PendingOperationStatus::FirstPrepareAttempt
     }
 

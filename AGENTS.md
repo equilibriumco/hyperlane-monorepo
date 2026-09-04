@@ -56,8 +56,8 @@ pnpm test          # Run relevant tests
 pnpm changeset     # Add changeset if modifying published packages
 
 # Rust (CI-compatible commands)
-cd rust/main && cargo clippy --features aleo,integration_test -- -D warnings
-cd rust/main && cargo test --all-targets --features aleo,integration_test
+cd rust/main && cargo clippy --features aleo,midnight,integration_test -- -D warnings
+cd rust/main && cargo test --all-targets --features aleo,midnight,integration_test
 cd rust/main && cargo fmt
 ```
 
@@ -296,6 +296,7 @@ See `docs/2025-11-20-multi-vm-migration.md` for full migration guide.
 | `hyperlane-aleo`     | Aleo          |
 | `hyperlane-radix`    | Radix         |
 | `hyperlane-starknet` | Starknet      |
+| `hyperlane-midnight` | Midnight      |
 
 **Core Crates**: `hyperlane-core` (traits, message types), `hyperlane-base` (shared agent utilities)
 

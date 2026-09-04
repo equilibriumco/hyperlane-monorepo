@@ -62,6 +62,7 @@ tempfile.workspace = true
 [features]
 default = []
 aleo = ["dep:hyperlane-aleo", "hyperlane-base/aleo"]
+midnight = ["hyperlane-base/midnight"]
 # Feature flag for integration tests - enables test-specific factory functions
 # Integration tests should enable this feature, production builds should not
 integration_test = []

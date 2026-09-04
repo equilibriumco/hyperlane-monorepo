@@ -3,6 +3,7 @@ import { BigNumber, ethers } from 'ethers';
 import path from 'path';
 
 import { type GasAction, ProtocolType } from '@hyperlane-xyz/provider-sdk';
+import { type ResFeeTokenBalance } from '@hyperlane-xyz/provider-sdk/altvm';
 import { type WarpArtifactConfig } from '@hyperlane-xyz/provider-sdk/warp';
 import { createWarpRouteConfigId } from '@hyperlane-xyz/registry';
 import {
@@ -160,13 +161,20 @@ export function isZODISMConfig(filepath: string): boolean {
   return parseIsmConfig(filepath).success;
 }
 
+interface ChainDeployBalance {
+  native: BigNumber;
+  // Set for chains whose fees are paid in a non-native resource (e.g.
+  // Midnight's DUST); the native balance never moves there.
+  feeToken?: ResFeeTokenBalance;
+}
+
 export async function getBalances(
   context: WriteCommandContext,
   chains: ChainName[],
   userAddress?: Address,
-): Promise<Record<string, BigNumber>> {
+): Promise<Record<string, ChainDeployBalance>> {
   const { multiProvider } = context;
-  const balances: Record<string, BigNumber> = {};
+  const balances: Record<string, ChainDeployBalance> = {};
 
   for (const chain of chains) {
     const { nativeToken, protocol } = multiProvider.getChainMetadata(chain);
@@ -175,7 +183,7 @@ export async function getBalances(
       const address =
         userAddress ?? (await multiProvider.getSignerAddress(chain));
       const provider = await multiProvider.getProvider(chain);
-      balances[chain] = await provider.getBalance(address);
+      balances[chain] = { native: await provider.getBalance(address) };
     } else {
       assert(
         nativeToken?.denom,
@@ -184,12 +192,15 @@ export async function getBalances(
 
       const signer = mustGet(context.altVmSigners, chain);
       const address = userAddress ?? signer.getSignerAddress();
-      balances[chain] = BigNumber.from(
-        await signer.getBalance({
-          address,
-          denom: nativeToken?.denom ?? '',
-        }),
-      );
+      balances[chain] = {
+        native: BigNumber.from(
+          await signer.getBalance({
+            address,
+            denom: nativeToken?.denom ?? '',
+          }),
+        ),
+        feeToken: await signer.getFeeTokenBalance?.({ address }),
+      };
     }
   }
 
@@ -199,7 +210,7 @@ export async function getBalances(
 export async function completeDeploy(
   context: WriteCommandContext,
   command: string,
-  initialBalances: Record<string, BigNumber>,
+  initialBalances: Record<string, ChainDeployBalance>,
   userAddress: Address | null,
   chains: ChainName[],
 ) {
@@ -209,8 +220,23 @@ export async function completeDeploy(
   for (const chain of chains) {
     const { nativeToken } = multiProvider.getChainMetadata(chain);
     const currentBalances = await getBalances(context, [chain]);
-    const balanceDelta = initialBalances[chain].sub(currentBalances[chain]);
+    const initialFee = initialBalances[chain].feeToken;
+    const currentFee = currentBalances[chain].feeToken;
 
+    if (initialFee && currentFee) {
+      const feeDelta = initialFee.balance - currentFee.balance;
+      logPink(
+        `\t- Gas required for ${command} deploy on ${chain}: ${ethers.utils.formatUnits(
+          feeDelta.toString(),
+          initialFee.decimals,
+        )} ${initialFee.symbol}`,
+      );
+      continue;
+    }
+
+    const balanceDelta = initialBalances[chain].native.sub(
+      currentBalances[chain].native,
+    );
     logPink(
       `\t- Gas required for ${command} deploy on ${chain}: ${ethers.utils.formatEther(balanceDelta)} ${
         nativeToken?.symbol ?? 'UNKNOWN SYMBOL'

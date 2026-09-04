@@ -10,6 +10,7 @@ members = [
   "chains/hyperlane-cosmos",
   "chains/hyperlane-ethereum",
   "chains/hyperlane-fuel",
+  "chains/hyperlane-midnight",
   "chains/hyperlane-radix",
   "chains/hyperlane-sealevel",
   "chains/hyperlane-tron",
@@ -312,3 +313,43 @@ version = "=0.12.1"
 branch = "hyperlane"
 git = "https://github.com/hyperlane-xyz/parity-common.git"
 version = "=0.5.2"
+
+# The Midnight contract-state decoder (chains/hyperlane-midnight) pins the
+# ledger 9.1 graph by git tag. These three redirects mirror midnight-ledger's
+# own root `[patch.crates-io]`, and together force ONE consistent serialize /
+# base-crypto across the whole midnight subgraph. Without them, `onchain-state`
+# (9.1) resolves `midnight-serialize 1.2.0` while its transitive
+# `transient-crypto-old` pulls crates.io `midnight-serialize 1.1.0`, and the
+# two `Serializable` impls collide (VerifierKey serialize fails to typecheck).
+#   - serialize / base-crypto: force the 9.1 versions everywhere.
+#   - transient-crypto: `onchain-state` uses the new 3.0.0 line (via the git
+#     checkout's internal path dep) AND the older `midnight-transient-crypto
+#     ^2.0.0` line for legacy VerifierKey (de)serialisation. The node
+#     (ledger-9.1) serialises ContractState's VerifierKeys with the 2.2.0-rc.1
+#     tag, so pin the crates.io 2.x ref there — without this the decoder
+#     resolves crates.io 2.1.0 and `tagged_deserialize::<ContractState>` reads
+#     the wrong VerifierKey wire format. The 3.0.0 line is a path dep, not a
+#     crates.io ref, so this patch does not touch it.
+[patch.crates-io.midnight-serialize]
+git = "https://github.com/midnightntwrk/midnight-ledger"
+tag = "ledger-9.1.0.0-rc.3"
+
+[patch.crates-io.midnight-base-crypto]
+git = "https://github.com/midnightntwrk/midnight-ledger"
+tag = "ledger-9.1.0.0-rc.3"
+
+[patch.crates-io.midnight-transient-crypto]
+git = "https://github.com/midnightntwrk/midnight-ledger"
+tag = "transient-crypto-2.2.0-rc.1"
+
+# Patched fork of size-of 0.1.5. Pulled transitively (starknet-types-core ->
+# cainome -> abigen), size-of 0.1.5 lists ABIs like `aapcs`/`win64`
+# unconditionally; rustc >= 1.95 rejects them with E0570 on targets where they
+# are invalid (e.g. aarch64-apple-darwin). The ledger-9.1 decode graph forces
+# rustc >= 1.95 (sysinfo 0.39 uses `cfg_select`), and 0.1.5 is upstream's newest
+# release under this name, so we patch it. The fork drops the target-invalid
+# ABIs; see its README for the full rationale.
+[patch.crates-io.size-of]
+git = "https://github.com/equilibriumco/size-of"
+rev = "f0725127cc0fb193b93376a3789b9312f580fe95"
+

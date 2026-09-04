@@ -195,11 +195,19 @@ catalog:
   '@prisma/client': 7.8.0
   prisma: 7.8.0
 overrides:
+  # compact-js's ^1.0.0-rc.3 range floats to rc.4; stagenet pairs with rc.3,
+  # and the ledger WASM must stay a single copy.
+  '@midnightntwrk/ledger-v9': 1.0.0-rc.3
   # 0.11.6 requires 18 consensus heights; current Aleo E2E networks provide 17.
   '@provablehq/wasm': 0.11.3
   '@types/react': 18.3.27
   '@types/react-dom': 18.3.7
   async: ^2.6.4
+  # Collapse bn.js 5.x to one copy: @polkadot/util tags node results with its
+  # BN class and @midnightntwrk/wallet-sdk-node-client instanceof-checks them
+  # with its own; two physical copies fail the check (ethers' 4.x pins are
+  # untouched by the range selector).
+  'bn.js@^5': 5.2.5
   fetch-ponyfill: ^7.1
   flat: ^5.0.2
   globals: ^16.3.0
@@ -230,11 +238,13 @@ allowBuilds:
   bigint-buffer: true
   bufferutil: true
   cbor-extract: true
+  classic-level: true
   core-js: true
   core-js-pure: true
   cpu-features: true
   esbuild: true
   keccak: true
+  msgpackr-extract: true
   node-hid: true
   prisma: true
   protobufjs: true

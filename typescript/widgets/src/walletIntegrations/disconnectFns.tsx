@@ -5,6 +5,7 @@ import { type KnownProtocolType, ProtocolType } from '@hyperlane-xyz/utils';
 import { widgetLogger } from '../logger.js';
 
 import { useAleoDisconnectFn } from './aleoWallet.js';
+import { useMidnightDisconnectFn } from './midnight.js';
 import { useCosmosDisconnectFn } from './cosmosWallet.js';
 import { useEthereumDisconnectFn } from './ethereumWallet.js';
 import { useRadixDisconnectFn } from './radixWallet.js';
@@ -26,6 +27,7 @@ export function useDisconnectFns(): Record<
   const disconnectStarknet = useStarknetDisconnectFn();
   const disconnectRadix = useRadixDisconnectFn();
   const disconnectAleo = useAleoDisconnectFn();
+  const disconnectMidnight = useMidnightDisconnectFn();
   const disconnectTron = useTronDisconnectFn();
 
   const onClickDisconnect =
@@ -66,6 +68,10 @@ export function useDisconnectFns(): Record<
         disconnectRadix,
       ),
       [ProtocolType.Aleo]: onClickDisconnect(ProtocolType.Aleo, disconnectAleo),
+      [ProtocolType.Midnight]: onClickDisconnect(
+        ProtocolType.Midnight,
+        disconnectMidnight,
+      ),
       [ProtocolType.Tron]: onClickDisconnect(ProtocolType.Tron, disconnectTron),
     }),
     [
@@ -75,6 +81,7 @@ export function useDisconnectFns(): Record<
       disconnectStarknet,
       disconnectRadix,
       disconnectAleo,
+      disconnectMidnight,
       disconnectTron,
     ],
   );
