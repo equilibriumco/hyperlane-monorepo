@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
+
 import { expect } from 'chai';
 
 import {
   type VerifierKeyEntry,
+  compareVerifierKeys,
+  describeVerifierKeyDrift,
+  moduleFingerprintProblems,
   operationVersionForKey,
   planChunks,
   totalKeyBytes,
@@ -131,5 +136,79 @@ describe('operationVersionForKey', () => {
     expect(() =>
       operationVersionForKey(keyWithHeader('midnight:verifier-key[v99]')),
     ).to.throw('unrecognized verifier key header');
+  });
+});
+
+describe('compareVerifierKeys', () => {
+  const key = (byte: number) => Uint8Array.from([byte, byte, byte]);
+  const build: VerifierKeyEntry[] = [
+    { circuitId: 'handle', key: key(1) },
+    { circuitId: 'fund', key: key(2) },
+    { circuitId: 'pause', key: key(3) },
+  ];
+
+  it('reports nothing when the chain holds exactly the build', () => {
+    const onChain = new Map([
+      ['pause', key(3)],
+      ['handle', key(1)],
+      ['fund', key(2)],
+    ]);
+    const drift = compareVerifierKeys(build, onChain);
+    expect(drift).to.eql({ missing: [], extra: [], wrong: [] });
+    expect(describeVerifierKeyDrift(drift)).to.equal(null);
+  });
+
+  it('names every missing, extra and wrong circuit', () => {
+    const onChain = new Map([
+      ['handle', key(1)],
+      ['pause', key(9)],
+      ['ghost', key(4)],
+    ]);
+    const drift = compareVerifierKeys(build, onChain);
+    expect(drift).to.eql({
+      missing: ['fund'],
+      extra: ['ghost'],
+      wrong: ['pause'],
+    });
+    expect(describeVerifierKeyDrift(drift)).to.equal(
+      'missing circuit: fund; extra circuit: ghost; wrong key: pause',
+    );
+  });
+});
+
+describe('moduleFingerprintProblems', () => {
+  const sha256 = (bytes: Uint8Array) =>
+    createHash('sha256').update(bytes).digest('hex');
+  const keys: VerifierKeyEntry[] = [
+    { circuitId: 'handle', key: Uint8Array.from([1, 2, 3]) },
+    { circuitId: 'fund', key: Uint8Array.from([4, 5, 6]) },
+  ];
+  const ownFingerprints = Object.fromEntries(
+    keys.map((e) => [e.circuitId, sha256(e.key)]),
+  );
+
+  it('accepts a module compiled with the keys being deployed', () => {
+    expect(moduleFingerprintProblems(ownFingerprints, keys)).to.eql([]);
+  });
+
+  it('names a key from another build, a missing key and an unknown circuit', () => {
+    const otherBuild = {
+      handle: sha256(Uint8Array.from([9, 9, 9])),
+      fund: ownFingerprints.fund,
+      pause: sha256(Uint8Array.from([7])),
+    };
+    const problems = moduleFingerprintProblems(otherBuild, [
+      ...keys,
+      { circuitId: 'ghost', key: Uint8Array.from([8]) },
+    ]);
+    expect(problems.map((p) => p.split(':')[0])).to.eql([
+      'handle',
+      'ghost',
+      'pause',
+    ]);
+  });
+
+  it('refuses a module built without keys', () => {
+    expect(moduleFingerprintProblems(undefined, keys)).to.have.length(1);
   });
 });
