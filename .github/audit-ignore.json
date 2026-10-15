@@ -1,0 +1,15 @@
+{
+  "GHSA-xq3m-2v4x-88gg": "protobufjs 6 under @confio/ics23 via @cosmjs/stargate. The CLI decodes protobuf only when it talks to a Cosmos chain; the Midnight bridge deploys to Midnight and EVM chains. Needs @confio/ics23 to move to protobufjs 7.",
+  "GHSA-66ff-xgx4-vchm": "protobufjs 6, see GHSA-xq3m-2v4x-88gg.",
+  "GHSA-685m-2w69-288q": "protobufjs 6, see GHSA-xq3m-2v4x-88gg.",
+  "GHSA-75px-5xx7-5xc7": "protobufjs 6, see GHSA-xq3m-2v4x-88gg.",
+  "GHSA-jvwf-75h9-cwgg": "protobufjs 6, see GHSA-xq3m-2v4x-88gg.",
+  "GHSA-wcpc-wj8m-hjx6": "protobufjs 6, see GHSA-xq3m-2v4x-88gg.",
+  "GHSA-3gc7-fjrx-p6mg": "bigint-buffer under @solana/buffer-layout-utils, Solana chains only. The workspace patches 1.1.5 (patches/bigint-buffer@1.1.5.patch), so the version is held there.",
+  "GHSA-vfj7-8cjw-p6xm": "braces under metro, the React Native bundler, reached through @turnkey/solana and WalletConnect. A Node CLI never imports React Native or Metro; the files sit unused in node_modules.",
+  "GHSA-5p2g-fcmc-qvqq": "image-size under metro, see GHSA-vfj7-8cjw-p6xm.",
+  "GHSA-w3rx-r6r6-pgpr": "image-size under metro, see GHSA-vfj7-8cjw-p6xm.",
+  "GHSA-22cc-p3c6-wpvm": "h3 under unstorage, reached through WalletConnect's key-value storage via @turnkey/solana. The CLI never starts an h3 HTTP server, so the vulnerable request handling is unreachable.",
+  "GHSA-mp2g-9vg9-f4cg": "h3 under unstorage, see GHSA-22cc-p3c6-wpvm.",
+  "GHSA-ph9p-34f9-6g65": "tmp under external-editor via the rebalancer's @inquirer/prompts. The temp file holds an operator-typed edit; exploiting the symlink issue needs write access to the operator's temp directory, where an attacker already runs as the operator."
+}

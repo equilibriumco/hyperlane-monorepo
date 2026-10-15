@@ -195,6 +195,13 @@ catalog:
   '@prisma/client': 7.8.0
   prisma: 7.8.0
 overrides:
+  # Known vulnerabilities in packages the CLI pulls in; the rest of the
+  # shipped set is accepted with a reason in .github/audit-ignore.json.
+  axios: ^1.20.0
+  proxy-addr: ^2.0.8
+  shell-quote: ^1.12.0
+  'ws@^8': ^8.21.1
+  'ws@^6': ^6.2.4
   # compact-js's ^1.0.0-rc.3 range floats to rc.4; stagenet pairs with rc.3,
   # and the ledger WASM must stay a single copy.
   '@midnightntwrk/ledger-v9': 1.0.0-rc.3

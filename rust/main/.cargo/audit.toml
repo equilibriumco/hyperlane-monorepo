@@ -1,0 +1,47 @@
+# Advisories `cargo audit` skips, each with the reason it is accepted. The
+# dependency-audit workflow runs `cargo audit` from this directory. Remove an
+# entry as soon as the crate that holds the vulnerable version moves.
+
+[advisories]
+ignore = [
+  # h2 0.3 (unbounded empty DATA frames). Bound to hyper 0.14, which the AWS
+  # SDK, reqwest 0.11 and axum 0.6 still use. The agents are HTTP/2 clients of
+  # endpoints the operator configures, so the malicious peer would be the
+  # operator's own server.
+  "RUSTSEC-2026-0258",
+  # idna 0.3 (Punycode labels). Under cookie_store via reqwest 0.11; only
+  # cookies from the operator's own endpoints are parsed.
+  "RUSTSEC-2024-0421",
+  # protobuf 2 (uncontrolled recursion). Under hyperlane-cosmos, reached only
+  # when a Cosmos chain is configured; the Midnight bridge configures none.
+  "RUSTSEC-2024-0437",
+  # ring 0.16 (AES panic with overflow checks; unmaintained). Under rustls
+  # 0.20 via tokio-tungstenite 0.17, which the fork's ethers-rs pins for
+  # websocket RPC. The bridge configures HTTP RPC endpoints.
+  "RUSTSEC-2025-0009",
+  "RUSTSEC-2025-0010",
+  # rustls 0.20 (infinite loop on network input) and tungstenite 0.17 (frame
+  # size DoS). Same tokio-tungstenite 0.17 path under the fork's ethers-rs;
+  # only a websocket RPC endpoint the operator chose could trigger either.
+  "RUSTSEC-2024-0336",
+  "RUSTSEC-2023-0065",
+  # rustls 0.20 and 0.21 (ServerHello downgrade to classical key exchange).
+  # Neither version offers post-quantum key exchange, so nothing to downgrade.
+  "RUSTSEC-2026-0349",
+  # rustls 0.21 (Debug impls expose TLS secrets). Needs a local reader of a
+  # Debug dump of a client session; the agents never print one.
+  "RUSTSEC-2026-0346",
+  # rustls-webpki 0.101 (CRL parsing panic, name constraints). Under rustls
+  # 0.21 via the AWS SDK and hyper-rustls 0.24. The agents configure no CRLs,
+  # and the public CAs behind their endpoints issue no constrained certs.
+  # Goes away when the AWS SDK moves to rustls 0.23.
+  "RUSTSEC-2026-0104",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  # Not in the dependency closure of the relayer, validator or scraper
+  # (`cargo tree -p relayer -p validator -p scraper --features midnight -e normal`).
+  "RUSTSEC-2025-0111", # tokio-tar
+  "RUSTSEC-2023-0071", # rsa
+  "RUSTSEC-2026-0001", # rkyv
+  "RUSTSEC-2026-0235", # rkyv
+]

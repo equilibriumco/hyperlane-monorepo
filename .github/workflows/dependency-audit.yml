@@ -1,0 +1,64 @@
+# Known vulnerabilities in what the Midnight deployment ships from this fork:
+# the relayer and validator (rust/main/Cargo.lock) and the CLI with the
+# workspace packages it depends on (pnpm-lock.yaml). Runs on ubuntu-latest on
+# purpose: the inherited Depot jobs never start on this fork.
+#
+# GitHub only schedules workflows from the default branch, which is upstream's
+# main here, so the weekly run lives in hyperlane-midnight against its pinned
+# commit of this fork.
+
+name: dependency-audit
+
+on:
+  push:
+    branches: [midnight]
+  pull_request:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_AUDIT_VERSION: 0.22.2
+
+jobs:
+  cargo-audit:
+    name: cargo audit (rust/main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cargo-audit
+        id: cargo-audit-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
+
+      - name: Audit rust/main/Cargo.lock (accepted advisories in rust/main/.cargo/audit.toml)
+        run: cargo audit
+        working-directory: rust/main
+
+  pnpm-audit:
+    name: pnpm audit (CLI production dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install production dependencies (the shipped set comes from pnpm ls)
+        run: npx -y pnpm@11.20.0 install --prod --frozen-lockfile --ignore-scripts
+
+      - name: Audit pnpm-lock.yaml (accepted advisories in .github/audit-ignore.json)
+        run: node .github/scripts/pnpm-audit.mjs
