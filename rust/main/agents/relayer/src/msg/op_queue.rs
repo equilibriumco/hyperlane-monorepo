@@ -1,4 +1,9 @@
-use std::{cmp::Reverse, collections::BinaryHeap, sync::Arc};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::BinaryHeap,
+    sync::Arc,
+    time::Instant,
+};
 
 use derive_new::new;
 use hyperlane_core::{PendingOperation, PendingOperationStatus, QueueOperation, ReprepareReason};
@@ -9,7 +14,54 @@ use tracing::{debug, instrument};
 use crate::server::operations::message_retry::{MessageRetryQueueResponse, MessageRetryRequest};
 use crate::settings::matching_list::MatchingListExt;
 
-pub type OperationPriorityQueue = Arc<Mutex<BinaryHeap<Reverse<QueueOperation>>>>;
+pub type OperationPriorityQueue = Arc<Mutex<BinaryHeap<Reverse<QueueEntry>>>>;
+
+/// An operation in a queue, ordered by when it became due: a retried
+/// operation by the end of its wait, any other by when it was pushed. So an
+/// operation whose wait is over goes before everything that arrived after
+/// that moment, rather than behind every operation that has never been
+/// retried. An operator's retry request puts an operation ahead of all.
+#[derive(Debug)]
+pub struct QueueEntry {
+    ready_at: Option<Instant>,
+    pub op: QueueOperation,
+}
+
+impl QueueEntry {
+    pub fn new(op: QueueOperation) -> Self {
+        Self {
+            ready_at: Some(op.next_attempt_after().unwrap_or_else(Instant::now)),
+            op,
+        }
+    }
+
+    fn ahead_of_all(op: QueueOperation) -> Self {
+        Self { ready_at: None, op }
+    }
+}
+
+impl PartialEq for QueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for QueueEntry {}
+
+impl PartialOrd for QueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // `None` sorts first; equal times fall back to the operations' own order.
+        self.ready_at
+            .cmp(&other.ready_at)
+            .then_with(|| self.op.cmp(&other.op))
+    }
+}
 
 /// Queue of generic operations that can be submitted to a destination chain.
 /// Includes logic for maintaining queue metrics by the destination and `app_context` of an operation
@@ -33,7 +85,7 @@ impl OpQueue {
         let new_metric = Arc::new(self.get_new_operation_metric(op.as_ref(), new_status.clone()));
         op.set_status_and_update_metrics(new_status, new_metric);
 
-        self.queue.lock().await.push(Reverse(op));
+        self.queue.lock().await.push(Reverse(QueueEntry::new(op)));
     }
 
     /// Pop an element from the queue and update metrics
@@ -50,8 +102,8 @@ impl OpQueue {
         self.process_retry_requests().await;
         let mut queue = self.queue.lock().await;
         let mut popped = vec![];
-        while let Some(Reverse(op)) = queue.pop() {
-            popped.push(op);
+        while let Some(Reverse(entry)) = queue.pop() {
+            popped.push(entry.op);
             if popped.len() >= limit {
                 break;
             }
@@ -125,7 +177,7 @@ impl OpQueue {
     }
 
     fn reprioritize_matching(
-        queue: &mut BinaryHeap<Reverse<Box<dyn PendingOperation>>>,
+        queue: &mut BinaryHeap<Reverse<QueueEntry>>,
         retry_requests: &[MessageRetryRequest],
     ) -> Vec<MessageRetryQueueResponse> {
         let mut retry_responses: Vec<_> = (0..retry_requests.len())
@@ -133,7 +185,8 @@ impl OpQueue {
             .collect();
         let mut reprioritized_queue: BinaryHeap<_> = queue
             .drain()
-            .map(|Reverse(mut op)| {
+            .map(|Reverse(entry)| {
+                let QueueEntry { ready_at, mut op } = entry;
                 let mut matched = false;
                 retry_responses
                     .iter_mut()
@@ -150,8 +203,9 @@ impl OpQueue {
                 if matched {
                     op.set_status(PendingOperationStatus::Retry(ReprepareReason::Manual));
                     op.reset_attempts();
+                    return Reverse(QueueEntry::ahead_of_all(op));
                 }
-                Reverse(op)
+                Reverse(QueueEntry { ready_at, op })
             })
             .collect();
         queue.append(&mut reprioritized_queue);

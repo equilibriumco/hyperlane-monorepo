@@ -33,6 +33,10 @@ pub struct MockPendingOperation {
     retry_count: u32,
     #[serde(skip)]
     pub mailbox: Option<Arc<dyn Mailbox>>,
+    #[serde(skip)]
+    never_attempted: bool,
+    #[serde(skip)]
+    due_at: Option<Instant>,
 }
 
 impl MockPendingOperation {
@@ -47,6 +51,8 @@ impl MockPendingOperation {
             origin_domain_id: 0,
             retry_count: 0,
             mailbox: None,
+            never_attempted: false,
+            due_at: None,
         }
     }
 
@@ -67,6 +73,8 @@ impl MockPendingOperation {
                 domain_technical_stack: HyperlaneDomainTechnicalStack::Other,
             },
             mailbox: None,
+            never_attempted: false,
+            due_at: None,
         }
     }
 
@@ -106,6 +114,22 @@ impl MockPendingOperation {
         self.set_retries(retry_count);
         self
     }
+
+    /// Never attempted, so no next attempt time.
+    pub fn never_attempted(self) -> Self {
+        Self {
+            never_attempted: true,
+            ..self
+        }
+    }
+
+    /// Retried, with a wait that ends at `at`.
+    pub fn due_at(self, at: Instant) -> Self {
+        Self {
+            due_at: Some(at),
+            ..self
+        }
+    }
 }
 
 impl TryBatchAs<HyperlaneMessage> for MockPendingOperation {}
@@ -125,6 +149,7 @@ impl PendingOperation for MockPendingOperation {
 
     fn reset_attempts(&mut self) {
         self.seconds_to_next_attempt = 0;
+        self.due_at = None;
     }
 
     fn sender_address(&self) -> &H256 {
@@ -203,6 +228,12 @@ impl PendingOperation for MockPendingOperation {
     }
 
     fn next_attempt_after(&self) -> Option<Instant> {
+        if self.never_attempted {
+            return None;
+        }
+        if let Some(at) = self.due_at {
+            return Some(at);
+        }
         Some(
             Instant::now()
                 .checked_add(Duration::from_secs(self.seconds_to_next_attempt))
@@ -351,6 +382,97 @@ async fn test_multiple_op_queues_message_id() {
     // The elements should be popped in the order they were pushed, because there was no retry request for them
     assert_eq!(queue_2_popped[0].id(), op_ids[3]);
     assert_eq!(queue_2_popped[1].id(), op_ids[4]);
+}
+
+async fn push_all(op_queue: &OpQueue, ops: Vec<MockPendingOperation>) -> Vec<H256> {
+    let mut ids = vec![];
+    for op in ops {
+        ids.push(op.id());
+        op_queue
+            .push(
+                Box::new(op) as QueueOperation,
+                Some(PendingOperationStatus::FirstPrepareAttempt),
+            )
+            .await;
+    }
+    ids
+}
+
+async fn pop_all(op_queue: &mut OpQueue) -> Vec<H256> {
+    let mut ids = vec![];
+    while let Some(op) = op_queue.pop().await {
+        ids.push(op.id());
+    }
+    ids
+}
+
+#[tokio::test]
+async fn test_op_whose_wait_ended_goes_before_ops_pushed_after_it() {
+    let broadcaster = sync::broadcast::Sender::new(100);
+    let mut op_queue = initialize_queue(&broadcaster);
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+
+    let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let ids = push_all(
+        &op_queue,
+        vec![
+            MockPendingOperation::new(0, destination_domain.clone()).due_at(a_second_ago),
+            MockPendingOperation::new(0, destination_domain.clone()).never_attempted(),
+            MockPendingOperation::new(0, destination_domain).never_attempted(),
+        ],
+    )
+    .await;
+
+    assert_eq!(pop_all(&mut op_queue).await, ids);
+}
+
+#[tokio::test]
+async fn test_order_is_by_the_end_of_the_wait_not_by_push_order() {
+    let broadcaster = sync::broadcast::Sender::new(100);
+    let mut op_queue = initialize_queue(&broadcaster);
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+
+    // Pushed last, but its wait ended before the other two arrived.
+    let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let ids = push_all(
+        &op_queue,
+        vec![
+            MockPendingOperation::new(0, destination_domain.clone()).never_attempted(),
+            MockPendingOperation::new(1, destination_domain.clone()),
+            MockPendingOperation::new(0, destination_domain).due_at(a_second_ago),
+        ],
+    )
+    .await;
+
+    assert_eq!(pop_all(&mut op_queue).await, vec![ids[2], ids[0], ids[1]]);
+}
+
+#[tokio::test]
+async fn test_operator_retry_goes_ahead_of_an_op_whose_wait_ended_earlier() {
+    let broadcaster = sync::broadcast::Sender::new(100);
+    let mut op_queue = initialize_queue(&broadcaster);
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+
+    let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let ids = push_all(
+        &op_queue,
+        vec![
+            MockPendingOperation::new(0, destination_domain.clone()).due_at(a_second_ago),
+            MockPendingOperation::new(0, destination_domain).never_attempted(),
+        ],
+    )
+    .await;
+
+    let (transmitter, _receiver) = mpsc::channel(ENDPOINT_MESSAGES_QUEUE_SIZE);
+    broadcaster
+        .send(MessageRetryRequest {
+            uuid: "59400966-e7fa-4fb9-9372-9a671d4392c3".to_string(),
+            pattern: MatchingList::with_message_id(ids[1]),
+            transmitter,
+        })
+        .unwrap();
+
+    assert_eq!(pop_all(&mut op_queue).await, vec![ids[1], ids[0]]);
 }
 
 #[tokio::test]
