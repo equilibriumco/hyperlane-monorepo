@@ -10,7 +10,7 @@ use hyperlane_core::{PendingOperationStatus, ReprepareReason, H256};
 use serde::{Deserialize, Serialize};
 
 use crate::msg::{
-    op_queue::OperationPriorityQueue,
+    op_queue::{OperationPriorityQueue, QueueEntry},
     pending_message::{MessageContext, PendingMessage, DEFAULT_MAX_MESSAGE_RETRIES},
 };
 
@@ -158,7 +158,7 @@ async fn handler(
     prep_queue
         .lock()
         .await
-        .push(Reverse(Box::new(pending_message)));
+        .push(Reverse(QueueEntry::new(Box::new(pending_message))));
 
     let resp = ResponseBody {
         pending_message: message_str,

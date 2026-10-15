@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use axum::{
     extract::{Query, State},
@@ -71,10 +71,10 @@ pub async fn format_queue(queue: OperationPriorityQueue) -> String {
         .lock()
         .await
         .iter()
-        .map(|reverse| {
+        .map(|Reverse(entry)| {
             (
-                reverse.0.get_retries(),
-                serde_json::to_value(OperationWithId::new(&reverse.0)),
+                entry.op.get_retries(),
+                serde_json::to_value(OperationWithId::new(&entry.op)),
             )
         })
         .collect();
@@ -111,7 +111,7 @@ mod tests {
     use crate::{
         msg::op_queue::{
             tests::{dummy_metrics_and_label, MockPendingOperation},
-            OpQueue,
+            OpQueue, QueueEntry,
         },
         test_utils::request::parse_body_to_string,
     };
@@ -233,8 +233,14 @@ mod tests {
   }}
 ]"#
         );
-        op_queue.lock().await.push(Reverse(dummy_operation_1));
-        op_queue.lock().await.push(Reverse(dummy_operation_2));
+        op_queue
+            .lock()
+            .await
+            .push(Reverse(QueueEntry::new(dummy_operation_1)));
+        op_queue
+            .lock()
+            .await
+            .push(Reverse(QueueEntry::new(dummy_operation_2)));
 
         let api_url = format!(
             "{LIST_OPERATIONS_API_BASE}?destination_domain={}",
@@ -300,8 +306,14 @@ mod tests {
   }}
 ]"#
         );
-        op_queue.lock().await.push(Reverse(dummy_operation_1));
-        op_queue.lock().await.push(Reverse(dummy_operation_2));
+        op_queue
+            .lock()
+            .await
+            .push(Reverse(QueueEntry::new(dummy_operation_1)));
+        op_queue
+            .lock()
+            .await
+            .push(Reverse(QueueEntry::new(dummy_operation_2)));
 
         let api_url = format!(
             "{LIST_OPERATIONS_API_BASE}?destination_domain={}",
