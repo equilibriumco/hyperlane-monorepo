@@ -68,6 +68,7 @@ hex.workspace = true
 hyperlane-metric = { path = "../../hyperlane-metric" }
 hyperlane-operation-verifier = { path = "../../applications/hyperlane-operation-verifier" }
 lander = { path = "../../lander" }
+rustc-serialize = "=0.3.24"
 
 [dev-dependencies]
 axum = { workspace = true, features = ["macros"] }
