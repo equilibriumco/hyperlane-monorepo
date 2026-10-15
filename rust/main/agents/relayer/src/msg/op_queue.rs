@@ -6,7 +6,10 @@ use std::{
 };
 
 use derive_new::new;
-use hyperlane_core::{PendingOperation, PendingOperationStatus, QueueOperation, ReprepareReason};
+use hyperlane_core::{
+    HyperlaneDomainProtocol, PendingOperation, PendingOperationStatus, QueueOperation,
+    ReprepareReason,
+};
 use prometheus::{IntGauge, IntGaugeVec};
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{debug, instrument};
@@ -16,11 +19,13 @@ use crate::settings::matching_list::MatchingListExt;
 
 pub type OperationPriorityQueue = Arc<Mutex<BinaryHeap<Reverse<QueueEntry>>>>;
 
-/// An operation in a queue, ordered by when it became due: a retried
-/// operation by the end of its wait, any other by when it was pushed. So an
-/// operation whose wait is over goes before everything that arrived after
-/// that moment, rather than behind every operation that has never been
-/// retried. An operator's retry request puts an operation ahead of all.
+/// An operation in a queue. Bound for a Midnight destination, it is ordered
+/// by when it became due: a retried operation by the end of its wait, any
+/// other by when it was pushed, so one whose wait is over goes before
+/// everything that arrived after that moment. Bound anywhere else, it
+/// carries no time and the operations' own order applies, as upstream:
+/// never retried first. An operator's retry request puts an operation
+/// ahead of all either way.
 #[derive(Debug)]
 pub struct QueueEntry {
     ready_at: Option<Instant>,
@@ -29,10 +34,13 @@ pub struct QueueEntry {
 
 impl QueueEntry {
     pub fn new(op: QueueOperation) -> Self {
-        Self {
-            ready_at: Some(op.next_attempt_after().unwrap_or_else(Instant::now)),
-            op,
-        }
+        let ready_at = match op.destination_domain().domain_protocol() {
+            HyperlaneDomainProtocol::Midnight => {
+                Some(op.next_attempt_after().unwrap_or_else(Instant::now))
+            }
+            _ => None,
+        };
+        Self { ready_at, op }
     }
 
     fn ahead_of_all(op: QueueOperation) -> Self {

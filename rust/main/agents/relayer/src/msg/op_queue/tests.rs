@@ -407,10 +407,30 @@ async fn pop_all(op_queue: &mut OpQueue) -> Vec<H256> {
 }
 
 #[tokio::test]
-async fn test_op_whose_wait_ended_goes_before_ops_pushed_after_it() {
+async fn test_other_destinations_keep_the_never_retried_first_order() {
     let broadcaster = sync::broadcast::Sender::new(100);
     let mut op_queue = initialize_queue(&broadcaster);
     let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+
+    // Not Midnight: a never-retried op still goes before one whose wait ended.
+    let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let ids = push_all(
+        &op_queue,
+        vec![
+            MockPendingOperation::new(0, destination_domain.clone()).due_at(a_second_ago),
+            MockPendingOperation::new(0, destination_domain).never_attempted(),
+        ],
+    )
+    .await;
+
+    assert_eq!(pop_all(&mut op_queue).await, vec![ids[1], ids[0]]);
+}
+
+#[tokio::test]
+async fn test_op_whose_wait_ended_goes_before_ops_pushed_after_it() {
+    let broadcaster = sync::broadcast::Sender::new(100);
+    let mut op_queue = initialize_queue(&broadcaster);
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Midnight.into();
 
     let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let ids = push_all(
@@ -430,7 +450,7 @@ async fn test_op_whose_wait_ended_goes_before_ops_pushed_after_it() {
 async fn test_order_is_by_the_end_of_the_wait_not_by_push_order() {
     let broadcaster = sync::broadcast::Sender::new(100);
     let mut op_queue = initialize_queue(&broadcaster);
-    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Midnight.into();
 
     // Pushed last, but its wait ended before the other two arrived.
     let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
@@ -451,7 +471,7 @@ async fn test_order_is_by_the_end_of_the_wait_not_by_push_order() {
 async fn test_operator_retry_goes_ahead_of_an_op_whose_wait_ended_earlier() {
     let broadcaster = sync::broadcast::Sender::new(100);
     let mut op_queue = initialize_queue(&broadcaster);
-    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Base.into();
+    let destination_domain: HyperlaneDomain = KnownHyperlaneDomain::Midnight.into();
 
     let a_second_ago = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let ids = push_all(

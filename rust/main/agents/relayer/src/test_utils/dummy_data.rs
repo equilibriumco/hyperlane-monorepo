@@ -20,7 +20,7 @@ use crate::{
         db_loader::tests::DummyApplicationOperationVerifier,
         gas_payment::GasPaymentEnforcer,
         metadata::{
-            BaseMetadataBuilder, DefaultIsmCache, IsmAwareAppContextClassifier,
+            BaseMetadataBuilder, BuildsBaseMetadata, DefaultIsmCache, IsmAwareAppContextClassifier,
             IsmCachePolicyClassifier,
         },
         pending_message::MessageContext,
@@ -120,8 +120,12 @@ pub fn dummy_message_context(
     db: &HyperlaneRocksDB,
     cache: OptionalCache<MeteredCache<LocalCache>>,
 ) -> MessageContext {
+    let mut destination_mailbox = MockMailboxContract::new_with_default_ism(H256::zero());
+    destination_mailbox
+        .expect__domain()
+        .return_const(base_metadata_builder.destination_domain().clone());
     MessageContext {
-        destination_mailbox: Arc::new(MockMailboxContract::new_with_default_ism(H256::zero())),
+        destination_mailbox: Arc::new(destination_mailbox),
         origin_db: Arc::new(db.clone()),
         cache,
         metadata_builder: base_metadata_builder,
