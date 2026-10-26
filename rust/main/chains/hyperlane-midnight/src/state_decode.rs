@@ -517,31 +517,93 @@ mod tests {
         );
     }
 
-    // Real `night` state captured from a devnet indexer. Ignored because the
-    // committed blob predates the switch to 64-byte pubkey validators, so it
-    // decodes to garbage addresses. Regenerating it from a deploy of the same
-    // three keys leaves the assertions below valid.
+    /// The values the capture recorded beside the fixture, from the inputs
+    /// that made the state rather than from decoding it.
+    #[derive(serde::Deserialize)]
+    struct ExpectedState {
+        ism: ExpectedIsm,
+        nonce: u32,
+        messages: Vec<ExpectedMessage>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ExpectedIsm {
+        validators: Vec<String>,
+        #[serde(rename = "validatorCount")]
+        validator_count: u8,
+        threshold: u8,
+        #[serde(rename = "moduleType")]
+        module_type: u8,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ExpectedMessage {
+        nonce: u32,
+        encoded: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        hex::decode(s.trim_start_matches("0x")).expect("valid hex")
+    }
+
+    // Real `night` state captured from a devnet indexer by the contracts
+    // repo's decoder-fixture suite, which enrolled a validator whose 64-byte
+    // key ends in a zero byte and dispatched two transfers whose stored
+    // messages do too. The ledger trims trailing zero bytes on store, so
+    // every value here has to come back whole. The suite writes both files;
+    // see tests/e2e/README.md there for how to regenerate them.
     #[test]
-    #[ignore = "night-state.hex predates the 64-byte pubkey validator registry; regenerate from a fresh deploy of the same 3 validators"]
-    fn decodes_live_night_ism_state() {
-        let hex = include_str!("../tests/fixtures/night-state.hex").trim();
-        let bytes = hex::decode(hex).expect("fixture is valid hex");
+    fn decodes_live_night_state() {
+        let bytes = unhex(include_str!("../tests/fixtures/night-state.hex").trim());
+        let expected: ExpectedState =
+            serde_json::from_str(include_str!("../tests/fixtures/night-state.expected.json"))
+                .expect("expected values are valid JSON");
+
         let ism = decode_ism_state(&bytes).expect("decode ISM state");
+        assert_eq!(ism.module_type, expected.ism.module_type, "module_type");
+        assert_eq!(ism.threshold, expected.ism.threshold, "threshold");
+        assert_eq!(
+            ism.validator_count, expected.ism.validator_count,
+            "validator_count"
+        );
+        let validators: Vec<[u8; 20]> = expected.ism.validators.iter().map(|v| addr(v)).collect();
+        assert_eq!(
+            ism.validators, validators,
+            "validator addresses in slot order, the zero-tailed key among them"
+        );
 
         assert_eq!(
-            ism.module_type, 5,
-            "module_type should be MessageIdMultisig"
+            decode_nonce_count(&bytes).expect("decode nonce"),
+            expected.nonce,
+            "nonce"
         );
-        assert_eq!(ism.threshold, 2, "threshold");
-        assert_eq!(ism.validator_count, 3, "validator_count");
+
+        let messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
         assert_eq!(
-            ism.validators,
-            vec![
-                addr("19e7e376e7c213b7e7e7e46cc70a5dd086daff2a"),
-                addr("1563915e194d8cfba1943570603f7606a3115508"),
-                addr("5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb"),
-            ],
-            "validator addresses in slot order"
+            messages.len(),
+            expected.messages.len(),
+            "every dispatched message"
         );
+        for ((nonce, message), want) in messages.iter().zip(&expected.messages) {
+            assert_eq!(*nonce, want.nonce, "map key");
+            let encoded = unhex(&want.encoded);
+            assert_eq!(
+                encoded.last().copied(),
+                Some(0u8),
+                "the fixture's message ends in a zero byte"
+            );
+            assert_eq!(
+                message.to_vec(),
+                encoded,
+                "message {nonce} byte for byte, trailing zero restored"
+            );
+            assert_eq!(
+                message.id().as_bytes(),
+                unhex(&want.message_id).as_slice(),
+                "message {nonce} id"
+            );
+        }
     }
 }

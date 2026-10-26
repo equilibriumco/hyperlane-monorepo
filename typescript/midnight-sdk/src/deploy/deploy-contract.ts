@@ -17,6 +17,7 @@ import {
   NIGHT_MAINTENANCE_PRIORITY,
   filteredContractClass,
   insertVerifierKeys,
+  moduleFingerprintProblems,
   planChunks,
   readVerifierKeys,
   totalKeyBytes,
@@ -61,8 +62,25 @@ export async function deployContractInstance(
   const zkConfigPath = artifactsPathFor(name);
   const module = await loadContractModule(name);
 
+  // The module comes from the packaged artifacts and the keys from
+  // `zkConfigPath`; they are only the same build if the fingerprints the
+  // compiler left in the module are the keys' own.
+  const entries = readVerifierKeys(zkConfigPath);
+  const mismatch = moduleFingerprintProblems(
+    (module as { expectedVk?: Record<string, string> }).expectedVk,
+    entries,
+  );
+  if (mismatch.length > 0) {
+    throw new Error(
+      `the ${name} contract module and the verifier keys at ${zkConfigPath} are not ` +
+        `the same build:\n  ${mismatch.join('\n  ')}\n` +
+        'Regenerate the SDK artifacts from that tree (scripts/generate-artifacts.js ' +
+        'with HYPERLANE_MIDNIGHT_CONTRACTS set) and rebuild.',
+    );
+  }
+
   const chunkPlan: ChunkPlan | null = req.chunked
-    ? planChunks(readVerifierKeys(zkConfigPath), {
+    ? planChunks(entries, {
         deployCircuits: NIGHT_DEPLOY_CIRCUITS,
         priority: NIGHT_MAINTENANCE_PRIORITY,
         budgetBytes: Number(
@@ -140,9 +158,12 @@ export async function deployContractInstance(
       });
       log(`tx ${finalized.txId} ${finalized.status}`);
     }
-    await verifyFullSurface(providers, address, readVerifierKeys(zkConfigPath));
-    log(`full circuit surface verified on-chain (${name})`);
   }
+
+  // In both modes and for every contract: a key on chain for every circuit
+  // in the build, and no circuit the build does not have.
+  await verifyFullSurface(providers, address, entries);
+  log(`every circuit's verifier key verified on chain (${name})`);
 
   return { address, receipts };
 }

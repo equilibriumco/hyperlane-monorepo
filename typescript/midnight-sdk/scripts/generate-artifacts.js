@@ -4,7 +4,7 @@
  * hyperlane-midnight checkout, and keeps whatever is already in ./artifacts if
  * neither is present, so a clean CI checkout still builds.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,6 +44,11 @@ for (const name of CONTRACTS) {
     process.exit(1);
   }
   const dest = resolve(ARTIFACTS_DIR, name);
+  // A copy from an earlier source must not survive underneath the new one:
+  // a verifier key or manifest left over is a mixed build.
+  for (const stale of ['contract', 'keys', 'compiler']) {
+    rmSync(resolve(dest, stale), { recursive: true, force: true });
+  }
   mkdirSync(resolve(dest, 'contract'), { recursive: true });
   for (const file of ['index.js', 'index.d.ts']) {
     cpSync(resolve(contractSrc, file), resolve(dest, 'contract', file));
