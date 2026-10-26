@@ -566,7 +566,6 @@ mod tests {
     // every value here has to come back whole. The suite writes both files;
     // see tests/e2e/README.md there for how to regenerate them.
     #[test]
-    #[ignore = "night-state.hex predates the transfer-limit field that moved the positional paths; regenerate it with the contracts repo's decoder-fixture suite on a limit-aware deploy"]
     fn decodes_live_night_state() {
         let bytes = unhex(include_str!("../tests/fixtures/night-state.hex").trim());
         let expected: ExpectedState =
