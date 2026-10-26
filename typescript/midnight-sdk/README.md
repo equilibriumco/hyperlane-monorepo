@@ -55,6 +55,42 @@ Two things differ from the other AltVM SDKs and are worth knowing first:
   and the route is created by `core deploy`. A warp deploy targets the
   counterpart chain and references the Midnight end as a `foreignDeployment`.
 
+## Core config
+
+`core deploy` seals the multisig ISM (`validators`, `validatorPubkeys`,
+`threshold`), the chain's `nativeToken.decimals` and one Midnight-only field
+into the night contract's constructor; none of them can be changed after the
+deploy. See `typescript/cli/examples/midnight/core-config.yaml` for a full
+example.
+
+- **maxTransferAmount**: per-transfer limit in local NIGHT units, as a decimal
+  string or number. `0` or unset means no limit.
+
+## Registry
+
+The CLI's default registry is a pinned commit of
+[equilibriumco/hyperlane-registry](https://github.com/equilibriumco/hyperlane-registry)
+(`MIDNIGHT_REGISTRY_URI` in `typescript/cli/src/consts.ts`); `--registry`
+overrides it as usual. Move the pin when the registry's `midnight` branch
+changes.
+
+The addresses a registry serves can also be checked against a known-good list,
+the private repo's `deployments/stagenet-sepolia.json`:
+
+- **HYPERLANE_KNOWN_ADDRESSES=\<path>**: read by the CLI on every command
+  except the deploys, once the registry is loaded. The core addresses of the
+  two chains the file names, the route's token on each and the remote token's
+  ISM must match one deployment entry (a `null` field in the entry is
+  skipped), or the command stops with `registry address check failed: ...`.
+  Unset, the command warns once that the addresses were not checked.
+- **knownAddresses** (`HYP_KNOWN_ADDRESSES=\<path>`): the same check in the
+  relayer and the validator at startup, on the core addresses of those chains
+  in the config the agent will actually use. The scraper does not check.
+
+`core deploy` and `warp deploy` create new addresses, so they do not check;
+after a Midnight deploy, add the addresses to the known list from the deploy
+record, not from the registry.
+
 ## Environment variables
 
 Submitting a transaction on Midnight means generating a zero-knowledge proof

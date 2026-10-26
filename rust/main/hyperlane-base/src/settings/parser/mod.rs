@@ -147,11 +147,18 @@ impl FromRawConf<RawAgentConf, Option<&HashSet<&str>>> for Settings {
 
         let domains = chains.keys().map(|k| (k.to_string(), k.clone())).collect();
 
+        let known_addresses = p
+            .chain(&mut err)
+            .get_opt_key("knownAddresses")
+            .parse_from_str("Expected known address list path")
+            .end();
+
         err.into_result(Self {
             domains,
             chains,
             metrics_port,
             tracing: TracingConfig { fmt, level },
+            known_addresses,
         })
     }
 }

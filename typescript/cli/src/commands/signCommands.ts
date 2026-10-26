@@ -52,6 +52,7 @@ export enum CommandType {
   CORE_DEPLOY = 'core:deploy',
   CORE_READ = 'core:read',
   CORE_CHECK = 'core:check',
+  REGISTRY_AGENT_CONFIG = 'registry:agent-config',
   ICA_DEPLOY = 'ica:deploy',
   ISM_DEPLOY = 'ism:deploy',
   ISM_READ = 'ism:read',

@@ -6,6 +6,9 @@
 #
 # A zero owner keeps ownership with the deployer.
 owner: '0x0000000000000000000000000000000000000000000000000000000000000000'
+# Per-transfer limit sealed into the night contract, in local NIGHT units
+# (6 decimals). 0 means no limit.
+maxTransferAmount: '0'
 defaultIsm:
   type: messageIdMultisigIsm
   validators: # anvil dev accounts 0-2

@@ -33,6 +33,9 @@ export interface CoreConfig {
   defaultHook: HookConfig | string;
   requiredHook: HookConfig | string;
   contractVersion?: string;
+  // Midnight only: per-transfer limit in local NIGHT units sealed into the
+  // night contract; 0 or unset means no limit.
+  maxTransferAmount?: string | number;
 }
 
 export interface DerivedCoreConfig extends CoreConfig {
@@ -116,6 +119,7 @@ export function coreConfigToArtifact(
       defaultHook: defaultHookArtifact,
       requiredHook: requiredHookArtifact,
       contractVersion: config.contractVersion,
+      maxTransferAmount: config.maxTransferAmount,
     },
   };
 }

@@ -35,6 +35,9 @@ export interface MailboxArtifactConfig {
   defaultHook: Artifact<HookArtifactConfig, DeployedHookAddress>; // Hook artifact reference
   requiredHook: Artifact<HookArtifactConfig, DeployedHookAddress>; // Hook artifact reference
   contractVersion?: string;
+  // Midnight only: per-transfer limit in local NIGHT units sealed into the
+  // night contract; 0 or unset means no limit.
+  maxTransferAmount?: string | number;
 }
 
 /**

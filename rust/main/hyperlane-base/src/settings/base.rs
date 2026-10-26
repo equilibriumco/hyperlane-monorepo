@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, path::PathBuf, sync::Arc};
 
 use eyre::{eyre, Context, Result};
 use futures_util::future::join_all;
@@ -53,6 +53,9 @@ pub struct Settings {
     pub metrics_port: u16,
     /// The tracing configuration
     pub tracing: TracingConfig,
+    /// Path of the known-good address list the chain config is checked
+    /// against at startup; unset means no check.
+    pub known_addresses: Option<PathBuf>,
 }
 
 impl Settings {
@@ -114,6 +117,7 @@ impl Settings {
             chains: self.chains.clone(),
             metrics_port: self.metrics_port,
             tracing: self.tracing.clone(),
+            known_addresses: self.known_addresses.clone(),
         }
     }
 }

@@ -626,6 +626,8 @@ impl BaseAgent for Validator {
             );
         }
 
+        settings.check_known_addresses()?;
+
         let db = DB::from_path(&settings.db)?;
         let msg_db = HyperlaneRocksDB::new(&settings.origin_chain, db);
 

@@ -29,12 +29,11 @@ import {
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
+import {
+  nightConstructorArgs,
+  parseMaxTransferAmount,
+} from '../deploy/night-args.js';
 import { resolveValidatorSet } from '../ism/validators.js';
-
-// Wire-format precision of warp transfer amounts, meaning the max decimals in
-// the route rather than the remote chain's local token decimals. Check the
-// contracts repo's Scale module before changing this.
-const MESSAGE_DECIMALS = 18n;
 
 class MidnightMailboxReader implements ArtifactReader<
   RawMailboxArtifactConfigs['mailbox'],
@@ -86,8 +85,8 @@ class MidnightMailboxWriter
 
   // Deploys the night monolith: mailbox, ISM, and native warp route in one
   // contract. The multisig ISM config is consumed here, since validators,
-  // threshold, and decimals are constructor args sealed at deploy time. Hook
-  // placeholders from the orchestrator are ignored.
+  // threshold, decimals and the transfer limit are constructor args sealed at
+  // deploy time. Hook placeholders from the orchestrator are ignored.
   async create(
     artifact: ArtifactNew<MailboxOnChain>,
   ): Promise<[DeployedRawMailboxArtifact, TxReceipt[]]> {
@@ -103,21 +102,21 @@ class MidnightMailboxWriter
       );
     }
     const domainId = BigInt(this.metadata.domainId);
+    const maxTransferAmount = parseMaxTransferAmount(config.maxTransferAmount);
 
     const { address, ownerId, receipts } =
       await this.signer.deployMidnightContract({
         name: 'night',
         chunked: true,
-        buildArgs: ({ ownerId, instanceSalt }) => [
-          ownerId,
-          instanceSalt,
-          domainId,
-          validatorSet.paddedPubkeys,
-          validatorSet.count,
-          validatorSet.threshold,
-          BigInt(localDecimals),
-          MESSAGE_DECIMALS,
-        ],
+        buildArgs: ({ ownerId, instanceSalt }) =>
+          nightConstructorArgs({
+            ownerId,
+            instanceSalt,
+            domainId,
+            validatorSet,
+            localDecimals: BigInt(localDecimals),
+            maxTransferAmount,
+          }),
       });
 
     // The ISM artifact still carries its pre-deploy placeholder address, and the

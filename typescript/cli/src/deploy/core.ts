@@ -22,6 +22,7 @@ import { deepEquals, mustGet } from '@hyperlane-xyz/utils';
 
 import { type MultiProtocolSignerManager } from '../context/strategies/signer/MultiProtocolSignerManager.js';
 import { type WriteCommandContext } from '../context/types.js';
+import { KNOWN_ADDRESSES_DEPLOY_NOTE } from '../context/knownAddresses.js';
 import { log, logBlue, logGray, logGreen } from '../logger.js';
 import { indentYamlOrJson } from '../utils/files.js';
 
@@ -143,6 +144,7 @@ export async function runCoreDeploy(params: DeployParams) {
 
   logGreen('✅ Core contract deployments complete:\n');
   log(indentYamlOrJson(yamlStringify(deployedAddresses, null, 2), 4));
+  if (protocol === ProtocolType.Midnight) log(KNOWN_ADDRESSES_DEPLOY_NOTE);
 }
 
 export async function runCoreApply(params: ApplyParams) {
