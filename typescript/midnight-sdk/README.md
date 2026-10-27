@@ -83,7 +83,7 @@ the private repo's `deployments/stagenet-sepolia.json`:
   ISM must match one deployment entry (a `null` field in the entry is
   skipped), or the command stops with `registry address check failed: ...`.
   Unset, the command warns once that the addresses were not checked.
-- **knownAddresses** (`HYP_KNOWN_ADDRESSES=\<path>`): the same check in the
+- **knownAddresses** (`HYP_KNOWNADDRESSES=\<path>`): the same check in the
   relayer and the validator at startup, on the core addresses of those chains
   in the config the agent will actually use. The scraper does not check.
 
