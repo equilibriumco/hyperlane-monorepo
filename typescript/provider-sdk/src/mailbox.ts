@@ -35,6 +35,9 @@ export interface MailboxArtifactConfig {
   defaultHook: Artifact<HookArtifactConfig, DeployedHookAddress>; // Hook artifact reference
   requiredHook: Artifact<HookArtifactConfig, DeployedHookAddress>; // Hook artifact reference
   contractVersion?: string;
+  // Midnight only: per-transfer limit in local NIGHT units sealed into the
+  // night contract; 0 or unset means no limit.
+  maxTransferAmount?: string | number;
 }
 
 /**
@@ -145,8 +148,14 @@ export function mailboxArtifactToDerivedCoreConfig(
     ) => DerivedHookConfig;
   },
 ): DerivedCoreConfig {
-  const { defaultIsm, defaultHook, requiredHook, owner, contractVersion } =
-    artifact.config;
+  const {
+    defaultIsm,
+    defaultHook,
+    requiredHook,
+    owner,
+    contractVersion,
+    maxTransferAmount,
+  } = artifact.config;
 
   return {
     owner,
@@ -160,6 +169,8 @@ export function mailboxArtifactToDerivedCoreConfig(
       converters.hookArtifactToDerivedConfig(a, chainLookup),
     ),
     contractVersion,
+    // Midnight only: only night's reader sets it.
+    ...(maxTransferAmount === undefined ? {} : { maxTransferAmount }),
   };
 }
 

@@ -479,6 +479,44 @@ describe('CoreWriter', () => {
       expect(initialConfig.owner).to.not.equal(mockOwner);
     });
 
+    for (const maxTransferAmount of ['1500000', undefined]) {
+      it(`should create mailbox with maxTransferAmount ${maxTransferAmount ?? 'left out'}`, async () => {
+        // ARRANGE
+        const artifact: ArtifactNew<MailboxArtifactConfig> = {
+          artifactState: ArtifactState.NEW,
+          config: {
+            owner: mockOwner,
+            defaultIsm: mockIsm,
+            defaultHook: mockDefaultHook,
+            requiredHook: mockRequiredHook,
+            ...(maxTransferAmount === undefined ? {} : { maxTransferAmount }),
+          },
+        };
+
+        Object.defineProperty(coreWriter, 'ismWriter', {
+          value: {
+            create: sinon.stub(),
+            update: sinon.stub(),
+            read: sinon.stub(),
+          },
+          writable: true,
+        });
+
+        // ACT
+        await coreWriter.create(artifact);
+
+        // ASSERT
+        const mailboxWriter = createMailboxWriterStub.returnValues[0];
+        const initialConfig = mailboxWriter.create.firstCall.args[0].config;
+
+        if (maxTransferAmount === undefined) {
+          expect(initialConfig).to.not.have.property('maxTransferAmount');
+        } else {
+          expect(initialConfig.maxTransferAmount).to.equal(maxTransferAmount);
+        }
+      });
+    }
+
     it('should create mailbox with zero-address hooks initially', async () => {
       // ARRANGE
       const artifact: ArtifactNew<MailboxArtifactConfig> = {
@@ -919,6 +957,54 @@ describe('CoreWriter', () => {
   });
 
   describe('update', () => {
+    for (const maxTransferAmount of ['1500000', undefined]) {
+      it(`should pass maxTransferAmount ${maxTransferAmount ?? 'only when set'} to the mailbox update`, async () => {
+        // ARRANGE
+        sinon.stub(coreWriter, 'read').resolves({
+          artifactState: ArtifactState.DEPLOYED,
+          config: {
+            owner: mockOwner,
+            defaultIsm: mockIsm,
+            defaultHook: mockDefaultHook,
+            requiredHook: mockRequiredHook,
+          },
+          deployed: { address: mockMailboxAddress, domainId: mockDomainId },
+        });
+        const underived = (address: string) =>
+          ({
+            artifactState: ArtifactState.UNDERIVED,
+            deployed: { address },
+          }) as const;
+        const expectedArtifact: ArtifactDeployed<
+          MailboxArtifactConfig,
+          DeployedMailboxAddress
+        > = {
+          artifactState: ArtifactState.DEPLOYED,
+          config: {
+            owner: mockOwner,
+            defaultIsm: underived(mockIsmAddress),
+            defaultHook: underived(mockDefaultHookAddress),
+            requiredHook: underived(mockRequiredHookAddress),
+            ...(maxTransferAmount === undefined ? {} : { maxTransferAmount }),
+          },
+          deployed: { address: mockMailboxAddress, domainId: mockDomainId },
+        };
+
+        // ACT
+        await coreWriter.update(expectedArtifact);
+
+        // ASSERT
+        const mailboxWriter = createMailboxWriterStub.returnValues[0];
+        const updateConfig = mailboxWriter.update.firstCall.args[0].config;
+
+        if (maxTransferAmount === undefined) {
+          expect(updateConfig).to.not.have.property('maxTransferAmount');
+        } else {
+          expect(updateConfig.maxTransferAmount).to.equal(maxTransferAmount);
+        }
+      });
+    }
+
     it('should handle ISM type change by deploying new ISM', async () => {
       // ARRANGE
       const currentMailbox: DeployedMailboxArtifact = {

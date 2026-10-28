@@ -34,6 +34,7 @@ import { validatorCommand } from './src/commands/validator.js';
 import { warpCommand } from './src/commands/warp.js';
 import { xerc20Command } from './src/commands/xerc20.js';
 import { contextMiddleware, signerMiddleware } from './src/context/context.js';
+import { knownAddressesMiddleware } from './src/context/knownAddresses.js';
 import { configureLogger, errorRed } from './src/logger.js';
 import { checkVersion } from './src/utils/version-check.js';
 import { VERSION } from './src/version.js';
@@ -72,6 +73,7 @@ try {
         configureLogger(argv.log as LogFormat, argv.verbosity as LogLevel);
       },
       contextMiddleware,
+      knownAddressesMiddleware,
       signerMiddleware,
     ])
     .command(avsCommand)

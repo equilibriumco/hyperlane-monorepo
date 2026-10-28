@@ -155,6 +155,7 @@ impl BaseAgent for Relayer {
         Self: Sized,
     {
         Self::reset_critical_errors(&settings, &chain_metrics);
+        settings.check_known_addresses()?;
 
         let start = Instant::now();
 

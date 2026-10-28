@@ -552,6 +552,26 @@ mod test {
         )
     }
 
+    #[test]
+    fn known_addresses_is_read_as_a_base_setting() {
+        let raw = json!({
+            "relaychains": "ethereum",
+            "chains": { "ethereum": chain_config("ethereum", 1) },
+            "knownaddresses": "/etc/hyperlane/known.json",
+        });
+        let settings = parse_settings(raw).unwrap();
+        assert_eq!(
+            settings.base.known_addresses,
+            Some(PathBuf::from("/etc/hyperlane/known.json"))
+        );
+
+        let raw = json!({
+            "relaychains": "ethereum",
+            "chains": { "ethereum": chain_config("ethereum", 1) },
+        });
+        assert_eq!(parse_settings(raw).unwrap().base.known_addresses, None);
+    }
+
     fn assert_fee_token_error(error: ConfigParsingError) {
         let error = error.to_string();
         assert!(

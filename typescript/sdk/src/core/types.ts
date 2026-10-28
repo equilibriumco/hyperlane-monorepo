@@ -15,6 +15,7 @@ import {
 } from '../ica/types.js';
 import type { DerivedIsmConfig, IsmConfig } from '../ism/types.js';
 import { IsmConfigSchema } from '../ism/types.js';
+import { ZUWei } from '../metadata/customZodTypes.js';
 import type { ChainName } from '../types.js';
 import { DeployedOwnableSchema, OwnableSchema } from '../types.js';
 import {
@@ -35,6 +36,9 @@ const CoreConfigBaseSchema = OwnableSchema.extend({
   // Set false for chains that should keep legacy core artifacts only.
   deployQuotedCalls: z.boolean().optional(),
   contractVersion: z.string().optional(),
+  // Midnight only: per-transfer limit in local NIGHT units sealed into the
+  // night contract at core deploy; 0 or unset means no limit.
+  maxTransferAmount: ZUWei.optional(),
 });
 
 /**

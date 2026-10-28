@@ -76,6 +76,8 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'unenrollRemoteRouter',
   'setDestinationGas',
   'destinationGasOf',
+  'setMaxTransfer',
+  'maxTransfer',
   // ISM / mailbox verification + state views (agent-facing)
   'verifyMultisig',
   'assertExpectedRoute',

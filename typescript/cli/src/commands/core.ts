@@ -253,6 +253,18 @@ export const check: CommandModuleWithContext<{
       onChainCoreConfig.contractVersion = undefined;
     }
 
+    // Midnight only: night's transfer limit is compared when the YAML sets
+    // it, as a decimal string whether the YAML wrote a string or a number.
+    if (onChainCoreConfig.maxTransferAmount !== undefined) {
+      if (expectedCoreConfig.maxTransferAmount === undefined) {
+        onChainCoreConfig.maxTransferAmount = undefined;
+      } else {
+        expectedCoreConfig.maxTransferAmount = String(
+          expectedCoreConfig.maxTransferAmount,
+        );
+      }
+    }
+
     const { mergedObject, isInvalid } = diffObjMerge(
       normalizeConfig(onChainCoreConfig),
       normalizeConfig(expectedCoreConfig),

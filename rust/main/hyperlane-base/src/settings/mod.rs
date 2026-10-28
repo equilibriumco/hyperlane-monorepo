@@ -80,6 +80,8 @@ pub(crate) mod aws_credentials;
 mod base;
 /// Chain configuration
 mod chains;
+/// Known-good address list check
+mod known_addresses;
 pub mod loader;
 /// Signer configuration
 mod signers;

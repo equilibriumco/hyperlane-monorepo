@@ -15,7 +15,7 @@ type StateValue = {
 // Positional paths into the compiled contract layout. Adding a ledger field
 // can move sibling slots, so a guard in the contracts repo re-checks them.
 const NIGHT_REMOTE_ROUTERS_PATH = [0, 6];
-const NIGHT_DESTINATION_GAS_PATH = [1, 14];
+const NIGHT_DESTINATION_GAS_PATH = [1, 13];
 
 export function unwrapChargedState(data: unknown): StateValue {
   return (data as { state: StateValue }).state;

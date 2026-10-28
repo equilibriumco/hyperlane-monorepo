@@ -131,6 +131,7 @@ fn generate_test_relayer_settings(
             chains,
             metrics_port,
             tracing: TracingConfig::default(),
+            known_addresses: None,
         },
         db: db_path.to_path_buf(),
         origin_chains: origin_chains.iter().cloned().collect(),

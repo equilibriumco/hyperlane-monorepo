@@ -884,6 +884,7 @@ mod test {
                 chains,
                 metrics_port: 5000,
                 tracing: TracingConfig::default(),
+                known_addresses: None,
             },
             db: String::new(),
             chains_to_scrape: vec![],

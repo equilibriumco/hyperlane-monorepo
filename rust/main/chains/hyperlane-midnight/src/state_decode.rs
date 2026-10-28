@@ -13,21 +13,23 @@ use midnight_storage_core::DefaultDB;
 
 use crate::error::HyperlaneMidnightError;
 
-// Positional paths into the ledger `StateValue::Array`. Root `[0]` holds the
-// ownership commitment and the Routes fields, `[1]` the
+// Positional paths into the ledger `StateValue::Array`. The compiler splits
+// night's top-level fields into two groups: root `[0]` holds the ownership
+// commitment, the Routes fields and, since the transfer limit became the
+// last field, the ISM validator registry; `[1]` holds the remaining
 // MessageIdMultisigIsm / Mailbox / Scale module fields. Paths follow each
 // module's field declaration order, so inserting or reordering a field shifts
 // them; the contracts repo re-checks them on every compile.
-const ISM_VALIDATORS_PATH: [usize; 2] = [1, 0];
-const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 1];
-const ISM_THRESHOLD_PATH: [usize; 2] = [1, 2];
-const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 3];
+const ISM_VALIDATORS_PATH: [usize; 2] = [0, 7];
+const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 0];
+const ISM_THRESHOLD_PATH: [usize; 2] = [1, 1];
+const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 2];
 
-// Mailbox fields, also under `[1]`. Slot 7 is the `deliveries` set, which is
+// Mailbox fields, also under `[1]`. Slot 6 is the `deliveries` set, which is
 // not decoded here: deliveries come from `HYP_PROCESS` events and the
 // `delivered` read goes through the toolkit.
-const MAILBOX_NONCE_PATH: [usize; 2] = [1, 8];
-const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 9];
+const MAILBOX_NONCE_PATH: [usize; 2] = [1, 7];
+const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 8];
 
 /// Length of an encoded `HyperlaneMessage`: version(1) + nonce(4) + origin(4)
 /// + sender(32) + destination(4) + recipient(32) + body(64).
@@ -306,10 +308,9 @@ mod tests {
             StateValue::Null, // [1,3]
             StateValue::Null, // [1,4]
             StateValue::Null, // [1,5]
-            StateValue::Null, // [1,6]
-            deliveries,       // [1,7]
-            nonce,            // [1,8]
-            dispatched,       // [1,9]
+            deliveries,       // [1,6]
+            nonce,            // [1,7]
+            dispatched,       // [1,8]
         ]);
         let root = array(vec![
             StateValue::Null, // [0] ownership + Routes fields (unused here)
@@ -423,22 +424,32 @@ mod tests {
         );
     }
 
-    /// Laid out so the ISM paths line up.
+    /// Laid out so the ISM paths line up: the validator registry closes the
+    /// `[0]` group, the other ISM fields open `[1]`.
     fn ism_state_bytes(
         validators: StateValue<DefaultDB>,
         validator_count: u8,
         threshold: u8,
         module_type: u8,
     ) -> Vec<u8> {
+        let routes = array(vec![
+            StateValue::Null, // [0,0]
+            StateValue::Null, // [0,1]
+            StateValue::Null, // [0,2]
+            StateValue::Null, // [0,3]
+            StateValue::Null, // [0,4]
+            StateValue::Null, // [0,5]
+            StateValue::Null, // [0,6]
+            validators,       // [0,7]
+        ]);
         let ism = array(vec![
-            validators,            // [1,0]
-            cell(validator_count), // [1,1]
-            cell(threshold),       // [1,2]
-            cell(module_type),     // [1,3]
+            cell(validator_count), // [1,0]
+            cell(threshold),       // [1,1]
+            cell(module_type),     // [1,2]
         ]);
         let root = array(vec![
-            StateValue::Null, // [0] ownership + Routes fields (unused here)
-            ism,              // [1] ISM/Mailbox module fields
+            routes, // [0] ownership + Routes fields + validator registry
+            ism,    // [1] ISM/Mailbox module fields
         ]);
         let cs = ContractState::<DefaultDB> {
             data: ChargedState::new(root),

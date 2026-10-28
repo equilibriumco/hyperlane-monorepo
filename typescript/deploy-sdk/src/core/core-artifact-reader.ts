@@ -130,6 +130,10 @@ export class CoreArtifactReader implements ArtifactReader<
         defaultHook: defaultHookArtifact,
         requiredHook: requiredHookArtifact,
         contractVersion: rawMailbox.config.contractVersion,
+        // Midnight only: only night's reader sets it.
+        ...(rawMailbox.config.maxTransferAmount === undefined
+          ? {}
+          : { maxTransferAmount: rawMailbox.config.maxTransferAmount }),
       },
       deployed: rawMailbox.deployed,
     };

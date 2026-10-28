@@ -29,12 +29,11 @@ import {
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
+import {
+  nightConstructorArgs,
+  parseMaxTransferAmount,
+} from '../deploy/night-args.js';
 import { resolveValidatorSet } from '../ism/validators.js';
-
-// Wire-format precision of warp transfer amounts, meaning the max decimals in
-// the route rather than the remote chain's local token decimals. Check the
-// contracts repo's Scale module before changing this.
-const MESSAGE_DECIMALS = 18n;
 
 class MidnightMailboxReader implements ArtifactReader<
   RawMailboxArtifactConfigs['mailbox'],
@@ -44,9 +43,10 @@ class MidnightMailboxReader implements ArtifactReader<
 
   async read(address: string): Promise<DeployedRawMailboxArtifact> {
     const state = await this.client.requireContractState(address);
-    const [owner, localDomain] = await Promise.all([
+    const [owner, localDomain, maxTransfer] = await Promise.all([
       this.client.runCircuit<Uint8Array>('night', state.data, 'owner'),
       this.client.runCircuit<bigint>('night', state.data, 'localDomain'),
+      this.client.runCircuit<bigint>('night', state.data, 'maxTransfer'),
     ]);
     // The night contract is a monolith and its own default ISM. There are no
     // dispatch-coupled hooks here, so `defaultHook` is the merkle_tree_hook
@@ -66,6 +66,7 @@ class MidnightMailboxReader implements ArtifactReader<
           artifactState: ArtifactState.UNDERIVED,
           deployed: { address: ZERO_ADDRESS_HEX_32 },
         },
+        maxTransferAmount: maxTransfer.toString(),
       },
       deployed: { address, domainId: Number(localDomain) },
     };
@@ -86,8 +87,8 @@ class MidnightMailboxWriter
 
   // Deploys the night monolith: mailbox, ISM, and native warp route in one
   // contract. The multisig ISM config is consumed here, since validators,
-  // threshold, and decimals are constructor args sealed at deploy time. Hook
-  // placeholders from the orchestrator are ignored.
+  // threshold, decimals and the transfer limit are constructor args sealed at
+  // deploy time. Hook placeholders from the orchestrator are ignored.
   async create(
     artifact: ArtifactNew<MailboxOnChain>,
   ): Promise<[DeployedRawMailboxArtifact, TxReceipt[]]> {
@@ -103,21 +104,21 @@ class MidnightMailboxWriter
       );
     }
     const domainId = BigInt(this.metadata.domainId);
+    const maxTransferAmount = parseMaxTransferAmount(config.maxTransferAmount);
 
     const { address, ownerId, receipts } =
       await this.signer.deployMidnightContract({
         name: 'night',
         chunked: true,
-        buildArgs: ({ ownerId, instanceSalt }) => [
-          ownerId,
-          instanceSalt,
-          domainId,
-          validatorSet.paddedPubkeys,
-          validatorSet.count,
-          validatorSet.threshold,
-          BigInt(localDecimals),
-          MESSAGE_DECIMALS,
-        ],
+        buildArgs: ({ ownerId, instanceSalt }) =>
+          nightConstructorArgs({
+            ownerId,
+            instanceSalt,
+            domainId,
+            validatorSet,
+            localDecimals: BigInt(localDecimals),
+            maxTransferAmount,
+          }),
       });
 
     // The ISM artifact still carries its pre-deploy placeholder address, and the
@@ -143,16 +144,39 @@ class MidnightMailboxWriter
     ];
   }
 
-  // The monolith's ISM/hook pointers are sealed at construction; the only
-  // mailbox-level mutable state is ownership. Validator rotation goes
-  // through the ISM writer.
+  // The monolith's ISM/hook pointers are sealed at construction; the
+  // mailbox-level mutable state is the transfer limit and ownership. Validator
+  // rotation goes through the ISM writer.
   async update(
     artifact: DeployedRawMailboxArtifact,
   ): Promise<MidnightTransaction[]> {
     const address = artifact.deployed.address;
+    const current = await this.read(address);
+    const txs: MidnightTransaction[] = [];
+
+    // The limit is changed only when the config sets it, and before any
+    // ownership transfer, which would take the signer's right to change it.
+    if (artifact.config.maxTransferAmount !== undefined) {
+      const expectedLimit = parseMaxTransferAmount(
+        artifact.config.maxTransferAmount,
+      );
+      if (
+        expectedLimit !==
+        parseMaxTransferAmount(current.config.maxTransferAmount)
+      ) {
+        txs.push({
+          annotation: `Set the night transfer limit to ${expectedLimit}`,
+          contract: 'night',
+          contractAddress: address,
+          circuit: 'setMaxTransfer',
+          args: [expectedLimit],
+        });
+      }
+    }
+
     const expectedOwner = artifact.config.owner;
     if (!expectedOwner || expectedOwner === ZERO_ADDRESS_HEX_32) {
-      return [];
+      return txs;
     }
     const ownerBytes = hexToBytes(expectedOwner);
     if (ownerBytes.length !== 32) {
@@ -160,22 +184,19 @@ class MidnightMailboxWriter
         `night owner must be a 32-byte ZOwnablePK commitment, got ${expectedOwner}`,
       );
     }
-    const current = await this.read(address);
     if (
-      normalizeHexForCompare(current.config.owner) ===
+      normalizeHexForCompare(current.config.owner) !==
       normalizeHexForCompare(expectedOwner)
     ) {
-      return [];
-    }
-    return [
-      {
+      txs.push({
         annotation: `Transfer night ownership to ${expectedOwner}`,
         contract: 'night',
         contractAddress: address,
         circuit: 'transferOwnership',
         args: [ownerBytes],
-      },
-    ];
+      });
+    }
+    return txs;
   }
 
   private extractMultisigConfig(

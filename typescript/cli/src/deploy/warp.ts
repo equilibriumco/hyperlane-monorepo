@@ -101,6 +101,7 @@ import {
 } from '@hyperlane-xyz/utils';
 
 import { requestAndSaveApiKeys } from '../context/apiKeys.js';
+import { KNOWN_ADDRESSES_DEPLOY_NOTE } from '../context/knownAddresses.js';
 import { type WriteCommandContext } from '../context/types.js';
 import {
   errorRed,
@@ -325,6 +326,14 @@ export async function runWarpRouteDeploy({
     null,
     deploymentChains,
   );
+
+  if (
+    chains.some(
+      (chain) => chainMetadata[chain].protocol === ProtocolType.Midnight,
+    )
+  ) {
+    log(KNOWN_ADDRESSES_DEPLOY_NOTE);
+  }
 }
 
 async function runDeployPlanStep({ context, warpDeployConfig }: DeployParams) {

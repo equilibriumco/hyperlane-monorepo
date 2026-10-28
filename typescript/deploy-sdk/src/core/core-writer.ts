@@ -167,6 +167,11 @@ export class CoreWriter extends CoreArtifactReader {
         defaultIsm: onChainIsmArtifact,
         defaultHook: this.getInitialHookArtifact(config.defaultHook),
         requiredHook: this.getInitialHookArtifact(config.requiredHook),
+        // Midnight only: night takes its transfer limit at deploy. Left out
+        // when unset, so other protocols get the same config as before.
+        ...(config.maxTransferAmount === undefined
+          ? {}
+          : { maxTransferAmount: config.maxTransferAmount }),
       },
     };
 
@@ -350,6 +355,11 @@ export class CoreWriter extends CoreArtifactReader {
           deployed: { address: newRequiredHookAddress },
         },
         contractVersion: expectedConfig.contractVersion,
+        // Midnight only: night's limit can change after deploy. Left out when
+        // unset, so other protocols get the same config as before.
+        ...(expectedConfig.maxTransferAmount === undefined
+          ? {}
+          : { maxTransferAmount: expectedConfig.maxTransferAmount }),
       },
       deployed: currentArtifact.deployed,
     };
