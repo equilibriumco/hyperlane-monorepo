@@ -12,7 +12,7 @@ import type { CommandContext } from './types.js';
 export const KNOWN_ADDRESSES_ENV = 'HYPERLANE_KNOWN_ADDRESSES';
 
 export const KNOWN_ADDRESSES_DEPLOY_NOTE =
-  'Add the deployed addresses to the known list (deployments/stagenet-sepolia.json in hyperlane-midnight-private) from this deploy record, not from the registry.';
+  'Add the deployed addresses to the known list (deployments/stagenet-sepolia.json in the contracts repo) from this deploy record, not from the registry.';
 
 // `core deploy`, `warp deploy` and the other deploys create new addresses, so
 // they are the only commands that skip the check.

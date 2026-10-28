@@ -56,7 +56,7 @@ midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledge
 
 [dev-dependencies]
 # Enable hyperlane-core's `ethers` feature in tests only — it gates
-# `SignedType::recover()`, which the #17 checkpoint-signing test uses to prove
+# `SignedType::recover()`, which the checkpoint-signing test uses to prove
 # a standard Hyperlane signature over a Midnight-origin checkpoint recovers to
 # the expected validator address (the exact production verify path). Feature
 # unification folds this into the non-test `async`-only dependency above when

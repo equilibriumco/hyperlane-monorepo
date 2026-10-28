@@ -78,7 +78,7 @@ at the commit the deployment guide pins. Move the pin when the registry's
 `midnight` branch changes.
 
 The addresses a registry serves can also be checked against a known-good list,
-the private repo's `deployments/stagenet-sepolia.json`. Only registries and
+the contracts repo's `deployments/stagenet-sepolia.json`. Only registries and
 configs with a Midnight chain are checked, so nothing changes for other chains:
 
 - **HYPERLANE_KNOWN_ADDRESSES=\<path>**: read by the CLI on every command
