@@ -148,8 +148,14 @@ export function mailboxArtifactToDerivedCoreConfig(
     ) => DerivedHookConfig;
   },
 ): DerivedCoreConfig {
-  const { defaultIsm, defaultHook, requiredHook, owner, contractVersion } =
-    artifact.config;
+  const {
+    defaultIsm,
+    defaultHook,
+    requiredHook,
+    owner,
+    contractVersion,
+    maxTransferAmount,
+  } = artifact.config;
 
   return {
     owner,
@@ -163,6 +169,8 @@ export function mailboxArtifactToDerivedCoreConfig(
       converters.hookArtifactToDerivedConfig(a, chainLookup),
     ),
     contractVersion,
+    // Midnight only: only night's reader sets it.
+    ...(maxTransferAmount === undefined ? {} : { maxTransferAmount }),
   };
 }
 

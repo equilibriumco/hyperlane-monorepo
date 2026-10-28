@@ -11,8 +11,3 @@ export const ETHEREUM_MINIMUM_GAS: MinimumRequiredGasByAction = {
 
 export const PROXY_DEPLOYED_URL = 'https://proxy.hyperlane.xyz';
 export const EXPLORER_URL = 'https://explorer.hyperlane.xyz';
-
-// The Midnight registry pinned to a commit of its `midnight` branch, so a
-// branch move cannot change the addresses a command resolves.
-export const MIDNIGHT_REGISTRY_URI =
-  'https://github.com/equilibriumco/hyperlane-registry/tree/ca458c7e01b31f2500278537e468fde138ef5428';

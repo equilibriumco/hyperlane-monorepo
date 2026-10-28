@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import type { IRegistry } from '@hyperlane-xyz/registry';
 import type { ChainMap, ChainMetadata } from '@hyperlane-xyz/sdk';
-import { assert } from '@hyperlane-xyz/utils';
+import { ProtocolType, assert } from '@hyperlane-xyz/utils';
 
 import { warnYellow } from '../logger.js';
 import { readJson } from '../utils/files.js';
@@ -207,6 +207,12 @@ export async function knownAddressesMiddleware(
 ): Promise<void> {
   const positional = Array.isArray(argv._) ? argv._ : [];
   if (positional.includes(DEPLOY_COMMAND) || !argv.context) return;
+  // Only a registry that serves a Midnight chain is checked, so commands on
+  // other chains behave as upstream's.
+  const servesMidnight = Object.values(argv.context.chainMetadata).some(
+    (metadata) => metadata.protocol === ProtocolType.Midnight,
+  );
+  if (!servesMidnight) return;
 
   const knownListPath = process.env[KNOWN_ADDRESSES_ENV];
   if (!knownListPath) {

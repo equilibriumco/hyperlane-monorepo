@@ -1,4 +1,7 @@
 import { expect } from 'chai';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import type { ChainAddresses, IRegistry } from '@hyperlane-xyz/registry';
 import type {
@@ -10,12 +13,15 @@ import type {
 import { ProtocolType } from '@hyperlane-xyz/utils';
 
 import {
+  KNOWN_ADDRESSES_ENV,
   type KnownAddresses,
   KnownAddressesSchema,
   type LoadedAddress,
   compareKnownAddresses,
+  knownAddressesMiddleware,
   loadRegistryAddresses,
 } from './knownAddresses.js';
+import type { CommandContext } from './types.js';
 
 const NIGHT =
   '1111111111111111111111111111111111111111111111111111111111111111';
@@ -307,5 +313,55 @@ describe('compareKnownAddresses', () => {
   it('ignores known fields the registry does not carry', () => {
     const loaded = [{ key: 'midnight.night', value: NIGHT }];
     expect(compareKnownAddresses(loaded, known)).to.equal(undefined);
+  });
+});
+
+describe('knownAddressesMiddleware', () => {
+  const tampered = {
+    midnight1: { ...midnightAddresses, mailbox: OLD_NIGHT },
+    test4: remoteAddresses,
+  };
+  let listPath: string;
+  let saved: string | undefined;
+
+  before(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'known-addresses-'));
+    listPath = path.join(dir, 'known.json');
+    fs.writeFileSync(listPath, JSON.stringify(known));
+  });
+
+  beforeEach(() => {
+    saved = process.env[KNOWN_ADDRESSES_ENV];
+    process.env[KNOWN_ADDRESSES_ENV] = listPath;
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KNOWN_ADDRESSES_ENV];
+    else process.env[KNOWN_ADDRESSES_ENV] = saved;
+  });
+
+  function argv(metadata: ChainMap<ChainMetadata>) {
+    return {
+      _: ['warp', 'read'],
+      context: {
+        registry: registry({ addresses: tampered }),
+        chainMetadata: metadata,
+      } as unknown as CommandContext,
+    };
+  }
+
+  it('stops a command on a registry that serves a Midnight chain', async () => {
+    let error: Error | undefined;
+    try {
+      await knownAddressesMiddleware(argv(chainMetadata));
+    } catch (e) {
+      error = e as Error;
+    }
+    expect(error?.message).to.contain('registry address check failed');
+  });
+
+  it('leaves a registry with no Midnight chain alone', async () => {
+    const { test4 } = chainMetadata;
+    expect(await knownAddressesMiddleware(argv({ test4 }))).to.equal(undefined);
   });
 });

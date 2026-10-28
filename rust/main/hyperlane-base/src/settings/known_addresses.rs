@@ -6,7 +6,7 @@ use eyre::{bail, eyre, Context, Result};
 use serde::Deserialize;
 use tracing::warn;
 
-use hyperlane_core::{H160, H256};
+use hyperlane_core::{HyperlaneDomainProtocol, H160, H256};
 
 use super::{base::Settings, chains::CoreContractAddresses};
 
@@ -64,12 +64,19 @@ pub struct LoadedAddress {
 
 impl Settings {
     /// Checks the chain config against the list named by `knownAddresses`.
-    /// Unset means no check, with a warning.
+    /// Unset means no check, with a warning when a Midnight chain is loaded.
     pub fn check_known_addresses(&self) -> Result<()> {
         let Some(path) = &self.known_addresses else {
-            warn!(
-                "Chain addresses were not checked against a known list (knownAddresses is unset)"
-            );
+            // Agents with no Midnight chain log what upstream's do.
+            if self
+                .chains
+                .keys()
+                .any(|domain| domain.domain_protocol() == HyperlaneDomainProtocol::Midnight)
+            {
+                warn!(
+                    "Chain addresses were not checked against a known list (knownAddresses is unset)"
+                );
+            }
             return Ok(());
         };
         let known = read_known_addresses(path)?;
@@ -360,10 +367,25 @@ mod test {
     }
 
     #[test]
-    fn unset_setting_skips_the_check() {
+    #[tracing_test::traced_test]
+    fn unset_setting_skips_the_check_and_warns_nothing_without_a_midnight_chain() {
         parse_settings(august_chains(), None)
             .check_known_addresses()
             .unwrap();
+        assert!(!logs_contain("knownAddresses is unset"));
+    }
+
+    #[cfg(feature = "midnight")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn unset_setting_warns_with_a_midnight_chain() {
+        let mut chains = august_chains();
+        chains["midnight1"]["protocol"] = json!("midnight");
+        chains["midnight1"]["indexergraphqlurl"] = json!("http://localhost:8088/api/v3/graphql");
+        parse_settings(chains, None)
+            .check_known_addresses()
+            .unwrap();
+        assert!(logs_contain("knownAddresses is unset"));
     }
 
     #[test]

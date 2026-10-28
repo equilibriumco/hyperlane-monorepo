@@ -346,6 +346,35 @@ describe('CoreArtifactReader', () => {
       expect(mockHookReader.read.callCount).to.equal(2);
     });
 
+    for (const maxTransferAmount of ['1500000', undefined]) {
+      it(`should carry maxTransferAmount ${maxTransferAmount ?? 'only when the mailbox reports one'}`, async () => {
+        // ARRANGE
+        readMailboxStub.resolves({
+          ...mockRawMailbox,
+          config: {
+            ...mockRawMailbox.config,
+            ...(maxTransferAmount === undefined ? {} : { maxTransferAmount }),
+          },
+        });
+        mockIsmReader.read.resolves(mockExpandedIsm);
+        mockHookReader.read
+          .onFirstCall()
+          .resolves(mockExpandedDefaultHook)
+          .onSecondCall()
+          .resolves(mockExpandedRequiredHook);
+
+        // ACT
+        const result = await coreReader.deriveCoreConfig(mockMailboxAddress);
+
+        // ASSERT
+        if (maxTransferAmount === undefined) {
+          expect(result).to.not.have.property('maxTransferAmount');
+        } else {
+          expect(result.maxTransferAmount).to.equal(maxTransferAmount);
+        }
+      });
+    }
+
     it('should propagate read errors', async () => {
       // ARRANGE
       const error = new Error('Mailbox read failed');

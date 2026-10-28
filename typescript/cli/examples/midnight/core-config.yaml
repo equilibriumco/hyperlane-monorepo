@@ -6,8 +6,8 @@
 #
 # A zero owner keeps ownership with the deployer.
 owner: '0x0000000000000000000000000000000000000000000000000000000000000000'
-# Per-transfer limit sealed into the night contract, in local NIGHT units
-# (6 decimals). 0 means no limit.
+# The night contract's per-transfer limit, in local NIGHT units (6 decimals).
+# 0 means no limit; `core apply` changes it through the owner.
 maxTransferAmount: '0'
 defaultIsm:
   type: messageIdMultisigIsm
