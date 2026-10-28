@@ -127,13 +127,14 @@ fn sample_announcement() -> SignedType<Announcement> {
     }
 }
 
-const ERROR_KINDS: [&str; 8] = [
+const ERROR_KINDS: [&str; 9] = [
     "proofTimeout",
     "insufficientDust",
     "staleState",
     "replay",
     "signerUnavailable",
     "rpcUnreachable",
+    "nodeRejected",
     "contractRevert",
     "internal",
 ];
@@ -616,10 +617,9 @@ async fn missing_sidecar_path_fails_every_call_at_once() {
 /// Live check: a hostile message through the relayer's own request builder
 /// into the real sidecar, which must refuse it with nothing reaching the
 /// chain. Needs the devnet with `night` deployed, and the relayer seed in the
-/// environment because the sidecar reads it from there. The body cases cost a
-/// wallet sync each, since the sidecar opens the wallet before it reads the
-/// message, so use a relayer wallet that is already registered for DUST, or a
-/// registration transaction lands and fails the final check. Run with:
+/// environment because the sidecar reads it from there. The sidecar checks the
+/// body before it opens the wallet, so the body cases cost no wallet sync.
+/// Run with:
 ///
 ///   MIDNIGHT_SIDECAR_PATH=<hyperlane-midnight>/relayer/bin/submit-handle \
 ///   MIDNIGHT_NIGHT_ADDRESS=<deployed night address hex> \
