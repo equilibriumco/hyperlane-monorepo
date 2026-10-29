@@ -4,8 +4,12 @@ import {
   addressToBytes,
   addressToBytes32,
   bytesToProtocolAddress,
+  decodeMidnightUnshieldedAddress,
+  encodeMidnightUnshieldedAddress,
   eqAddressMidnight,
+  getAddressProtocolType,
   isAddressStarknet,
+  isMidnightUnshieldedAddress,
   isValidAddressMidnight,
   isValidAddressStarknet,
   isValidTransactionHashMidnight,
@@ -263,6 +267,62 @@ describe('Address utilities', () => {
       expect(isValidTransactionHashMidnight('0x' + 'ab'.repeat(32))).to.be.true;
       expect(isValidTransactionHashMidnight('ab'.repeat(32))).to.be.true;
       expect(isValidTransactionHashMidnight('0x1234')).to.be.false;
+    });
+
+    // The address form vectors were produced with Midnight's own address codec.
+    const FORM_HEX =
+      '0x7a1e5f0c3b9d2e4f6a8b0c1d2e3f4a5b' + '6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f';
+    const FORM_UNDEPLOYED =
+      'mn_addr_undeployed10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0snvvkpf';
+    const FORM_STAGENET =
+      'mn_addr_stagenet10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0s7c8nxa';
+    const FORM_MAINNET =
+      'mn_addr10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0sjrz6n0';
+
+    it('Decodes and encodes the unshielded address form', () => {
+      for (const [form, networkId] of [
+        [FORM_UNDEPLOYED, 'undeployed'],
+        [FORM_STAGENET, 'stagenet'],
+        [FORM_MAINNET, 'mainnet'],
+      ] as const) {
+        const decoded = decodeMidnightUnshieldedAddress(form);
+        expect(decoded.networkId).to.equal(networkId);
+        expect(
+          bytesToProtocolAddress(decoded.bytes, ProtocolType.Midnight),
+        ).to.equal(FORM_HEX);
+        expect(
+          encodeMidnightUnshieldedAddress(decoded.bytes, networkId),
+        ).to.equal(form);
+        expect(isMidnightUnshieldedAddress(form)).to.be.true;
+      }
+    });
+
+    it('Tells the address form from hex and from a damaged form', () => {
+      expect(isMidnightUnshieldedAddress(MIDNIGHT_ADDR)).to.be.false;
+      expect(isMidnightUnshieldedAddress(FORM_UNDEPLOYED.slice(0, -1) + 'g')).to
+        .be.false;
+      expect(() =>
+        decodeMidnightUnshieldedAddress(
+          FORM_UNDEPLOYED.replace('mn_addr', 'mn_dust'),
+        ),
+      ).to.throw();
+      // Contract addresses in registries and configs stay hex.
+      expect(isValidAddressMidnight(FORM_UNDEPLOYED)).to.be.false;
+    });
+
+    it('Converts and compares the address form as the same user address', () => {
+      expect(getAddressProtocolType(FORM_UNDEPLOYED)).to.equal(
+        ProtocolType.Midnight,
+      );
+      expect(addressToBytes32(FORM_UNDEPLOYED)).to.equal(FORM_HEX);
+      expect(
+        bytesToProtocolAddress(
+          addressToBytes(FORM_STAGENET, ProtocolType.Midnight),
+          ProtocolType.Midnight,
+        ),
+      ).to.equal(FORM_HEX);
+      expect(normalizeAddressMidnight(FORM_MAINNET)).to.equal(FORM_HEX);
+      expect(eqAddressMidnight(FORM_UNDEPLOYED, FORM_HEX)).to.be.true;
     });
   });
 });

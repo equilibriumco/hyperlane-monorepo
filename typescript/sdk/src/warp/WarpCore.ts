@@ -63,6 +63,7 @@ import {
   WarpTxCategory,
   WarpTypedTransaction,
 } from './types.js';
+import { validateMidnightRecipient } from './midnightRecipient.js';
 
 export interface WarpCoreOptions {
   logger?: Logger;
@@ -1393,13 +1394,16 @@ export class WarpCore {
   /**
    * Ensure recipient address is valid for the destination chain
    */
-  protected validateRecipient(
+  validateRecipient(
     recipient: Address,
     destination: ChainNameOrId,
   ): Record<string, string> | null {
     const destinationMetadata =
       this.multiProvider.getChainMetadata(destination);
     const { protocol, bech32Prefix } = destinationMetadata;
+    if (protocol === ProtocolType.Midnight) {
+      return validateMidnightRecipient(recipient, destinationMetadata);
+    }
     // Ensure recip address is valid for the destination chain's protocol
     if (!isValidAddress(recipient, protocol) || isZeroishAddress(recipient))
       return { recipient: 'Invalid recipient' };

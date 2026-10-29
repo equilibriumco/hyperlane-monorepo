@@ -8,12 +8,14 @@ import {
   Numberish,
   addressToBytes32,
   assert,
+  isEVMLike,
   strip0x,
 } from '@hyperlane-xyz/utils';
 
 import { BaseMidnightAdapter } from '../../app/MultiProtocolApp.js';
 import type { MultiProviderAdapter } from '../../providers/MultiProviderAdapter.js';
 import { ChainName } from '../../types.js';
+import { evmMintableRecipientBytes32 } from '../../warp/midnightRecipient.js';
 import { TokenMetadata } from '../types.js';
 
 import {
@@ -209,7 +211,7 @@ export class BaseMidnightHypTokenAdapter
       signer: params.fromAccountOwner,
       tokenAddress: this.tokenAddress,
       destinationDomainId: params.destination,
-      recipient: strip0x(addressToBytes32(params.recipient)),
+      recipient: this.recipientBytes32(params.destination, params.recipient),
       amount: params.weiAmountOrId.toString(),
       customHookAddress: params.customHook,
       gasLimit: '',
@@ -218,6 +220,18 @@ export class BaseMidnightHypTokenAdapter
         amount: igpQuote.amount.toString(),
       },
     });
+  }
+
+  // The transaction builder only sees a domain id, so the destination's
+  // address rules are applied here, where the chain metadata is known.
+  private recipientBytes32(destination: Domain, recipient: Address): string {
+    const protocol =
+      this.multiProvider.tryGetChainMetadata(destination)?.protocol;
+    const bytes32 =
+      protocol && isEVMLike(protocol)
+        ? evmMintableRecipientBytes32(recipient)
+        : addressToBytes32(recipient);
+    return strip0x(bytes32);
   }
 }
 
