@@ -18,6 +18,7 @@ import {
   artifactsPathFor,
   deployContractInstance,
 } from '../deploy/deploy-contract.js';
+import { committeeFromEnv } from '../deploy/maintenance-committee.js';
 import {
   OwnerStateStore,
   decodeCoinPublicKey,
@@ -405,6 +406,8 @@ export class MidnightSigner
   }> {
     const log = options.log ?? defaultLog;
     this.ownerStore.assertPrivate();
+    // A bad committee list stops the deploy before anything is deployed.
+    const committee = committeeFromEnv();
     const wallet = await this.walletContext();
     const providers = await this.providersFor(options.name);
     const module = await loadContractModule(options.name);
@@ -430,6 +433,7 @@ export class MidnightSigner
       providers,
       chunked: options.chunked ?? false,
       ownerStore: this.ownerStore,
+      committee,
       log,
     });
     // The agents' `index.from` must be at or before this, and nothing else in

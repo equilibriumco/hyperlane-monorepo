@@ -259,16 +259,18 @@ export function operationVersionForKey(key: Uint8Array): 'v3' | 'v4' {
   );
 }
 
-/**
- * The replay counter is read from current chain state and each update bumps it,
- * so batches have to be submitted strictly in sequence.
- */
-export async function insertVerifierKeys(
+interface DeployKeyAuthority {
+  counter: bigint;
+  signingKey: ledger.SigningKey;
+}
+
+// The deploy key is a 1-of-1 authority from the deploy transaction until the
+// committee hand-over, which is the last update it signs.
+async function deployKeyAuthority(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providers: any,
   contractAddress: string,
-  batch: readonly VerifierKeyEntry[],
-): Promise<FinalizedTxData> {
+): Promise<DeployKeyAuthority> {
   const contractState =
     await providers.publicDataProvider.queryContractState(contractAddress);
   if (!contractState) {
@@ -279,30 +281,29 @@ export async function insertVerifierKeys(
   if (!signingKey) {
     throw new Error(
       `no maintenance signing key stored for ${contractAddress} — the deployer's ` +
-        `private-state store (or owner-state.json) must hold the key sampled at deploy time`,
+        `private-state store must hold the key sampled at deploy time`,
     );
   }
+  return { counter: contractState.maintenanceAuthority.counter, signingKey };
+}
 
-  const updates = batch.map(
-    (entry) =>
-      new ledger.VerifierKeyInsert(
-        entry.circuitId,
-        new ledger.ContractOperationVersionedVerifierKey(
-          operationVersionForKey(entry.key),
-          entry.key,
-        ),
-      ),
-  );
-  const counter: bigint = contractState.maintenanceAuthority.counter;
+async function submitDeployKeyUpdate(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providers: any,
+  contractAddress: string,
+  updates: unknown[],
+  authority: DeployKeyAuthority,
+): Promise<FinalizedTxData> {
   const unsigned = new ledger.MaintenanceUpdate(
     contractAddress,
-    updates,
-    counter,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    updates as any,
+    authority.counter,
   );
   // The authority is 1-of-1, so one signature at committee index 0 carries it.
   const signed = unsigned.addSignature(
     0n,
-    ledger.signData(signingKey, unsigned.dataToSign),
+    ledger.signData(authority.signingKey, unsigned.dataToSign),
   );
 
   const intent = ledger.Intent.new(
@@ -318,6 +319,56 @@ export async function insertVerifierKeys(
   );
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return await (submitTx as any)(providers, { unprovenTx });
+}
+
+/**
+ * The replay counter is read from current chain state and each update bumps it,
+ * so batches have to be submitted strictly in sequence.
+ */
+export async function insertVerifierKeys(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providers: any,
+  contractAddress: string,
+  batch: readonly VerifierKeyEntry[],
+): Promise<FinalizedTxData> {
+  const authority = await deployKeyAuthority(providers, contractAddress);
+  const updates = batch.map(
+    (entry) =>
+      new ledger.VerifierKeyInsert(
+        entry.circuitId,
+        new ledger.ContractOperationVersionedVerifierKey(
+          operationVersionForKey(entry.key),
+          entry.key,
+        ),
+      ),
+  );
+  return submitDeployKeyUpdate(providers, contractAddress, updates, authority);
+}
+
+/**
+ * Hand the maintenance authority to `committee` with `threshold`, signed by
+ * the deploy key. The new authority carries the next counter, as the ledger
+ * requires of a replacement.
+ */
+export async function replaceMaintenanceAuthority(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providers: any,
+  contractAddress: string,
+  committee: ledger.SignatureVerifyingKey[],
+  threshold: number,
+): Promise<FinalizedTxData> {
+  const authority = await deployKeyAuthority(providers, contractAddress);
+  const replacement = new ledger.ContractMaintenanceAuthority(
+    committee,
+    threshold,
+    authority.counter + 1n,
+  );
+  return submitDeployKeyUpdate(
+    providers,
+    contractAddress,
+    [new ledger.ReplaceAuthority(replacement)],
+    authority,
+  );
 }
 
 /**
