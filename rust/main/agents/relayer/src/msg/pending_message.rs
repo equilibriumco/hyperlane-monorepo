@@ -20,8 +20,8 @@ use hyperlane_base::{
 };
 use hyperlane_core::{
     gas_used_by_operation, BatchItem, ChainCommunicationError, ChainResult, ConfirmReason,
-    FixedPointNumber, HyperlaneChain, HyperlaneDomain, HyperlaneMessage, Mailbox,
-    MessageSubmissionData, Metadata, PendingOperation, PendingOperationResult,
+    FixedPointNumber, HyperlaneChain, HyperlaneDomain, HyperlaneDomainProtocol, HyperlaneMessage,
+    Mailbox, MessageSubmissionData, Metadata, PendingOperation, PendingOperationResult,
     PendingOperationStatus, ReprepareReason, TryBatchAs, TxCostEstimate, TxOutcome, H256, U256,
 };
 use hyperlane_operation_verifier::ApplicationOperationVerifier;
@@ -508,6 +508,14 @@ impl PendingOperation for PendingMessage {
             Err(e) => {
                 error!(error=?e, "Error when processing message");
                 self.clear_metadata();
+                // A Midnight delivery the node refuses has already cost a proof of
+                // several minutes, and the dry run cannot see why it failed, so
+                // its retry backs off like a failed dry run instead of proving
+                // again at once.
+                if self.destination_domain().domain_protocol() == HyperlaneDomainProtocol::Midnight
+                {
+                    return self.on_reprepare::<String>(None, ReprepareReason::ErrorSubmitting);
+                }
                 return PendingOperationResult::Reprepare(ReprepareReason::ErrorSubmitting);
             }
         }
@@ -1263,6 +1271,8 @@ mod test {
     use hyperlane_base::{cache::OptionalCache, db::*};
     use hyperlane_core::*;
 
+    use hyperlane_test::mocks::MockMailboxContract;
+
     use crate::test_utils::dummy_data::{dummy_message_context, dummy_metadata_builder};
 
     use super::{PendingMessage, DEFAULT_MAX_MESSAGE_RETRIES, VALIDATOR_SIGNATURE_FAST_RETRY_MAX};
@@ -1562,5 +1572,80 @@ mod test {
         let pending_message_debug = format!("{pending_message:?}");
         let expected = r#"PendingMessage { num_retries: 0, since_last_attempt_s: 0, next_attempt_after_s: 0, message_id: 0xaeafdd9f018e66a50d30bb141184d10e57bd956e839f70213c163eb41a3c0d87, status: FirstPrepareAttempt, app_context: Some("test-0") }"#;
         assert_eq!(pending_message_debug, expected);
+    }
+
+    /// A message ready to submit, with no dry run left to do, whose delivery
+    /// the destination refuses at submit.
+    fn refused_at_submit(
+        destination_domain: HyperlaneDomain,
+        db_dir: &std::path::Path,
+    ) -> PendingMessage {
+        let origin_domain = HyperlaneDomain::Known(KnownHyperlaneDomain::Arbitrum);
+        let cache = OptionalCache::new(None);
+        let base_db = HyperlaneRocksDB::new(&origin_domain, DB::from_path(db_dir).unwrap());
+        let base_metadata_builder =
+            dummy_metadata_builder(&origin_domain, &destination_domain, &base_db, cache.clone());
+        let mut ctx = dummy_message_context(Arc::new(base_metadata_builder), &base_db, cache);
+        let mut mailbox = MockMailboxContract::new_with_default_ism(H256::zero());
+        mailbox
+            .expect__domain()
+            .return_const(destination_domain.clone());
+        mailbox
+            .expect_process()
+            .returning(|_, _, _| Err(ChainCommunicationError::from_other_str("refused")));
+        ctx.destination_mailbox = Arc::new(mailbox);
+
+        let message = HyperlaneMessage {
+            nonce: 0,
+            origin: origin_domain.id(),
+            destination: destination_domain.id(),
+            ..Default::default()
+        };
+        let mut pending = PendingMessage::new(
+            message,
+            Arc::new(ctx),
+            PendingOperationStatus::ReadyToSubmit,
+            None,
+            DEFAULT_MAX_MESSAGE_RETRIES,
+        );
+        pending.submission_data = Some(Box::new(MessageSubmissionData {
+            metadata: Metadata::new(vec![]),
+            gas_limit: U256::zero(),
+        }));
+        pending
+    }
+
+    #[tokio::test]
+    async fn a_midnight_delivery_refused_at_submit_backs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pending = refused_at_submit(KnownHyperlaneDomain::Midnight.into(), dir.path());
+
+        let result = pending.submit().await;
+
+        assert!(matches!(
+            result,
+            PendingOperationResult::Reprepare(ReprepareReason::ErrorSubmitting)
+        ));
+        assert_eq!(pending.num_retries, 1);
+        let wait = pending
+            .next_attempt_after
+            .expect("no backoff was set")
+            .duration_since(Instant::now());
+        assert!(wait > Duration::from_secs(4), "backoff of {wait:?}");
+    }
+
+    #[tokio::test]
+    async fn a_delivery_elsewhere_refused_at_submit_retries_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pending = refused_at_submit(KnownHyperlaneDomain::Arbitrum.into(), dir.path());
+
+        let result = pending.submit().await;
+
+        assert!(matches!(
+            result,
+            PendingOperationResult::Reprepare(ReprepareReason::ErrorSubmitting)
+        ));
+        assert_eq!(pending.num_retries, 0);
+        assert!(pending.next_attempt_after.is_none());
     }
 }
