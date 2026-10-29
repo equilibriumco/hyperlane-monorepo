@@ -14,7 +14,7 @@ hyperlane-warp-route = { path = "../../applications/hyperlane-warp-route" }
 
 async-trait = { workspace = true }
 derive-new = { workspace = true }
-ethers = { workspace = true }
+ethers = { workspace = true, features = ["ws"] }
 hex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
