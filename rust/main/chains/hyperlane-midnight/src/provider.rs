@@ -11,7 +11,7 @@ use hyperlane_core::{
 use crate::events::h512_to_h256;
 use crate::indexer_client::{BlockDetails, TransactionDetails};
 use crate::toolkit::{self, ToolkitContext};
-use crate::{ConnectionConf, MidnightIndexerClient};
+use crate::{ConnectionConf, MidnightIndexerClient, MidnightNodeClient};
 
 /// A sidecar `balance` call costs a full wallet sync in a subprocess, so reads
 /// are cached.
@@ -22,6 +22,7 @@ const WALLET_BALANCE_TTL: Duration = Duration::from_secs(300);
 pub struct MidnightProvider {
     domain: HyperlaneDomain,
     indexer: MidnightIndexerClient,
+    node: Option<MidnightNodeClient>,
     toolkit_ctx: Option<ToolkitContext>,
     /// Shared across clones so every consumer sees one TTL window.
     wallet_balance_cache: Arc<Mutex<Option<(Instant, String, U256)>>>,
@@ -33,23 +34,36 @@ impl MidnightProvider {
         Self {
             domain,
             indexer,
+            node: None,
             toolkit_ctx: None,
             wallet_balance_cache: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Wires the sidecar too, so `get_balance` can answer the relayer wallet's
-    /// own address.
+    /// own address, and the node the state reads are cross-checked against.
     pub fn from_conf(domain: HyperlaneDomain, conf: &ConnectionConf) -> Self {
         let indexer = MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-        let mut provider = Self::new(domain, indexer);
+        let mut provider = Self::new(domain, indexer).with_node_client(node_client_from(conf));
         provider.toolkit_ctx = Some(ToolkitContext::from_conf(conf));
         provider
+    }
+
+    /// The node the merkle tree reads cross-check the indexer against; `None`
+    /// reads the indexer alone.
+    pub fn with_node_client(mut self, node: Option<MidnightNodeClient>) -> Self {
+        self.node = node;
+        self
     }
 
     /// The indexer client, for chain-state reads.
     pub fn indexer(&self) -> &MidnightIndexerClient {
         &self.indexer
+    }
+
+    /// The node client, when the chain config names a node.
+    pub fn node(&self) -> Option<&MidnightNodeClient> {
+        self.node.as_ref()
     }
 
     async fn wallet_balance(&self, address: &str) -> ChainResult<U256> {
@@ -81,6 +95,11 @@ impl MidnightProvider {
         }
         Ok(balances.night_micro)
     }
+}
+
+/// The node client for a chain config, when it names a node.
+pub fn node_client_from(conf: &ConnectionConf) -> Option<MidnightNodeClient> {
+    conf.node_rpc_url.clone().map(MidnightNodeClient::new)
 }
 
 /// `BlockInfo.timestamp` is unix seconds per the trait contract, but the indexer

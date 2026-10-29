@@ -8,16 +8,21 @@
 //! `latest_checkpoint`) rebuild the tree off-chain from the append-only
 //! `dispatched_messages` map, as Sealevel does from its outbox account, while
 //! the indexer half derives one leaf per `HYP_DISPATCH` event.
+//!
+//! The map is read from the indexer, and held to the node's copy of the same
+//! state when the chain config names a node: a message the two disagree on
+//! is an error, and a source that lags only shortens the tree.
 
 use std::ops::RangeInclusive;
+use std::sync::Once;
 
 use async_trait::async_trait;
 
 use hyperlane_core::{
     accumulator::incremental::IncrementalMerkle, ChainCommunicationError, ChainResult, Checkpoint,
-    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneProvider,
-    IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook, MerkleTreeInsertion,
-    ReorgPeriod, SequenceAwareIndexer, H256, H512,
+    CheckpointAtBlock, HyperlaneChain, HyperlaneContract, HyperlaneDomain, HyperlaneMessage,
+    HyperlaneProvider, IncrementalMerkleAtBlock, Indexed, Indexer, LogMeta, MerkleTreeHook,
+    MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512,
 };
 
 use crate::events::{
@@ -26,7 +31,9 @@ use crate::events::{
 };
 use crate::indexer_client::MiscEvent;
 use crate::state_decode::decode_dispatched_messages;
-use crate::MidnightProvider;
+use crate::{HyperlaneMidnightError, MidnightProvider};
+
+static CROSS_CHECK_OFF: Once = Once::new();
 
 /// Midnight has BFT finality and the indexer serves only finalized state, so a
 /// configured `reorg_period` has no effect. Log it rather than drop it
@@ -58,6 +65,32 @@ fn checkpoint_from_tree(
             index: tree.index(),
         },
         block_height: None,
+    })
+}
+
+/// The messages both sources agree on, each list sorted by nonce: the shorter
+/// list when one source lags the other, an error naming the first message the
+/// two disagree on.
+fn agreed_messages(
+    indexer: Vec<(u32, HyperlaneMessage)>,
+    node: Vec<(u32, HyperlaneMessage)>,
+) -> ChainResult<Vec<(u32, HyperlaneMessage)>> {
+    for (position, ((indexer_nonce, indexer_message), (node_nonce, node_message))) in
+        indexer.iter().zip(node.iter()).enumerate()
+    {
+        if indexer_nonce != node_nonce || indexer_message != node_message {
+            return Err(HyperlaneMidnightError::IndexerNodeMismatch(format!(
+                "dispatched message {position}: the indexer has nonce {indexer_nonce} id {:?}, the node has nonce {node_nonce} id {:?}",
+                indexer_message.id(),
+                node_message.id()
+            ))
+            .into());
+        }
+    }
+    Ok(if node.len() < indexer.len() {
+        node
+    } else {
+        indexer
     })
 }
 
@@ -101,15 +134,27 @@ impl MidnightMerkleTreeHook {
         format!("{:x}", self.address)
     }
 
-    async fn dispatched_messages(
-        &self,
-    ) -> ChainResult<Vec<(u32, hyperlane_core::HyperlaneMessage)>> {
-        let bytes = self
-            .provider
-            .indexer()
-            .contract_state(&self.address_hex())
-            .await?;
-        decode_dispatched_messages(&bytes)
+    /// The dispatched messages the indexer serves, held to the node's copy of
+    /// the state when the chain config names a node.
+    async fn dispatched_messages(&self) -> ChainResult<Vec<(u32, HyperlaneMessage)>> {
+        let address = self.address_hex();
+        let indexer_bytes = self.provider.indexer().contract_state(&address).await?;
+        let indexer_messages = decode_dispatched_messages(&indexer_bytes)?;
+        let Some(node) = self.provider.node() else {
+            CROSS_CHECK_OFF.call_once(|| {
+                tracing::warn!(
+                    chain = self.domain.name(),
+                    "Midnight chain config names no node in rpcUrls: the dispatched messages are read from the indexer alone, with no node cross-check"
+                );
+            });
+            return Ok(indexer_messages);
+        };
+        let node_bytes = node.contract_state(&address).await?;
+        if node_bytes == indexer_bytes {
+            return Ok(indexer_messages);
+        }
+        let node_messages = decode_dispatched_messages(&node_bytes)?;
+        agreed_messages(indexer_messages, node_messages)
     }
 
     async fn latest_height_u32(&self) -> ChainResult<u32> {
@@ -240,6 +285,165 @@ mod tests {
     const TEST_DOMAIN: u32 = 1234;
     fn test_addr() -> H256 {
         H256::repeat_byte(0xaa)
+    }
+
+    fn message(nonce: u32, body_byte: u8) -> (u32, HyperlaneMessage) {
+        (
+            nonce,
+            HyperlaneMessage {
+                version: 3,
+                nonce,
+                origin: TEST_DOMAIN,
+                sender: H256::repeat_byte(0x01),
+                destination: 4321,
+                recipient: H256::repeat_byte(0x02),
+                body: vec![body_byte; 64],
+            },
+        )
+    }
+
+    #[test]
+    fn agreed_messages_keeps_a_list_both_sources_serve() {
+        let list = vec![message(0, 0xa0), message(1, 0xa1)];
+        let agreed = agreed_messages(list.clone(), list.clone()).expect("identical lists agree");
+        assert_eq!(agreed, list);
+    }
+
+    #[test]
+    fn agreed_messages_takes_the_shorter_list_when_one_source_lags() {
+        let longer = vec![message(0, 0xa0), message(1, 0xa1), message(2, 0xa2)];
+        let shorter = longer[..2].to_vec();
+        assert_eq!(
+            agreed_messages(longer.clone(), shorter.clone()).expect("the node lags"),
+            shorter,
+            "a dispatch the node has not seen yet is not signed"
+        );
+        assert_eq!(
+            agreed_messages(shorter.clone(), longer).expect("the indexer lags"),
+            shorter,
+            "a dispatch the indexer has not seen yet is not signed"
+        );
+    }
+
+    #[test]
+    fn agreed_messages_refuses_a_message_the_sources_disagree_on() {
+        let indexer = vec![message(0, 0xa0), message(1, 0xa1)];
+        let node = vec![message(0, 0xa0), message(1, 0xb1)];
+        let err = agreed_messages(indexer.clone(), node.clone())
+            .expect_err("a different message at the same nonce");
+        let text = err.to_string();
+        assert!(
+            text.contains(
+                "indexer and node disagree: dispatched message 1: the indexer has nonce 1 id"
+            ),
+            "names the position and nonce: {text}"
+        );
+        assert!(
+            text.contains(&format!("{:?}", indexer[1].1.id()))
+                && text.contains(&format!("{:?}", node[1].1.id())),
+            "names both ids: {text}"
+        );
+    }
+
+    #[test]
+    fn agreed_messages_refuses_a_nonce_only_one_source_has() {
+        let indexer = vec![message(0, 0xa0), message(1, 0xa1)];
+        let node = vec![message(0, 0xa0), message(2, 0xa2)];
+        let err = agreed_messages(indexer, node).expect_err("the node skips a nonce");
+        assert!(
+            err.to_string().contains("the indexer has nonce 1 id"),
+            "names the nonces: {err}"
+        );
+    }
+
+    #[test]
+    fn node_client_follows_the_chain_config() {
+        use crate::ConnectionConf;
+
+        let indexer_url = Url::parse("http://127.0.0.1:8088/api/v3/graphql").unwrap();
+        let node_url = Url::parse("ws://127.0.0.1:9944").unwrap();
+        let domain = HyperlaneDomain::Known(KnownHyperlaneDomain::Midnight);
+
+        let with_node = ConnectionConf::new(indexer_url.clone(), Some(node_url.clone()), None);
+        let provider = MidnightProvider::from_conf(domain.clone(), &with_node);
+        assert_eq!(
+            provider.node().map(|node| node.url().clone()),
+            Some(node_url),
+            "the first rpcUrls entry is the node"
+        );
+
+        let without_node = ConnectionConf::new(indexer_url.clone(), None, None);
+        let provider = MidnightProvider::from_conf(domain.clone(), &without_node);
+        assert!(provider.node().is_none(), "no node, no cross-check");
+
+        let indexer = crate::MidnightIndexerClient::new(indexer_url);
+        let provider = MidnightProvider::new(domain, indexer)
+            .with_node_client(crate::node_client_from(&with_node));
+        assert!(
+            provider.node().is_some(),
+            "the hook builder wires it the same way"
+        );
+    }
+
+    /// Live check that the indexer and the node serve the same dispatched
+    /// messages, through the hook's cross-checked read and the two raw reads:
+    ///
+    ///   MIDNIGHT_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
+    ///   MIDNIGHT_NODE_URL=ws://127.0.0.1:9944 \
+    ///   MIDNIGHT_NIGHT_ADDRESS=<deployed night address hex> \
+    ///   cargo test -p hyperlane-midnight indexer_and_node_agree -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires a running Midnight devnet (node + indexer) with a deployed night contract"]
+    async fn indexer_and_node_agree_on_live_devnet() {
+        use crate::{ConnectionConf, MidnightNodeClient};
+
+        let indexer_url = std::env::var("MIDNIGHT_INDEXER_URL")
+            .expect("set MIDNIGHT_INDEXER_URL to the indexer GraphQL endpoint");
+        let node_url = std::env::var("MIDNIGHT_NODE_URL")
+            .expect("set MIDNIGHT_NODE_URL to the node's JSON-RPC endpoint (http or ws)");
+        let address = std::env::var("MIDNIGHT_NIGHT_ADDRESS")
+            .expect("set MIDNIGHT_NIGHT_ADDRESS to the deployed night contract address (hex)");
+        let address = address.trim_start_matches("0x").to_string();
+
+        let indexer = crate::MidnightIndexerClient::new(Url::parse(&indexer_url).unwrap());
+        let node = MidnightNodeClient::new(Url::parse(&node_url).unwrap());
+        let indexer_bytes = indexer
+            .contract_state(&address)
+            .await
+            .expect("indexer state");
+        let node_bytes = node.contract_state(&address).await.expect("node state");
+        println!(
+            "indexer served {} bytes, node served {} bytes, identical: {}",
+            indexer_bytes.len(),
+            node_bytes.len(),
+            indexer_bytes == node_bytes
+        );
+        let from_indexer = decode_dispatched_messages(&indexer_bytes).expect("indexer decode");
+        let from_node = decode_dispatched_messages(&node_bytes).expect("node decode");
+        assert_eq!(
+            from_indexer, from_node,
+            "both sources decode to the same messages"
+        );
+
+        let conf = ConnectionConf::new(
+            Url::parse(&indexer_url).unwrap(),
+            Some(Url::parse(&node_url).unwrap()),
+            None,
+        );
+        let domain = HyperlaneDomain::Known(KnownHyperlaneDomain::Midnight);
+        let provider = MidnightProvider::from_conf(domain.clone(), &conf);
+        let addr = H256::from_slice(&hex::decode(&address).expect("hex address"));
+        let hook = MidnightMerkleTreeHook::new(addr, domain, provider);
+        let tree = hook
+            .tree(&ReorgPeriod::None)
+            .await
+            .expect("cross-checked tree");
+        assert_eq!(
+            tree.tree.count(),
+            from_indexer.len(),
+            "the cross-checked tree holds every dispatched message"
+        );
+        println!("cross-checked tree: {} leaves", tree.tree.count());
     }
 
     // The validator hits this at startup, so it must surface "no checkpoint"

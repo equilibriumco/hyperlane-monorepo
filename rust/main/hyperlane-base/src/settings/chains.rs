@@ -572,7 +572,8 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer)
+                    .with_node_client(h_midnight::node_client_from(conf));
                 let hook = h_midnight::MidnightMerkleTreeHook::new(
                     locator.address,
                     locator.domain.clone(),
@@ -1084,7 +1085,8 @@ impl ChainConf {
             ChainConnectionConf::Midnight(conf) => {
                 let indexer =
                     h_midnight::MidnightIndexerClient::new(conf.indexer_graphql_url.clone());
-                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer);
+                let provider = h_midnight::MidnightProvider::new(locator.domain.clone(), indexer)
+                    .with_node_client(h_midnight::node_client_from(conf));
                 let hook = h_midnight::MidnightMerkleTreeHook::new(
                     locator.address,
                     locator.domain.clone(),
