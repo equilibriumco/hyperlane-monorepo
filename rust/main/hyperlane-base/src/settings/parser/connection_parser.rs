@@ -854,6 +854,15 @@ pub fn build_midnight_connection_conf(
         .end()
         .map(|s| s.to_string());
 
+    // The gas a delivery is reported to cost, in the origin IGP's unit, so
+    // `onChainFeeQuoting` can enforce toward this chain. Unset means zero.
+    let delivery_gas: hyperlane_core::U256 = chain
+        .chain(&mut local_err)
+        .get_opt_key("deliveryGas")
+        .parse_u256()
+        .end()
+        .unwrap_or_default();
+
     if !local_err.is_ok() {
         err.merge(local_err);
         None
@@ -865,7 +874,8 @@ pub fn build_midnight_connection_conf(
                 indexer_graphql_url?,
                 rpcs.first().cloned(),
                 toolkit_path,
-            ),
+            )
+            .with_delivery_gas(delivery_gas),
         ))
     }
 }

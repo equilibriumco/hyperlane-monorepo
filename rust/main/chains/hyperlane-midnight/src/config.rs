@@ -1,3 +1,4 @@
+use hyperlane_core::U256;
 use url::Url;
 
 /// Midnight connection configuration.
@@ -11,6 +12,11 @@ pub struct ConnectionConf {
     pub node_rpc_url: Option<Url>,
     /// Path to the handle submitter binary.
     pub toolkit_path: Option<String>,
+    /// The gas a delivery on this chain is reported to cost, in the origin
+    /// IGP's gas unit, so the fee-quoting gas payment policy can hold a
+    /// message to its payment. Zero (the default) reports no estimate, which
+    /// leaves that policy permissive.
+    pub delivery_gas: U256,
 }
 
 impl ConnectionConf {
@@ -25,6 +31,13 @@ impl ConnectionConf {
             indexer_graphql_url,
             node_rpc_url,
             toolkit_path,
+            delivery_gas: U256::zero(),
         }
+    }
+
+    /// Set the reported delivery gas.
+    pub fn with_delivery_gas(mut self, delivery_gas: U256) -> Self {
+        self.delivery_gas = delivery_gas;
+        self
     }
 }
