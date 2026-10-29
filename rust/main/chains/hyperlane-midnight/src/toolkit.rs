@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -553,6 +554,32 @@ pub async fn query_storage_locations(
     Ok(trimmed)
 }
 
+/// What Node needs to start the sidecar, beyond the sidecar's own settings.
+const SIDECAR_RUNTIME_VARS: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+];
+
+/// The agent's variables the sidecar is started with: its own `MIDNIGHT_*`
+/// settings, the seed among them, the proof timeout, and what Node needs to
+/// start. The rest of the agent's environment, the agent's own keys included,
+/// stays out of the sidecar and of everything it starts.
+fn sidecar_env(
+    vars: impl Iterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (OsString, OsString)> {
+    vars.filter(|(key, _)| {
+        key.to_str().is_some_and(|key| {
+            key.starts_with("MIDNIGHT_")
+                || key == "PROOF_TIMEOUT_MS"
+                || SIDECAR_RUNTIME_VARS.contains(&key)
+        })
+    })
+}
+
 async fn run_submitter<R: Serialize>(
     ctx: &ToolkitContext,
     request: &R,
@@ -565,6 +592,8 @@ async fn run_submitter<R: Serialize>(
     let payload = serde_json::to_vec(request).map_err(HyperlaneMidnightError::from)?;
 
     let mut child: Child = Command::new(&ctx.binary_path)
+        .env_clear()
+        .envs(sidecar_env(std::env::vars_os()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -709,6 +738,36 @@ pub async fn dry_run_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_env_keeps_its_own_settings_and_drops_the_rest() {
+        let vars = [
+            ("MIDNIGHT_RELAYER_SEED", "seed"),
+            ("MIDNIGHT_INDEXER_URL", "http://indexer"),
+            ("PROOF_TIMEOUT_MS", "900000"),
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/relayer"),
+            ("HYP_CHAINS_SEPOLIA_SIGNER_KEY", "0xkey"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("HYP_DB", "/db"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+
+        let kept: Vec<String> = sidecar_env(vars.into_iter())
+            .map(|(k, _)| k.into_string().unwrap())
+            .collect();
+
+        assert_eq!(
+            kept,
+            [
+                "MIDNIGHT_RELAYER_SEED",
+                "MIDNIGHT_INDEXER_URL",
+                "PROOF_TIMEOUT_MS",
+                "PATH",
+                "HOME"
+            ]
+        );
+    }
 
     #[test]
     fn derive_ws_url_appends_ws_path_and_swaps_scheme() {
