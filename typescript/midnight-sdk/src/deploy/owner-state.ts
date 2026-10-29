@@ -53,9 +53,28 @@ export class OwnerStateStore {
     };
   }
 
+  // The file holds every contract's owner secret and maintenance key, so only
+  // its owner may read it. The modes apply when the directory or file is
+  // created; the chmod tightens a file an older run left readable.
   private save(state: OwnerStateFile): void {
-    fs.mkdirSync(this.stateDir, { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(state, null, 2) + '\n');
+    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(this.file, JSON.stringify(state, null, 2) + '\n', {
+      mode: 0o600,
+    });
+    fs.chmodSync(this.file, 0o600);
+  }
+
+  // A deploy adds its secrets to the file, so it stops while the file is
+  // readable by others: whoever could read it may already hold the secrets.
+  assertPrivate(): void {
+    if (!fs.existsSync(this.file)) return;
+    if ((fs.statSync(this.file).mode & 0o077) !== 0) {
+      throw new Error(
+        `${this.file} is readable by other users. It holds each contract's ` +
+          'owner secret and maintenance key: check who could have read it, ' +
+          'then chmod 600 it and deploy again.',
+      );
+    }
   }
 
   getOrCreate(contract: MidnightContractName): OwnerState {

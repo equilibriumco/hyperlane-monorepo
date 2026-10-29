@@ -27,6 +27,7 @@ import {
   createProviders,
   type ContractProviders,
 } from '../deploy/providers.js';
+import { privateStatePassword as privateStateStorePassword } from '../deploy/private-state-password.js';
 import {
   createWallet,
   deriveUnshieldedKeystore,
@@ -59,8 +60,6 @@ import { readGasPayments } from './state.js';
 // Proving is client-side and public networks expose no proof server, so the
 // default is the operator's own local instance.
 const DEFAULT_PROOF_SERVER_URL = 'http://127.0.0.1:6300';
-// Local private-state DB password; the SDK enforces length and charset rules.
-const DEFAULT_PRIVATE_STATE_PASSWORD = 'Hyperlane-Midnight-2026!';
 
 const PAY_FOR_GAS_ATTEMPTS = 3;
 const PAY_FOR_GAS_RETRY_DELAY_MS = 1000;
@@ -94,7 +93,7 @@ export interface MidnightSignerOptions {
   seedHex: string;
   endpoints: WalletEndpoints;
   stateDir: string;
-  privateStatePassword: string;
+  privateStatePassword: () => string;
 }
 
 export class MidnightSigner
@@ -160,8 +159,7 @@ export class MidnightSigner
     const stateDir =
       process.env.MIDNIGHT_STATE_DIR ??
       path.join(os.homedir(), '.hyperlane-midnight', metadata.name);
-    const privateStatePassword =
-      process.env.MIDNIGHT_STATE_PASSWORD ?? DEFAULT_PRIVATE_STATE_PASSWORD;
+    const privateStatePassword = () => privateStateStorePassword(networkId);
 
     return new MidnightSigner(
       metadata,
@@ -406,6 +404,7 @@ export class MidnightSigner
     receipts: MidnightTxReceipt[];
   }> {
     const log = options.log ?? defaultLog;
+    this.ownerStore.assertPrivate();
     const wallet = await this.walletContext();
     const providers = await this.providersFor(options.name);
     const module = await loadContractModule(options.name);

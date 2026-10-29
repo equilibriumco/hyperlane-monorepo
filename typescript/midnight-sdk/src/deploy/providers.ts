@@ -15,7 +15,7 @@ export interface ProviderOptions {
   // `privateStateStoreName` only names a sublevel inside the DB, so the DB
   // itself would otherwise land in the process cwd.
   privateStateDbPath: string;
-  privateStatePassword: string;
+  privateStatePassword: () => string;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,7 +72,8 @@ export async function createProviders(
 
   return {
     privateStateProvider: levelPrivateStateProvider({
-      privateStoragePasswordProvider: async () => options.privateStatePassword,
+      privateStoragePasswordProvider: async () =>
+        options.privateStatePassword(),
       accountId: String(walletCtx.unshieldedKeystore.getBech32Address()),
       midnightDbName: options.privateStateDbPath,
     }),
