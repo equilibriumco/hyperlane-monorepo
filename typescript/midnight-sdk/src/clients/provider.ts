@@ -252,6 +252,9 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
         `recipient must be 32 bytes (bytes32-padded), got ${req.recipient}`,
       );
     }
+    if (recipient.every((b) => b === 0)) {
+      throw new Error('recipient must not be all zero');
+    }
     if (!req.customHookAddress) {
       throw new Error(
         'Midnight remote transfers need the IGP contract address as customHook ' +

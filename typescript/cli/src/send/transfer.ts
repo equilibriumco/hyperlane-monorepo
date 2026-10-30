@@ -544,14 +544,22 @@ async function executeDelivery({
     log(
       `Skipping transfer validation for ${origin} because Cosmos-origin validation is currently unsupported (CosmJS gas estimation requires sender public key).`,
     );
-  } else if (isMidnightOrigin) {
-    log(
-      `Skipping transfer validation for ${origin} because Midnight wallet balances are not readable without a synced wallet (the indexer exposes no balance-by-address query).`,
-    );
   } else if (skippedByUser) {
     log(
       `Skipping transfer validation for ${origin} because --skip-validation was set.`,
     );
+  } else if (isMidnightOrigin) {
+    log(
+      `Skipping balance validation for ${origin} because Midnight wallet balances are not readable without a synced wallet (the indexer exposes no balance-by-address query); the recipient is still checked.`,
+    );
+    const recipientError = warpCore.validateRecipient(
+      recipientAddress,
+      destination,
+    );
+    if (recipientError) {
+      logRed('Error validating recipient', JSON.stringify(recipientError));
+      throw new Error('Error validating transfer');
+    }
   }
 
   if (!shouldSkipTransferValidation) {

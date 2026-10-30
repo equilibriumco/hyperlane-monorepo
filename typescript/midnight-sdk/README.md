@@ -69,6 +69,29 @@ changes the validator set and the field below. See
   of the config, the deployed limit stays as it is. `core read` reports it as
   a decimal string.
 
+## Warp send recipients
+
+`warp send` checks the recipient against the destination before anything is
+sent. A transfer to a recipient of the wrong kind is NIGHT nobody receives:
+night pays an inbound transfer to the recipient bytes as a user address, the
+EVM router mints an outbound one to the last 20 bytes, and neither refunds.
+
+- **To Midnight**: give the recipient in the wallet's unshielded address form
+  (`mn_addr...`, `mn_addr_undeployed...` on a local devnet), which names a user
+  address and nothing else. Raw 32-byte hex is refused, and so is an address
+  for another network than the destination's `midnightNetworkId`, when the
+  chain metadata names one. Contract addresses in registries and configs stay
+  hex. The address form is read only toward a Midnight destination; other
+  routes treat it as an unknown address, as upstream does.
+- **From Midnight**: an EVM destination takes a 20-byte address. The zero
+  address, and 32 bytes whose first 12 are not zero, are refused.
+
+The SDK applies the same rules in `WarpCore.validateRecipient`, so a transfer
+built without the CLI gets them too. The Midnight token adapter applies the EVM
+rules as well, and also takes the 32-byte zero-padded form of an EVM address,
+which `WarpCore.validateRecipient` refuses. The transaction builder refuses an
+all-zero recipient on every route.
+
 ## Registry
 
 The CLI's default registry is upstream's, which has no Midnight chain, so pass

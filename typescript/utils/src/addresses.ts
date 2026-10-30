@@ -26,6 +26,16 @@ const TRON_ADDRESS_REGEX = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 // Midnight addresses in Hyperlane contexts are the raw 32-byte value,
 // hex-encoded (Midnight contract/user addresses are natively 32 bytes).
 const MIDNIGHT_ADDRESS_REGEX = /^(0x)?[0-9a-fA-F]{64}$/;
+// A user address can also be given in Midnight's unshielded address form:
+// bech32m over the same 32 bytes, prefix `mn_addr`, plus `_<network>` off
+// mainnet. Transfer recipients take this form; contract addresses stay hex.
+// It is read only where the protocol is named as Midnight, so a route
+// without Midnight never takes it for an address.
+const MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX = 'mn_addr';
+const MIDNIGHT_MAINNET_ID = 'mainnet';
+// The official codec sets no length limit, and the library default of 90 is
+// too short for longer network names.
+const MIDNIGHT_BECH32M_LIMIT = 1023;
 
 const HEX_BYTES32_REGEX = /^0x[a-fA-F0-9]{64}$/;
 
@@ -106,6 +116,57 @@ export function isAddressAleo(address: Address) {
 
 export function isAddressTron(address: Address) {
   return TRON_ADDRESS_REGEX.test(address);
+}
+
+export function decodeMidnightUnshieldedAddress(address: Address): {
+  networkId: string;
+  bytes: Uint8Array;
+} {
+  const { prefix, words } = bech32m.decode(address, MIDNIGHT_BECH32M_LIMIT);
+  const [chain, type, ...network] = prefix.split('_');
+  if (
+    `${chain}_${type}` !== MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX ||
+    network.length > 1
+  ) {
+    throw new Error(`not a Midnight unshielded address: prefix ${prefix}`);
+  }
+  const bytes = new Uint8Array(bech32m.fromWords(words));
+  if (bytes.length !== 32) {
+    throw new Error(
+      `Midnight unshielded address holds ${bytes.length} bytes, expected 32`,
+    );
+  }
+  return { networkId: network[0] ?? MIDNIGHT_MAINNET_ID, bytes };
+}
+
+export function encodeMidnightUnshieldedAddress(
+  bytes: Uint8Array,
+  networkId: string,
+): string {
+  assert(
+    bytes.length === 32,
+    `Midnight unshielded address needs 32 bytes, got ${bytes.length}`,
+  );
+  const prefix =
+    networkId === MIDNIGHT_MAINNET_ID
+      ? MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX
+      : `${MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX}_${networkId}`;
+  return bech32m.encode(prefix, bech32m.toWords(bytes), MIDNIGHT_BECH32M_LIMIT);
+}
+
+export function isMidnightUnshieldedAddress(address: Address): boolean {
+  if (
+    !address ||
+    !address.toLowerCase().startsWith(MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX)
+  ) {
+    return false;
+  }
+  try {
+    decodeMidnightUnshieldedAddress(address);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isAddressMidnight(address: Address) {
@@ -315,6 +376,11 @@ export function normalizeAddressTron(address: Address) {
 }
 
 export function normalizeAddressMidnight(address: Address) {
+  if (isMidnightUnshieldedAddress(address)) {
+    return bytesToAddressMidnight(
+      decodeMidnightUnshieldedAddress(address).bytes,
+    );
+  }
   if (isZeroishAddress(address)) return address;
   return ensure0x(address.toLowerCase());
 }
@@ -584,6 +650,9 @@ export function addressToBytesTron(address: Address): Uint8Array {
 }
 
 export function addressToBytesMidnight(address: Address): Uint8Array {
+  if (isMidnightUnshieldedAddress(address)) {
+    return decodeMidnightUnshieldedAddress(address).bytes;
+  }
   return new Uint8Array(Buffer.from(strip0x(address), 'hex'));
 }
 
