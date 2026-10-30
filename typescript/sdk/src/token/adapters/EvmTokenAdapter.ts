@@ -269,6 +269,17 @@ export class EvmHypSyntheticAdapter
     super(chainName, multiProvider, addresses, contractFactory);
   }
 
+  // A Midnight recipient may be in its unshielded address form, which only
+  // the destination's protocol tells apart from other addresses.
+  protected recipientBytes32(destination: Domain, recipient: Address): string {
+    const protocol =
+      this.multiProvider.tryGetChainMetadata(destination)?.protocol;
+    if (protocol === ProtocolType.Midnight) {
+      return addressToBytes32(recipient, ProtocolType.Midnight);
+    }
+    return addressToBytes32(addressToByteHexString(recipient));
+  }
+
   override async isApproveRequired(
     owner: Address,
     spender: Address,
@@ -476,7 +487,7 @@ export class EvmHypSyntheticAdapter
     );
     assert(recipient, 'Recipient must be defined for quoteTransferRemoteGas');
 
-    const recipBytes32 = addressToBytes32(addressToByteHexString(recipient));
+    const recipBytes32 = this.recipientBytes32(destination, recipient);
     const rawQuotes: RawTupleQuote[] = await this.contract[
       'quoteTransferRemote(uint32,bytes32,uint256)'
     ](destination, recipBytes32, amount.toString());
@@ -566,7 +577,7 @@ export class EvmHypSyntheticAdapter
       nativeValue += interchainGas.tokenFeeQuote?.amount ?? 0n;
     }
 
-    const recipBytes32 = addressToBytes32(addressToByteHexString(recipient));
+    const recipBytes32 = this.recipientBytes32(destination, recipient);
 
     const predicateWrapper = PredicateRouterWrapper__factory.connect(
       predicateWrapperAddress,
@@ -618,7 +629,7 @@ export class EvmHypSyntheticAdapter
       nativeValue += interchainGas.tokenFeeQuote?.amount ?? 0n;
     }
 
-    const recipBytes32 = addressToBytes32(addressToByteHexString(recipient));
+    const recipBytes32 = this.recipientBytes32(destination, recipient);
     return this.contract.populateTransaction[
       'transferRemote(uint32,bytes32,uint256)'
     ](destination, recipBytes32, weiAmountOrId, {

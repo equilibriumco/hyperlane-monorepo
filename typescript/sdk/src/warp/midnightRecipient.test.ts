@@ -1,14 +1,16 @@
 import chai, { expect } from 'chai';
 import chaiAsPromised from 'chai-as-promised';
+import { providers } from 'ethers';
 import sinon from 'sinon';
 
 import { ProtocolType } from '@hyperlane-xyz/utils';
 
-import { test1 } from '../consts/testChains.js';
+import { test1, test2 } from '../consts/testChains.js';
 import { ChainMetadata } from '../metadata/chainMetadataTypes.js';
 import { MultiProtocolProvider } from '../providers/MultiProtocolProvider.js';
 import { MultiProviderAdapter } from '../providers/MultiProviderAdapter.js';
 import { Token } from '../token/Token.js';
+import { EvmHypSyntheticAdapter } from '../token/adapters/EvmTokenAdapter.js';
 import { MidnightHypCollateralAdapter } from '../token/adapters/MidnightTokenAdapter.js';
 
 import { WarpCore } from './WarpCore.js';
@@ -169,5 +171,48 @@ describe('MidnightHypCollateralAdapter.populateTransferRemoteTx', () => {
   it('Leaves a recipient for a destination it does not know alone', async () => {
     await transfer(424242, FORM_HEX);
     expect(built[0].recipient).to.equal(FORM_HEX.slice(2));
+  });
+});
+
+describe('EvmHypSyntheticAdapter.populateTransferRemoteTx', () => {
+  let sandbox: sinon.SinonSandbox;
+  let adapter: EvmHypSyntheticAdapter;
+
+  beforeEach(() => {
+    const multiProvider = new MultiProtocolProvider({
+      [test1.name]: test1,
+      [test2.name]: test2,
+      [midnight.name]: midnight,
+    });
+    sandbox = sinon.createSandbox();
+    // Building the transaction never reaches the provider.
+    sandbox
+      .stub(multiProvider, 'getEthersV5Provider')
+      .returns(new providers.JsonRpcProvider('http://127.0.0.1:1'));
+    adapter = new EvmHypSyntheticAdapter(test1.name, multiProvider, {
+      token: EVM_ADDRESS,
+    });
+  });
+
+  afterEach(() => {
+    sandbox.restore();
+  });
+
+  function transfer(destination: number, recipient: string) {
+    return adapter.populateTransferRemoteTx({
+      weiAmountOrId: 1n,
+      destination,
+      recipient,
+      interchainGas: { igpQuote: { amount: 0n } },
+    });
+  }
+
+  it('Takes the address form toward Midnight', async () => {
+    const tx = await transfer(midnight.domainId!, FORM_UNDEPLOYED);
+    expect(tx.data).to.include(FORM_HEX.slice(2));
+  });
+
+  it('Refuses the address form toward a destination that is not Midnight', async () => {
+    await expect(transfer(test2.domainId!, FORM_UNDEPLOYED)).to.be.rejected;
   });
 });

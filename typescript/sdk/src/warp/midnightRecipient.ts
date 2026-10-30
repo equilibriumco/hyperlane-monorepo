@@ -47,16 +47,20 @@ export function validateMidnightRecipient(
 // The 32 recipient bytes an EVM destination can mint to: a 20-byte address in
 // the low bytes and nothing else. Its router reverts on anything else.
 export function evmMintableRecipientBytes32(recipient: Address): string {
-  const bytes32 = addressToBytes32(recipient);
+  const notEvm = new Error(
+    `recipient ${recipient} is not an EVM address: the first 12 of its 32 bytes must be zero, or the destination cannot mint to it`,
+  );
+  let bytes32: string;
+  try {
+    bytes32 = addressToBytes32(recipient);
+  } catch {
+    throw notEvm;
+  }
   if (isZeroishAddress(bytes32)) {
     throw new Error(
       'recipient must not be the zero address: the destination cannot mint to it',
     );
   }
-  if (!/^0x0{24}[0-9a-fA-F]{40}$/.test(bytes32)) {
-    throw new Error(
-      `recipient ${recipient} is not an EVM address: the first 12 of its 32 bytes must be zero, or the destination cannot mint to it`,
-    );
-  }
+  if (!/^0x0{24}[0-9a-fA-F]{40}$/.test(bytes32)) throw notEvm;
   return bytes32;
 }

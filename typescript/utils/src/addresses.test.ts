@@ -1,3 +1,4 @@
+import { bech32m } from 'bech32';
 import { expect } from 'chai';
 
 import {
@@ -306,15 +307,24 @@ describe('Address utilities', () => {
           FORM_UNDEPLOYED.replace('mn_addr', 'mn_dust'),
         ),
       ).to.throw();
+      // Other address kinds with a valid checksum over the same bytes.
+      const { words } = bech32m.decode(FORM_UNDEPLOYED, 1023);
+      for (const prefix of [
+        'mn_dust_undeployed',
+        'mn_shield-addr_undeployed',
+      ]) {
+        expect(() =>
+          decodeMidnightUnshieldedAddress(bech32m.encode(prefix, words, 1023)),
+        ).to.throw(/not a Midnight unshielded address/);
+      }
       // Contract addresses in registries and configs stay hex.
       expect(isValidAddressMidnight(FORM_UNDEPLOYED)).to.be.false;
     });
 
     it('Converts and compares the address form as the same user address', () => {
-      expect(getAddressProtocolType(FORM_UNDEPLOYED)).to.equal(
-        ProtocolType.Midnight,
+      expect(addressToBytes32(FORM_UNDEPLOYED, ProtocolType.Midnight)).to.equal(
+        FORM_HEX,
       );
-      expect(addressToBytes32(FORM_UNDEPLOYED)).to.equal(FORM_HEX);
       expect(
         bytesToProtocolAddress(
           addressToBytes(FORM_STAGENET, ProtocolType.Midnight),
@@ -323,6 +333,14 @@ describe('Address utilities', () => {
       ).to.equal(FORM_HEX);
       expect(normalizeAddressMidnight(FORM_MAINNET)).to.equal(FORM_HEX);
       expect(eqAddressMidnight(FORM_UNDEPLOYED, FORM_HEX)).to.be.true;
+    });
+
+    it('Reads the address form only when the protocol is named as Midnight', () => {
+      expect(getAddressProtocolType(FORM_UNDEPLOYED)).to.be.undefined;
+      expect(() => addressToBytes32(FORM_UNDEPLOYED)).to.throw();
+      expect(() =>
+        addressToBytes32(FORM_UNDEPLOYED, ProtocolType.Ethereum),
+      ).to.throw();
     });
   });
 });

@@ -29,6 +29,8 @@ const MIDNIGHT_ADDRESS_REGEX = /^(0x)?[0-9a-fA-F]{64}$/;
 // A user address can also be given in Midnight's unshielded address form:
 // bech32m over the same 32 bytes, prefix `mn_addr`, plus `_<network>` off
 // mainnet. Transfer recipients take this form; contract addresses stay hex.
+// It is read only where the protocol is named as Midnight, so a route
+// without Midnight never takes it for an address.
 const MIDNIGHT_UNSHIELDED_ADDRESS_PREFIX = 'mn_addr';
 const MIDNIGHT_MAINNET_ID = 'mainnet';
 // The official codec sets no length limit, and the library default of 90 is
@@ -168,9 +170,7 @@ export function isMidnightUnshieldedAddress(address: Address): boolean {
 }
 
 export function isAddressMidnight(address: Address) {
-  return (
-    MIDNIGHT_ADDRESS_REGEX.test(address) || isMidnightUnshieldedAddress(address)
-  );
+  return MIDNIGHT_ADDRESS_REGEX.test(address);
 }
 
 export function getAddressProtocolType(address: Address) {
