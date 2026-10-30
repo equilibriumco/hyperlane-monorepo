@@ -114,12 +114,21 @@ on disk.
   local. There is no public proof server.
 - **MIDNIGHT_NETWORK=devnet/stagenet**: selects default endpoints. Unset on a
   stagenet host means every endpoint quietly points at localhost.
-- **MIDNIGHT_STATE_DIR=\<path>**: holds the ownership secret and private state.
-  Losing it forfeits contract ownership and the ability to update circuits, so
-  back it up after a deploy. Its `owner-state.json` is written readable by your
-  user only, and a deploy will not start while it is readable by others.
+- **MIDNIGHT_STATE_DIR=\<path>**: holds the ownership secret, the private state
+  and the maintenance committee keys this host holds. Losing it forfeits
+  contract ownership and the ability to update circuits, so back it up after a
+  deploy. Its `owner-state.json` is written readable by your user only, and a
+  deploy will not start while it is readable by others.
 - **MIDNIGHT_STATE_PASSWORD=\<password>**: encrypts that state, and is required
   off a local devnet. There is no rotation path, so set it before first use.
+- **MIDNIGHT_MAINTENANCE_COMMITTEE=\<kind>:\<hex>,...**: the verifying keys of
+  the maintenance committee every deploy ends with, at least three, each as
+  its holder's key tool prints it (`schnorr:...`). The deploy's last
+  transaction hands the contract's maintenance authority to them with a
+  threshold of two, reads it back, and the deploy host then holds no
+  maintenance key. Unset, the committee is the deploy key plus two sampled
+  keys, all three saved in `owner-state.json`, which is only fit for a local
+  devnet.
 - **MIDNIGHT_SUBMIT_TIMEOUT_SECS=\<seconds>**: submit timeout. The default is
   well below the time an inbound delivery proof takes, so raise it when running
   agents.

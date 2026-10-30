@@ -2,8 +2,9 @@
  * Per-contract owner state. ZOwnablePK binds the owner id to a `secretNonce` in
  * private state plus an immutable `instanceSalt`, both generated once per
  * contract and persisted so admin tooling keeps the same identity later. The
- * maintenance-authority signing key is persisted too: losing it means never
- * being able to add or replace verifier keys on that instance again.
+ * maintenance committee keys this host holds are persisted too: the committee
+ * needs two signatures, so once fewer than two of its keys survive, no
+ * verifier key can ever be added or replaced on that instance again.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -19,8 +20,10 @@ interface OwnerStateEntry {
 
 interface OwnerStateFile {
   contracts: Partial<Record<MidnightContractName, OwnerStateEntry>>;
-  // Keyed by contract address; stored as whatever JSON value the SDK's
-  // SigningKey serializes to.
+  // Keyed by contract address: the committee keys this host holds, each at
+  // its committee index, as the JSON the SDK's SigningKey serializes to. A
+  // deploy that handed maintenance to keys held elsewhere stores an empty
+  // list; an entry written before committees holds one key, not a list.
   maintenanceSigningKeys: Record<string, unknown>;
 }
 
@@ -107,17 +110,20 @@ export class OwnerStateStore {
     };
   }
 
-  saveMaintenanceSigningKey(
+  saveMaintenanceSigningKeys(
     contractAddress: string,
-    signingKey: unknown,
+    signingKeys: unknown[],
   ): void {
     const all = this.load();
-    all.maintenanceSigningKeys[contractAddress] = signingKey;
+    all.maintenanceSigningKeys[contractAddress] = signingKeys;
     this.save(all);
   }
 
-  getMaintenanceSigningKey(contractAddress: string): unknown {
-    return this.load().maintenanceSigningKeys[contractAddress] ?? null;
+  // The committee keys this host holds, in committee order.
+  getMaintenanceSigningKeys(contractAddress: string): unknown[] {
+    const stored = this.load().maintenanceSigningKeys[contractAddress];
+    if (stored == null) return [];
+    return Array.isArray(stored) ? stored : [stored];
   }
 }
 
