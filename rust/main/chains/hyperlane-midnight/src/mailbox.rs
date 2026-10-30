@@ -26,6 +26,7 @@ pub struct MidnightMailbox {
     domain: HyperlaneDomain,
     provider: MidnightProvider,
     toolkit_ctx: ToolkitContext,
+    delivery_gas: U256,
     /// Test-only override for the on-chain validator order, so `process` can
     /// run offline without an indexer.
     #[cfg(test)]
@@ -43,6 +44,7 @@ impl MidnightMailbox {
             domain: locator.domain.clone(),
             provider,
             toolkit_ctx,
+            delivery_gas: conf.delivery_gas,
             #[cfg(test)]
             validator_override: None,
         })
@@ -130,11 +132,10 @@ impl Mailbox for MidnightMailbox {
 
         let outcome = toolkit::submit_handle(&self.toolkit_ctx, &request).await?;
 
-        // Gas is the DUST actually paid, in specks, at a unit price.
         Ok(TxOutcome {
             transaction_id: outcome.transaction_id,
             executed: outcome.executed,
-            gas_used: outcome.fee_specks.unwrap_or_default(),
+            gas_used: outcome_gas_used(self.delivery_gas, outcome.fee_specks),
             gas_price: FixedPointNumber::from_str("1")
                 .map_err(|err| ChainCommunicationError::from_other_str(&err.to_string()))?,
         })
@@ -158,14 +159,7 @@ impl Mailbox for MidnightMailbox {
             toolkit::build_dry_run_request(self.address, &self.toolkit_ctx, message, parsed, false);
         toolkit::dry_run_handle(&self.toolkit_ctx, &request).await?;
 
-        // Fees are DUST the wallet computes at submission time, so there is no
-        // estimate to report. Zero leaves `onChainFeeQuoting` permissive rather
-        // than imposing an arbitrary bar.
-        Ok(TxCostEstimate {
-            gas_limit: U256::zero(),
-            gas_price: FixedPointNumber::zero(),
-            l2_gas_limit: None,
-        })
+        Ok(cost_estimate(self.delivery_gas))
     }
 
     async fn process_calldata(
@@ -332,9 +326,54 @@ fn recover_signer(inner_hash: &[u8; 32], sig_bytes: &[u8]) -> ChainResult<H160> 
     Ok(H160::from(recovered.0))
 }
 
+// Fees are DUST the wallet computes at submission time, so the only estimate
+// is the configured delivery gas, in the origin IGP's unit. Zero leaves
+// `onChainFeeQuoting` permissive rather than imposing an arbitrary bar.
+fn cost_estimate(delivery_gas: U256) -> TxCostEstimate {
+    TxCostEstimate {
+        gas_limit: delivery_gas,
+        gas_price: FixedPointNumber::zero(),
+        l2_gas_limit: None,
+    }
+}
+
+// The gas a landed delivery is recorded as having used. With a delivery gas
+// configured it is that figure, in the unit the payment policy compares
+// against; without one it is the DUST paid, in specks, at a unit price.
+fn outcome_gas_used(delivery_gas: U256, fee_specks: Option<U256>) -> U256 {
+    if delivery_gas.is_zero() {
+        fee_specks.unwrap_or_default()
+    } else {
+        delivery_gas
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_estimate_reports_the_configured_delivery_gas() {
+        assert_eq!(
+            cost_estimate(U256::zero()).enforceable_gas_limit(),
+            U256::zero()
+        );
+        assert_eq!(
+            cost_estimate(U256::from(300_000)).enforceable_gas_limit(),
+            U256::from(300_000)
+        );
+    }
+
+    #[test]
+    fn outcome_gas_used_follows_the_delivery_gas_unit() {
+        let fee = Some(U256::from(24_639_658_107_501u64));
+        assert_eq!(outcome_gas_used(U256::zero(), fee), fee.unwrap());
+        assert_eq!(outcome_gas_used(U256::zero(), None), U256::zero());
+        assert_eq!(
+            outcome_gas_used(U256::from(300_000), fee),
+            U256::from(300_000)
+        );
+    }
 
     #[test]
     fn parse_metadata_extracts_fields() {
