@@ -71,6 +71,14 @@ pub enum HyperlaneMidnightError {
     #[error("contract state decode error: {0}")]
     StateDecode(String),
 
+    /// The node's JSON-RPC endpoint failed or refused a read.
+    #[error("node RPC error: {0}")]
+    NodeRpc(String),
+
+    /// The indexer and the node serve different dispatched messages.
+    #[error("indexer and node disagree: {0}")]
+    IndexerNodeMismatch(String),
+
     /// Catch-all.
     #[error("{0}")]
     Other(String),

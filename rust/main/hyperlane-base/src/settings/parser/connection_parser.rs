@@ -834,7 +834,7 @@ pub fn build_aleo_connection_conf(
 
 #[cfg(feature = "midnight")]
 pub fn build_midnight_connection_conf(
-    _rpcs: &[Url],
+    rpcs: &[Url],
     chain: &ValueParser,
     err: &mut ConfigParsingError,
     _operation_batch: OpSubmissionConfig,
@@ -858,8 +858,14 @@ pub fn build_midnight_connection_conf(
         err.merge(local_err);
         None
     } else {
+        // The first `rpcUrls` entry is the node the merkle tree reads
+        // cross-check the indexer against.
         Some(ChainConnectionConf::Midnight(
-            hyperlane_midnight::ConnectionConf::new(indexer_graphql_url?, toolkit_path),
+            hyperlane_midnight::ConnectionConf::new(
+                indexer_graphql_url?,
+                rpcs.first().cloned(),
+                toolkit_path,
+            ),
         ))
     }
 }

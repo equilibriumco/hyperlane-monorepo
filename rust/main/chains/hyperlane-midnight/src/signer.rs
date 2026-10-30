@@ -42,11 +42,16 @@ mod tests {
     fn config_constructs() {
         let conf = ConnectionConf::new(
             Url::parse("http://localhost:8080/graphql").unwrap(),
+            Some(Url::parse("ws://localhost:9944").unwrap()),
             Some("/srv/hyperlane/relayer/dist/submit-handle.js".to_string()),
         );
         assert_eq!(
             conf.indexer_graphql_url.as_str(),
             "http://localhost:8080/graphql"
+        );
+        assert_eq!(
+            conf.node_rpc_url.as_ref().map(|u| u.as_str()),
+            Some("ws://localhost:9944/")
         );
         assert!(conf.toolkit_path.is_some());
     }

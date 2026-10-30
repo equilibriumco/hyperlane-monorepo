@@ -71,6 +71,7 @@ const TEST_CONTRACT_ADDRESS: H256 = H256::repeat_byte(0xA1);
 fn test_conf(toolkit_path: Option<String>) -> ConnectionConf {
     ConnectionConf::new(
         Url::parse("http://127.0.0.1:8088/api/v3/graphql").unwrap(),
+        None,
         toolkit_path,
     )
 }
@@ -641,7 +642,7 @@ async fn hostile_message_through_the_real_sidecar_lands_nothing() {
 
     let night = H256::from_slice(&hex::decode(address_hex.trim_start_matches("0x")).unwrap());
     let domain = HyperlaneDomain::Known(KnownHyperlaneDomain::Midnight);
-    let conf = ConnectionConf::new(indexer.clone(), Some(sidecar));
+    let conf = ConnectionConf::new(indexer.clone(), None, Some(sidecar));
     let deployed = MidnightMailbox::new(
         &ContractLocator {
             domain: &domain,
