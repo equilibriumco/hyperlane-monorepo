@@ -5,6 +5,7 @@
  * threshold of two, so no key on its own can change a verifier key or the
  * authority.
  */
+import * as ledger from '@midnightntwrk/ledger-v9';
 import type { SignatureVerifyingKey } from '@midnightntwrk/ledger-v9';
 
 export const MAINTENANCE_THRESHOLD = 2;
@@ -39,10 +40,19 @@ export function parseCommittee(raw: string): SignatureVerifyingKey[] {
           `MIDNIGHT_MAINTENANCE_COMMITTEE: '${token}' is not a hex verifying key`,
         );
       }
-      return {
+      const key = {
         tag: tag as SignatureVerifyingKey['tag'],
         value: value.toLowerCase(),
       };
+      // The ledger checks the key only at the hand-over, after the deploy.
+      try {
+        new ledger.ContractMaintenanceAuthority([key], 1, 0n);
+      } catch (e) {
+        throw new Error(
+          `MIDNIGHT_MAINTENANCE_COMMITTEE: '${token}' is not a ${key.tag} verifying key: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      return key;
     });
   if (keys.length < MIN_COMMITTEE_SIZE) {
     throw new Error(
