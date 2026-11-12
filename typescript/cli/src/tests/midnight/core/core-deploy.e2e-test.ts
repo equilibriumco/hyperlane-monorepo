@@ -19,6 +19,9 @@ import {
 import { comparableSet, validatorSetsByOrigin } from '../ism.js';
 
 const HEX_32_BYTES = /^0x[0-9a-f]{64}$/;
+// The registry holds Midnight contract addresses as the ledger writes them,
+// without a 0x prefix.
+const CONTRACT_ADDRESS = /^[0-9a-f]{64}$/;
 const ZERO_32_BYTES = `0x${'0'.repeat(64)}`;
 
 describe('hyperlane midnight core deploy e2e tests', async function () {
@@ -46,9 +49,9 @@ describe('hyperlane midnight core deploy e2e tests', async function () {
   });
 
   it('should deploy the night monolith with its satellite contracts', () => {
-    expect(addresses.mailbox).to.match(HEX_32_BYTES);
-    expect(addresses.interchainGasPaymaster).to.match(HEX_32_BYTES);
-    expect(addresses.validatorAnnounce).to.match(HEX_32_BYTES);
+    expect(addresses.mailbox).to.match(CONTRACT_ADDRESS);
+    expect(addresses.interchainGasPaymaster).to.match(CONTRACT_ADDRESS);
+    expect(addresses.validatorAnnounce).to.match(CONTRACT_ADDRESS);
 
     // The night contract is its own merkle tree hook identity; the IGP and
     // the validator announce are standalone contracts.
