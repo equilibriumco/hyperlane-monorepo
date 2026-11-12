@@ -11,6 +11,9 @@ export interface NightConstructorInputs {
   ownerId: Uint8Array;
   instanceSalt: Uint8Array;
   domainId: bigint;
+  // The one origin chain whose validators the constructor takes; the other
+  // origins are set by the owner after the deploy.
+  initialOrigin: bigint;
   validatorSet: ResolvedValidatorSet;
   localDecimals: bigint;
   // Per-transfer limit in local NIGHT units; 0 means no limit.
@@ -44,6 +47,7 @@ export function nightConstructorArgs(
     inputs.ownerId,
     inputs.instanceSalt,
     inputs.domainId,
+    inputs.initialOrigin,
     inputs.validatorSet.paddedPubkeys,
     inputs.validatorSet.count,
     inputs.validatorSet.threshold,

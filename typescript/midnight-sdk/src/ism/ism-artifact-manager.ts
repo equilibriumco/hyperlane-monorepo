@@ -20,91 +20,62 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/module';
 import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
-import { bytesToHex } from '../utils/conversion.js';
-import { unsupportedOnMidnight } from '../utils/errors.js';
+import { bytesToHex, normalizeHexForCompare } from '../utils/conversion.js';
+import { NIGHT_ISM_SHAPE, unsupportedOnMidnight } from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
+import { readValidatorSetOrigins } from '../clients/state.js';
 
 import {
+  maxValidators,
   pubkeyToEthAddress,
   resolveValidatorSet,
   sameValidatorSet,
+  setValidatorsTx,
+  validatorSetsByOrigin,
 } from './validators.js';
 
 const MODULE_TYPE_MESSAGE_ID_MULTISIG = 5n;
 
-class MidnightMultisigIsmReader implements ArtifactReader<
-  RawIsmArtifactConfigs['messageIdMultisigIsm'],
-  DeployedIsmAddress
-> {
-  constructor(protected readonly client: MidnightReadClient) {}
+type MultisigIsmConfig = RawIsmArtifactConfigs['messageIdMultisigIsm'];
+type RoutingIsmConfig = RawIsmArtifactConfigs['domainRoutingIsm'];
 
-  async read(
-    address: string,
-  ): Promise<
-    ArtifactDeployed<
-      RawIsmArtifactConfigs['messageIdMultisigIsm'],
-      DeployedIsmAddress
-    >
-  > {
-    const state = await this.client.requireContractState(address);
-    const [count, threshold] = await Promise.all([
-      this.client.runCircuit<bigint>('night', state.data, 'validatorCount'),
-      this.client.runCircuit<bigint>('night', state.data, 'thresholdValue'),
-    ]);
-    // The chain stores full pubkeys; expose both them and the derived eth
-    // addresses so a derived config round-trips into write-ready configs
-    // (writes need the pubkeys, checks compare the addresses).
-    const validators: string[] = [];
-    const validatorPubkeys: string[] = [];
-    for (let i = 0n; i < count; i++) {
-      const pubkey = await this.client.runCircuit<Uint8Array>(
-        'night',
-        state.data,
-        'validatorAt',
-        [i],
-      );
-      validators.push(pubkeyToEthAddress(pubkey));
-      validatorPubkeys.push(bytesToHex(pubkey));
-    }
-    return {
-      artifactState: ArtifactState.DEPLOYED,
-      config: {
-        type: 'messageIdMultisigIsm',
-        validators,
-        threshold: Number(threshold),
-        validatorPubkeys,
-      },
-      deployed: { address },
-    };
-  }
+// What night's validatorSet circuit returns: every slot, then how many of
+// them are the set.
+type OnChainValidatorSet = {
+  validators: Uint8Array[];
+  count: bigint;
+  threshold: bigint;
+};
+
+function noSingleMultisigIsm(): never {
+  throw new Error(
+    'night keeps one validator set per origin chain, so there is no single ' +
+      'messageIdMultisigIsm to read — read its ISM as a domainRoutingIsm',
+  );
 }
 
-class MidnightMultisigIsmWriter
-  extends MidnightMultisigIsmReader
-  implements
-    ArtifactWriter<
-      RawIsmArtifactConfigs['messageIdMultisigIsm'],
-      DeployedIsmAddress
-    >
-{
-  // The ISM is a facet of the night monolith and cannot deploy standalone: its
-  // validators and threshold are constructor args, and the contract does not
-  // exist yet when the orchestrator asks. The zero-address sentinel keeps the
-  // config flowing to the mailbox writer, which seals it in and stamps the real
-  // address back here.
-  async create(
-    artifact: ArtifactNew<RawIsmArtifactConfigs['messageIdMultisigIsm']>,
-  ): Promise<
-    [
-      ArtifactDeployed<
-        RawIsmArtifactConfigs['messageIdMultisigIsm'],
-        DeployedIsmAddress
-      >,
-      TxReceipt[],
-    ]
+// One origin's validators are part of night, with no address or state of
+// their own: the routing writer below reads and writes every origin's set.
+export class MidnightMultisigIsmWriter implements ArtifactWriter<
+  MultisigIsmConfig,
+  DeployedIsmAddress
+> {
+  async read(): Promise<
+    ArtifactDeployed<MultisigIsmConfig, DeployedIsmAddress>
   > {
-    resolveValidatorSet(artifact.config);
+    return noSingleMultisigIsm();
+  }
+
+  // The contract does not exist yet when the orchestrator asks for a new
+  // origin's ISM. The zero-address sentinel keeps the validated config flowing
+  // to the routing writer and, on a deploy, to the mailbox writer.
+  async create(
+    artifact: ArtifactNew<MultisigIsmConfig>,
+  ): Promise<
+    [ArtifactDeployed<MultisigIsmConfig, DeployedIsmAddress>, TxReceipt[]]
+  > {
+    resolveValidatorSet(artifact.config, await maxValidators());
     return [
       {
         artifactState: ArtifactState.DEPLOYED,
@@ -115,29 +86,146 @@ class MidnightMultisigIsmWriter
     ];
   }
 
-  async update(
-    artifact: ArtifactDeployed<
-      RawIsmArtifactConfigs['messageIdMultisigIsm'],
-      DeployedIsmAddress
-    >,
-  ): Promise<MidnightTransaction[]> {
-    const expected = artifact.config;
-    const current = await this.read(artifact.deployed.address);
-    if (sameValidatorSet(current.config, expected)) {
-      return [];
+  async update(): Promise<MidnightTransaction[]> {
+    return [];
+  }
+}
+
+class MidnightRoutingIsmReader implements ArtifactReader<
+  RoutingIsmConfig,
+  DeployedIsmAddress
+> {
+  constructor(protected readonly client: MidnightReadClient) {}
+
+  // Night is its own ISM: the routing ISM and every origin's multisig carry
+  // night's address, and the owner is night's owner commitment.
+  async read(
+    address: string,
+  ): Promise<ArtifactDeployed<RoutingIsmConfig, DeployedIsmAddress>> {
+    const { owner, sets } = await this.readValidatorSets(address);
+    const domains: RoutingIsmConfig['domains'] = {};
+    for (const [origin, config] of sets) {
+      domains[origin] = {
+        artifactState: ArtifactState.DEPLOYED,
+        config,
+        deployed: { address },
+      };
     }
-    const set = resolveValidatorSet(expected);
+    return {
+      artifactState: ArtifactState.DEPLOYED,
+      config: { type: 'domainRoutingIsm', owner, domains },
+      deployed: { address },
+    };
+  }
+
+  protected async readValidatorSets(
+    address: string,
+  ): Promise<{ owner: string; sets: Map<number, MultisigIsmConfig> }> {
+    const state = await this.client.requireContractState(address);
+    const [moduleType, owner] = await Promise.all([
+      this.client.runCircuit<bigint>('night', state.data, 'moduleType'),
+      this.client.runCircuit<Uint8Array>('night', state.data, 'owner'),
+    ]);
+    if (moduleType !== MODULE_TYPE_MESSAGE_ID_MULTISIG) {
+      throw new Error(
+        `unexpected ISM module type ${moduleType} at ${address}, only messageIdMultisigIsm (5) exists on Midnight`,
+      );
+    }
+    const sets = new Map<number, MultisigIsmConfig>();
+    for (const origin of readValidatorSetOrigins(state.data)) {
+      const set = await this.client.runCircuit<OnChainValidatorSet>(
+        'night',
+        state.data,
+        'validatorSet',
+        [BigInt(origin)],
+      );
+      // The chain stores full pubkeys; expose both them and the derived eth
+      // addresses so a derived config round-trips into write-ready configs
+      // (writes need the pubkeys, checks compare the addresses).
+      const pubkeys = set.validators.slice(0, Number(set.count));
+      sets.set(origin, {
+        type: 'messageIdMultisigIsm',
+        validators: pubkeys.map(pubkeyToEthAddress),
+        threshold: Number(set.threshold),
+        validatorPubkeys: pubkeys.map(bytesToHex),
+      });
+    }
+    return { owner: bytesToHex(owner), sets };
+  }
+}
+
+export class MidnightRoutingIsmWriter
+  extends MidnightRoutingIsmReader
+  implements ArtifactWriter<RoutingIsmConfig, DeployedIsmAddress>
+{
+  // The ISM is a facet of the night monolith and cannot deploy standalone: the
+  // first origin's validators are constructor args. The zero-address sentinel
+  // keeps the config flowing to the mailbox writer, which deploys night with
+  // it and stamps the real address back here.
+  async create(
+    artifact: ArtifactNew<RoutingIsmConfig>,
+  ): Promise<
+    [ArtifactDeployed<RoutingIsmConfig, DeployedIsmAddress>, TxReceipt[]]
+  > {
+    if (validatorSetsByOrigin(artifact.config.domains).size === 0) {
+      throw new Error(
+        `night needs the validators of at least one origin chain: ${NIGHT_ISM_SHAPE}`,
+      );
+    }
     return [
       {
-        annotation:
-          `Set validators (${expected.validators.length}) and threshold ` +
-          `${expected.threshold} on ${artifact.deployed.address}`,
-        contract: 'night',
-        contractAddress: artifact.deployed.address,
-        circuit: 'setValidatorsAndThreshold',
-        args: [set.paddedPubkeys, set.count, set.threshold],
+        artifactState: ArtifactState.DEPLOYED,
+        config: artifact.config,
+        deployed: { address: ZERO_ADDRESS_HEX_32 },
       },
+      [],
     ];
+  }
+
+  // One full replace per origin whose set differs or is new, and one removal
+  // per origin that is on chain but no longer in the config.
+  async update(
+    artifact: ArtifactDeployed<RoutingIsmConfig, DeployedIsmAddress>,
+  ): Promise<MidnightTransaction[]> {
+    const address = artifact.deployed.address;
+    const expected = validatorSetsByOrigin(artifact.config.domains);
+    const current = await this.readValidatorSets(address);
+
+    const expectedOwner = artifact.config.owner;
+    if (
+      expectedOwner &&
+      expectedOwner !== ZERO_ADDRESS_HEX_32 &&
+      normalizeHexForCompare(expectedOwner) !==
+        normalizeHexForCompare(current.owner)
+    ) {
+      throw new Error(
+        `night's ISM has no owner of its own: it is night's owner ` +
+          `(${current.owner}), and the config says ${expectedOwner}. Move ` +
+          `ownership through the core config's owner and write the ISM owner ` +
+          `as the zero address`,
+      );
+    }
+
+    const slots = await maxValidators();
+    const txs: MidnightTransaction[] = [];
+    for (const [origin, config] of expected) {
+      const onChain = current.sets.get(origin);
+      if (onChain && sameValidatorSet(onChain, config)) continue;
+      txs.push(
+        setValidatorsTx(address, origin, resolveValidatorSet(config, slots)),
+      );
+    }
+    for (const origin of current.sets.keys()) {
+      if (expected.has(origin)) continue;
+      txs.push({
+        annotation: `Remove the validators for origin ${origin} on ${address}`,
+        contract: 'night',
+        contractAddress: address,
+        circuit: 'removeValidators',
+        args: [BigInt(origin)],
+      });
+    }
+    return txs;
   }
 }
 
@@ -148,25 +236,8 @@ export class MidnightIsmArtifactManager implements IRawIsmArtifactManager {
     this.client = MidnightReadClient.fromMetadata(chainMetadata);
   }
 
-  // setValidatorsAndThreshold rotates the multisig in place; a config
-  // change must not force the EVM-style "redeploy the static ISM" path.
-  supportsInPlaceStaticIsmUpdates(): boolean {
-    return true;
-  }
-
   async readIsm(address: string): Promise<DeployedRawIsmArtifact> {
-    const state = await this.client.requireContractState(address);
-    const moduleType = await this.client.runCircuit<bigint>(
-      'night',
-      state.data,
-      'moduleType',
-    );
-    if (moduleType !== MODULE_TYPE_MESSAGE_ID_MULTISIG) {
-      throw new Error(
-        `unexpected ISM module type ${moduleType} at ${address}, only messageIdMultisigIsm (5) exists on Midnight`,
-      );
-    }
-    return this.createReader('messageIdMultisigIsm').read(address);
+    return this.createReader('domainRoutingIsm').read(address);
   }
 
   createReader<T extends IsmType>(
@@ -178,12 +249,12 @@ export class MidnightIsmArtifactManager implements IRawIsmArtifactManager {
         DeployedIsmAddress
       >;
     } = {
-      messageIdMultisigIsm: () => new MidnightMultisigIsmReader(this.client),
+      messageIdMultisigIsm: noSingleMultisigIsm,
       merkleRootMultisigIsm: unsupportedOnMidnight(
         'ISM',
         'merkleRootMultisigIsm',
       ),
-      domainRoutingIsm: unsupportedOnMidnight('ISM', 'domainRoutingIsm'),
+      domainRoutingIsm: () => new MidnightRoutingIsmReader(this.client),
       testIsm: unsupportedOnMidnight('ISM', 'testIsm'),
       compositeIsm: unsupportedOnMidnight('ISM', 'compositeIsm'),
     };
@@ -200,12 +271,12 @@ export class MidnightIsmArtifactManager implements IRawIsmArtifactManager {
         DeployedIsmAddress
       >;
     } = {
-      messageIdMultisigIsm: () => new MidnightMultisigIsmWriter(this.client),
+      messageIdMultisigIsm: () => new MidnightMultisigIsmWriter(),
       merkleRootMultisigIsm: unsupportedOnMidnight(
         'ISM',
         'merkleRootMultisigIsm',
       ),
-      domainRoutingIsm: unsupportedOnMidnight('ISM', 'domainRoutingIsm'),
+      domainRoutingIsm: () => new MidnightRoutingIsmWriter(this.client),
       testIsm: unsupportedOnMidnight('ISM', 'testIsm'),
       compositeIsm: unsupportedOnMidnight('ISM', 'compositeIsm'),
     };

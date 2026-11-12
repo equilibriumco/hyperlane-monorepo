@@ -1,29 +1,23 @@
 import { expect } from 'chai';
 
-import type { RawIsmArtifactConfigs } from '@hyperlane-xyz/provider-sdk/ism';
+import { ArtifactState } from '@hyperlane-xyz/provider-sdk/artifact';
 
+import { deployNight } from '../testing/simulated-night.js';
+import {
+  PUBKEYS,
+  VALIDATORS,
+  multisigOf,
+  type MultisigConfig,
+} from '../testing/validators.js';
 import { hexToBytes } from '../utils/conversion.js';
 
 import {
-  MAX_VALIDATORS,
+  maxValidators,
   pubkeyToEthAddress,
   resolveValidatorSet,
+  sameValidatorSet,
+  validatorSetsByOrigin,
 } from './validators.js';
-
-// The well-known anvil dev accounts #0-#2: real secp256k1 pubkeys whose
-// keccak hashes derive the matching addresses.
-const VALIDATORS = [
-  '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-  '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
-  '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
-];
-const PUBKEYS = [
-  '0x8318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed753547f11ca8696646f2f3acb08e31016afac23e630c5d11f59f61fef57b0d2aa5',
-  '0xba5734d8f7091719471e7f7ed6b9df170dc70cc661ca05e688601ad984f068b0d67351e5f06073092499336ab0839ef8a521afd334e53807205fa2f08eec74f4',
-  '0x9d9031e97dd78ff8c15aa86939de9b1e791066a0224e331bc962a2099a7b1f0464b8bbafe1535f2301c72c2cb3535b172da30b02686ab0393d348614f157fbdb',
-];
-
-type MultisigConfig = RawIsmArtifactConfigs['messageIdMultisigIsm'];
 
 function multisigConfig(overrides: Partial<MultisigConfig>): MultisigConfig {
   return {
@@ -51,20 +45,45 @@ describe('pubkeyToEthAddress', () => {
   });
 });
 
+describe('maxValidators', () => {
+  it('is the number of slots the compiled night contract stores', async () => {
+    const night = await deployNight({ 31338: multisigOf([0], 1) });
+    const { data } = await night.requireContractState(night.address);
+    const stored = await night.runCircuit<{ validators: Uint8Array[] }>(
+      'night',
+      data,
+      'validatorSet',
+      [31338n],
+    );
+    expect(stored.validators).to.have.lengthOf(await maxValidators());
+  });
+});
+
 describe('resolveValidatorSet', () => {
-  it('pads the pubkey vector to the contract size', () => {
-    const resolved = resolveValidatorSet(multisigConfig({}));
+  let slots: number;
+
+  before(async () => {
+    slots = await maxValidators();
+  });
+
+  it('pads the pubkey vector to the contract size with zero keys', () => {
+    const resolved = resolveValidatorSet(multisigConfig({}), slots);
 
     expect(resolved.count).to.equal(3n);
     expect(resolved.threshold).to.equal(2n);
-    expect(resolved.paddedPubkeys).to.have.lengthOf(MAX_VALIDATORS);
-    expect(resolved.paddedPubkeys[0]).to.eql(hexToBytes(PUBKEYS[0]));
-    expect(resolved.paddedPubkeys[3]).to.eql(new Uint8Array(64));
+    expect(resolved.paddedPubkeys).to.have.lengthOf(slots);
+    expect(resolved.paddedPubkeys.slice(0, 3)).to.eql(PUBKEYS.map(hexToBytes));
+    for (const unused of resolved.paddedPubkeys.slice(3)) {
+      expect(unused).to.eql(new Uint8Array(64));
+    }
   });
 
   it('requires validatorPubkeys', () => {
     expect(() =>
-      resolveValidatorSet(multisigConfig({ validatorPubkeys: undefined })),
+      resolveValidatorSet(
+        multisigConfig({ validatorPubkeys: undefined }),
+        slots,
+      ),
     ).to.throw('validatorPubkeys');
   });
 
@@ -72,6 +91,7 @@ describe('resolveValidatorSet', () => {
     expect(() =>
       resolveValidatorSet(
         multisigConfig({ validatorPubkeys: PUBKEYS.slice(0, 2) }),
+        slots,
       ),
     ).to.throw('one-to-one');
   });
@@ -82,6 +102,7 @@ describe('resolveValidatorSet', () => {
         multisigConfig({
           validatorPubkeys: [PUBKEYS[1], PUBKEYS[0], PUBKEYS[2]],
         }),
+        slots,
       ),
     ).to.throw('derives address');
   });
@@ -93,6 +114,7 @@ describe('resolveValidatorSet', () => {
           validators: [VALIDATORS[0], VALIDATORS[0], VALIDATORS[1]],
           validatorPubkeys: [PUBKEYS[0], PUBKEYS[0], PUBKEYS[1]],
         }),
+        slots,
       ),
     ).to.throw('must be distinct');
     // EIP-55 checksum casing does not make two equal addresses distinct.
@@ -106,26 +128,90 @@ describe('resolveValidatorSet', () => {
           ],
           validatorPubkeys: [PUBKEYS[0], PUBKEYS[0], PUBKEYS[1]],
         }),
+        slots,
       ),
     ).to.throw('must be distinct');
   });
 
   it('rejects an out-of-range threshold', () => {
     expect(() =>
-      resolveValidatorSet(multisigConfig({ threshold: 4 })),
+      resolveValidatorSet(multisigConfig({ threshold: 4 }), slots),
     ).to.throw('out of range');
     expect(() =>
-      resolveValidatorSet(multisigConfig({ threshold: 0 })),
+      resolveValidatorSet(multisigConfig({ threshold: 0 }), slots),
     ).to.throw('out of range');
   });
 
   it('rejects more validators than the contract vector holds', () => {
-    const validators = [...VALIDATORS, ...VALIDATORS].slice(
-      0,
-      MAX_VALIDATORS + 1,
+    const validators = Array.from(
+      { length: slots + 1 },
+      (_, i) => VALIDATORS[i % VALIDATORS.length],
     );
-    expect(() => resolveValidatorSet(multisigConfig({ validators }))).to.throw(
-      `1-${MAX_VALIDATORS} validators`,
-    );
+    expect(() =>
+      resolveValidatorSet(multisigConfig({ validators }), slots),
+    ).to.throw(`1-${slots} validators`);
+  });
+});
+
+describe('sameValidatorSet', () => {
+  it('ignores validator order and address casing', () => {
+    const current = multisigOf([0, 1, 2], 2);
+    const expected = {
+      validators: [VALIDATORS[2], VALIDATORS[0], VALIDATORS[1]].map((v) =>
+        v.toLowerCase(),
+      ),
+      threshold: 2,
+    };
+    expect(sameValidatorSet(current, expected)).to.equal(true);
+  });
+
+  it('sees a changed threshold or member', () => {
+    const current = multisigOf([0, 1, 2], 2);
+    expect(sameValidatorSet(current, multisigOf([0, 1, 2], 3))).to.equal(false);
+    expect(sameValidatorSet(current, multisigOf([0, 1], 2))).to.equal(false);
+  });
+});
+
+describe('validatorSetsByOrigin', () => {
+  const address = `0x${'5a'.repeat(32)}`;
+
+  it('lists each origin with its multisig config', () => {
+    const sets = validatorSetsByOrigin({
+      31338: {
+        artifactState: ArtifactState.DEPLOYED,
+        config: multisigOf([0, 1, 2], 2),
+        deployed: { address },
+      },
+      31347: {
+        artifactState: ArtifactState.DEPLOYED,
+        config: multisigOf([2], 1),
+        deployed: { address },
+      },
+    });
+    expect([...sets.keys()]).to.eql([31338, 31347]);
+    expect(sets.get(31347)).to.eql(multisigOf([2], 1));
+  });
+
+  it('refuses an origin that points at another ISM address', () => {
+    expect(() =>
+      validatorSetsByOrigin({
+        31338: {
+          artifactState: ArtifactState.UNDERIVED,
+          deployed: { address },
+        },
+      }),
+    ).to.throw('origin 31338: write night');
+  });
+
+  it('refuses an origin with another ISM type', () => {
+    expect(() =>
+      validatorSetsByOrigin({
+        31338: {
+          artifactState: ArtifactState.DEPLOYED,
+          config: { type: 'testIsm' },
+          deployed: { address },
+        },
+      }),
+    ).to.throw('one messageIdMultisigIsm');
   });
 });

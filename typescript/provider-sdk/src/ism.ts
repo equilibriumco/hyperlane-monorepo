@@ -262,14 +262,6 @@ export interface IRawIsmArtifactManager extends IArtifactManager<
    * @returns The artifact configuration and deployment data
    */
   readIsm(address: string): Promise<DeployedRawIsmArtifact>;
-
-  /**
-   * Whether "static" ISM types are mutable in place on this protocol. Defaults
-   * to false, matching EVM, where a config change means a new deployment.
-   * Protocols whose multisig ISM has an on-chain rotation entry point return
-   * true, routing config changes through `update()` instead of a redeploy.
-   */
-  supportsInPlaceStaticIsmUpdates?(): boolean;
 }
 
 /**
@@ -318,11 +310,6 @@ export function shouldDeployNewIsm(
 export function mergeIsmArtifacts(
   currentArtifact: DeployedIsmArtifact | undefined,
   expectedArtifact: ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact,
-  options?: {
-    // When true, a changed static-ISM config keeps the current deployment and
-    // routes the change through the writer's `update()`.
-    allowInPlaceStaticUpdate?: boolean;
-  },
 ): ArtifactNew<IsmArtifactConfig> | DeployedIsmArtifact {
   const expectedConfig = expectedArtifact.config;
 
@@ -343,10 +330,7 @@ export function mergeIsmArtifacts(
 
   // For static ISMs, check if config changed
   if (STATIC_ISM_TYPES.includes(expectedConfig.type)) {
-    if (
-      !options?.allowInPlaceStaticUpdate &&
-      shouldDeployNewIsm(currentConfig, expectedConfig)
-    ) {
+    if (shouldDeployNewIsm(currentConfig, expectedConfig)) {
       return {
         artifactState: ArtifactState.NEW,
         config: expectedConfig,

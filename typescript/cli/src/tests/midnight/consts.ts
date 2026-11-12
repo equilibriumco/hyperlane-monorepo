@@ -30,6 +30,12 @@ export const MIDNIGHT_STATE_DIR = `${TEMP_PATH}/${CHAIN_NAME_1}/state`;
 export const REMOTE_CHAIN_NAME = 'anvil2';
 export const REMOTE_DOMAIN_ID = 31338;
 
+// Two more origin chains for night's validator sets, also registry-only. The
+// example core config deploys with a set for the remote chain above and the
+// first of these; the second is added and removed by `core apply`.
+export const REMOTE_CHAIN_NAME_2 = 'anvil3';
+export const REMOTE_CHAIN_NAME_3 = 'anvil4';
+
 // Anvil dev account #0 as a 32-byte hex router address on the remote chain.
 export const REMOTE_ROUTER_ADDRESS =
   '0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266';

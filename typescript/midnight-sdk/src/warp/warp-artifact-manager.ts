@@ -24,7 +24,10 @@ import {
   hexToBytes,
   normalizeHexForCompare,
 } from '../utils/conversion.js';
-import { unsupportedOnMidnight } from '../utils/errors.js';
+import {
+  assertNightIsItsOwnIsm,
+  unsupportedOnMidnight,
+} from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { readDestinationGas, readRemoteRouters } from '../clients/state.js';
@@ -86,7 +89,7 @@ class MidnightNativeWarpReader implements ArtifactReader<
 // The night warp route is the mailbox monolith itself, born in core deploy
 // with its ISM/hook/decimals sealed. Mutable surface: remote router
 // enrollment, per-destination gas, and ownership.
-class MidnightNativeWarpWriter
+export class MidnightNativeWarpWriter
   extends MidnightNativeWarpReader
   implements
     ArtifactWriter<RawWarpArtifactConfigs['native'], DeployedWarpAddress>
@@ -111,6 +114,12 @@ class MidnightNativeWarpWriter
   ): Promise<MidnightTransaction[]> {
     const expected = artifact.config;
     const address = artifact.deployed.address;
+    if (expected.interchainSecurityModule) {
+      assertNightIsItsOwnIsm(
+        address,
+        expected.interchainSecurityModule.deployed.address,
+      );
+    }
     const current = (await this.read(address)).config;
     const txs: MidnightTransaction[] = [];
 

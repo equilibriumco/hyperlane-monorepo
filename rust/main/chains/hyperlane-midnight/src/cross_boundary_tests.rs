@@ -240,7 +240,7 @@ async fn process_request_json_pins_wire_shape() {
     assert_eq!(md["index"], 7);
 
     let sigs = md["signatures"].as_array().unwrap();
-    // Forwarded unpadded; the submitter pads the on-chain `Vector<4>`.
+    // Forwarded unpadded; the submitter pads the on-chain vector.
     assert_eq!(sigs.len(), 2);
     assert_eq!(
         sigs[0].as_str().unwrap(),

@@ -700,22 +700,26 @@ mod tests {
             ism.module_type, 5,
             "module_type should be MessageIdMultisig"
         );
-        assert_eq!(
-            ism.validator_count as usize,
-            ism.validators.len(),
-            "validator_count must match decoded validator slots"
-        );
         assert!(
-            !ism.validators.is_empty(),
-            "expected at least one validator"
+            !ism.validator_sets.is_empty(),
+            "expected a validator set for at least one origin"
         );
-        assert!(ism.threshold >= 1, "threshold must be at least 1");
-        assert!(
-            ism.threshold as usize <= ism.validators.len(),
-            "threshold {} cannot exceed validator count {}",
-            ism.threshold,
-            ism.validators.len()
-        );
+        for (origin, set) in &ism.validator_sets {
+            assert!(
+                !set.validators.is_empty(),
+                "origin {origin}: expected at least one validator"
+            );
+            assert!(
+                set.threshold >= 1,
+                "origin {origin}: threshold must be at least 1"
+            );
+            assert!(
+                set.threshold as usize <= set.validators.len(),
+                "origin {origin}: threshold {} cannot exceed validator count {}",
+                set.threshold,
+                set.validators.len()
+            );
+        }
     }
 }
 

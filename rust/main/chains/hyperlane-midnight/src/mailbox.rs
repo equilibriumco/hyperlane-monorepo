@@ -11,11 +11,6 @@ use hyperlane_core::{
 use crate::toolkit::{self, ToolkitContext, WireMetadata};
 use crate::{ConnectionConf, HyperlaneMidnightError, MidnightProvider};
 
-// Matches the contract's `MessageIdMultisigIsm.MAX_VALIDATORS`, kept small to
-// keep the handle proof tractable. Signatures are forwarded verbatim: the
-// submitter is what pads the on-chain `Vector<4>` by repeating slot 0, and a
-// zero-signature pad added here would recover to a garbage pubkey.
-const MAX_SIGNATURES: usize = 4;
 const SIGNATURE_LEN: usize = 65;
 const METADATA_HEADER_LEN: usize = 32 + 32 + 4;
 
@@ -50,22 +45,22 @@ impl MidnightMailbox {
         })
     }
 
-    async fn validator_order(&self) -> ChainResult<Vec<H160>> {
+    /// The validators of the message's origin, in the contract's slot order.
+    /// Metadata with more signatures than a delivery has slots is refused.
+    async fn validator_order(
+        &self,
+        message: &HyperlaneMessage,
+        metadata: &WireMetadata,
+    ) -> ChainResult<Vec<H160>> {
         #[cfg(test)]
         if let Some(validators) = &self.validator_override {
             return Ok(validators.clone());
         }
         let address = format!("{:x}", self.address);
-        let validators = self
-            .provider
-            .indexer()
-            .read_ism_state(&address)
-            .await?
-            .validators
-            .into_iter()
-            .map(H160::from)
-            .collect();
-        Ok(validators)
+        let state = self.provider.indexer().read_ism_state(&address).await?;
+        let set = state.validator_set(message.origin)?;
+        check_signature_count(metadata.signatures.len(), set.slots)?;
+        Ok(set.validators.iter().copied().map(H160::from).collect())
     }
 
     /// Test-only: pin the validator order so `process` skips the chain read.
@@ -118,11 +113,12 @@ impl Mailbox for MidnightMailbox {
     ) -> ChainResult<TxOutcome> {
         let mut parsed = parse_metadata(metadata.as_ref())?;
 
-        // The on-chain ISM matches signatures against the validator set with a
-        // forward-only walk, so they must arrive in set-index order. The
-        // relayer emits them in checkpoint-syncer fetch order, which only
-        // incidentally matches, so sort against the on-chain set here.
-        let validators = self.validator_order().await?;
+        // The on-chain ISM matches signatures against the origin's validator
+        // set with a forward-only walk, so they must arrive in set-index
+        // order. The relayer emits them in checkpoint-syncer fetch order,
+        // which only incidentally matches, so sort against the on-chain set
+        // here.
+        let validators = self.validator_order(message, &parsed).await?;
         if !validators.is_empty() {
             sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
         }
@@ -151,7 +147,7 @@ impl Mailbox for MidnightMailbox {
         // The metadata is prepared exactly as `process` prepares it, or an
         // unsorted signature vector would revert spuriously.
         let mut parsed = parse_metadata(metadata.as_ref())?;
-        let validators = self.validator_order().await?;
+        let validators = self.validator_order(message, &parsed).await?;
         if !validators.is_empty() {
             sort_signatures_by_validator_index(message, &mut parsed, &validators)?;
         }
@@ -175,7 +171,7 @@ impl Mailbox for MidnightMailbox {
     }
 }
 
-// Layout: merkle_tree_hook (32) || root (32) || index (u32 BE, 4) || sigs (65 each, up to 4).
+// Layout: merkle_tree_hook (32) || root (32) || index (u32 BE, 4) || sigs (65 each).
 fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
     if bytes.len() < METADATA_HEADER_LEN {
         return Err(HyperlaneMidnightError::Other(format!(
@@ -195,12 +191,6 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
     }
 
     let sig_count = sigs_blob.len() / SIGNATURE_LEN;
-    if sig_count > MAX_SIGNATURES {
-        return Err(HyperlaneMidnightError::Other(format!(
-            "metadata carries {sig_count} signatures, exceeds on-chain bound of {MAX_SIGNATURES}"
-        ))
-        .into());
-    }
 
     let merkle_tree_hook = format!("0x{}", hex::encode(&bytes[0..32]));
     let root = format!("0x{}", hex::encode(&bytes[32..64]));
@@ -224,6 +214,21 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
         index,
         signatures,
     })
+}
+
+// A delivery has one signature slot per key slot of a validator set, a size
+// the contract fixes at compile time, so the bound comes from the state.
+// Signatures are forwarded verbatim: the submitter is what pads the on-chain
+// vector by repeating slot 0, and a zero-signature pad added here would
+// recover to a garbage pubkey.
+fn check_signature_count(signatures: usize, slots: usize) -> ChainResult<()> {
+    if signatures > slots {
+        return Err(HyperlaneMidnightError::Other(format!(
+            "metadata carries {signatures} signatures, exceeds on-chain bound of {slots}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Drops any zero padding. A signature recovering to an unknown address is an
@@ -421,13 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_metadata_rejects_too_many_signatures() {
-        let mut bytes = vec![0u8; METADATA_HEADER_LEN];
-        bytes.extend(std::iter::repeat_n(
-            0u8,
-            (MAX_SIGNATURES + 1) * SIGNATURE_LEN,
-        ));
-        assert!(parse_metadata(&bytes).is_err());
+    fn signature_count_is_held_to_the_contract_slots() {
+        assert!(check_signature_count(9, 9).is_ok());
+        assert!(check_signature_count(10, 9).is_err());
+        assert!(check_signature_count(5, 4).is_err());
     }
 
     #[tokio::test]
@@ -511,7 +513,7 @@ mod tests {
         let sig_rogue = k_rogue.sign_message(&inner[..]).await.unwrap();
         let zero_hex = format!("0x{}", hex::encode([0u8; SIGNATURE_LEN]));
         metadata.signatures = vec![format!("0x{}", hex::encode(<[u8; 65]>::from(sig_rogue)))];
-        while metadata.signatures.len() < MAX_SIGNATURES {
+        while metadata.signatures.len() < 4 {
             metadata.signatures.push(zero_hex.clone());
         }
 

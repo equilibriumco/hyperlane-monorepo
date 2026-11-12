@@ -66,7 +66,7 @@ pub struct WireMetadata {
     pub root: String,
     pub index: u32,
     /// Validator signatures, forwarded unpadded. The submitter pads the
-    /// on-chain `Vector<4>` by repeating slot 0.
+    /// on-chain vector by repeating slot 0.
     pub signatures: Vec<String>,
 }
 

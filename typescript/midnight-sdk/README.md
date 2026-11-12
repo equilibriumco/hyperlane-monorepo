@@ -57,12 +57,44 @@ Two things differ from the other AltVM SDKs and are worth knowing first:
 
 ## Core config
 
-`core deploy` passes the multisig ISM (`validators`, `validatorPubkeys`,
-`threshold`), the chain's `nativeToken.decimals` and one Midnight-only field to
-the night contract's constructor. The decimals are fixed for good; `core apply`
-changes the validator set and the field below. See
+The night contract is its own ISM and holds one validator set per origin
+chain: a message is checked against the validators of the chain it came from,
+and an origin with no set delivers nothing. The config writes that as a
+`domainRoutingIsm` with one `messageIdMultisigIsm` per origin chain:
+
+```yaml
+defaultIsm:
+  type: domainRoutingIsm
+  owner: '0x0000000000000000000000000000000000000000000000000000000000000000'
+  domains:
+    sepolia:
+      type: messageIdMultisigIsm
+      validators: ['0x...'] # the validators' eth addresses
+      validatorPubkeys: ['0x...'] # their 64-byte secp256k1 keys, same order
+      threshold: 1
+```
+
+A `defaultIsm` written as one `messageIdMultisigIsm`, or as the address of
+another ISM, is refused by `core deploy` and `core apply`.
+
+`core deploy` passes one origin's validators (the lowest domain id), the
+chain's `nativeToken.decimals` and one Midnight-only field to the night
+contract's constructor, then sets every other origin's validators through the
+owner, one transaction each. The decimals are fixed for good; `core apply`
+changes the validator sets and the field below. See
 `typescript/cli/examples/midnight/core-config.yaml` for a full example.
 
+- **defaultIsm.domains**: `core apply` replaces the set of an origin whose
+  validators or threshold differ, sets an origin that is new, and removes the
+  set of an origin that is on chain but not in the config. An origin the
+  registry does not know counts as not in the config. Every origin needs its
+  `validatorPubkeys`, and a set holds at most as many validators as the
+  contract has slots (its `maxValidators()`). `core read` reports one entry per
+  origin, each with night's address.
+- **defaultIsm.owner**: the ISM has no owner of its own, night's owner sets
+  the validators. Write the zero address; `core read` reports night's owner,
+  which is accepted too. Any other value is refused: ownership moves through
+  the top-level `owner`.
 - **maxTransferAmount**: per-transfer limit in local NIGHT units, as a decimal
   string or number. `0` or unset at deploy means no limit. With a different
   value, `core apply` changes it through night's owner-only setter; left out

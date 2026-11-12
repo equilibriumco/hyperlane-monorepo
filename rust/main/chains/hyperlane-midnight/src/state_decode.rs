@@ -6,6 +6,8 @@
 //! tagged state is deserialized with the same crates the indexer uses and the
 //! resulting `StateValue::Array` is navigated positionally.
 
+use std::collections::BTreeMap;
+
 use hyperlane_core::{ChainResult, HyperlaneMessage};
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
@@ -14,16 +16,19 @@ use midnight_storage_core::DefaultDB;
 use crate::error::HyperlaneMidnightError;
 
 // Positional paths into the ledger `StateValue::Array`. The compiler splits
-// night's top-level fields into two groups: root `[0]` holds the ownership
-// commitment, the Routes fields and, since the transfer limit became the
-// last field, the ISM validator registry; `[1]` holds the remaining
-// MessageIdMultisigIsm / Mailbox / Scale module fields. Paths follow each
-// module's field declaration order, so inserting or reordering a field shifts
-// them; the contracts repo re-checks them on every compile.
-const ISM_VALIDATORS_PATH: [usize; 2] = [0, 7];
-const ISM_VALIDATOR_COUNT_PATH: [usize; 2] = [1, 0];
-const ISM_THRESHOLD_PATH: [usize; 2] = [1, 1];
-const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 2];
+// night's top-level fields into two groups: root `[0]` holds the three
+// ownership fields, `[1]` holds the rest, the Routes, MessageIdMultisigIsm,
+// Mailbox and Scale module fields among them. Paths follow each module's
+// field declaration order, so inserting or reordering a field shifts them;
+// the contracts repo re-checks them on every compile.
+//
+// `validator_sets` maps an origin domain to one cell holding that origin's
+// `ValidatorSet` struct. The key is a little-endian `Uint<32>`. The cell is a
+// flat list of atoms: one per `Bytes<64>` key slot, then `count`, then
+// `threshold`. The number of slots is a compile-time constant of the
+// contract, so it is taken from the cell.
+const ISM_VALIDATOR_SETS_PATH: [usize; 2] = [1, 4];
+const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 5];
 
 // Mailbox fields, also under `[1]`. Slot 6 is the `deliveries` set, which is
 // not decoded here: deliveries come from `HYP_PROCESS` events and the
@@ -35,19 +40,38 @@ const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 8];
 /// + sender(32) + destination(4) + recipient(32) + body(64).
 pub(crate) const ENCODED_MESSAGE_LEN: usize = 141;
 
-/// The MessageIdMultisigIsm configuration read from on-chain state.
+/// One origin chain's validators, as the MessageIdMultisigIsm holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IsmState {
-    /// Validator addresses, in on-chain slot order. The registry stores
+pub struct ValidatorSet {
+    /// Validator addresses, in on-chain slot order. The contract stores
     /// 64-byte secp256k1 public keys; the address is
     /// `keccak256(pubkey)[12..]`.
     pub validators: Vec<[u8; 20]>,
-    /// Number of populated validator slots.
-    pub validator_count: u8,
     /// Multisig threshold (M of N).
     pub threshold: u8,
+    /// Key slots the contract keeps per set, used or not. A delivery carries
+    /// one signature slot for each.
+    pub slots: usize,
+}
+
+/// The MessageIdMultisigIsm configuration read from on-chain state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsmState {
+    /// Validator sets by origin domain. The contract checks a message
+    /// against the set of the chain it came from.
+    pub validator_sets: BTreeMap<u32, ValidatorSet>,
     /// Hyperlane `ModuleType` discriminant (5 = MessageIdMultisig).
     pub module_type: u8,
+}
+
+impl IsmState {
+    /// The validators that sign for `origin`. An origin with no set delivers
+    /// nothing, so a missing one is an error.
+    pub fn validator_set(&self, origin: u32) -> ChainResult<&ValidatorSet> {
+        self.validator_sets
+            .get(&origin)
+            .ok_or_else(|| HyperlaneMidnightError::NoValidatorSet(origin).into())
+    }
 }
 
 /// Deserialize the raw indexer-served state bytes.
@@ -96,9 +120,22 @@ fn cell_atom(node: &StateValue<DefaultDB>) -> ChainResult<&[u8]> {
     }
 }
 
+/// Every atom of a cell that holds a struct, in field order.
+fn cell_atoms(node: &StateValue<DefaultDB>) -> ChainResult<Vec<&[u8]>> {
+    match node {
+        StateValue::Cell(sp) => {
+            let aligned = &**sp;
+            Ok(aligned.value.0.iter().map(|atom| &atom.0[..]).collect())
+        }
+        other => Err(HyperlaneMidnightError::StateDecode(format!(
+            "expected cell leaf, got {other:?}"
+        ))
+        .into()),
+    }
+}
+
 /// A zero `Uint<8>` is stored as an empty atom.
-fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
-    let bytes = cell_atom(node)?;
+fn u8_from_atom(bytes: &[u8]) -> ChainResult<u8> {
     match bytes.len() {
         0 => Ok(0),
         1 => Ok(bytes[0]),
@@ -108,10 +145,13 @@ fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     }
 }
 
-/// A stored `Bytes<N>` leaf has its trailing zero bytes trimmed, so a key ending
+fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
+    u8_from_atom(cell_atom(node)?)
+}
+
+/// A stored `Bytes<N>` atom has its trailing zero bytes trimmed, so a key ending
 /// in zeros comes back short and has to be right-padded.
-fn read_bytes64(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 64]> {
-    let bytes = cell_atom(node)?;
+fn bytes64_from_atom(bytes: &[u8]) -> ChainResult<[u8; 64]> {
     if bytes.len() > 64 {
         return Err(HyperlaneMidnightError::StateDecode(format!(
             "expected 64-byte secp256k1 public key, got {} bytes",
@@ -124,68 +164,105 @@ fn read_bytes64(node: &StateValue<DefaultDB>) -> ChainResult<[u8; 64]> {
     Ok(pubkey)
 }
 
-/// Ascending slot-index order is what the on-chain multisig expects.
-fn read_validators(node: &StateValue<DefaultDB>) -> ChainResult<Vec<[u8; 20]>> {
+/// One origin's `ValidatorSet` cell. The contract keeps the first `count`
+/// slots as the set and the rest zero, with `1 <= threshold <= count`, so a
+/// cell that breaks this means the positional path reads the wrong field,
+/// not a legitimate on-chain state.
+fn read_validator_set(node: &StateValue<DefaultDB>, origin: u32) -> ChainResult<ValidatorSet> {
+    let atoms = cell_atoms(node)?;
+    let Some(slots) = atoms.len().checked_sub(2) else {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "validator set of origin {origin} has {} atoms, expected key slots, count and threshold",
+            atoms.len()
+        ))
+        .into());
+    };
+    let (keys, tail) = atoms.split_at(slots);
+    let count = u8_from_atom(tail[0])? as usize;
+    let threshold = u8_from_atom(tail[1])?;
+
+    if count > slots {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "validator count {count} of origin {origin} exceeds the {slots} key slots"
+        ))
+        .into());
+    }
+    if threshold < 1 || threshold as usize > count {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "threshold {threshold} of origin {origin} out of range 1..={count} (validator count)"
+        ))
+        .into());
+    }
+    if let Some(unused) = keys[count..]
+        .iter()
+        .position(|key| key.iter().any(|byte| *byte != 0))
+    {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "key slot {} of origin {origin} is past the validator count {count} but not zero",
+            count + unused
+        ))
+        .into());
+    }
+
+    let mut validators = Vec::with_capacity(count);
+    for key in &keys[..count] {
+        let digest = ethers::utils::keccak256(bytes64_from_atom(key)?);
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&digest[12..]);
+        validators.push(addr);
+    }
+    Ok(ValidatorSet {
+        validators,
+        threshold,
+        slots,
+    })
+}
+
+fn read_validator_sets(node: &StateValue<DefaultDB>) -> ChainResult<BTreeMap<u32, ValidatorSet>> {
     let map = match node {
         StateValue::Map(m) => m,
         other => {
             return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for validators, got {other:?}"
+                "expected map for validator_sets, got {other:?}"
             ))
             .into())
         }
     };
-    let mut entries: Vec<(u8, [u8; 20])> = Vec::with_capacity(map.size());
+    let mut sets = BTreeMap::new();
     for entry in map.iter() {
         let pair = &*entry;
+        // The key is a little-endian `Uint<32>` origin domain.
         let key_av = &*pair.0;
-        let idx = key_av
+        let key_bytes = key_av
             .value
             .0
             .first()
-            .and_then(|atom| atom.0.first())
-            .copied()
-            .unwrap_or(0);
-        let pubkey = read_bytes64(&pair.1)?;
-        let digest = ethers::utils::keccak256(pubkey);
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&digest[12..]);
-        entries.push((idx, addr));
+            .map(|atom| &atom.0[..])
+            .unwrap_or(&[]);
+        if key_bytes.len() > 4 {
+            return Err(HyperlaneMidnightError::StateDecode(format!(
+                "validator_sets key is {} bytes, expected a u32 origin domain",
+                key_bytes.len()
+            ))
+            .into());
+        }
+        let mut kb = [0u8; 4];
+        kb[..key_bytes.len()].copy_from_slice(key_bytes);
+        let origin = u32::from_le_bytes(kb);
+
+        sets.insert(origin, read_validator_set(&pair.1, origin)?);
     }
-    entries.sort_by_key(|(idx, _)| *idx);
-    Ok(entries.into_iter().map(|(_, addr)| addr).collect())
+    Ok(sets)
 }
 
 /// Decode the MessageIdMultisigIsm config from the serialized ledger state.
 pub fn decode_ism_state(bytes: &[u8]) -> ChainResult<IsmState> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
-    let state = IsmState {
-        validators: read_validators(nav(root, &ISM_VALIDATORS_PATH)?)?,
-        validator_count: read_u8(nav(root, &ISM_VALIDATOR_COUNT_PATH)?)?,
-        threshold: read_u8(nav(root, &ISM_THRESHOLD_PATH)?)?,
+    Ok(IsmState {
+        validator_sets: read_validator_sets(nav(root, &ISM_VALIDATOR_SETS_PATH)?)?,
         module_type: read_u8(nav(root, &ISM_MODULE_TYPE_PATH)?)?,
-    };
-
-    // Mutually inconsistent slots mean the positional paths read the wrong
-    // fields, not a legitimate on-chain state.
-    if state.validator_count as usize != state.validators.len() {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "validator_count {} does not match decoded validator set size {}",
-            state.validator_count,
-            state.validators.len()
-        ))
-        .into());
-    }
-    if state.threshold < 1 || state.threshold > state.validator_count {
-        return Err(HyperlaneMidnightError::StateDecode(format!(
-            "threshold {} out of range 1..={} (validator_count)",
-            state.threshold, state.validator_count
-        ))
-        .into());
-    }
-
-    Ok(state)
+    })
 }
 
 /// A zero counter is stored as an empty atom.
@@ -424,32 +501,19 @@ mod tests {
         );
     }
 
-    /// Laid out so the ISM paths line up: the validator registry closes the
-    /// `[0]` group, the other ISM fields open `[1]`.
-    fn ism_state_bytes(
-        validators: StateValue<DefaultDB>,
-        validator_count: u8,
-        threshold: u8,
-        module_type: u8,
-    ) -> Vec<u8> {
-        let routes = array(vec![
-            StateValue::Null, // [0,0]
-            StateValue::Null, // [0,1]
-            StateValue::Null, // [0,2]
-            StateValue::Null, // [0,3]
-            StateValue::Null, // [0,4]
-            StateValue::Null, // [0,5]
-            StateValue::Null, // [0,6]
-            validators,       // [0,7]
-        ]);
-        let ism = array(vec![
-            cell(validator_count), // [1,0]
-            cell(threshold),       // [1,1]
-            cell(module_type),     // [1,2]
+    /// Laid out so the ISM paths line up under `[1]`.
+    fn ism_state_bytes(validator_sets: StateValue<DefaultDB>, module_type: u8) -> Vec<u8> {
+        let fields = array(vec![
+            StateValue::Null,  // [1,0]
+            StateValue::Null,  // [1,1]
+            StateValue::Null,  // [1,2]
+            StateValue::Null,  // [1,3]
+            validator_sets,    // [1,4]
+            cell(module_type), // [1,5]
         ]);
         let root = array(vec![
-            routes, // [0] ownership + Routes fields + validator registry
-            ism,    // [1] ISM/Mailbox module fields
+            StateValue::Null, // [0] ownership fields (unused here)
+            fields,           // [1] every other field
         ]);
         let cs = ContractState::<DefaultDB> {
             data: ChargedState::new(root),
@@ -458,6 +522,46 @@ mod tests {
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&cs, &mut bytes).expect("serialize synthetic state");
         bytes
+    }
+
+    /// The contract's own slot count. The decoder takes it from the cell, so
+    /// a test is free to use another.
+    const SLOTS: usize = 9;
+
+    /// A `ValidatorSet` cell the way the contract stores it: one atom per key
+    /// slot, then `count` and `threshold`.
+    fn validator_set_cell(slots: &[[u8; 64]], count: u8, threshold: u8) -> StateValue<DefaultDB> {
+        let mut fields: Vec<AlignedValue> =
+            slots.iter().map(|key| AlignedValue::from(*key)).collect();
+        fields.push(AlignedValue::from(count));
+        fields.push(AlignedValue::from(threshold));
+        cell(AlignedValue::concat(fields.iter()))
+    }
+
+    /// `keys` followed by zero slots up to `slots`, as the contract pads a set.
+    fn padded(keys: &[[u8; 64]], slots: usize) -> Vec<[u8; 64]> {
+        let mut out = keys.to_vec();
+        out.resize(slots, [0u8; 64]);
+        out
+    }
+
+    fn validator_sets(entries: Vec<(u32, StateValue<DefaultDB>)>) -> StateValue<DefaultDB> {
+        let mut map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new();
+        for (origin, set) in entries {
+            map = map.insert(AlignedValue::from(origin), set);
+        }
+        StateValue::Map(map)
+    }
+
+    /// State with one origin whose set cell is `set`.
+    fn single_set_state_bytes(set: StateValue<DefaultDB>) -> Vec<u8> {
+        ism_state_bytes(validator_sets(vec![(31337, set)]), 5)
+    }
+
+    fn decode_error(bytes: &[u8]) -> String {
+        decode_ism_state(bytes)
+            .expect_err("the state must be refused")
+            .to_string()
     }
 
     /// The derivation under test is cross-checked against ethers' own
@@ -476,35 +580,82 @@ mod tests {
         (pubkey, derived)
     }
 
-    // Addresses must come back in ascending slot-index order regardless of the
-    // map's iteration order, so the entries are inserted out of order here.
+    // Each origin has its own set and threshold, and addresses come back in
+    // slot order.
     #[test]
-    fn decodes_synthetic_ism_state_from_pubkey_registry() {
+    fn decodes_synthetic_validator_sets_per_origin() {
+        let (pk0, addr0) =
+            validator_keypair("1111111111111111111111111111111111111111111111111111111111111111");
+        let (pk1, addr1) =
+            validator_keypair("2222222222222222222222222222222222222222222222222222222222222222");
+        let (pk2, addr2) =
+            validator_keypair("3333333333333333333333333333333333333333333333333333333333333333");
+
+        let sets = validator_sets(vec![
+            (
+                31337,
+                validator_set_cell(&padded(&[pk1, pk2, pk0], SLOTS), 3, 2),
+            ),
+            (11155111, validator_set_cell(&padded(&[pk0], SLOTS), 1, 1)),
+        ]);
+        let bytes = ism_state_bytes(sets, 5);
+
+        let ism = decode_ism_state(&bytes).expect("decode ISM state");
+        assert_eq!(ism.module_type, 5, "module_type");
+        assert_eq!(
+            ism.validator_sets.keys().copied().collect::<Vec<_>>(),
+            vec![31337, 11155111],
+            "one set per origin"
+        );
+        assert_eq!(
+            ism.validator_sets[&31337],
+            ValidatorSet {
+                validators: vec![addr1, addr2, addr0],
+                threshold: 2,
+                slots: SLOTS,
+            },
+            "addresses derived from the 64-byte pubkeys, in slot order"
+        );
+        assert_eq!(
+            ism.validator_sets[&11155111],
+            ValidatorSet {
+                validators: vec![addr0],
+                threshold: 1,
+                slots: SLOTS,
+            },
+            "the other origin's set is its own"
+        );
+    }
+
+    // The slot count is the contract's compile-time choice, so a set with a
+    // different one decodes the same way.
+    #[test]
+    fn takes_the_slot_count_from_the_cell() {
         let (pk0, addr0) =
             validator_keypair("1111111111111111111111111111111111111111111111111111111111111111");
         let (pk1, addr1) =
             validator_keypair("2222222222222222222222222222222222222222222222222222222222222222");
 
-        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(1u8), cell(pk1))
-            .insert(AlignedValue::from(0u8), cell(pk0));
-        let bytes = ism_state_bytes(StateValue::Map(map), 2, 2, 5);
-
-        let ism = decode_ism_state(&bytes).expect("decode ISM state");
-        assert_eq!(ism.module_type, 5, "module_type");
-        assert_eq!(ism.threshold, 2, "threshold");
-        assert_eq!(ism.validator_count, 2, "validator_count");
-        assert_eq!(
-            ism.validators,
-            vec![addr0, addr1],
-            "addresses derived from the 64-byte pubkeys, in slot order"
-        );
+        for slots in [2usize, 4, 12] {
+            let bytes =
+                single_set_state_bytes(validator_set_cell(&padded(&[pk0, pk1], slots), 2, 1));
+            let ism = decode_ism_state(&bytes).expect("decode ISM state");
+            assert_eq!(
+                ism.validator_sets[&31337],
+                ValidatorSet {
+                    validators: vec![addr0, addr1],
+                    threshold: 1,
+                    slots,
+                },
+                "{slots} key slots"
+            );
+        }
     }
 
     // A pubkey whose Y coordinate ends in 0x00 is stored short, and roughly
     // one key in 256 does. Synthetic bytes rather than a real curve point: the
     // decoder never validates the point, and a forced zero tail pins the pad
-    // branch.
+    // branch. A full key follows it, so a short atom must not shift the rest.
     #[test]
     fn decodes_pubkey_with_trailing_zeros_trimmed_on_store() {
         let mut pubkey = [0x5Au8; 64];
@@ -514,22 +665,116 @@ mod tests {
             61,
             "expected the trailing-zero tail to be trimmed on store"
         );
-        let expected: [u8; 20] = ethers::utils::keccak256(pubkey)[12..].try_into().unwrap();
+        let full = [0x77u8; 64];
+        let expected: Vec<[u8; 20]> = [pubkey, full]
+            .iter()
+            .map(|key| ethers::utils::keccak256(key)[12..].try_into().unwrap())
+            .collect();
 
-        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(0u8), cell(pubkey));
-        let bytes = ism_state_bytes(StateValue::Map(map), 1, 1, 5);
+        let bytes =
+            single_set_state_bytes(validator_set_cell(&padded(&[pubkey, full], SLOTS), 2, 2));
 
         let ism = decode_ism_state(&bytes).expect("decode ISM state");
         assert_eq!(
-            ism.validators,
-            vec![expected],
-            "trimmed leaf must right-pad back to the full 64-byte pubkey before hashing"
+            ism.validator_sets[&31337].validators, expected,
+            "trimmed atom must right-pad back to the full 64-byte pubkey before hashing"
         );
     }
 
-    /// The values the capture recorded beside the fixture, from the inputs
-    /// that made the state rather than from decoding it.
+    #[test]
+    fn decodes_empty_validator_sets() {
+        let bytes = ism_state_bytes(validator_sets(vec![]), 5);
+
+        let ism = decode_ism_state(&bytes).expect("decode ISM state");
+        assert!(ism.validator_sets.is_empty(), "no origin has a set");
+        assert_eq!(ism.module_type, 5, "module_type");
+    }
+
+    // The contract never stores any of these, so each one means the path
+    // points at the wrong field.
+    #[test]
+    fn rejects_inconsistent_validator_set() {
+        let key = [0x5Au8; 64];
+        let other = [0x77u8; 64];
+
+        let zero_threshold = validator_set_cell(&padded(&[key, other], SLOTS), 2, 0);
+        assert!(
+            decode_error(&single_set_state_bytes(zero_threshold)).contains("threshold 0"),
+            "threshold 0"
+        );
+
+        let threshold_above_count = validator_set_cell(&padded(&[key, other], SLOTS), 2, 3);
+        assert!(
+            decode_error(&single_set_state_bytes(threshold_above_count)).contains("threshold 3"),
+            "threshold above the count"
+        );
+
+        let empty_set = validator_set_cell(&padded(&[], SLOTS), 0, 0);
+        assert!(
+            decode_error(&single_set_state_bytes(empty_set)).contains("threshold 0"),
+            "a stored set has at least one validator"
+        );
+
+        let count_above_slots = validator_set_cell(&[key, other], 3, 1);
+        assert!(
+            decode_error(&single_set_state_bytes(count_above_slots))
+                .contains("exceeds the 2 key slots"),
+            "count above the slots"
+        );
+
+        let key_past_count = validator_set_cell(&padded(&[key, other], SLOTS), 1, 1);
+        assert!(
+            decode_error(&single_set_state_bytes(key_past_count))
+                .contains("key slot 1 of origin 31337"),
+            "non-zero key past the count"
+        );
+
+        let wide_key = cell(AlignedValue::concat(
+            [
+                AlignedValue::from([0x5Au8; 65]),
+                AlignedValue::from(1u8),
+                AlignedValue::from(1u8),
+            ]
+            .iter(),
+        ));
+        assert!(
+            decode_error(&single_set_state_bytes(wide_key)).contains("got 65 bytes"),
+            "a key wider than 64 bytes"
+        );
+
+        let too_short = cell(7u8);
+        assert!(
+            decode_error(&single_set_state_bytes(too_short)).contains("has 1 atoms"),
+            "a cell too short to be a set"
+        );
+    }
+
+    // A cell where the map should be, as in a contract that predates
+    // per-origin sets.
+    #[test]
+    fn rejects_state_without_a_validator_sets_map() {
+        let bytes = ism_state_bytes(cell(1u8), 5);
+        assert!(
+            decode_error(&bytes).contains("expected map for validator_sets"),
+            "a cell at the validator_sets path"
+        );
+    }
+
+    #[test]
+    fn rejects_origin_key_wider_than_u32() {
+        let sets = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new().insert(
+            AlignedValue::from(1u64 << 32),
+            validator_set_cell(&padded(&[[0x5Au8; 64]], SLOTS), 1, 1),
+        );
+        let bytes = ism_state_bytes(StateValue::Map(sets), 5);
+        assert!(
+            decode_error(&bytes).contains("expected a u32 origin domain"),
+            "a key wider than an origin domain"
+        );
+    }
+
+    /// The values recorded beside the fixture, from the inputs that made the
+    /// state rather than from decoding it.
     #[derive(serde::Deserialize)]
     struct ExpectedState {
         ism: ExpectedIsm,
@@ -539,12 +784,20 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct ExpectedIsm {
-        validators: Vec<String>,
-        #[serde(rename = "validatorCount")]
-        validator_count: u8,
-        threshold: u8,
         #[serde(rename = "moduleType")]
         module_type: u8,
+        #[serde(rename = "maxValidators")]
+        max_validators: usize,
+        #[serde(rename = "validatorSets")]
+        validator_sets: Vec<ExpectedValidatorSet>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ExpectedValidatorSet {
+        origin: u32,
+        pubkeys: Vec<String>,
+        validators: Vec<String>,
+        threshold: u8,
     }
 
     #[derive(serde::Deserialize)]
@@ -559,14 +812,14 @@ mod tests {
         hex::decode(s.trim_start_matches("0x")).expect("valid hex")
     }
 
-    // Real `night` state captured from a devnet indexer by the contracts
-    // repo's decoder-fixture suite, which enrolled a validator whose 64-byte
-    // key ends in a zero byte and dispatched two transfers whose stored
-    // messages do too. The ledger trims trailing zero bytes on store, so
-    // every value here has to come back whole. The suite writes both files;
-    // see tests/e2e/README.md there for how to regenerate them.
+    // Real `night` state, made by running the contracts repo's compiled
+    // contract: deployed with one origin's validators, given a second
+    // origin's set that holds a key whose 64 bytes end in a zero byte, then
+    // two transfers out whose stored messages end in one too. It is
+    // serialized the way the indexer serves it. The ledger trims trailing
+    // zero bytes on store, so every value here has to come back whole.
     #[test]
-    fn decodes_live_night_state() {
+    fn decodes_real_night_state() {
         let bytes = unhex(include_str!("../tests/fixtures/night-state.hex").trim());
         let expected: ExpectedState =
             serde_json::from_str(include_str!("../tests/fixtures/night-state.expected.json"))
@@ -574,15 +827,45 @@ mod tests {
 
         let ism = decode_ism_state(&bytes).expect("decode ISM state");
         assert_eq!(ism.module_type, expected.ism.module_type, "module_type");
-        assert_eq!(ism.threshold, expected.ism.threshold, "threshold");
         assert_eq!(
-            ism.validator_count, expected.ism.validator_count,
-            "validator_count"
+            ism.validator_sets.len(),
+            expected.ism.validator_sets.len(),
+            "one set per origin"
         );
-        let validators: Vec<[u8; 20]> = expected.ism.validators.iter().map(|v| addr(v)).collect();
-        assert_eq!(
-            ism.validators, validators,
-            "validator addresses in slot order, the zero-tailed key among them"
+        assert!(
+            expected.ism.validator_sets.len() >= 2,
+            "the fixture holds more than one origin"
+        );
+        let mut zero_tailed_keys = 0;
+        for want in &expected.ism.validator_sets {
+            let set = ism
+                .validator_set(want.origin)
+                .unwrap_or_else(|e| panic!("origin {}: {e}", want.origin));
+            let validators: Vec<[u8; 20]> = want.validators.iter().map(|v| addr(v)).collect();
+            assert_eq!(
+                set.validators, validators,
+                "origin {}: validator addresses in slot order",
+                want.origin
+            );
+            assert_eq!(
+                set.threshold, want.threshold,
+                "origin {}: threshold",
+                want.origin
+            );
+            assert_eq!(
+                set.slots, expected.ism.max_validators,
+                "origin {}: key slots",
+                want.origin
+            );
+            zero_tailed_keys += want
+                .pubkeys
+                .iter()
+                .filter(|key| unhex(key).last() == Some(&0))
+                .count();
+        }
+        assert!(
+            zero_tailed_keys > 0,
+            "the fixture holds a key that ends in a zero byte"
         );
 
         assert_eq!(
