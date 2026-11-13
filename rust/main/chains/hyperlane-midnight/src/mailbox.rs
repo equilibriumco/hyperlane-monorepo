@@ -8,6 +8,7 @@ use hyperlane_core::{
     ReorgPeriod, TxCostEstimate, TxOutcome, H160, H256, U256,
 };
 
+use crate::state_decode::IsmState;
 use crate::toolkit::{self, ToolkitContext, WireMetadata};
 use crate::{ConnectionConf, HyperlaneMidnightError, MidnightProvider};
 
@@ -58,9 +59,7 @@ impl MidnightMailbox {
         }
         let address = format!("{:x}", self.address);
         let state = self.provider.indexer().read_ism_state(&address).await?;
-        let set = state.validator_set(message.origin)?;
-        check_signature_count(metadata.signatures.len(), set.slots)?;
-        Ok(set.validators.iter().copied().map(H160::from).collect())
+        validators_in_order(&state, message.origin, metadata.signatures.len())
     }
 
     /// Test-only: pin the validator order so `process` skips the chain read.
@@ -221,14 +220,16 @@ fn parse_metadata(bytes: &[u8]) -> ChainResult<WireMetadata> {
 // Signatures are forwarded verbatim: the submitter is what pads the on-chain
 // vector by repeating slot 0, and a zero-signature pad added here would
 // recover to a garbage pubkey.
-fn check_signature_count(signatures: usize, slots: usize) -> ChainResult<()> {
-    if signatures > slots {
+fn validators_in_order(state: &IsmState, origin: u32, signatures: usize) -> ChainResult<Vec<H160>> {
+    let set = state.validator_set(origin)?;
+    if signatures > set.slots {
         return Err(HyperlaneMidnightError::Other(format!(
-            "metadata carries {signatures} signatures, exceeds on-chain bound of {slots}"
+            "metadata carries {signatures} signatures, exceeds on-chain bound of {}",
+            set.slots
         ))
         .into());
     }
-    Ok(())
+    Ok(set.validators.iter().copied().map(H160::from).collect())
 }
 
 /// Drops any zero padding. A signature recovering to an unknown address is an
@@ -355,7 +356,10 @@ fn outcome_gas_used(delivery_gas: U256, fee_specks: Option<U256>) -> U256 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::state_decode::ValidatorSet;
 
     #[test]
     fn cost_estimate_reports_the_configured_delivery_gas() {
@@ -425,11 +429,33 @@ mod tests {
         assert!(parse_metadata(&bytes).is_err());
     }
 
+    fn ism_state(origin: u32, validators: Vec<[u8; 20]>, slots: usize) -> IsmState {
+        let set = ValidatorSet {
+            validators,
+            threshold: 1,
+            slots,
+        };
+        IsmState {
+            validator_sets: BTreeMap::from([(origin, set)]),
+            module_type: 5,
+        }
+    }
+
     #[test]
-    fn signature_count_is_held_to_the_contract_slots() {
-        assert!(check_signature_count(9, 9).is_ok());
-        assert!(check_signature_count(10, 9).is_err());
-        assert!(check_signature_count(5, 4).is_err());
+    fn validators_come_in_slot_order_for_the_message_origin() {
+        let state = ism_state(31337, vec![[0x11; 20], [0x22; 20]], 9);
+        assert_eq!(
+            validators_in_order(&state, 31337, 9).unwrap(),
+            vec![H160::repeat_byte(0x11), H160::repeat_byte(0x22)]
+        );
+        assert!(validators_in_order(&state, 31338, 1).is_err());
+    }
+
+    #[test]
+    fn more_signatures_than_the_contract_has_slots_are_refused() {
+        let state = ism_state(31337, vec![[0x11; 20]], 9);
+        let err = validators_in_order(&state, 31337, 10).unwrap_err();
+        assert!(err.to_string().contains("exceeds on-chain bound of 9"));
     }
 
     #[tokio::test]
