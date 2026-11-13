@@ -22,8 +22,10 @@ describe('night state readers', () => {
       31338: multisigOf([0, 1, 2], 2),
       31347: multisigOf([2], 1),
     });
+    // 31347 has validators and no router, 31400 a router and no validators,
+    // so neither list can stand in for the other.
     await night.call('enrollRemoteRouter', [31338n, ROUTER]);
-    await night.call('enrollRemoteRouter', [31347n, SHORT_ROUTER]);
+    await night.call('enrollRemoteRouter', [31400n, SHORT_ROUTER]);
     await night.call('setDestinationGas', [31338n, 250_000n]);
     return (await night.requireContractState(night.address)).data;
   }
@@ -32,7 +34,7 @@ describe('night state readers', () => {
     const routers = readRemoteRouters(await nightState());
     expect(routers.sort((a, b) => a.domainId - b.domainId)).to.eql([
       { domainId: 31338, router: bytesToHex(ROUTER) },
-      { domainId: 31347, router: bytesToHex(SHORT_ROUTER) },
+      { domainId: 31400, router: bytesToHex(SHORT_ROUTER) },
     ]);
   });
 
