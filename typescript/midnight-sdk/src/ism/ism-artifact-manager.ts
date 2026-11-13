@@ -189,6 +189,13 @@ export class MidnightRoutingIsmWriter
   ): Promise<MidnightTransaction[]> {
     const address = artifact.deployed.address;
     const expected = validatorSetsByOrigin(artifact.config.domains);
+    // No origins would remove every validator set, and it is also what a
+    // registry that knows none of the config's chains leaves of the config.
+    if (expected.size === 0) {
+      throw new Error(
+        `night needs the validators of at least one origin chain: ${NIGHT_ISM_SHAPE}`,
+      );
+    }
     const current = await this.readValidatorSets(address);
 
     const expectedOwner = artifact.config.owner;

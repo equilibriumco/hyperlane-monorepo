@@ -297,6 +297,12 @@ describe('Midnight routing ISM', () => {
       });
     });
 
+    it('refuses a config that would leave no origin', async () => {
+      expect(
+        await rejectionOf(writer.update(routingIsm(night, {}))),
+      ).to.include('at least one origin chain');
+    });
+
     it('takes the zero owner or night owner, and refuses any other', async () => {
       const domains = {
         [ANVIL2]: unchanged(night, multisigOf([0, 1, 2], 2)),

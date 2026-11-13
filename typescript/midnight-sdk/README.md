@@ -87,10 +87,11 @@ changes the validator sets and the field below. See
 - **defaultIsm.domains**: `core apply` replaces the set of an origin whose
   validators or threshold differ, sets an origin that is new, and removes the
   set of an origin that is on chain but not in the config. An origin the
-  registry does not know counts as not in the config. Every origin needs its
-  `validatorPubkeys`, and a set holds at most as many validators as the
-  contract has slots (its `maxValidators()`). `core read` reports one entry per
-  origin, each with night's address.
+  registry does not know counts as not in the config, and a config that leaves
+  no origin is refused. Every origin needs its `validatorPubkeys`, and a set
+  holds at most as many validators as the contract has slots (its
+  `maxValidators()`). `core read` reports one entry per origin, each with
+  night's address.
 - **defaultIsm.owner**: the ISM has no owner of its own, night's owner sets
   the validators. Write the zero address; `core read` reports night's owner,
   which is accepted too. Any other value is refused: ownership moves through
