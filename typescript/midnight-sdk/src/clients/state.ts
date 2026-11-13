@@ -14,7 +14,8 @@ type StateValue = {
 
 // Positional paths into the compiled contract layout. Adding a ledger field
 // can move sibling slots, so a guard in the contracts repo re-checks them.
-const NIGHT_REMOTE_ROUTERS_PATH = [0, 6];
+const NIGHT_REMOTE_ROUTERS_PATH = [1, 3];
+const NIGHT_VALIDATOR_SETS_PATH = [1, 4];
 const NIGHT_DESTINATION_GAS_PATH = [1, 13];
 
 export function unwrapChargedState(data: unknown): StateValue {
@@ -70,6 +71,16 @@ export function readRemoteRouters(
     });
   }
   return routers;
+}
+
+// The origin domains night holds a validator set for, lowest first. Each set
+// is read through the validatorSet circuit, so only the map's keys are decoded
+// here.
+export function readValidatorSetOrigins(data: unknown): number[] {
+  const map = slotAt(data, NIGHT_VALIDATOR_SETS_PATH, 'map').asMap();
+  return [...map.keys()]
+    .map((key) => Number(leBytesToBigint(key.value[0])))
+    .sort((a, b) => a - b);
 }
 
 // night.compact destination_gas: domain -> Uint<64> handle-gas defaults for

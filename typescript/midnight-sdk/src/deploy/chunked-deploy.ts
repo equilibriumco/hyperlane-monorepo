@@ -73,6 +73,7 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'transferOwnership',
   'renounceOwnership',
   'setValidatorsAndThreshold',
+  'removeValidators',
   'unenrollRemoteRouter',
   'setDestinationGas',
   'destinationGasOf',
@@ -86,9 +87,7 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'nonceValue',
   'messageAt',
   'vaultBalance',
-  'validatorAt',
-  'validatorCount',
-  'thresholdValue',
+  'validatorSet',
   // sealed-config read views
   'localDomain',
   'isEnrolled',

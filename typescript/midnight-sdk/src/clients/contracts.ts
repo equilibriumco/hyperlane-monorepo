@@ -2,6 +2,9 @@ import {
   createCircuitContext,
   dummyContractAddress,
   emptyZswapLocalState,
+  type CircuitContext,
+  type ConstructorContext,
+  type ConstructorResult,
 } from '@midnight-ntwrk/compact-runtime';
 
 import { createIgpWitnesses } from '../witnesses/igp-witnesses.js';
@@ -11,12 +14,21 @@ export type ContractModule = {
   Contract: new (witnesses: Record<string, unknown>) => {
     circuits: Record<
       string,
-      (ctx: unknown, ...args: unknown[]) => Promise<{ result: unknown }>
+      (
+        ctx: unknown,
+        ...args: unknown[]
+      ) => Promise<{ result: unknown; context: CircuitContext }>
     >;
+    initialState(
+      ctx: ConstructorContext,
+      ...args: unknown[]
+    ): Promise<ConstructorResult>;
   };
   pureCircuits: {
     // ZOwnablePK commitment: computeOwnerId(pkEither, secretNonce).
     computeOwnerId(pk: unknown, nonce: Uint8Array): Uint8Array;
+    // night only: the slots a validator set is padded to.
+    maxValidators?(): bigint;
   } & Record<string, unknown>;
 };
 

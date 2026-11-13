@@ -1,12 +1,8 @@
 import { expect } from 'chai';
 
 import { type ChainAddresses } from '@hyperlane-xyz/registry';
-import {
-  type CoreConfig,
-  IsmType,
-  type MultisigIsmConfig,
-} from '@hyperlane-xyz/sdk';
-import { ProtocolType, assert } from '@hyperlane-xyz/utils';
+import { type CoreConfig } from '@hyperlane-xyz/sdk';
+import { ProtocolType } from '@hyperlane-xyz/utils';
 
 import { readYamlOrJson } from '../../../utils/files.js';
 import { HyperlaneE2ECoreTestCommands } from '../../commands/core.js';
@@ -17,9 +13,15 @@ import {
   HYP_KEY,
   MIDNIGHT_E2E_TEST_TIMEOUT,
   REGISTRY_PATH,
+  REMOTE_CHAIN_NAME,
+  REMOTE_CHAIN_NAME_2,
 } from '../consts.js';
+import { comparableSet, validatorSetsByOrigin } from '../ism.js';
 
 const HEX_32_BYTES = /^0x[0-9a-f]{64}$/;
+// The registry holds Midnight contract addresses as the ledger writes them,
+// without a 0x prefix.
+const CONTRACT_ADDRESS = /^[0-9a-f]{64}$/;
 const ZERO_32_BYTES = `0x${'0'.repeat(64)}`;
 
 describe('hyperlane midnight core deploy e2e tests', async function () {
@@ -47,9 +49,9 @@ describe('hyperlane midnight core deploy e2e tests', async function () {
   });
 
   it('should deploy the night monolith with its satellite contracts', () => {
-    expect(addresses.mailbox).to.match(HEX_32_BYTES);
-    expect(addresses.interchainGasPaymaster).to.match(HEX_32_BYTES);
-    expect(addresses.validatorAnnounce).to.match(HEX_32_BYTES);
+    expect(addresses.mailbox).to.match(CONTRACT_ADDRESS);
+    expect(addresses.interchainGasPaymaster).to.match(CONTRACT_ADDRESS);
+    expect(addresses.validatorAnnounce).to.match(CONTRACT_ADDRESS);
 
     // The night contract is its own merkle tree hook identity; the IGP and
     // the validator announce are standalone contracts.
@@ -61,27 +63,43 @@ describe('hyperlane midnight core deploy e2e tests', async function () {
     );
   });
 
-  it('should seal the multisig ISM config into the deployed contract', async () => {
+  // The constructor takes one origin's validators, so a deploy with two
+  // origins is the deploy plus one owner transaction for the second.
+  it('should deploy with a validator set for each of two origin chains', async () => {
     const coreConfig: CoreConfig = await hyperlaneCore.readConfig();
 
-    const expectedIsm = inputConfig.defaultIsm as MultisigIsmConfig;
-    const actualIsm = coreConfig.defaultIsm as MultisigIsmConfig & {
-      validatorPubkeys?: string[];
-    };
+    const expectedSets = validatorSetsByOrigin(inputConfig);
+    const actualSets = validatorSetsByOrigin(coreConfig);
 
-    assert(
-      actualIsm.type === IsmType.MESSAGE_ID_MULTISIG,
-      `Expected defaultIsm to be ${IsmType.MESSAGE_ID_MULTISIG}`,
+    expect(Object.keys(expectedSets).sort()).to.eql([
+      REMOTE_CHAIN_NAME,
+      REMOTE_CHAIN_NAME_2,
+    ]);
+    // `core read` shows one entry per origin, and the reader emits the
+    // enrolled pubkeys so read output round-trips into write-ready configs.
+    expect(Object.keys(actualSets).sort()).to.eql(
+      Object.keys(expectedSets).sort(),
     );
-    expect(actualIsm.threshold).to.equal(expectedIsm.threshold);
-    expect(actualIsm.validators.map((v) => v.toLowerCase()).sort()).to.eql(
-      expectedIsm.validators.map((v) => v.toLowerCase()).sort(),
-    );
-    // The reader emits the enrolled pubkeys so read output round-trips
-    // into write-ready configs.
-    expect(actualIsm.validatorPubkeys).to.have.lengthOf(
-      expectedIsm.validators.length,
-    );
+    for (const [origin, expectedSet] of Object.entries(expectedSets)) {
+      expect(comparableSet(actualSets[origin])).to.eql(
+        comparableSet(expectedSet),
+      );
+    }
+  });
+
+  it('should report night itself as the ISM of every origin', async () => {
+    const coreConfig: CoreConfig = await hyperlaneCore.readConfig();
+
+    // Read back as written, the ISM carries the address it was read from.
+    const ism: unknown = coreConfig.defaultIsm;
+    expect(ism).to.have.property('address', addresses.mailbox);
+    expect(ism).to.have.property('owner', coreConfig.owner);
+    for (const origin of [REMOTE_CHAIN_NAME, REMOTE_CHAIN_NAME_2]) {
+      expect(ism).to.have.nested.property(
+        `domains.${origin}.address`,
+        addresses.mailbox,
+      );
+    }
   });
 
   it('should keep ownership with the deployer for a zero owner config', async () => {

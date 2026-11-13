@@ -382,9 +382,7 @@ export class CoreWriter extends CoreArtifactReader {
     }
 
     // Merge current with expected (preserves DEPLOYED state for unchanged nested ISMs)
-    const mergedArtifact = mergeIsmArtifacts(currentIsmArtifact, expectedIsm, {
-      allowInPlaceStaticUpdate: this.ismWriter.supportsInPlaceStaticUpdates(),
-    });
+    const mergedArtifact = mergeIsmArtifacts(currentIsmArtifact, expectedIsm);
 
     if (isArtifactNew(mergedArtifact)) {
       const [deployed] = await this.ismWriter.create(mergedArtifact);

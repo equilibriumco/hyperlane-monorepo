@@ -71,6 +71,10 @@ pub enum HyperlaneMidnightError {
     #[error("contract state decode error: {0}")]
     StateDecode(String),
 
+    /// The contract holds no validator set for a message's origin.
+    #[error("the Midnight contract holds no validator set for origin domain {0}: its validators were never set, or were removed")]
+    NoValidatorSet(u32),
+
     /// The node's JSON-RPC endpoint failed or refused a read.
     #[error("node RPC error: {0}")]
     NodeRpc(String),

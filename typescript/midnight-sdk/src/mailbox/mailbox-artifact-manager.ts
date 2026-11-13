@@ -2,11 +2,11 @@ import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
 import type { ISigner } from '@hyperlane-xyz/provider-sdk/altvm';
 import {
   ArtifactState,
+  isArtifactDeployed,
   type ArtifactNew,
   type ArtifactReader,
   type ArtifactWriter,
 } from '@hyperlane-xyz/provider-sdk/artifact';
-import type { RawIsmArtifactConfigs } from '@hyperlane-xyz/provider-sdk/ism';
 import type {
   DeployedMailboxAddress,
   DeployedRawMailboxArtifact,
@@ -26,6 +26,7 @@ import {
   hexToBytes,
   normalizeHexForCompare,
 } from '../utils/conversion.js';
+import { NIGHT_ISM_SHAPE, assertNightIsItsOwnIsm } from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
@@ -33,7 +34,19 @@ import {
   nightConstructorArgs,
   parseMaxTransferAmount,
 } from '../deploy/night-args.js';
-import { resolveValidatorSet } from '../ism/validators.js';
+import {
+  maxValidators,
+  resolveValidatorSet,
+  setValidatorsTx,
+  validatorSetsByOrigin,
+} from '../ism/validators.js';
+
+// What the writer needs of the signer: the night deploy, and the owner's
+// transactions for the origins the constructor cannot take.
+export type NightDeployer = Pick<
+  MidnightSigner,
+  'deployMidnightContract' | 'sendAndConfirmTransaction'
+>;
 
 class MidnightMailboxReader implements ArtifactReader<
   RawMailboxArtifactConfigs['mailbox'],
@@ -73,28 +86,45 @@ class MidnightMailboxReader implements ArtifactReader<
   }
 }
 
-class MidnightMailboxWriter
+export class MidnightMailboxWriter
   extends MidnightMailboxReader
   implements ArtifactWriter<MailboxOnChain, DeployedMailboxAddress>
 {
   constructor(
     client: MidnightReadClient,
     private readonly metadata: ChainMetadataForAltVM,
-    private readonly signer: MidnightSigner,
+    private readonly signer: NightDeployer,
   ) {
     super(client);
   }
 
   // Deploys the night monolith: mailbox, ISM, and native warp route in one
-  // contract. The multisig ISM config is consumed here, since validators,
-  // threshold, decimals and the transfer limit are constructor args sealed at
-  // deploy time. Hook placeholders from the orchestrator are ignored.
+  // contract. The ISM config is consumed here: the constructor takes one
+  // origin's validators, the decimals and the transfer limit, and the owner
+  // sets every other origin's validators right after. Hook placeholders from
+  // the orchestrator are ignored.
   async create(
     artifact: ArtifactNew<MailboxOnChain>,
   ): Promise<[DeployedRawMailboxArtifact, TxReceipt[]]> {
     const config = artifact.config;
-    const ismConfig = this.extractMultisigConfig(config.defaultIsm);
-    const validatorSet = resolveValidatorSet(ismConfig);
+    const ism = config.defaultIsm;
+    if (!isArtifactDeployed(ism) || ism.config.type !== 'domainRoutingIsm') {
+      throw new Error(`night deploy needs its ISM inline: ${NIGHT_ISM_SHAPE}`);
+    }
+    const slots = await maxValidators();
+    // Lowest origin first, so a config always deploys the same way. Every set
+    // is resolved before the deploy, which nothing can undo.
+    const [initial, ...others] = [...validatorSetsByOrigin(ism.config.domains)]
+      .sort(([a], [b]) => a - b)
+      .map(([origin, multisig]) => ({
+        origin,
+        set: resolveValidatorSet(multisig, slots),
+      }));
+    if (!initial) {
+      throw new Error(
+        `night needs the validators of at least one origin chain: ${NIGHT_ISM_SHAPE}`,
+      );
+    }
 
     const localDecimals = this.metadata.nativeToken?.decimals;
     if (localDecimals === undefined) {
@@ -115,29 +145,34 @@ class MidnightMailboxWriter
             ownerId,
             instanceSalt,
             domainId,
-            validatorSet,
+            initialOrigin: BigInt(initial.origin),
+            validatorSet: initial.set,
             localDecimals: BigInt(localDecimals),
             maxTransferAmount,
           }),
       });
 
-    // The ISM artifact still carries its pre-deploy placeholder address, and the
-    // orchestrator reuses that same object when reporting deployed addresses.
-    // The night contract is its own ISM, so stamp the real address on now.
-    config.defaultIsm.deployed.address = address;
+    for (const { origin, set } of others) {
+      receipts.push(
+        await this.signer.sendAndConfirmTransaction(
+          setValidatorsTx(address, origin, set),
+        ),
+      );
+    }
+
+    // The ISM artifacts still carry their pre-deploy placeholder address, and
+    // the orchestrator reuses the same objects when reporting deployed
+    // addresses and in its own update step. The night contract is its own ISM
+    // for every origin, so stamp the real address on now.
+    ism.deployed.address = address;
+    for (const originIsm of Object.values(ism.config.domains)) {
+      if (isArtifactDeployed(originIsm)) originIsm.deployed.address = address;
+    }
 
     return [
       {
         artifactState: ArtifactState.DEPLOYED,
-        config: {
-          ...config,
-          owner: bytesToHex(ownerId),
-          defaultIsm: {
-            artifactState: ArtifactState.DEPLOYED,
-            config: ismConfig,
-            deployed: { address },
-          },
-        },
+        config: { ...config, owner: bytesToHex(ownerId) },
         deployed: { address, domainId: Number(domainId) },
       },
       receipts,
@@ -151,6 +186,10 @@ class MidnightMailboxWriter
     artifact: DeployedRawMailboxArtifact,
   ): Promise<MidnightTransaction[]> {
     const address = artifact.deployed.address;
+    assertNightIsItsOwnIsm(
+      address,
+      artifact.config.defaultIsm.deployed.address,
+    );
     const current = await this.read(address);
     const txs: MidnightTransaction[] = [];
 
@@ -197,25 +236,6 @@ class MidnightMailboxWriter
       });
     }
     return txs;
-  }
-
-  private extractMultisigConfig(
-    defaultIsm: MailboxOnChain['defaultIsm'],
-  ): RawIsmArtifactConfigs['messageIdMultisigIsm'] {
-    if (!('config' in defaultIsm) || !defaultIsm.config) {
-      throw new Error(
-        `night deploy needs the multisig ISM config inline (validators, ` +
-          `threshold, validatorPubkeys) — a pre-deployed ISM address cannot ` +
-          `be sealed into a new night instance`,
-      );
-    }
-    const config = defaultIsm.config;
-    if (config.type !== 'messageIdMultisigIsm') {
-      throw new Error(
-        `night's ISM is messageIdMultisigIsm, got ${config.type}`,
-      );
-    }
-    return config;
   }
 }
 
