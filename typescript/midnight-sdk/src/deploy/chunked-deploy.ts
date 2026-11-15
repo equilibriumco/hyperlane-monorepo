@@ -5,9 +5,8 @@
  * reject the monolithic deploy outright, and raising them needs a governance
  * motion.
  *
- * Built at the ledger level rather than through the SDK's insert helpers
- * because compact-js pins ledger operation version 'v3' and rejects newer
- * compiler output before the tx is even built.
+ * Built at the ledger level rather than through the SDK's insert helpers,
+ * which take one verifier key per transaction: a batch here carries several.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -18,9 +17,16 @@ import {
   submitTx,
   verifierKeysEqual,
 } from '@midnight-ntwrk/midnight-js-contracts';
-import { getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
-import type { FinalizedTxData } from '@midnight-ntwrk/midnight-js-types';
+import {
+  type FinalizedTxRead,
+  LedgerTransaction,
+} from '@midnight-ntwrk/midnight-js-types';
 import * as ledger from '@midnightntwrk/ledger-v9';
+
+import { decodeContractState } from '../clients/contract-state.js';
+import { rethrowWithCauses } from '../utils/errors.js';
+
+import type { ContractProviders } from './providers.js';
 
 export interface VerifierKeyEntry {
   circuitId: string;
@@ -80,7 +86,6 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'setMaxTransfer',
   'maxTransfer',
   // ISM / mailbox verification + state views (agent-facing)
-  'verifyMultisig',
   'assertExpectedRoute',
   'isDelivered',
   'deliveryCount',
@@ -263,18 +268,26 @@ interface DeployKeyAuthority {
   signingKey: ledger.SigningKey;
 }
 
+// The contract's current state on chain, decoded with this package's runtime.
+export async function deployedContractState(
+  providers: ContractProviders,
+  contractAddress: string,
+): Promise<ContractState> {
+  const read =
+    await providers.publicDataProvider.queryContractState(contractAddress);
+  if (!read) {
+    throw new Error(`no contract state found at ${contractAddress}`);
+  }
+  return decodeContractState(read);
+}
+
 // The deploy key is a 1-of-1 authority from the deploy transaction until the
 // committee hand-over, which is the last update it signs.
 async function deployKeyAuthority(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providers: any,
+  providers: ContractProviders,
   contractAddress: string,
 ): Promise<DeployKeyAuthority> {
-  const contractState =
-    await providers.publicDataProvider.queryContractState(contractAddress);
-  if (!contractState) {
-    throw new Error(`no contract state found at ${contractAddress}`);
-  }
+  const contractState = await deployedContractState(providers, contractAddress);
   const signingKey =
     await providers.privateStateProvider.getSigningKey(contractAddress);
   if (!signingKey) {
@@ -287,16 +300,14 @@ async function deployKeyAuthority(
 }
 
 async function submitDeployKeyUpdate(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providers: any,
+  providers: ContractProviders,
   contractAddress: string,
-  updates: unknown[],
+  updates: ledger.SingleUpdate[],
   authority: DeployKeyAuthority,
-): Promise<FinalizedTxData> {
+): Promise<FinalizedTxRead> {
   const unsigned = new ledger.MaintenanceUpdate(
     contractAddress,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    updates as any,
+    updates,
     authority.counter,
   );
   // The authority is 1-of-1, so one signature at committee index 0 carries it.
@@ -309,15 +320,15 @@ async function submitDeployKeyUpdate(
     new Date(Date.now() + 60 * 60 * 1000),
   ).addMaintenanceUpdate(signed);
   // Both coin offers stay empty; the wallet's balanceTx adds the fee dust.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const unprovenTx = (ledger.Transaction as any).fromParts(
-    getNetworkId(),
+  const unprovenTx = ledger.Transaction.fromParts(
+    providers.config.networkId,
     undefined,
     undefined,
     intent,
   );
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return await (submitTx as any)(providers, { unprovenTx });
+  return await submitTx(providers, {
+    unprovenTx: LedgerTransaction.seal('v9', 'Unproven', unprovenTx),
+  }).catch(rethrowWithCauses);
 }
 
 /**
@@ -325,11 +336,10 @@ async function submitDeployKeyUpdate(
  * so batches have to be submitted strictly in sequence.
  */
 export async function insertVerifierKeys(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providers: any,
+  providers: ContractProviders,
   contractAddress: string,
   batch: readonly VerifierKeyEntry[],
-): Promise<FinalizedTxData> {
+): Promise<FinalizedTxRead> {
   const authority = await deployKeyAuthority(providers, contractAddress);
   const updates = batch.map(
     (entry) =>
@@ -350,12 +360,11 @@ export async function insertVerifierKeys(
  * requires of a replacement.
  */
 export async function replaceMaintenanceAuthority(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providers: any,
+  providers: ContractProviders,
   contractAddress: string,
   committee: ledger.SignatureVerifyingKey[],
   threshold: number,
-): Promise<FinalizedTxData> {
+): Promise<FinalizedTxRead> {
   const authority = await deployKeyAuthority(providers, contractAddress);
   const replacement = new ledger.ContractMaintenanceAuthority(
     committee,
@@ -474,16 +483,11 @@ export function onChainVerifierKeys(
 }
 
 export async function verifyFullSurface(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providers: any,
+  providers: ContractProviders,
   contractAddress: string,
   entries: readonly VerifierKeyEntry[],
 ): Promise<void> {
-  const contractState =
-    await providers.publicDataProvider.queryContractState(contractAddress);
-  if (!contractState) {
-    throw new Error(`no contract state found at ${contractAddress}`);
-  }
+  const contractState = await deployedContractState(providers, contractAddress);
   const problem = describeVerifierKeyDrift(
     compareVerifierKeys(entries, onChainVerifierKeys(contractState)),
   );

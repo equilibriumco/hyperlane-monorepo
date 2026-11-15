@@ -78,13 +78,13 @@ export class SimulatedNight extends MidnightReadClient {
       throw new Error(`circuit ${circuit} not found on the night contract`);
     }
     const { context } = await run(
-      createCircuitContext(
-        circuit,
-        dummyContractAddress(),
-        emptyZswapLocalState(COIN_PUBLIC_KEY),
-        this.state,
-        PRIVATE_STATE,
-      ),
+      createCircuitContext({
+        circuitId: circuit,
+        contractAddress: dummyContractAddress(),
+        coinPublicKeyOrZswapState: emptyZswapLocalState(COIN_PUBLIC_KEY),
+        contractState: this.state,
+        privateState: PRIVATE_STATE,
+      }),
       ...args,
     );
     this.state = context.queryContexts[dummyContractAddress()].state;

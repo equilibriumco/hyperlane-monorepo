@@ -3,7 +3,6 @@ import * as path from 'node:path';
 
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
-import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { nativeToken } from '@midnightntwrk/ledger-v9';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
@@ -41,6 +40,7 @@ import {
   type WalletEndpoints,
 } from '../deploy/wallet.js';
 import { bytesToHex, hexToBytes } from '../utils/conversion.js';
+import { rethrowWithCauses } from '../utils/errors.js';
 import type { MidnightTransaction, MidnightTxReceipt } from '../utils/types.js';
 
 import {
@@ -65,7 +65,7 @@ const DEFAULT_PROOF_SERVER_URL = 'http://127.0.0.1:6300';
 const PAY_FOR_GAS_ATTEMPTS = 3;
 const PAY_FOR_GAS_RETRY_DELAY_MS = 1000;
 // Long enough to outlast normal indexer lag. It cannot prove a payment will
-// never land: a broadcast transaction stays valid for the 30-minute tx TTL.
+// never land: a broadcast transaction stays valid for the one-hour tx TTL.
 const PAY_FOR_GAS_SETTLE_MS_DEFAULT = 180_000;
 const PAY_FOR_GAS_POLL_MS = 3000;
 
@@ -92,6 +92,7 @@ function payForGasSettleMs(): number {
 
 export interface MidnightSignerOptions {
   seedHex: string;
+  networkId: string;
   endpoints: WalletEndpoints;
   stateDir: string;
   privateStatePassword: () => string;
@@ -118,7 +119,10 @@ export class MidnightSigner
     super(metadata, client, indexer);
     this.ownerStore = new OwnerStateStore(options.stateDir);
     this.signerAddress = String(
-      deriveUnshieldedKeystore(options.seedHex).getBech32Address(),
+      deriveUnshieldedKeystore(
+        options.seedHex,
+        options.networkId,
+      ).getBech32Address(),
     );
   }
 
@@ -135,17 +139,16 @@ export class MidnightSigner
       );
     }
 
-    // The ledger/wallet stack encodes addresses and transactions against a
-    // process-global network id; it must be set before any key derivation.
+    // Addresses and transactions are encoded for one Midnight network, so the
+    // wallet and the providers are both built with its id.
     const networkId = (metadata as { midnightNetworkId?: string })
       .midnightNetworkId;
     if (!networkId) {
       throw new Error(
         `chain metadata for ${metadata.name} has no midnightNetworkId — ` +
-          `set it to the Midnight network id (e.g. 'stagenet', or 'undeployed' for a local devnet)`,
+          `set it to the Midnight network id (e.g. 'preview', or 'undeployed' for a local devnet)`,
       );
     }
-    setNetworkId(networkId);
 
     const client = MidnightReadClient.fromMetadata(metadata);
     const endpoints: WalletEndpoints = {
@@ -166,7 +169,7 @@ export class MidnightSigner
       metadata,
       client,
       new MidnightIndexerClient(client.endpoints.indexerGraphqlUrl),
-      { seedHex, endpoints, stateDir, privateStatePassword },
+      { seedHex, networkId, endpoints, stateDir, privateStatePassword },
     );
   }
 
@@ -198,7 +201,7 @@ export class MidnightSigner
           `at ${transaction.contractAddress}`,
       );
     }
-    const txData = await call(...transaction.args);
+    const txData = await call(...transaction.args).catch(rethrowWithCauses);
     const receipt: MidnightTxReceipt = {
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
@@ -288,12 +291,14 @@ export class MidnightSigner
       throw new Error(`messageId must be 32 bytes, got ${req.messageId}`);
     }
     const igp = await this.joinContract('igp', req.igpAddress);
-    const txData = await igp.callTx.payForGas(
-      messageId,
-      BigInt(req.destinationDomainId),
-      BigInt(req.gasLimit),
-      BigInt(req.amount),
-    );
+    const txData = await igp.callTx
+      .payForGas(
+        messageId,
+        BigInt(req.destinationDomainId),
+        BigInt(req.gasLimit),
+        BigInt(req.amount),
+      )
+      .catch(rethrowWithCauses);
     return {
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
@@ -364,7 +369,7 @@ export class MidnightSigner
     if (req.address === this.signerAddress) {
       const ctx = await this.walletContext();
       const state = await waitForSync(ctx);
-      return state.unshielded?.balances[nativeToken().raw] ?? 0n;
+      return state.unshielded.balances[nativeToken().raw] ?? 0n;
     }
     return super.getBalance(req);
   }
@@ -380,7 +385,7 @@ export class MidnightSigner
     const ctx = await this.walletContext();
     const state = await waitForSync(ctx);
     return {
-      balance: state.dust?.balance(new Date()) ?? 0n,
+      balance: state.dust.balance(new Date()),
       symbol: 'DUST',
       decimals: 15,
     };
@@ -450,6 +455,7 @@ export class MidnightSigner
       this.walletPromise = (async () => {
         const ctx = await createWallet(
           this.options.seedHex,
+          this.options.networkId,
           this.options.endpoints,
         );
         await this.ensureFeesReady(ctx);
@@ -463,9 +469,9 @@ export class MidnightSigner
   // a fee. An empty wallet fails fast rather than waiting forever.
   private async ensureFeesReady(ctx: WalletContext): Promise<void> {
     const state = await waitForSync(ctx);
-    const dust = state.dust?.balance(new Date()) ?? 0n;
+    const dust = state.dust.balance(new Date());
     if (dust >= minimumDustSpecks()) return;
-    const night = state.unshielded?.balances[nativeToken().raw] ?? 0n;
+    const night = state.unshielded.balances[nativeToken().raw] ?? 0n;
     if (night === 0n) {
       throw new Error(
         `signer wallet ${this.signerAddress} holds no NIGHT — fund it before ` +
@@ -480,6 +486,7 @@ export class MidnightSigner
     if (!cached) {
       cached = this.walletContext().then((wallet) =>
         createProviders(wallet, artifactsPathFor(name), {
+          networkId: this.options.networkId,
           endpoints: this.options.endpoints,
           privateStateDbPath: this.ownerStore.privateStateStorePath(),
           privateStatePassword: this.options.privateStatePassword,
