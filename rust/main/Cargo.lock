@@ -1557,7 +1557,7 @@ dependencies = [
  "ff 0.13.1",
  "hex 0.4.3",
  "midnight-curves 0.3.1",
- "midnight-proofs 0.8.2",
+ "midnight-proofs 0.8.3",
  "num-bigint 0.4.6",
  "rand 0.8.5",
  "serde",
@@ -6556,7 +6556,7 @@ dependencies = [
  "hyperlane-starknet",
  "hyperlane-test",
  "hyperlane-tron",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "maplit",
  "mockall",
  "moka",
@@ -6613,7 +6613,7 @@ dependencies = [
  "getrandom 0.2.15",
  "hex 0.4.3",
  "hyperlane-application",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "num 0.4.3",
  "num-derive",
  "num-traits",
@@ -6662,7 +6662,7 @@ dependencies = [
  "ibc-proto",
  "injective-protobuf",
  "injective-std",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "once_cell",
  "pin-project",
  "protobuf 2.28.0",
@@ -6739,7 +6739,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "k256 0.13.4",
  "num 0.4.3",
  "num-traits",
@@ -6842,7 +6842,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "once_cell",
  "radix-common",
  "radix-engine-interface",
@@ -7111,7 +7111,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "num 0.4.3",
  "num-traits",
  "prost 0.13.4",
@@ -7851,7 +7851,7 @@ dependencies = [
  "hyperlane-radix",
  "hyperlane-sealevel",
  "hyperlane-tron",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "mockall",
  "prometheus",
  "radix-common",
@@ -8198,7 +8198,7 @@ dependencies = [
  "group 0.13.0",
  "k256 0.14.0",
  "lazy_static",
- "midnight-base-crypto-derive 1.1.0 (git+https://github.com/midnightntwrk/midnight-ledger?tag=ledger-9.1.0.2-rc.0)",
+ "midnight-base-crypto-derive 1.1.0",
  "midnight-serialize",
  "pastey",
  "rand 0.8.5",
@@ -8215,13 +8215,13 @@ dependencies = [
 
 [[package]]
 name = "midnight-base-crypto-derive"
-version = "1.1.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30565daf666e3016d2bb72073e2c3ff61ac3ad123912eec764a72e20758082f2"
+checksum = "62d0904a6357c953a55316b0ea7fac93d971f2d00c94d51e082817ae24872126"
 dependencies = [
  "proc-macro2",
  "quote 1.0.42",
- "syn 2.0.109",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -8269,7 +8269,7 @@ dependencies = [
  "group 0.13.0",
  "lazy_static",
  "midnight-curves 0.3.1",
- "midnight-proofs 0.8.2",
+ "midnight-proofs 0.8.3",
  "num-bigint 0.4.6",
  "num-integer",
  "num-traits",
@@ -8396,9 +8396,9 @@ dependencies = [
 
 [[package]]
 name = "midnight-proofs"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22b1526bc7d9d1fad29505a15b81fe54aa7698a7dcd1948b447021bc8571f543"
+checksum = "19b2e4b1acb581ad741b0cb7c0e9dbdf51142f4e9518886f25fcff40a6702dcc"
 dependencies = [
  "blake2b_simd",
  "ff 0.13.1",
@@ -8558,7 +8558,7 @@ dependencies = [
  "lazy_static",
  "lru 0.18.1",
  "midnight-base-crypto",
- "midnight-base-crypto-derive 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "midnight-base-crypto-derive 1.0.0",
  "midnight-circuits 6.2.1",
  "midnight-curves 0.2.1",
  "midnight-proofs 0.7.2",
@@ -8592,10 +8592,10 @@ dependencies = [
  "lazy_static",
  "lru 0.18.1",
  "midnight-base-crypto",
- "midnight-base-crypto-derive 1.1.0 (git+https://github.com/midnightntwrk/midnight-ledger?tag=ledger-9.1.0.2-rc.0)",
+ "midnight-base-crypto-derive 1.1.0",
  "midnight-circuits 7.3.0",
  "midnight-curves 0.3.1",
- "midnight-proofs 0.8.2",
+ "midnight-proofs 0.8.3",
  "midnight-serialize",
  "midnight-storage-core 1.2.3 (git+https://github.com/midnightntwrk/midnight-ledger?tag=ledger-9.1.0.2-rc.0)",
  "midnight-zk-stdlib 2.4.0",
@@ -8648,7 +8648,7 @@ dependencies = [
  "hex-literal 1.1.0",
  "midnight-circuits 7.3.0",
  "midnight-curves 0.3.1",
- "midnight-proofs 0.8.2",
+ "midnight-proofs 0.8.3",
  "num-bigint 0.4.6",
  "num-traits",
  "rand 0.8.5",
@@ -10132,7 +10132,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote 1.0.42",
  "syn 2.0.109",
@@ -10823,7 +10823,7 @@ dependencies = [
  "hyperlane-operation-verifier",
  "hyperlane-sealevel",
  "hyperlane-test",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "lander",
  "maplit",
  "mockall",
@@ -11818,7 +11818,7 @@ dependencies = [
  "hyperlane-core",
  "hyperlane-ethereum",
  "hyperlane-test",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "migration",
  "num-bigint 0.4.6",
  "num-traits",
@@ -12525,7 +12525,7 @@ dependencies = [
  "blake2b_simd",
  "ff 0.13.1",
  "midnight-curves 0.3.1",
- "midnight-proofs 0.8.2",
+ "midnight-proofs 0.8.3",
  "num-bigint 0.4.6",
  "rand 0.8.5",
 ]
@@ -18665,7 +18665,7 @@ dependencies = [
  "hyperlane-ethereum",
  "hyperlane-metric",
  "hyperlane-test",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "k256 0.13.4",
  "mockall",
  "prometheus",
