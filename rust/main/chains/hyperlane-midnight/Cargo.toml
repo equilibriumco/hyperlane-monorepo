@@ -32,8 +32,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 # Native decode of the Midnight contract ledger state served by the
-# indexer (`contractAction.state`). Pinned to the ledger 9.1.0.2-rc.0 graph, a
-# client-side release candidate on the 9.1.0.1 line that node 2.1.101 runs,
+# indexer (`contractAction.state`). Pinned to the ledger 9.1.0.2 graph, a
+# client-side patch on the 9.1.0.1 line that node 2.1.101 runs,
 # which serialises contract state with the `midnight:contract-state[v8]` tag —
 # the earlier ledger 8.x crates only understood `[v6]` and `tagged_deserialize`
 # rejects the newer blob outright. These crates implement the
@@ -53,10 +53,10 @@ url = { workspace = true }
 # storage, ...) resolve via the git checkout's internal `path =` deps, which
 # unify with the direct git deps below. Bump the tag in lockstep with the
 # midnightntwrk/midnight-node image in docker/compose.yaml + the contracts repo.
-midnight-onchain-state = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2-rc.0", package = "midnight-onchain-state" }
-midnight-serialize = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2-rc.0", package = "midnight-serialize" }
-midnight-storage = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2-rc.0", package = "midnight-storage" }
-midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2-rc.0", package = "midnight-storage-core", features = ["layout-v2"] }
+midnight-onchain-state = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2", package = "midnight-onchain-state" }
+midnight-serialize = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2", package = "midnight-serialize" }
+midnight-storage = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2", package = "midnight-storage" }
+midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2", package = "midnight-storage-core", features = ["layout-v2"] }
 
 [dev-dependencies]
 # Enable hyperlane-core's `ethers` feature in tests only — it gates
@@ -74,4 +74,4 @@ tempfile = { workspace = true }
 # *construct* the test blobs. Pinned to the same git tag as the graph above
 # (base-crypto 1.1.1) so the test builds the byte-identical wire format the
 # live indexer serves. Not used by any non-test code.
-midnight-base-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2-rc.0", package = "midnight-base-crypto" }
+midnight-base-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.2", package = "midnight-base-crypto" }

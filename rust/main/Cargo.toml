@@ -331,11 +331,11 @@ version = "=0.5.2"
 #     `midnight-zkir`, which the decoder does not pull in.
 [patch.crates-io.midnight-serialize]
 git = "https://github.com/midnightntwrk/midnight-ledger"
-tag = "ledger-9.1.0.2-rc.0"
+tag = "ledger-9.1.0.2"
 
 [patch.crates-io.midnight-base-crypto]
 git = "https://github.com/midnightntwrk/midnight-ledger"
-tag = "ledger-9.1.0.2-rc.0"
+tag = "ledger-9.1.0.2"
 
 # Patched fork of size-of 0.1.5. Pulled transitively (starknet-types-core ->
 # cainome -> abigen), size-of 0.1.5 lists ABIs like `aapcs`/`win64`

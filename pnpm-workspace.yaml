@@ -9,8 +9,8 @@ minimumReleaseAgeExclude:
   - oxlint
   # Midnight's ledger release pinned in overrides; drop these two once it is
   # past the age limit.
-  - '@midnightntwrk/ledger-v9@1.0.2-rc.0'
-  - '@midnightntwrk/onchain-runtime-v4@4.0.2-rc.0'
+  - '@midnightntwrk/ledger-v9@1.0.2'
+  - '@midnightntwrk/onchain-runtime-v4@4.0.2'
 
 packages:
   - 'solhint-plugin'
@@ -202,8 +202,8 @@ overrides:
   # midnight-js pins ledger-v9 1.0.0 and compact-js asks ^1.0.0; the ledger
   # WASM and its on-chain runtime must each stay a single copy, so both are
   # forced to the ledger release that carries the client-side fixes.
-  '@midnightntwrk/ledger-v9': 1.0.2-rc.0
-  '@midnightntwrk/onchain-runtime-v4': 4.0.2-rc.0
+  '@midnightntwrk/ledger-v9': 1.0.2
+  '@midnightntwrk/onchain-runtime-v4': 4.0.2
   # 0.11.6 requires 18 consensus heights; current Aleo E2E networks provide 17.
   '@provablehq/wasm': 0.11.3
   '@types/react': 18.3.27
