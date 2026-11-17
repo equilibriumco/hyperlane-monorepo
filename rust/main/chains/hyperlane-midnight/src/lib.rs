@@ -29,7 +29,7 @@ mod cross_boundary_tests;
 #[cfg(test)]
 mod metadata_tests;
 
-pub use config::ConnectionConf;
+pub use config::{ConnectionConf, DEFAULT_SUBMIT_TIMEOUT};
 pub use error::HyperlaneMidnightError;
 pub use indexer::{MidnightDeliveryIndexer, MidnightDispatchIndexer};
 pub use indexer_client::MidnightIndexerClient;

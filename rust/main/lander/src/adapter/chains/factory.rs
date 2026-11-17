@@ -70,9 +70,9 @@ impl AdapterFactory {
                 Arc::new(adapter)
             }
             #[cfg(feature = "midnight")]
-            ChainConnectionConf::Midnight(_) => todo!(
-                "Midnight uses the Classic submitter; this arm is only reached \
-                 if a chain config explicitly sets `submitter: lander`."
+            ChainConnectionConf::Midnight(_) => eyre::bail!(
+                "Midnight uses the Classic submitter; the config parser refuses \
+                 `submitter: lander` for it"
             ),
         };
         Ok(adapter)

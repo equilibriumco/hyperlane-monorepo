@@ -10,18 +10,6 @@ use hyperlane_core::{ChainResult, HyperlaneMessage, H160, H256, H512, U256};
 
 use crate::HyperlaneMidnightError;
 
-/// How long an agent waits for the submitter subprocess to prove and land a
-/// transaction. Governs the heavy `submit` and `announce` proofs, which take
-/// minutes on a RAM-constrained host, so the default is 1800s and
-/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS` overrides it.
-fn submit_timeout() -> Duration {
-    Duration::from_secs(
-        std::env::var("MIDNIGHT_SUBMIT_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1800),
-    )
-}
 const DELIVERED_TIMEOUT: Duration = Duration::from_secs(30);
 const STORAGE_LOCATIONS_TIMEOUT: Duration = Duration::from_secs(60);
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,7 +25,6 @@ pub struct SubmitRequest<'a> {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub proof_server_url: String,
     pub message: WireMessage<'a>,
     pub metadata: WireMetadata,
     pub is_contract_recipient: bool,
@@ -205,20 +192,17 @@ pub struct ToolkitContext {
     pub binary_path: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub proof_server_url: String,
+    pub submit_timeout: Duration,
 }
 
-const DEFAULT_PROOF_SERVER_URL: &str = "http://127.0.0.1:6300";
-
 impl ToolkitContext {
-    /// Build the sidecar context from the chain config and the `MIDNIGHT_*` env.
+    /// Build the sidecar context from the chain config.
     pub fn from_conf(conf: &crate::ConnectionConf) -> Self {
         Self {
             binary_path: conf.toolkit_path.clone().unwrap_or_default(),
             indexer_graphql_url: conf.indexer_graphql_url.to_string(),
             indexer_ws_url: derive_ws_url(&conf.indexer_graphql_url),
-            proof_server_url: std::env::var("MIDNIGHT_PROOF_SERVER_URL")
-                .unwrap_or_else(|_| DEFAULT_PROOF_SERVER_URL.to_string()),
+            submit_timeout: conf.submit_timeout,
         }
     }
 }
@@ -241,7 +225,7 @@ pub async fn submit_handle(
     ctx: &ToolkitContext,
     request: &SubmitRequest<'_>,
 ) -> ChainResult<ToolkitOutcome> {
-    let raw = run_submitter(ctx, request, submit_timeout()).await?;
+    let raw = run_submitter(ctx, request, ctx.submit_timeout).await?;
     let response: SubmitResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),
@@ -371,7 +355,6 @@ pub struct AnnounceRequest {
     pub contract_address: String,
     pub indexer_graphql_url: String,
     pub indexer_ws_url: String,
-    pub proof_server_url: String,
     pub validator: String,
     /// `0x`-prefixed hex of the whole zero-padded `Bytes<480>` buffer — the
     /// exact bytes the validator signed over, since the on-chain digest hashes
@@ -429,14 +412,13 @@ pub async fn announce_tx(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        proof_server_url: ctx.proof_server_url.clone(),
         validator: format!("0x{validator:x}"),
         storage_location: format!("0x{}", hex::encode(bytes)),
         signature: format!("0x{}", hex::encode(signature)),
         pubkey: format!("0x{}", hex::encode(pubkey)),
     };
 
-    let raw = run_submitter(ctx, &request, submit_timeout()).await?;
+    let raw = run_submitter(ctx, &request, ctx.submit_timeout).await?;
     let response: SubmitResponse =
         serde_json::from_str(&raw).map_err(|err| HyperlaneMidnightError::SubmitterMalformed {
             message: err.to_string(),
@@ -677,7 +659,6 @@ pub fn build_request<'a>(
         contract_address: format!("{contract_address:x}"),
         indexer_graphql_url: ctx.indexer_graphql_url.clone(),
         indexer_ws_url: ctx.indexer_ws_url.clone(),
-        proof_server_url: ctx.proof_server_url.clone(),
         message: wire_message(message),
         metadata,
         is_contract_recipient,
@@ -799,7 +780,7 @@ mod tests {
             binary_path: "/bin/false".to_string(),
             indexer_graphql_url: "http://indexer/graphql".to_string(),
             indexer_ws_url: "ws://indexer/graphql".to_string(),
-            proof_server_url: "http://proof:6300".to_string(),
+            submit_timeout: crate::DEFAULT_SUBMIT_TIMEOUT,
         }
     }
 
