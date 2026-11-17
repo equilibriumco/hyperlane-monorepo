@@ -14,7 +14,8 @@ pub struct ConnectionConf {
     pub indexer_graphql_url: Url,
     /// JSON-RPC URL of a Midnight node (the chain config's first `rpcUrls`
     /// entry, http(s) or ws(s)). The merkle tree reads cross-check the
-    /// indexer's contract state against it; `None` turns the check off.
+    /// indexer's contract state against its state at its finalized block;
+    /// `None` turns the check off.
     pub node_rpc_url: Option<Url>,
     /// Path to the handle submitter binary.
     pub toolkit_path: Option<String>,
