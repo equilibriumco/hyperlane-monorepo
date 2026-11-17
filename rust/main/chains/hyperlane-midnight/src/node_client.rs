@@ -3,10 +3,8 @@
 
 use std::time::Duration;
 
-use async_trait::async_trait;
-use ethers::providers::{JsonRpcClient, Ws};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use ethers::providers::{Http, JsonRpcClient, Ws};
+use serde_json::json;
 use url::Url;
 
 use crate::HyperlaneMidnightError;
@@ -25,79 +23,19 @@ pub struct MidnightNodeClient {
     http: reqwest::Client,
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcResponse {
-    result: Option<String>,
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
-
-/// One connection to the node. Both calls of a read go through it.
-#[async_trait]
-trait NodeRpc: Send + Sync {
-    async fn call(&self, method: &str, params: Value) -> Result<String, String>;
-}
-
-#[async_trait]
-impl NodeRpc for Ws {
-    async fn call(&self, method: &str, params: Value) -> Result<String, String> {
-        self.request::<_, String>(method, params)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-struct HttpRpc<'a> {
-    client: &'a reqwest::Client,
-    url: &'a Url,
-}
-
-#[async_trait]
-impl NodeRpc for HttpRpc<'_> {
-    async fn call(&self, method: &str, params: Value) -> Result<String, String> {
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-        let response: JsonRpcResponse = self
-            .client
-            .post(self.url.clone())
-            .json(&body)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
-        match (response.result, response.error) {
-            (Some(result), _) => Ok(result),
-            (None, Some(error)) => Err(format!("{} (code {})", error.message, error.code)),
-            (None, None) => Err("response carries neither a result nor an error".to_string()),
-        }
-    }
-}
-
 /// The contract's state, as hex, at the node's finalized head. On failure,
 /// the call that failed and why.
-async fn finalized_state_hex(
-    rpc: &dyn NodeRpc,
+async fn finalized_state_hex<P: JsonRpcClient>(
+    rpc: &P,
     address: &str,
 ) -> Result<String, (&'static str, String)> {
-    let head = rpc
-        .call(FINALIZED_HEAD, json!([]))
+    let head: String = rpc
+        .request(FINALIZED_HEAD, json!([]))
         .await
-        .map_err(|e| (FINALIZED_HEAD, e))?;
-    rpc.call(CONTRACT_STATE, json!([address, head]))
+        .map_err(|e| (FINALIZED_HEAD, e.to_string()))?;
+    rpc.request(CONTRACT_STATE, json!([address, head]))
         .await
-        .map_err(|e| (CONTRACT_STATE, e))
+        .map_err(|e| (CONTRACT_STATE, e.to_string()))
 }
 
 impl MidnightNodeClient {
@@ -145,11 +83,8 @@ impl MidnightNodeClient {
                 finalized_state_hex(&ws, address).await
             }
             "http" | "https" => {
-                let rpc = HttpRpc {
-                    client: &self.http,
-                    url: &self.url,
-                };
-                finalized_state_hex(&rpc, address).await
+                let http = Http::new_with_client(self.url.clone(), self.http.clone());
+                finalized_state_hex(&http, address).await
             }
             scheme => {
                 return Err(HyperlaneMidnightError::NodeRpc(format!(
@@ -166,74 +101,38 @@ impl MidnightNodeClient {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use ethers::providers::MockProvider;
 
     use super::*;
 
     const HEAD: &str = "0x32d79281f047c2184d69cf779e942a1d96ec51d323e2501b064930fed390039d";
 
-    /// Answers the finalized head with `head` and any state read with `aa`,
-    /// recording every call.
-    struct StubNode {
-        head: Result<String, String>,
-        calls: Mutex<Vec<(String, Value)>>,
-    }
-
-    impl StubNode {
-        fn new(head: Result<String, String>) -> Self {
-            Self {
-                head,
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<(String, Value)> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl NodeRpc for StubNode {
-        async fn call(&self, method: &str, params: Value) -> Result<String, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((method.to_string(), params));
-            match method {
-                FINALIZED_HEAD => self.head.clone(),
-                CONTRACT_STATE => Ok("aa".to_string()),
-                other => Err(format!("unexpected method {other}")),
-            }
-        }
-    }
-
     #[tokio::test]
     async fn reads_the_state_at_the_finalized_head() {
-        let node = StubNode::new(Ok(HEAD.to_string()));
+        let node = MockProvider::new();
+        // The mock answers the last pushed first.
+        node.push::<String, _>("aa".to_string()).unwrap();
+        node.push::<String, _>(HEAD.to_string()).unwrap();
         let state = finalized_state_hex(&node, "0102")
             .await
             .expect("both calls answer");
         assert_eq!(state, "aa");
-        assert_eq!(
-            node.calls(),
-            vec![
-                (FINALIZED_HEAD.to_string(), json!([])),
-                (CONTRACT_STATE.to_string(), json!(["0102", HEAD])),
-            ],
-            "the state is read at the hash the node named as finalized"
-        );
+        node.assert_request(FINALIZED_HEAD, json!([])).unwrap();
+        node.assert_request(CONTRACT_STATE, json!(["0102", HEAD]))
+            .expect("the state is read at the hash the node named as finalized");
     }
 
     #[tokio::test]
     async fn reads_no_state_without_a_finalized_head() {
-        let node = StubNode::new(Err("connection reset".to_string()));
-        let err = finalized_state_hex(&node, "0102")
+        let node = MockProvider::new();
+        let (method, _) = finalized_state_hex(&node, "0102")
             .await
-            .expect_err("the head call failed");
-        assert_eq!(err, (FINALIZED_HEAD, "connection reset".to_string()));
-        assert_eq!(
-            node.calls().len(),
-            1,
+            .expect_err("the node gave no head");
+        assert_eq!(method, FINALIZED_HEAD);
+        node.assert_request(FINALIZED_HEAD, json!([])).unwrap();
+        assert!(
+            node.assert_request(CONTRACT_STATE, json!(["0102"]))
+                .is_err(),
             "no state read at the best block in its place"
         );
     }
