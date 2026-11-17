@@ -94,9 +94,7 @@ export async function deployContractInstance(
     ? planChunks(entries, {
         deployCircuits: NIGHT_DEPLOY_CIRCUITS,
         priority: NIGHT_MAINTENANCE_PRIORITY,
-        budgetBytes: Number(
-          process.env.NIGHT_CHUNK_BUDGET_BYTES ?? DEFAULT_CHUNK_BUDGET_BYTES,
-        ),
+        budgetBytes: DEFAULT_CHUNK_BUDGET_BYTES,
       })
     : null;
 

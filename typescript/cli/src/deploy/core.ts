@@ -75,6 +75,9 @@ export async function runCoreDeploy(params: DeployParams) {
   });
 
   let deployedAddresses: ChainAddresses;
+  // The block the agents start indexing from. Nothing can be dispatched
+  // before the contracts exist, so the height before the deploy is safe.
+  let midnightStartBlock: number | undefined;
   const protocol = multiProvider.getProtocol(chain);
   switch (protocol) {
     case ProtocolType.Tron:
@@ -117,6 +120,9 @@ export async function runCoreDeploy(params: DeployParams) {
 
       const userAddress = signer.getSignerAddress();
       const initialBalances = await getBalances(context, [chain], userAddress);
+      if (protocol === ProtocolType.Midnight) {
+        midnightStartBlock = await signer.getHeight();
+      }
 
       const validatedConfig = validateCoreConfigForAltVM(
         config,
@@ -141,6 +147,21 @@ export async function runCoreDeploy(params: DeployParams) {
     chainName: chain,
     addresses: deployedAddresses,
   });
+  if (midnightStartBlock !== undefined) {
+    const metadata = await registry.getChainMetadata(chain);
+    if (metadata) {
+      await registry.updateChain({
+        chainName: chain,
+        metadata: {
+          ...metadata,
+          index: { ...metadata.index, from: midnightStartBlock },
+        },
+      });
+      log(
+        `Agents index ${chain} from block ${midnightStartBlock} (index.from)`,
+      );
+    }
+  }
 
   logGreen('✅ Core contract deployments complete:\n');
   log(indentYamlOrJson(yamlStringify(deployedAddresses, null, 2), 4));

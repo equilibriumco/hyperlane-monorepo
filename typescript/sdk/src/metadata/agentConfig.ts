@@ -818,18 +818,12 @@ export function buildAgentConfig(
           ? formatMidnightAddress(addresses[chain])
           : addresses[chain];
 
-    // The indexer GraphQL endpoint travels in the metadata's gatewayUrls. The
-    // node signer marks that signing is delegated to the submitter subprocess,
-    // and its presence is what lets the validator self-announce. `toolkitPath`
-    // is host-local, so the operator supplies it separately.
+    // The node signer marks that signing is delegated to the submitter
+    // subprocess, and its presence is what lets the validator self-announce.
+    // `toolkitPath` is host-local, so the operator supplies it separately.
     const midnightConfig =
       metadata?.protocol === ProtocolType.Midnight
-        ? {
-            indexerGraphqlUrl: (
-              metadata as { gatewayUrls?: { http: string }[] }
-            ).gatewayUrls?.[0]?.http,
-            signer: { type: AgentSignerKeyType.Node },
-          }
+        ? { signer: { type: AgentSignerKeyType.Node } }
         : {};
 
     // Registry metadata may carry agent index settings beyond `from`

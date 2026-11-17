@@ -423,12 +423,41 @@ async function getWarpCoreConfig(
     contracts,
     tokenMetadataMap,
   );
+  await addMidnightGasPaymasters(params.context, warpCoreConfig);
 
   fullyConnectTokens(warpCoreConfig, params.context.multiProvider);
 
   const symbol = tokenMetadataMap.getDefaultSymbol();
 
   return { warpCoreConfig, addWarpRouteOptions: { symbol } };
+}
+
+/**
+ * A Midnight token pays for gas at its chain's IGP, which the token does not
+ * reference on chain, so the route has to name it for transfers to work.
+ */
+export async function addMidnightGasPaymasters(
+  context: WriteCommandContext,
+  warpCoreConfig: WarpCoreConfig,
+): Promise<void> {
+  for (const token of warpCoreConfig.tokens) {
+    if (
+      context.multiProvider.getProtocol(token.chainName) !==
+      ProtocolType.Midnight
+    ) {
+      continue;
+    }
+    const igp = (await context.registry.getChainAddresses(token.chainName))
+      ?.interchainGasPaymaster;
+    if (!igp) {
+      warnYellow(
+        `No interchainGasPaymaster for ${token.chainName} in the registry, so ` +
+          'its token has no igpTokenAddressOrDenom and transfers from it fail',
+      );
+      continue;
+    }
+    token.igpTokenAddressOrDenom = igp;
+  }
 }
 
 /**

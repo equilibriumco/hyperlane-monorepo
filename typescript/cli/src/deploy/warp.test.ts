@@ -19,6 +19,7 @@ import {
 } from '@hyperlane-xyz/sdk';
 
 import {
+  addMidnightGasPaymasters,
   fullyConnectTokens,
   runWarpRouteApply,
   runWarpRouteCombine,
@@ -731,5 +732,51 @@ describe('transformDeployConfigForDisplay', () => {
     expect(lowerRow?.Accept).to.equal(true);
     expect(upperRow?.Accept).to.equal(false);
     expect(relayerRow?.Relayer).to.equal(RELAYER);
+  });
+});
+
+describe('addMidnightGasPaymasters', () => {
+  const token = (chainName: string) => ({
+    chainName,
+    standard: TokenStandard.EvmHypSynthetic,
+    decimals: 6,
+    symbol: 'NIGHT',
+    name: 'NIGHT',
+    addressOrDenom: '0x1',
+  });
+
+  it('records the registry IGP on Midnight tokens only', async () => {
+    const context = {
+      multiProvider: {
+        getProtocol: (chain: string) =>
+          chain === 'midnight1' ? ProtocolType.Midnight : ProtocolType.Ethereum,
+      },
+      registry: {
+        getChainAddresses: async (chain: string) =>
+          ({ interchainGasPaymaster: `igp-of-${chain}` }) as any,
+      },
+    } as any;
+    const config: WarpCoreConfig = {
+      tokens: [token('midnight1'), token('sepolia')],
+    };
+
+    await addMidnightGasPaymasters(context, config);
+
+    expect(config.tokens[0].igpTokenAddressOrDenom).to.equal(
+      'igp-of-midnight1',
+    );
+    expect(config.tokens[1].igpTokenAddressOrDenom).to.be.undefined;
+  });
+
+  it('leaves the field unset when the registry has no IGP', async () => {
+    const context = {
+      multiProvider: { getProtocol: () => ProtocolType.Midnight },
+      registry: { getChainAddresses: async () => ({}) as any },
+    } as any;
+    const config: WarpCoreConfig = { tokens: [token('midnight1')] };
+
+    await addMidnightGasPaymasters(context, config);
+
+    expect(config.tokens[0].igpTokenAddressOrDenom).to.be.undefined;
   });
 });

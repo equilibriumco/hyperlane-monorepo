@@ -7,6 +7,7 @@ import { ProtocolType } from '@hyperlane-xyz/utils';
 import { readYamlOrJson } from '../../../utils/files.js';
 import { HyperlaneE2ECoreTestCommands } from '../../commands/core.js';
 import {
+  CHAIN_1_METADATA_PATH,
   CHAIN_NAME_1,
   CORE_CONFIG_PATH,
   CORE_READ_CONFIG_PATH_1,
@@ -61,6 +62,13 @@ describe('hyperlane midnight core deploy e2e tests', async function () {
     expect(addresses.validatorAnnounce).to.not.equal(
       addresses.interchainGasPaymaster,
     );
+  });
+
+  it('should record the block the agents start indexing from', () => {
+    const metadata: { index?: { from?: number } } = readYamlOrJson(
+      CHAIN_1_METADATA_PATH,
+    );
+    expect(metadata.index?.from).to.be.a('number').and.greaterThan(0);
   });
 
   // The constructor takes one origin's validators, so a deploy with two
