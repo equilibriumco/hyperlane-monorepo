@@ -10,8 +10,9 @@
 //! the indexer half derives one leaf per `HYP_DISPATCH` event.
 //!
 //! The map is read from the indexer, and held to the node's copy of the same
-//! state when the chain config names a node: a message the two disagree on
-//! is an error, and a source that lags only shortens the tree.
+//! state at its finalized block when the chain config names a node: a message
+//! the two disagree on is an error, and a source that lags only shortens the
+//! tree.
 
 use std::ops::RangeInclusive;
 use std::sync::Once;
@@ -35,8 +36,8 @@ use crate::{HyperlaneMidnightError, MidnightProvider};
 
 static CROSS_CHECK_OFF: Once = Once::new();
 
-/// Midnight has BFT finality and the indexer serves only finalized state, so a
-/// configured `reorg_period` has no effect. Log it rather than drop it
+/// The node is read at its finalized block and the indexer serves only
+/// finalized blocks, so a configured `reorg_period` has no effect. Log it rather than drop it
 /// silently, so an operator who set one finds out why.
 fn note_reorg_ignored(reorg_period: &ReorgPeriod) {
     if !reorg_period.is_none() {
@@ -135,7 +136,7 @@ impl MidnightMerkleTreeHook {
     }
 
     /// The dispatched messages the indexer serves, held to the node's copy of
-    /// the state when the chain config names a node.
+    /// the state at its finalized block when the chain config names a node.
     async fn dispatched_messages(&self) -> ChainResult<Vec<(u32, HyperlaneMessage)>> {
         let address = self.address_hex();
         let indexer_bytes = self.provider.indexer().contract_state(&address).await?;
