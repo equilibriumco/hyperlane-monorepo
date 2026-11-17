@@ -1,5 +1,11 @@
+use std::time::Duration;
+
 use hyperlane_core::U256;
 use url::Url;
+
+/// How long a delivery or announcement may run in the submitter before it is
+/// killed, unless `MIDNIGHT_SUBMIT_TIMEOUT_SECS` says otherwise.
+pub const DEFAULT_SUBMIT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Midnight connection configuration.
 #[derive(Clone, Debug)]
@@ -17,6 +23,8 @@ pub struct ConnectionConf {
     /// message to its payment. Zero (the default) reports no estimate, which
     /// leaves that policy permissive.
     pub delivery_gas: U256,
+    /// How long the heavy `submit` and `announce` calls may run.
+    pub submit_timeout: Duration,
 }
 
 impl ConnectionConf {
@@ -32,12 +40,19 @@ impl ConnectionConf {
             node_rpc_url,
             toolkit_path,
             delivery_gas: U256::zero(),
+            submit_timeout: DEFAULT_SUBMIT_TIMEOUT,
         }
     }
 
     /// Set the reported delivery gas.
     pub fn with_delivery_gas(mut self, delivery_gas: U256) -> Self {
         self.delivery_gas = delivery_gas;
+        self
+    }
+
+    /// Set how long `submit` and `announce` may run.
+    pub fn with_submit_timeout(mut self, submit_timeout: Duration) -> Self {
+        self.submit_timeout = submit_timeout;
         self
     }
 }

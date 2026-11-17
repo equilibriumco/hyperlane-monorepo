@@ -381,7 +381,10 @@ mod test {
     fn unset_setting_warns_with_a_midnight_chain() {
         let mut chains = august_chains();
         chains["midnight1"]["protocol"] = json!("midnight");
-        chains["midnight1"]["indexergraphqlurl"] = json!("http://localhost:8088/api/v3/graphql");
+        chains["midnight1"]["gatewayurls"] =
+            json!([{ "http": "http://localhost:8088/api/v3/graphql" }]);
+        chains["midnight1"]["toolkitpath"] = json!(std::env::current_exe().unwrap());
+        chains["midnight1"]["nativetoken"] = json!({ "decimals": 6 });
         parse_settings(chains, None)
             .check_known_addresses()
             .unwrap();

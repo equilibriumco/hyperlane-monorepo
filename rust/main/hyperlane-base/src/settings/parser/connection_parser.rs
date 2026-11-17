@@ -841,18 +841,34 @@ pub fn build_midnight_connection_conf(
 ) -> Option<ChainConnectionConf> {
     let mut local_err = ConfigParsingError::default();
 
-    let indexer_graphql_url: Option<Url> = chain
-        .chain(&mut local_err)
-        .get_key("indexerGraphqlUrl")
-        .parse_from_str("Invalid Midnight indexer GraphQL URL")
-        .end();
+    // The indexer endpoint, read from the same field the CLI reads.
+    let indexer_graphql_url = parse_base_and_override_urls(
+        chain,
+        "gatewayUrls",
+        "customGatewayUrls",
+        "http",
+        &mut local_err,
+        false,
+    )
+    .into_iter()
+    .next();
 
+    // Every write goes through the sidecar, so a config without it would load
+    // and then fail on the first delivery or announcement.
     let toolkit_path: Option<String> = chain
         .chain(&mut local_err)
-        .get_opt_key("toolkitPath")
+        .get_key("toolkitPath")
         .parse_string()
         .end()
         .map(|s| s.to_string());
+    if let Some(path) = &toolkit_path {
+        if !std::path::Path::new(path).is_file() {
+            local_err.push(
+                (&chain.cwp).add("toolkit_path"),
+                eyre!("`toolkitPath` `{path}` is not a file: point it at the submit sidecar"),
+            );
+        }
+    }
 
     // The gas a delivery is reported to cost, in the origin IGP's unit, so
     // `onChainFeeQuoting` can enforce toward this chain. Unset means zero.
@@ -862,6 +878,13 @@ pub fn build_midnight_connection_conf(
         .parse_u256()
         .end()
         .unwrap_or_default();
+
+    let submit_timeout = midnight_submit_timeout(
+        std::env::var("MIDNIGHT_SUBMIT_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+    .take_err(&mut local_err, || chain.cwp.clone());
 
     if !local_err.is_ok() {
         err.merge(local_err);
@@ -875,8 +898,23 @@ pub fn build_midnight_connection_conf(
                 rpcs.first().cloned(),
                 toolkit_path,
             )
-            .with_delivery_gas(delivery_gas),
+            .with_delivery_gas(delivery_gas)
+            .with_submit_timeout(submit_timeout?),
         ))
+    }
+}
+
+/// `MIDNIGHT_SUBMIT_TIMEOUT_SECS`, in whole seconds above zero.
+#[cfg(feature = "midnight")]
+pub(super) fn midnight_submit_timeout(raw: Option<&str>) -> eyre::Result<std::time::Duration> {
+    let Some(raw) = raw else {
+        return Ok(hyperlane_midnight::DEFAULT_SUBMIT_TIMEOUT);
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Ok(std::time::Duration::from_secs(secs)),
+        _ => Err(eyre!(
+            "MIDNIGHT_SUBMIT_TIMEOUT_SECS must be a whole number of seconds above zero, got `{raw}`"
+        )),
     }
 }
 

@@ -22,8 +22,9 @@ use hyperlane_core::matching_list::MatchingList;
 
 use h_cosmos::RawCosmosAmount;
 use hyperlane_core::{
-    cfg_unwrap_all, config::*, HyperlaneDomain, HyperlaneDomainProtocol,
-    HyperlaneDomainTechnicalStack, IndexMode, NativeToken, ReorgPeriod, SubmitterType,
+    cfg_unwrap_all, config::*, metrics::agent::decimals_by_protocol, HyperlaneDomain,
+    HyperlaneDomainProtocol, HyperlaneDomainTechnicalStack, IndexMode, NativeToken, ReorgPeriod,
+    SubmitterType, H256,
 };
 
 use crate::settings::{
@@ -235,22 +236,23 @@ fn parse_chain(
         .get_opt_key("chunk")
         .parse_u32()
         .unwrap_or(DEFAULT_CHUNK_SIZE);
-    let mode = chain
+    let configured_mode: Option<IndexMode> = chain
         .chain(&mut err)
         .get_opt_key("index")
         .get_opt_key("mode")
         .parse_value("Invalid index mode")
-        .unwrap_or_else(|| {
-            domain
-                .as_ref()
-                .and_then(|d| match d.domain_protocol() {
-                    HyperlaneDomainProtocol::Ethereum => Some(IndexMode::Block),
-                    HyperlaneDomainProtocol::Sealevel => Some(IndexMode::Sequence),
-                    HyperlaneDomainProtocol::Midnight => Some(IndexMode::Block),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        });
+        .end();
+    let mode = configured_mode.unwrap_or_else(|| {
+        domain
+            .as_ref()
+            .and_then(|d| match d.domain_protocol() {
+                HyperlaneDomainProtocol::Ethereum => Some(IndexMode::Block),
+                HyperlaneDomainProtocol::Sealevel => Some(IndexMode::Sequence),
+                HyperlaneDomainProtocol::Midnight => Some(IndexMode::Block),
+                _ => None,
+            })
+            .unwrap_or_default()
+    });
     // Defaults to 5s; overridable via `index.interval` (seconds).
     let interval_secs = chain
         .chain(&mut err)
@@ -338,12 +340,13 @@ fn parse_chain(
         })
         .unwrap_or_default();
 
-    let native_token_decimals = chain
+    let configured_decimals = chain
         .chain(&mut err)
         .get_opt_key("nativeToken")
         .get_opt_key("decimals")
         .parse_u32()
-        .unwrap_or(18);
+        .end();
+    let native_token_decimals = configured_decimals.unwrap_or(18);
 
     let native_token_symbol = chain
         .chain(&mut err)
@@ -378,13 +381,26 @@ fn parse_chain(
 
     cfg_unwrap_all!(&chain.cwp, err: [connection, mailbox, interchain_gas_paymaster, validator_announce, merkle_tree_hook]);
 
-    let submitter = chain
+    let configured_submitter = chain
         .chain(&mut err)
         .get_opt_key("submitter")
         .parse_from_str::<SubmitterType>("Invalid Submitter type")
         .end();
+    if domain.domain_protocol() == HyperlaneDomainProtocol::Midnight {
+        check_midnight_chain(
+            &chain.cwp,
+            &mut err,
+            MidnightChainSettings {
+                decimals: configured_decimals,
+                mode: configured_mode,
+                submitter: configured_submitter,
+                mailbox,
+                merkle_tree_hook,
+            },
+        );
+    }
     // for EVM chains, default to `SubmitterType::Lander` if not specified
-    let submitter = match submitter {
+    let submitter = match configured_submitter {
         Some(submitter_type) => submitter_type,
         None => match connection.protocol() {
             HyperlaneDomainProtocol::Ethereum
@@ -426,6 +442,59 @@ fn parse_chain(
             denom: native_token_denom,
         },
     })
+}
+
+/// What a Midnight chain config must say, or must not.
+struct MidnightChainSettings {
+    decimals: Option<u32>,
+    mode: Option<IndexMode>,
+    submitter: Option<SubmitterType>,
+    mailbox: H256,
+    merkle_tree_hook: H256,
+}
+
+/// Config mistakes on a Midnight chain that would otherwise load clean and
+/// fail later, or misreport, with no error naming the field.
+fn check_midnight_chain(cwp: &ConfigPath, err: &mut ConfigParsingError, s: MidnightChainSettings) {
+    let night_decimals = u32::from(decimals_by_protocol(HyperlaneDomainProtocol::Midnight));
+    match s.decimals {
+        Some(decimals) if decimals == night_decimals => {}
+        Some(decimals) => err.push(
+            cwp.join("native_token").join("decimals"),
+            eyre!("`nativeToken.decimals` is {decimals}, but NIGHT has {night_decimals}"),
+        ),
+        None => err.push(
+            cwp.join("native_token").join("decimals"),
+            eyre!(
+                "`nativeToken.decimals` is required on a Midnight chain and must be \
+                 {night_decimals}; without it balances are read as 18 decimals"
+            ),
+        ),
+    }
+    if matches!(s.mode, Some(IndexMode::Sequence)) {
+        err.push(
+            cwp.join("index").join("mode"),
+            eyre!(
+                "`index.mode: sequence` does not work on Midnight: the indexer numbers \
+                 events across every contract. Leave it unset"
+            ),
+        );
+    }
+    if s.submitter == Some(SubmitterType::Lander) {
+        err.push(
+            cwp.join("submitter"),
+            eyre!("`submitter: lander` is not implemented for Midnight. Leave it unset"),
+        );
+    }
+    if s.mailbox != s.merkle_tree_hook {
+        err.push(
+            cwp.join("merkle_tree_hook"),
+            eyre!(
+                "`merkleTreeHook` must be the same contract as `mailbox` on Midnight: \
+                 night is both"
+            ),
+        );
+    }
 }
 
 /// Expects ChainMetadata
@@ -790,5 +859,161 @@ mod test {
         let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
         let value_parser = ValueParser::new(Default::default(), &val);
         parse_matching_list(value_parser).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "midnight"))]
+mod midnight_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::settings::ChainConnectionConf;
+
+    const NIGHT: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn chain() -> Value {
+        json!({
+            "name": "midnight",
+            "domainId": 1234,
+            "protocol": "midnight",
+            "rpcUrls": [{ "http": "http://127.0.0.1:9944" }],
+            "gatewayUrls": [{ "http": "http://127.0.0.1:8088/api/v3/graphql" }],
+            "toolkitPath": std::env::current_exe().unwrap().to_str().unwrap(),
+            "mailbox": NIGHT,
+            "merkleTreeHook": NIGHT,
+            "interchainGasPaymaster": "0x0000000000000000000000000000000000000000000000000000000000000002",
+            "validatorAnnounce": "0x0000000000000000000000000000000000000000000000000000000000000003",
+            "nativeToken": { "name": "NIGHT", "symbol": "NIGHT", "decimals": 6 },
+        })
+    }
+
+    /// The config loader hands the parser flat-case keys.
+    fn flat(val: &Value) -> Value {
+        match val {
+            Value::Object(obj) => Value::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.to_case(Case::Flat), flat(v)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(flat).collect()),
+            other => other.clone(),
+        }
+    }
+
+    fn parse(val: &Value) -> ConfigResult<ChainConf> {
+        let cwp = ConfigPath::default().join("chains").join("midnight");
+        parse_chain(ValueParser::new(cwp, &flat(val)), "midnight", "fallback")
+    }
+
+    fn parse_err(val: &Value) -> String {
+        format!("{}", parse(val).unwrap_err())
+    }
+
+    #[test]
+    fn accepts_a_complete_config_and_reads_the_indexer_from_gateway_urls() {
+        let conf = parse(&chain()).unwrap();
+        let ChainConnectionConf::Midnight(connection) = conf.connection else {
+            panic!("not a Midnight connection");
+        };
+        assert_eq!(
+            connection.indexer_graphql_url.as_str(),
+            "http://127.0.0.1:8088/api/v3/graphql"
+        );
+        assert_eq!(conf.native_token.decimals, 6);
+    }
+
+    #[test]
+    fn refuses_missing_or_wrong_decimals() {
+        let mut val = chain();
+        val["nativeToken"]
+            .as_object_mut()
+            .unwrap()
+            .remove("decimals");
+        assert!(parse_err(&val).contains("chains.midnight.nativeToken.decimals"));
+
+        val["nativeToken"]["decimals"] = json!(18);
+        let err = parse_err(&val);
+        assert!(err.contains("nativeToken.decimals"), "{err}");
+        assert!(err.contains("is 18, but NIGHT has 6"), "{err}");
+    }
+
+    #[test]
+    fn refuses_sequence_index_mode() {
+        let mut val = chain();
+        val["index"] = json!({ "mode": "sequence" });
+        assert!(parse_err(&val).contains("chains.midnight.index.mode"));
+
+        val["index"] = json!({ "mode": "block" });
+        parse(&val).unwrap();
+    }
+
+    #[test]
+    fn refuses_the_lander_submitter() {
+        let mut val = chain();
+        val["submitter"] = json!("lander");
+        assert!(parse_err(&val).contains("chains.midnight.submitter"));
+    }
+
+    #[test]
+    fn refuses_a_merkle_tree_hook_other_than_the_mailbox() {
+        let mut val = chain();
+        val["merkleTreeHook"] =
+            json!("0x0000000000000000000000000000000000000000000000000000000000000004");
+        assert!(parse_err(&val).contains("chains.midnight.merkleTreeHook"));
+    }
+
+    #[test]
+    fn refuses_a_missing_or_wrong_toolkit_path() {
+        let mut val = chain();
+        val.as_object_mut().unwrap().remove("toolkitPath");
+        assert!(parse_err(&val).contains("chains.midnight.toolkitPath"));
+
+        val["toolkitPath"] = json!("/nonexistent/submit-handle");
+        let err = parse_err(&val);
+        assert!(err.contains("chains.midnight.toolkitPath"), "{err}");
+        assert!(err.contains("is not a file"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_config_without_gateway_urls() {
+        let mut val = chain();
+        val.as_object_mut().unwrap().remove("gatewayUrls");
+        val["indexerGraphqlUrl"] = json!("http://127.0.0.1:8088/api/v3/graphql");
+        assert!(parse_err(&val).contains("chains.midnight.gatewayUrls"));
+    }
+
+    #[test]
+    fn other_protocols_keep_the_decimals_default() {
+        let val = json!({
+            "name": "test1",
+            "domainId": 9913371,
+            "protocol": "ethereum",
+            "rpcUrls": [{ "http": "http://127.0.0.1:8545" }],
+            "mailbox": NIGHT,
+            "merkleTreeHook": "0x0000000000000000000000000000000000000000000000000000000000000004",
+            "interchainGasPaymaster": NIGHT,
+            "validatorAnnounce": NIGHT,
+            "index": { "mode": "sequence" },
+        });
+        let cwp = ConfigPath::default().join("chains").join("test1");
+        let conf = parse_chain(ValueParser::new(cwp, &flat(&val)), "test1", "fallback").unwrap();
+        assert_eq!(conf.native_token.decimals, 18);
+    }
+
+    #[test]
+    fn submit_timeout_takes_whole_seconds_above_zero() {
+        use super::connection_parser::midnight_submit_timeout;
+        assert_eq!(
+            midnight_submit_timeout(None).unwrap(),
+            hyperlane_midnight::DEFAULT_SUBMIT_TIMEOUT
+        );
+        assert_eq!(
+            midnight_submit_timeout(Some("60")).unwrap(),
+            std::time::Duration::from_secs(60)
+        );
+        for raw in ["", "0", "abc", "-5", "1.5"] {
+            let err = midnight_submit_timeout(Some(raw)).unwrap_err();
+            assert!(err.to_string().contains("MIDNIGHT_SUBMIT_TIMEOUT_SECS"));
+        }
     }
 }

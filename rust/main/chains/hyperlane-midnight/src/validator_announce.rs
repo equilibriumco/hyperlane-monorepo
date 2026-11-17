@@ -167,7 +167,7 @@ mod tests {
             binary_path: binary_path.to_string(),
             indexer_graphql_url: "http://indexer/graphql".to_string(),
             indexer_ws_url: "ws://indexer/graphql/ws".to_string(),
-            proof_server_url: "http://proof:6300".to_string(),
+            submit_timeout: crate::DEFAULT_SUBMIT_TIMEOUT,
         }
     }
 
