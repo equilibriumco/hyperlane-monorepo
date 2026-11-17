@@ -39,17 +39,16 @@
   "dependencies": {
     "@hyperlane-xyz/provider-sdk": "workspace:*",
     "@hyperlane-xyz/utils": "workspace:*",
-    "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
-    "@midnight-ntwrk/compact-runtime": "0.19.0-rc.0",
-    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.7",
-    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@midnightntwrk/wallet-sdk": "2.0.0-beta.2",
+    "@midnight-ntwrk/compact-js": "3.0.0",
+    "@midnight-ntwrk/compact-runtime": "0.21.0",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0",
+    "@midnightntwrk/ledger-v9": "1.0.2",
+    "@midnightntwrk/wallet-sdk": "2.0.0",
     "@noble/hashes": "^2.2.0",
     "rxjs": "^7.8.0",
     "ws": "^8.19.0"
@@ -65,5 +64,8 @@
     "oxfmt": "catalog:",
     "tsx": "catalog:",
     "typescript": "catalog:"
+  },
+  "engines": {
+    "node": ">=22.12"
   }
 }

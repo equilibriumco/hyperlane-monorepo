@@ -10,12 +10,14 @@ import {
   witnessesFor,
   type MidnightContractName,
 } from '../clients/contracts.js';
+import { rethrowWithCauses } from '../utils/errors.js';
 import type { MidnightTxReceipt } from '../utils/types.js';
 
 import {
   DEFAULT_CHUNK_BUDGET_BYTES,
   NIGHT_DEPLOY_CIRCUITS,
   NIGHT_MAINTENANCE_PRIORITY,
+  deployedContractState,
   filteredContractClass,
   insertVerifierKeys,
   moduleFingerprintProblems,
@@ -126,7 +128,7 @@ export async function deployContractInstance(
     privateStateId: `${name}-state`,
     initialPrivateState: { secretNonce: req.secretNonce },
     args: req.args,
-  });
+  }).catch(rethrowWithCauses);
   /* eslint-enable @typescript-eslint/no-explicit-any */
   const address: string = deployed.deployTxData.public.contractAddress;
   const receipts: MidnightTxReceipt[] = [
@@ -146,10 +148,8 @@ export async function deployContractInstance(
       );
       const finalized = await insertVerifierKeys(providers, address, batch);
       receipts.push({
-        txId: String(finalized.txId),
-        blockHeight: Number(
-          (finalized as { blockHeight?: number | bigint }).blockHeight ?? 0,
-        ),
+        txId: finalized.txId,
+        blockHeight: finalized.blockHeight,
       });
       log(`tx ${finalized.txId} ${finalized.status}`);
     }
@@ -209,24 +209,16 @@ async function handOverMaintenance(
     log(`  ${formatVerifyingKey(key)}`);
   }
 
-  const contractState =
-    await providers.publicDataProvider.queryContractState(address);
-  const authority = contractState?.maintenanceAuthority;
-  const onChain: string[] = (authority?.committee ?? []).map(
-    (key: { value: string }) => key.value,
-  );
+  const authority = (await deployedContractState(providers, address))
+    .maintenanceAuthority;
+  const onChain = authority.committee.map((key) => key.value);
   if (
-    authority?.threshold !== MAINTENANCE_THRESHOLD ||
+    authority.threshold !== MAINTENANCE_THRESHOLD ||
     onChain.join(',') !== committee.map((key) => key.value).join(',')
   ) {
     throw new Error(
       `the maintenance authority of ${name} is not the committee just set`,
     );
   }
-  return {
-    txId: String(finalized.txId),
-    blockHeight: Number(
-      (finalized as { blockHeight?: number | bigint }).blockHeight ?? 0,
-    ),
-  };
+  return { txId: finalized.txId, blockHeight: finalized.blockHeight };
 }

@@ -114,13 +114,15 @@ export async function runReadCircuit<T>(
   args: unknown[] = [],
 ): Promise<T> {
   const contract = new module.Contract(witnesses);
-  const ctx = createCircuitContext(
+  const ctx = createCircuitContext({
     circuitId,
-    dummyContractAddress(),
-    emptyZswapLocalState({ bytes: new Uint8Array(32) }),
-    stateData as never,
-    { secretNonce: new Uint8Array(32) },
-  );
+    contractAddress: dummyContractAddress(),
+    coinPublicKeyOrZswapState: emptyZswapLocalState({
+      bytes: new Uint8Array(32),
+    }),
+    contractState: stateData as never,
+    privateState: { secretNonce: new Uint8Array(32) },
+  });
   const circuit = contract.circuits[circuitId];
   if (!circuit) {
     throw new Error(`circuit ${circuitId} not found on contract module`);

@@ -315,32 +315,27 @@ git = "https://github.com/hyperlane-xyz/parity-common.git"
 version = "=0.5.2"
 
 # The Midnight contract-state decoder (chains/hyperlane-midnight) pins the
-# ledger 9.1 graph by git tag. These three redirects mirror midnight-ledger's
+# ledger 9.1 graph by git tag. These two redirects mirror midnight-ledger's
 # own root `[patch.crates-io]`, and together force ONE consistent serialize /
 # base-crypto across the whole midnight subgraph. Without them, `onchain-state`
-# (9.1) resolves `midnight-serialize 1.2.0` while its transitive
-# `transient-crypto-old` pulls crates.io `midnight-serialize 1.1.0`, and the
+# resolves the tag's `midnight-serialize 1.2.1` while its transitive
+# `transient-crypto-old` pulls the crates.io copy of it, and the
 # two `Serializable` impls collide (VerifierKey serialize fails to typecheck).
-#   - serialize / base-crypto: force the 9.1 versions everywhere.
-#   - transient-crypto: `onchain-state` uses the new 3.0.0 line (via the git
+#   - serialize / base-crypto: force the tag's versions everywhere.
+#   - transient-crypto: `onchain-state` uses the new 3.1.0 line (via the git
 #     checkout's internal path dep) AND the older `midnight-transient-crypto
-#     ^2.0.0` line for legacy VerifierKey (de)serialisation. The node
-#     (ledger-9.1) serialises ContractState's VerifierKeys with the 2.2.0-rc.1
-#     tag, so pin the crates.io 2.x ref there — without this the decoder
-#     resolves crates.io 2.1.0 and `tagged_deserialize::<ContractState>` reads
-#     the wrong VerifierKey wire format. The 3.0.0 line is a path dep, not a
-#     crates.io ref, so this patch does not touch it.
+#     ^2.0.0` line for legacy VerifierKey (de)serialisation. The legacy line
+#     needs no redirect: it resolves to crates.io 2.2.0, the version the node
+#     (2.1.101) and midnight-ledger's own lockfile at the tag use, and
+#     Cargo.lock holds it there. midnight-ledger's third redirect only serves
+#     `midnight-zkir`, which the decoder does not pull in.
 [patch.crates-io.midnight-serialize]
 git = "https://github.com/midnightntwrk/midnight-ledger"
-tag = "ledger-9.1.0.0-rc.3"
+tag = "ledger-9.1.0.2"
 
 [patch.crates-io.midnight-base-crypto]
 git = "https://github.com/midnightntwrk/midnight-ledger"
-tag = "ledger-9.1.0.0-rc.3"
-
-[patch.crates-io.midnight-transient-crypto]
-git = "https://github.com/midnightntwrk/midnight-ledger"
-tag = "transient-crypto-2.2.0-rc.1"
+tag = "ledger-9.1.0.2"
 
 # Patched fork of size-of 0.1.5. Pulled transitively (starknet-types-core ->
 # cainome -> abigen), size-of 0.1.5 lists ABIs like `aapcs`/`win64`

@@ -8,14 +8,21 @@ set -e
 if [ -z "${HYPERLANE_MIDNIGHT_CONTRACTS}" ]; then
   echo "HYPERLANE_MIDNIGHT_CONTRACTS is not set."
   echo "Point it at a compiled Midnight contracts tree (the directory that"
-  echo "contains night/, igp/, and validator-announce/, each with keys/ and"
-  echo "zkir/) so deploys and circuit calls can prove."
+  echo "contains night/, igp/, and validator-announce/, each with keys/,"
+  echo "zkir/ and compiler/) so deploys and circuit calls can prove."
   exit 1
 fi
 
 if [ ! -d "${HYPERLANE_MIDNIGHT_CONTRACTS}/night/keys" ]; then
   echo "HYPERLANE_MIDNIGHT_CONTRACTS (${HYPERLANE_MIDNIGHT_CONTRACTS}) has no night/keys directory."
   echo "The tests need a fully compiled contracts tree including prover keys."
+  exit 1
+fi
+
+# The keys and circuits are checked against the compiler's manifest.
+if [ ! -f "${HYPERLANE_MIDNIGHT_CONTRACTS}/night/compiler/contract-manifest.json" ]; then
+  echo "HYPERLANE_MIDNIGHT_CONTRACTS (${HYPERLANE_MIDNIGHT_CONTRACTS}) has no night/compiler/contract-manifest.json."
+  echo "The tests need the compiler/ directory the Compact compiler writes next to keys/."
   exit 1
 fi
 

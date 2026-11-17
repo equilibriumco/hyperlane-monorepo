@@ -1,4 +1,7 @@
-import { getPublicStates } from '@midnight-ntwrk/midnight-js-contracts';
+import {
+  ContractNotFoundError,
+  getPublicStates,
+} from '@midnight-ntwrk/midnight-js-contracts';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 
 import type { ChainMetadataForAltVM } from '@hyperlane-xyz/provider-sdk';
@@ -6,15 +9,13 @@ import { assert, strip0x } from '@hyperlane-xyz/utils';
 
 import type { MidnightEndpoints } from '../utils/types.js';
 
+import { decodeContractState } from './contract-state.js';
 import {
   loadContractModule,
   type MidnightContractName,
   runReadCircuit,
   witnessesFor,
 } from './contracts.js';
-
-const CONTRACT_NOT_FOUND_RE =
-  /not found|no contract|unknown contract|no public state/i;
 
 export type FetchedContractState = { data: unknown; balance: unknown };
 
@@ -48,19 +49,16 @@ export class MidnightReadClient {
   async fetchContractState(
     contractAddress: string,
   ): Promise<FetchedContractState | null> {
-    const publicDataProvider = indexerPublicDataProvider(
-      this.endpoints.indexerGraphqlUrl,
-      this.endpoints.indexerWsUrl,
-    );
+    const publicDataProvider = indexerPublicDataProvider({
+      queryURL: this.endpoints.indexerGraphqlUrl,
+      subscriptionURL: this.endpoints.indexerWsUrl,
+    });
     try {
-      const publicStates = await getPublicStates(
-        publicDataProvider,
-        strip0x(contractAddress),
+      return decodeContractState(
+        await getPublicStates(publicDataProvider, strip0x(contractAddress)),
       );
-      return publicStates.contractState;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (CONTRACT_NOT_FOUND_RE.test(message)) {
+      if (err instanceof ContractNotFoundError) {
         return null;
       }
       throw err;

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use hyperlane_core::{ChainResult, HyperlaneMessage};
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
+use midnight_storage::merkle_patricia_trie::ALLOW_SHORT_EXTENSION_CHAINS;
 use midnight_storage_core::DefaultDB;
 
 use crate::error::HyperlaneMidnightError;
@@ -75,9 +76,14 @@ impl IsmState {
 }
 
 /// Deserialize the raw indexer-served state bytes.
+///
+/// An ordinary on-chain write can leave a trie with a short `Extension` chain,
+/// which strict decoding refuses, so the ledger's client-side leniency is set
+/// for the decode. Decoding is eager, so nothing is loaded outside this call.
 pub fn decode_contract_state(bytes: &[u8]) -> ChainResult<ContractState<DefaultDB>> {
     let mut reader = bytes;
-    tagged_deserialize(&mut reader)
+    ALLOW_SHORT_EXTENSION_CHAINS
+        .set(&(), || tagged_deserialize(&mut reader))
         .map_err(|e| HyperlaneMidnightError::StateDecode(e.to_string()).into())
 }
 
@@ -354,6 +360,7 @@ mod tests {
     use super::*;
 
     use hyperlane_core::{Encode as _, H256};
+    use midnight_base_crypto::cost_model::RunningCost;
     use midnight_base_crypto::fab::{AlignedValue, ValueAtom};
     use midnight_onchain_state::state::ChargedState;
     use midnight_storage::arena::Sp;
@@ -372,12 +379,12 @@ mod tests {
         StateValue::Array(Array::from(values))
     }
 
-    /// Produces the same tagged wire bytes the indexer serves.
-    fn mailbox_state_bytes(
+    /// Laid out so the Mailbox paths line up under `[1]`.
+    fn mailbox_root(
         deliveries: StateValue<DefaultDB>,
         nonce: StateValue<DefaultDB>,
         dispatched: StateValue<DefaultDB>,
-    ) -> Vec<u8> {
+    ) -> StateValue<DefaultDB> {
         let mailbox = array(vec![
             StateValue::Null, // [1,0]
             StateValue::Null, // [1,1]
@@ -389,17 +396,31 @@ mod tests {
             nonce,            // [1,7]
             dispatched,       // [1,8]
         ]);
-        let root = array(vec![
+        array(vec![
             StateValue::Null, // [0] ownership + Routes fields (unused here)
             mailbox,          // [1] ISM/Mailbox module fields
-        ]);
+        ])
+    }
+
+    /// Produces the same tagged wire bytes the indexer serves.
+    fn state_bytes(data: ChargedState<DefaultDB>) -> Vec<u8> {
         let cs = ContractState::<DefaultDB> {
-            data: ChargedState::new(root),
+            data,
             ..ContractState::default()
         };
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&cs, &mut bytes).expect("serialize synthetic state");
         bytes
+    }
+
+    fn mailbox_state_bytes(
+        deliveries: StateValue<DefaultDB>,
+        nonce: StateValue<DefaultDB>,
+        dispatched: StateValue<DefaultDB>,
+    ) -> Vec<u8> {
+        state_bytes(ChargedState::new(mailbox_root(
+            deliveries, nonce, dispatched,
+        )))
     }
 
     fn sample_message(nonce: u32) -> HyperlaneMessage {
@@ -438,6 +459,34 @@ mod tests {
             StateValue::Map(HashMap::new()),
         );
         assert_eq!(decode_nonce_count(&bytes).expect("decode nonce"), 0);
+    }
+
+    // A small state is stored in-line, so its charge record is keyed by the
+    // whole root. An update that collects nothing keeps the old root beside
+    // the new one, and the two long keys leave a short `Extension` chain.
+    #[test]
+    fn decodes_state_with_a_short_extension_chain() {
+        let root = |nonce: u64| {
+            mailbox_root(
+                StateValue::Map(HashMap::new()),
+                cell(nonce),
+                StateValue::Map(HashMap::new()),
+            )
+        };
+        let (data, _) =
+            ChargedState::new(root(7)).update(root(8), |_, _| RunningCost::default(), |_| 0);
+        let bytes = state_bytes(data);
+
+        let strict: std::io::Result<ContractState<DefaultDB>> = tagged_deserialize(&mut &bytes[..]);
+        let refusal = strict
+            .expect_err("strict decoding refuses the chain")
+            .to_string();
+        assert!(
+            refusal.contains("Node::Extension path must be of length 255"),
+            "refused for the chain: {refusal}"
+        );
+
+        assert_eq!(decode_nonce_count(&bytes).expect("decode nonce"), 8);
     }
 
     #[test]

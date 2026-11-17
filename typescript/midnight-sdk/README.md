@@ -161,11 +161,13 @@ on disk.
 
 - **HYPERLANE_MIDNIGHT_CONTRACTS=\<path>**: the compiled contract tree from
   [hyperlane-midnight](https://github.com/equilibriumco/hyperlane-midnight)
-  (`contracts/src/managed`). Export it before **building** this package, not
-  only before using it: the build copies the artifacts in, and without it
-  copies from whatever sibling checkout it happens to find. The packaged
-  fallback carries verifier keys only, so proving fails at run time rather than
-  at build time.
+  (`contracts/src/managed`), compiled with Compact 0.36.0. Each contract's
+  `compiler/` directory has to be there next to `keys/` and `zkir/`: the keys
+  and circuits are checked against its manifest. Export it before **building**
+  this package, not only before using it: the build copies the artifacts in,
+  and without it copies from whatever sibling checkout it happens to find. The
+  packaged fallback carries verifier keys only, so proving fails at run time
+  rather than at build time.
 - **MIDNIGHT_PROOF_SERVER_URL=\<url>**: proof server to prove against, default
   local. There is no public proof server.
 - **MIDNIGHT_NETWORK=devnet/stagenet**: selects default endpoints. Unset on a
@@ -191,7 +193,8 @@ on disk.
 
 ## Setup
 
-Node 18 or newer is required.
+Node 22.12 or newer is required: the Midnight packages this SDK builds on do
+not run on older versions.
 
 Building this package requires the compiled Compact artifacts described above;
 compile them in the contracts repository first.

@@ -2,6 +2,11 @@ import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import {
+  createLedger9MidnightProvider,
+  createLedger9WalletProvider,
+  type MidnightProviders,
+} from '@midnight-ntwrk/midnight-js-types';
 
 import {
   waitForSync,
@@ -9,7 +14,13 @@ import {
   type WalletEndpoints,
 } from './wallet.js';
 
+// How long a built transaction stays valid, the framework's and the wallet's
+// part alike.
+const TX_TTL_SECONDS = 3600;
+
 export interface ProviderOptions {
+  // The Midnight network transactions are built for.
+  networkId: string;
   endpoints: WalletEndpoints;
   // Absolute path of the level DB directory, which must be `midnightDbName`:
   // `privateStateStoreName` only names a sublevel inside the DB, so the DB
@@ -18,55 +29,43 @@ export interface ProviderOptions {
   privateStatePassword: () => string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ContractProviders = any;
+export type ContractProviders = MidnightProviders;
 
 /**
  * Build the provider bundle `deployContract` and `findDeployedContract`
  * consume. `zkConfigPath` is the per-contract artifacts dir holding the
- * prover/verifier keys.
+ * prover/verifier keys and the compiler's manifest they are checked against.
  */
 export async function createProviders(
   walletCtx: WalletContext,
   zkConfigPath: string,
   options: ProviderOptions,
 ): Promise<ContractProviders> {
-  const state = await waitForSync(walletCtx);
-  if (!state.shielded) {
-    throw new Error('wallet state has no shielded sub-wallet');
-  }
-  const shielded = state.shielded;
+  const { wallet, unshieldedKeystore } = walletCtx;
+  const { shielded } = await waitForSync(walletCtx);
 
-  // `balanceTx` and `submitTx` straddle two SDK packages whose tx types are not
-  // nominally compatible. The runtime shapes match; the types do not.
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  const walletProvider = {
+  // The wallet seals transactions in its own handles, so they cross as bytes.
+  const walletProvider = createLedger9WalletProvider({
     getCoinPublicKey: () => shielded.coinPublicKey.toHexString(),
-    getEncryptionPublicKey: () =>
-      (
-        state as unknown as {
-          shielded: { encryptionPublicKey: { toHexString(): string } };
-        }
-      ).shielded.encryptionPublicKey.toHexString(),
-    async balanceTx(tx: any, ttl?: Date) {
-      const recipe = await walletCtx.wallet.balanceUnboundTransaction(
-        tx,
-        {
-          shieldedSecretKeys: walletCtx.shieldedSecretKeys,
-          dustSecretKey: walletCtx.dustSecretKey,
-        },
-        { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
+    getEncryptionPublicKey: () => shielded.encryptionPublicKey.toHexString(),
+    async balanceTx(tx, ttl) {
+      const recipe = await wallet.balanceUnboundTransaction(
+        wallet.adoptTransaction(tx.serialize(), 'Unbound'),
+        { ttl: ttl ?? new Date(Date.now() + TX_TTL_SECONDS * 1000) },
       );
       // Signs the unshielded-offer inputs any `receiveUnshielded` circuit
       // produces; without it the chain rejects with error 192.
-      const signed = await walletCtx.wallet.signRecipe(recipe, (payload) =>
-        walletCtx.unshieldedKeystore.signDataAsync(payload),
+      const signed = await wallet.signRecipe(recipe, (payload) =>
+        unshieldedKeystore.signDataAsync(payload),
       );
-      return walletCtx.wallet.finalizeRecipe(signed);
+      return (await wallet.finalizeRecipe(signed)).serialize();
     },
-    submitTx: (tx: any) => walletCtx.wallet.submitTransaction(tx),
-  };
-  /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  const midnightProvider = createLedger9MidnightProvider((tx) =>
+    wallet.submitTransaction(
+      wallet.adoptTransaction(tx.serialize(), 'Finalized'),
+    ),
+  );
 
   const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
 
@@ -74,22 +73,23 @@ export async function createProviders(
     privateStateProvider: levelPrivateStateProvider({
       privateStoragePasswordProvider: async () =>
         options.privateStatePassword(),
-      accountId: String(walletCtx.unshieldedKeystore.getBech32Address()),
+      accountId: String(unshieldedKeystore.getBech32Address()),
       midnightDbName: options.privateStateDbPath,
     }),
-    publicDataProvider: indexerPublicDataProvider(
-      options.endpoints.indexer,
-      options.endpoints.indexerWs,
-    ),
+    publicDataProvider: indexerPublicDataProvider({
+      queryURL: options.endpoints.indexer,
+      subscriptionURL: options.endpoints.indexerWs,
+    }),
     zkConfigProvider,
-    // The SDK's default /prove timeout is too tight for stagenet-sized
-    // circuits on constrained hosts; overridable via PROOF_TIMEOUT_MS.
-    proofProvider: httpClientProofProvider(
-      options.endpoints.proofServer,
+    // The SDK's default /prove timeout is too tight for the larger circuits
+    // on constrained hosts; overridable via PROOF_TIMEOUT_MS.
+    proofProvider: httpClientProofProvider({
+      url: options.endpoints.proofServer,
       zkConfigProvider,
-      { timeout: Number(process.env.PROOF_TIMEOUT_MS ?? 600000) },
-    ),
+      timeout: Number(process.env.PROOF_TIMEOUT_MS ?? 600000),
+    }),
     walletProvider,
-    midnightProvider: walletProvider,
+    midnightProvider,
+    config: { networkId: options.networkId, ttlSeconds: TX_TTL_SECONDS },
   };
 }
