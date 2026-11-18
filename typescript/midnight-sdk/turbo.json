@@ -2,7 +2,8 @@
   "extends": ["//"],
   "tasks": {
     "build": {
-      "env": ["HYPERLANE_MIDNIGHT_CONTRACTS"]
+      "cache": false,
+      "passThroughEnv": ["HYPERLANE_MIDNIGHT_CONTRACTS"]
     }
   }
 }
