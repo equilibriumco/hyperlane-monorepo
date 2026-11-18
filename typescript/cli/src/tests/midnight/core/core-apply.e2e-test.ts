@@ -54,7 +54,7 @@ describe('hyperlane midnight core apply e2e tests', async function () {
   // Mirrors the deploy config with three changes: the validator sets are the
   // ones given, the owner is pinned to the on-chain commitment, which avoids a
   // spurious ownership transfer, and requiredHook is a plain address, since
-  // repeating the IGP block here would deploy a second IGP.
+  // core apply refuses the IGP block.
   function applyConfig(defaultIsm: CoreConfig['defaultIsm']): CoreConfig {
     const inputConfig: CoreConfig = readYamlOrJson(CORE_CONFIG_PATH);
 
@@ -125,5 +125,19 @@ describe('hyperlane midnight core apply e2e tests', async function () {
       validatorSetsByOrigin(await hyperlaneCore.readConfig()),
       deployedSets,
     );
+  });
+
+  // The deploy config as it is, IGP block included, before anything is sent.
+  it('should refuse an IGP block in requiredHook', async () => {
+    const deployConfig: CoreConfig = readYamlOrJson(CORE_CONFIG_PATH);
+    writeYamlOrJson(CORE_READ_CONFIG_PATH_1, {
+      ...deployConfig,
+      owner: ownerCommitment,
+    });
+
+    const output = await hyperlaneCore.apply(HYP_KEY).nothrow();
+
+    expect(output.exitCode).to.not.equal(0);
+    expect(output.text()).to.include('core apply cannot change the IGP');
   });
 });
