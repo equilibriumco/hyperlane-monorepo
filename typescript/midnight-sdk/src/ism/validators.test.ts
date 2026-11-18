@@ -13,9 +13,11 @@ import { hexToBytes } from '../utils/conversion.js';
 
 import {
   maxValidators,
+  pubkeyFromValidatorKey,
   pubkeyToEthAddress,
   resolveValidatorSet,
   sameValidatorSet,
+  type ValidatorKey,
   validatorSetsByOrigin,
 } from './validators.js';
 
@@ -49,7 +51,7 @@ describe('maxValidators', () => {
   it('is the number of slots the compiled night contract stores', async () => {
     const night = await deployNight({ 31338: multisigOf([0], 1) });
     const { data } = await night.requireContractState(night.address);
-    const stored = await night.runCircuit<{ validators: Uint8Array[] }>(
+    const stored = await night.runCircuit<{ validators: ValidatorKey[] }>(
       'night',
       data,
       'validatorSet',
@@ -71,10 +73,12 @@ describe('resolveValidatorSet', () => {
 
     expect(resolved.count).to.equal(3n);
     expect(resolved.threshold).to.equal(2n);
-    expect(resolved.paddedPubkeys).to.have.lengthOf(slots);
-    expect(resolved.paddedPubkeys.slice(0, 3)).to.eql(PUBKEYS.map(hexToBytes));
-    for (const unused of resolved.paddedPubkeys.slice(3)) {
-      expect(unused).to.eql(new Uint8Array(64));
+    expect(resolved.paddedKeys).to.have.lengthOf(slots);
+    expect(resolved.paddedKeys.slice(0, 3).map(pubkeyFromValidatorKey)).to.eql(
+      PUBKEYS.map(hexToBytes),
+    );
+    for (const unused of resolved.paddedKeys.slice(3)) {
+      expect(unused).to.eql({ x: 0n, y: 0n });
     }
   });
 

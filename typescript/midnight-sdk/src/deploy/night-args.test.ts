@@ -11,7 +11,10 @@ import {
 } from './night-args.js';
 
 const validatorSet = {
-  paddedPubkeys: [new Uint8Array(64), new Uint8Array(64)],
+  paddedKeys: [
+    { x: 0n, y: 0n },
+    { x: 0n, y: 0n },
+  ],
   count: 2n,
   threshold: 1n,
 };
@@ -64,7 +67,7 @@ describe('nightConstructorArgs', () => {
       instanceSalt,
       1234n,
       31338n,
-      validatorSet.paddedPubkeys,
+      validatorSet.paddedKeys,
       2n,
       1n,
       6n,
@@ -101,7 +104,7 @@ describe('nightConstructorArgs', () => {
     expect(await read('messageDecimals')).to.equal(MESSAGE_DECIMALS);
     expect(await read('maxTransfer')).to.equal(500n);
     expect(await read('validatorSet', [31338n])).to.eql({
-      validators: resolved.paddedPubkeys,
+      validators: resolved.paddedKeys,
       count: 3n,
       threshold: 2n,
     });

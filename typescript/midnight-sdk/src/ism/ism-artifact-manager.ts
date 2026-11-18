@@ -28,11 +28,13 @@ import { readValidatorSetOrigins } from '../clients/state.js';
 
 import {
   maxValidators,
+  pubkeyFromValidatorKey,
   pubkeyToEthAddress,
   resolveValidatorSet,
   sameValidatorSet,
   setValidatorsTx,
   validatorSetsByOrigin,
+  type ValidatorKey,
 } from './validators.js';
 
 const MODULE_TYPE_MESSAGE_ID_MULTISIG = 5n;
@@ -43,7 +45,7 @@ type RoutingIsmConfig = RawIsmArtifactConfigs['domainRoutingIsm'];
 // What night's validatorSet circuit returns: every slot, then how many of
 // them are the set.
 type OnChainValidatorSet = {
-  validators: Uint8Array[];
+  validators: ValidatorKey[];
   count: bigint;
   threshold: bigint;
 };
@@ -139,10 +141,12 @@ class MidnightRoutingIsmReader implements ArtifactReader<
         'validatorSet',
         [BigInt(origin)],
       );
-      // The chain stores full pubkeys; expose both them and the derived eth
-      // addresses so a derived config round-trips into write-ready configs
-      // (writes need the pubkeys, checks compare the addresses).
-      const pubkeys = set.validators.slice(0, Number(set.count));
+      // Expose both the pubkeys and the derived eth addresses so a derived
+      // config round-trips into write-ready configs (writes need the pubkeys,
+      // checks compare the addresses).
+      const pubkeys = set.validators
+        .slice(0, Number(set.count))
+        .map(pubkeyFromValidatorKey);
       sets.set(origin, {
         type: 'messageIdMultisigIsm',
         validators: pubkeys.map(pubkeyToEthAddress),

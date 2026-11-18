@@ -48,7 +48,7 @@ export function nightConstructorArgs(
     inputs.instanceSalt,
     inputs.domainId,
     inputs.initialOrigin,
-    inputs.validatorSet.paddedPubkeys,
+    inputs.validatorSet.paddedKeys,
     inputs.validatorSet.count,
     inputs.validatorSet.threshold,
     inputs.localDecimals,

@@ -31,7 +31,7 @@ import {
   MidnightMultisigIsmWriter,
   MidnightRoutingIsmWriter,
 } from './ism-artifact-manager.js';
-import { maxValidators } from './validators.js';
+import { maxValidators, validatorKeyFromPubkey } from './validators.js';
 
 type RoutingIsmArtifact = ArtifactDeployed<
   RawIsmArtifactConfigs['domainRoutingIsm'],
@@ -240,9 +240,9 @@ describe('Midnight routing ISM', () => {
       expect(txs[0].args).to.eql([
         BigInt(ANVIL2),
         [
-          hexToBytes(PUBKEYS[0]),
-          hexToBytes(PUBKEYS[1]),
-          ...Array.from({ length: slots - 2 }, () => new Uint8Array(64)),
+          validatorKeyFromPubkey(hexToBytes(PUBKEYS[0])),
+          validatorKeyFromPubkey(hexToBytes(PUBKEYS[1])),
+          ...Array.from({ length: slots - 2 }, () => ({ x: 0n, y: 0n })),
         ],
         2n,
         1n,
