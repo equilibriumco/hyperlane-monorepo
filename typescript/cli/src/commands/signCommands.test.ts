@@ -26,6 +26,13 @@ describe('signCommands', () => {
       expect(isSignCommand({ _: ['help'] })).to.be.false;
     });
 
+    it('requires a key for the midnight writes but not for its status', () => {
+      for (const cmd of ['pause', 'unpause', 'fund']) {
+        expect(isSignCommand({ _: ['warp', 'midnight', cmd] })).to.be.true;
+      }
+      expect(isSignCommand({ _: ['warp', 'midnight', 'status'] })).to.be.false;
+    });
+
     describe('conditional sign commands', () => {
       it('status command returns false without --relay flag', () => {
         expect(isSignCommand({ _: ['status'] })).to.be.false;

@@ -191,6 +191,11 @@ export class MidnightProvider implements IProvider<MidnightTransaction> {
     return readNativeBalance(state.balance);
   }
 
+  async isPaused(nightAddress: string): Promise<boolean> {
+    const state = await this.requireContractState(nightAddress);
+    return Boolean(await this.runNightCircuit(state.data, 'isPaused'));
+  }
+
   // The IGP is a separate contract that the token does not reference
   // on-chain, so its address must arrive as customHookAddress. An optional
   // customHookMetadata overrides the gas limit (decimal or 0x-hex).

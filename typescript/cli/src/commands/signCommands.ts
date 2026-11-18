@@ -10,6 +10,9 @@ export const SIGN_COMMANDS = [
   'submit',
   'relayer',
   'rebalancer',
+  'pause',
+  'unpause',
+  'fund',
 ];
 
 // Commands that conditionally require keys based on flags
@@ -63,4 +66,8 @@ export enum CommandType {
   WARP_ALT_READ = 'warp:alt:read',
   WARP_QUOTE_CREATE = 'warp:quote:create',
   WARP_QUOTE_READ = 'warp:quote:read',
+  WARP_MIDNIGHT_PAUSE = 'warp:midnight:pause',
+  WARP_MIDNIGHT_UNPAUSE = 'warp:midnight:unpause',
+  WARP_MIDNIGHT_FUND = 'warp:midnight:fund',
+  WARP_MIDNIGHT_STATUS = 'warp:midnight:status',
 }

@@ -72,6 +72,7 @@ import {
 } from './options.js';
 import { type MessageOptionsArgTypes, messageSendOptions } from './send.js';
 import { altCommand } from './warp-alt.js';
+import { midnightCommand } from './warp-midnight.js';
 import { quoteCommand } from './warp-quote.js';
 
 /**
@@ -91,6 +92,7 @@ export const warpCommand: CommandModule = {
       .command(fork)
       .command(getFees)
       .command(init)
+      .command(midnightCommand)
       .command(quoteCommand)
       .command(read)
       .command(rebalancer)
