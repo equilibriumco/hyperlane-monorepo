@@ -276,6 +276,34 @@ export class MidnightSigner
     return receipt;
   }
 
+  // Owner calls on night that no Hyperlane config covers. Pausing stops
+  // deliveries, transfers out and funding until unpaused; funding moves the
+  // signer's NIGHT into the escrow that deliveries pay out of.
+  pauseNight(nightAddress: string): Promise<MidnightTxReceipt> {
+    return this.callNight(nightAddress, 'pause', []);
+  }
+
+  unpauseNight(nightAddress: string): Promise<MidnightTxReceipt> {
+    return this.callNight(nightAddress, 'unpause', []);
+  }
+
+  fundNight(nightAddress: string, amount: bigint): Promise<MidnightTxReceipt> {
+    return this.callNight(nightAddress, 'fund', [amount]);
+  }
+
+  private callNight(
+    nightAddress: string,
+    circuit: string,
+    args: unknown[],
+  ): Promise<MidnightTxReceipt> {
+    return this.sendAndConfirmTransaction({
+      contract: 'night',
+      contractAddress: nightAddress,
+      circuit,
+      args,
+    });
+  }
+
   // Permissionless gas payment for a message that is already dispatched: the
   // rescue path when the follow-up failed, and the top-up path for a relayer
   // policy that wants more than was first paid.

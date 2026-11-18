@@ -18,7 +18,7 @@ import {
   ExplorerLicenseType,
   altVmChainLookup,
 } from '@hyperlane-xyz/sdk';
-import { deepEquals, mustGet } from '@hyperlane-xyz/utils';
+import { assert, deepEquals, mustGet } from '@hyperlane-xyz/utils';
 
 import { type MultiProtocolSignerManager } from '../context/strategies/signer/MultiProtocolSignerManager.js';
 import { type WriteCommandContext } from '../context/types.js';
@@ -212,6 +212,16 @@ export async function runCoreApply(params: ApplyParams) {
       break;
     }
     default: {
+      // Midnight only: night keeps no hook pointer, so a hook config here
+      // would deploy a new IGP that nothing uses.
+      assert(
+        protocol !== ProtocolType.Midnight ||
+          typeof config.requiredHook !== 'object',
+        `core apply cannot change the IGP on ${chain}: night keeps no hook ` +
+          'pointer. Write requiredHook as the zero address, as core read ' +
+          'does, and change the IGP with hook apply',
+      );
+
       const signer = mustGet(context.altVmSigners, chain);
 
       const { submitter } = await getSubmitterByStrategy({

@@ -23,7 +23,6 @@ import {
   REGISTRY_PATH,
   REMOTE_CHAIN_NAME,
   REMOTE_DOMAIN_ID,
-  REMOTE_HYP_KEY,
   REMOTE_ROUTER_ADDRESS,
   WARP_READ_OUTPUT_PATH_1,
 } from '../consts.js';
@@ -70,10 +69,12 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
 
   function writeRouteConfigs(
     remoteRouters: Record<string, { address: string }>,
+    scale = NIGHT_SCALE,
   ): void {
-    // The remote entry is foreignDeployment reference data, but the signer
-    // middleware still wants a key for it. Token metadata has to be spelled out
-    // here too: non-EVM native entries derive nothing from chain metadata.
+    // Only the Midnight side: the remote router is enrolled by domain, and a
+    // remote chain in the route would need a real token there, which warp
+    // apply reads. Token metadata has to be spelled out: non-EVM native
+    // entries derive nothing from chain metadata.
     const deployConfig: WarpRouteDeployConfig = {
       [CHAIN_NAME_1]: {
         type: TokenType.native,
@@ -82,14 +83,8 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
         decimals: 6,
         owner: ownerCommitment,
         mailbox,
-        scale: NIGHT_SCALE,
+        scale,
         remoteRouters,
-      },
-      [REMOTE_CHAIN_NAME]: {
-        type: TokenType.synthetic,
-        owner: '0x0000000000000000000000000000000000000001',
-        foreignDeployment: '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
-        gas: 200000,
       },
     } as WarpRouteDeployConfig;
 
@@ -111,12 +106,11 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
     writeYamlOrJson(WARP_CORE_PATH, coreConfig);
   }
 
-  async function applyRoute(): Promise<void> {
-    await hyperlaneWarp.applyRaw({
+  function applyRoute() {
+    return hyperlaneWarp.applyRaw({
       warpRouteId: WARP_ROUTE_ID,
       privateKey: HYP_KEY,
       skipConfirmationPrompts: true,
-      extraArgs: ['--key.ethereum', REMOTE_HYP_KEY],
     });
   }
 
@@ -142,8 +136,9 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
     });
     await applyRoute();
 
+    // warp read names a remote router by its chain when the registry has it.
     const enrolled = await readRemoteRouters();
-    const enrolledRouter = enrolled[REMOTE_DOMAIN_ID.toString()] as
+    const enrolledRouter = enrolled[REMOTE_CHAIN_NAME] as
       | { address: string }
       | undefined;
     expect(enrolledRouter, 'expected the remote router to be enrolled').to.not
@@ -156,6 +151,15 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
     await applyRoute();
 
     const unenrolled = await readRemoteRouters();
-    expect(unenrolled[REMOTE_DOMAIN_ID.toString()]).to.be.undefined;
+    expect(unenrolled[REMOTE_CHAIN_NAME]).to.be.undefined;
+  });
+
+  it('should refuse a scale other than the one set at deploy', async () => {
+    writeRouteConfigs({}, NIGHT_SCALE * 10);
+    const refused = await applyRoute().nothrow();
+    expect(refused.exitCode).to.not.equal(0);
+    expect(refused.stdout + refused.stderr).to.include(
+      `night scale is sealed at deploy (${NIGHT_SCALE})`,
+    );
   });
 });

@@ -101,6 +101,11 @@ changes the validator sets and the field below. See
   value, `core apply` changes it through night's owner-only setter; left out
   of the config, the deployed limit stays as it is. `core read` reports it as
   a decimal string.
+- **requiredHook**: an `interchainGasPaymaster` block here is the IGP that
+  `core deploy` deploys beside night. night keeps no hook pointer, so `core
+read` reports the zero address, and `core apply` refuses the block, which
+  would deploy a new IGP that nothing uses. The IGP changes through `hook
+apply`.
 
 ## Warp send recipients
 
@@ -124,6 +129,28 @@ built without the CLI gets them too. The Midnight token adapter applies the EVM
 rules as well, and also takes the 32-byte zero-padded form of an EVM address,
 which `WarpCore.validateRecipient` refuses. The transaction builder refuses an
 all-zero recipient on every route.
+
+## Pause and fund
+
+Three owner calls on night have no field in a Hyperlane config, so they are
+commands of their own:
+
+```sh
+hyperlane warp midnight fund --chain midnight --amount 1000000 # micro-NIGHT
+hyperlane warp midnight pause --chain midnight
+hyperlane warp midnight unpause --chain midnight
+hyperlane warp midnight status --chain midnight
+```
+
+- **fund** moves NIGHT from the owner's wallet into night's escrow, which
+  every transfer into Midnight is paid out of.
+- **pause** stops transfers in both directions and funding until **unpause**.
+- **status** shows whether night is paused and what its escrow holds. It is
+  the only one that needs no key.
+
+They act on the chain's `mailbox` from the registry, or on `--address`. The
+writes are owner calls, so they need the deploy's key and its
+`MIDNIGHT_STATE_DIR`.
 
 ## Registry
 

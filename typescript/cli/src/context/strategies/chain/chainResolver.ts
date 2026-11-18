@@ -83,6 +83,10 @@ export async function resolveChains(
     case CommandType.HOOK_DEPLOY:
     case CommandType.HOOK_APPLY:
     case CommandType.HOOK_READ:
+    case CommandType.WARP_MIDNIGHT_PAUSE:
+    case CommandType.WARP_MIDNIGHT_UNPAUSE:
+    case CommandType.WARP_MIDNIGHT_FUND:
+    case CommandType.WARP_MIDNIGHT_STATUS:
       return resolveChain(argv);
     case CommandType.ICA_DEPLOY:
       return resolveIcaDeployChains(argv);

@@ -40,11 +40,6 @@ export const REMOTE_CHAIN_NAME_3 = 'anvil4';
 export const REMOTE_ROUTER_ADDRESS =
   '0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266';
 
-// Anvil dev key #0. The remote chain is never written to, but the signer
-// middleware still requires a key for it.
-export const REMOTE_HYP_KEY =
-  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-
 // Every state change costs a real proof, which takes minutes rather than
 // seconds.
 export const MIDNIGHT_E2E_TEST_TIMEOUT = 1_200_000;
