@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use hyperlane_core::{ChainResult, HyperlaneMessage};
+use hyperlane_core::{ChainResult, HyperlaneMessage, U256};
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
 use midnight_storage::merkle_patricia_trie::ALLOW_SHORT_EXTENSION_CHAINS;
@@ -25,9 +25,10 @@ use crate::error::HyperlaneMidnightError;
 //
 // `validator_sets` maps an origin domain to one cell holding that origin's
 // `ValidatorSet` struct. The key is a little-endian `Uint<32>`. The cell is a
-// flat list of atoms: one per `Bytes<64>` key slot, then `count`, then
-// `threshold`. The number of slots is a compile-time constant of the
-// contract, so it is taken from the cell.
+// flat list of atoms: four per key slot, the key's x and y coordinates as two
+// `Secp256k1Base` values each, then `count`, then `threshold`. The number of
+// slots is a compile-time constant of the contract, so it is taken from the
+// cell.
 const ISM_VALIDATOR_SETS_PATH: [usize; 2] = [1, 4];
 const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 5];
 
@@ -44,9 +45,9 @@ pub(crate) const ENCODED_MESSAGE_LEN: usize = 141;
 /// One origin chain's validators, as the MessageIdMultisigIsm holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatorSet {
-    /// Validator addresses, in on-chain slot order. The contract stores
-    /// 64-byte secp256k1 public keys; the address is
-    /// `keccak256(pubkey)[12..]`.
+    /// Validator addresses, in on-chain slot order. The contract stores each
+    /// secp256k1 public key as its coordinates; the address is
+    /// `keccak256(x || y)[12..]`, big-endian.
     pub validators: Vec<[u8; 20]>,
     /// Multisig threshold (M of N).
     pub threshold: u8,
@@ -155,18 +156,53 @@ fn read_u8(node: &StateValue<DefaultDB>) -> ChainResult<u8> {
     u8_from_atom(cell_atom(node)?)
 }
 
-/// A stored `Bytes<N>` atom has its trailing zero bytes trimmed, so a key ending
-/// in zeros comes back short and has to be right-padded.
-fn bytes64_from_atom(bytes: &[u8]) -> ChainResult<[u8; 64]> {
-    if bytes.len() > 64 {
+/// Atoms per stored key: x and y, two atoms each.
+const KEY_ATOMS: usize = 4;
+
+/// secp256k1's base field modulus minus one, big-endian.
+const SECP256K1_P_MINUS_ONE: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xff, 0xff, 0xfc, 0x2e,
+];
+
+/// A `Secp256k1Base` is stored as the low 192 and the high 64 bits of the
+/// value minus one, little-endian, so zero is stored as p - 1. Each atom has
+/// its trailing zero bytes trimmed.
+fn secp256k1_base_from_atoms(low: &[u8], high: &[u8]) -> ChainResult<[u8; 32]> {
+    if low.len() > 24 || high.len() > 8 {
         return Err(HyperlaneMidnightError::StateDecode(format!(
-            "expected 64-byte secp256k1 public key, got {} bytes",
-            bytes.len()
+            "expected a 24- and an 8-byte coordinate atom, got {} and {} bytes",
+            low.len(),
+            high.len()
         ))
         .into());
     }
+    let mut le = [0u8; 32];
+    le[..low.len()].copy_from_slice(low);
+    le[24..24 + high.len()].copy_from_slice(high);
+    let stored = U256::from_little_endian(&le);
+    let p_minus_one = U256::from_big_endian(&SECP256K1_P_MINUS_ONE);
+    if stored > p_minus_one {
+        return Err(HyperlaneMidnightError::StateDecode(
+            "stored coordinate is not a secp256k1 field element".to_string(),
+        )
+        .into());
+    }
+    let value = if stored == p_minus_one {
+        U256::zero()
+    } else {
+        stored + 1
+    };
+    let mut be = [0u8; 32];
+    value.to_big_endian(&mut be);
+    Ok(be)
+}
+
+/// The 64-byte public key (x || y, big-endian) of one stored key slot.
+fn pubkey_from_atoms(atoms: &[&[u8]]) -> ChainResult<[u8; 64]> {
     let mut pubkey = [0u8; 64];
-    pubkey[..bytes.len()].copy_from_slice(bytes);
+    pubkey[..32].copy_from_slice(&secp256k1_base_from_atoms(atoms[0], atoms[1])?);
+    pubkey[32..].copy_from_slice(&secp256k1_base_from_atoms(atoms[2], atoms[3])?);
     Ok(pubkey)
 }
 
@@ -176,14 +212,19 @@ fn bytes64_from_atom(bytes: &[u8]) -> ChainResult<[u8; 64]> {
 /// not a legitimate on-chain state.
 fn read_validator_set(node: &StateValue<DefaultDB>, origin: u32) -> ChainResult<ValidatorSet> {
     let atoms = cell_atoms(node)?;
-    let Some(slots) = atoms.len().checked_sub(2) else {
+    let Some(key_atoms) = atoms.len().checked_sub(2).filter(|n| n % KEY_ATOMS == 0) else {
         return Err(HyperlaneMidnightError::StateDecode(format!(
             "validator set of origin {origin} has {} atoms, expected key slots, count and threshold",
             atoms.len()
         ))
         .into());
     };
-    let (keys, tail) = atoms.split_at(slots);
+    let slots = key_atoms / KEY_ATOMS;
+    let (key_atoms, tail) = atoms.split_at(key_atoms);
+    let keys = key_atoms
+        .chunks(KEY_ATOMS)
+        .map(pubkey_from_atoms)
+        .collect::<ChainResult<Vec<_>>>()?;
     let count = u8_from_atom(tail[0])? as usize;
     let threshold = u8_from_atom(tail[1])?;
 
@@ -212,7 +253,7 @@ fn read_validator_set(node: &StateValue<DefaultDB>, origin: u32) -> ChainResult<
 
     let mut validators = Vec::with_capacity(count);
     for key in &keys[..count] {
-        let digest = ethers::utils::keccak256(bytes64_from_atom(key)?);
+        let digest = ethers::utils::keccak256(key);
         let mut addr = [0u8; 20];
         addr.copy_from_slice(&digest[12..]);
         validators.push(addr);
@@ -577,11 +618,32 @@ mod tests {
     /// a test is free to use another.
     const SLOTS: usize = 9;
 
-    /// A `ValidatorSet` cell the way the contract stores it: one atom per key
-    /// slot, then `count` and `threshold`.
+    /// A coordinate the way the runtime stores a `Secp256k1Base`.
+    fn coordinate_atoms(be: &[u8]) -> [AlignedValue; 2] {
+        let value = U256::from_big_endian(be);
+        let stored = if value.is_zero() {
+            U256::from_big_endian(&SECP256K1_P_MINUS_ONE)
+        } else {
+            value - 1
+        };
+        let mut le = [0u8; 32];
+        stored.to_little_endian(&mut le);
+        let low: [u8; 24] = le[..24].try_into().unwrap();
+        let high: [u8; 8] = le[24..].try_into().unwrap();
+        [AlignedValue::from(low), AlignedValue::from(high)]
+    }
+
+    /// A `ValidatorSet` cell the way the contract stores it: four atoms per
+    /// key slot, then `count` and `threshold`.
     fn validator_set_cell(slots: &[[u8; 64]], count: u8, threshold: u8) -> StateValue<DefaultDB> {
-        let mut fields: Vec<AlignedValue> =
-            slots.iter().map(|key| AlignedValue::from(*key)).collect();
+        let mut fields: Vec<AlignedValue> = slots
+            .iter()
+            .flat_map(|key| {
+                let [x_low, x_high] = coordinate_atoms(&key[..32]);
+                let [y_low, y_high] = coordinate_atoms(&key[32..]);
+                [x_low, x_high, y_low, y_high]
+            })
+            .collect();
         fields.push(AlignedValue::from(count));
         fields.push(AlignedValue::from(threshold));
         cell(AlignedValue::concat(fields.iter()))
@@ -701,32 +763,91 @@ mod tests {
         }
     }
 
-    // A pubkey whose Y coordinate ends in 0x00 is stored short, and roughly
-    // one key in 256 does. Synthetic bytes rather than a real curve point: the
-    // decoder never validates the point, and a forced zero tail pins the pad
-    // branch. A full key follows it, so a short atom must not shift the rest.
+    // A coordinate with a zero top byte is stored in short atoms, and about
+    // one key in 128 has one. Synthetic bytes rather than a real curve point:
+    // the decoder never validates the point. x = 1 stores two empty atoms and
+    // y a one-byte one. A full key follows it, so a short atom must not shift
+    // the rest.
     #[test]
-    fn decodes_pubkey_with_trailing_zeros_trimmed_on_store() {
-        let mut pubkey = [0x5Au8; 64];
-        pubkey[61..].fill(0);
+    fn decodes_coordinates_stored_in_short_atoms() {
+        let mut short = [0u8; 64];
+        short[31] = 0x01;
+        short[63] = 0x5A;
+        let [x_low, x_high] = coordinate_atoms(&short[..32]);
+        let [y_low, _] = coordinate_atoms(&short[32..]);
         assert_eq!(
-            ValueAtom::from(pubkey).0.len(),
-            61,
-            "expected the trailing-zero tail to be trimmed on store"
+            x_low.value.0[0].0.len(),
+            0,
+            "x - 1 = 0 stores an empty atom"
         );
+        assert_eq!(x_high.value.0[0].0.len(), 0, "and an empty high atom");
+        assert_eq!(y_low.value.0[0].0.len(), 1, "y - 1 stores one byte");
         let full = [0x77u8; 64];
-        let expected: Vec<[u8; 20]> = [pubkey, full]
+        let expected: Vec<[u8; 20]> = [short, full]
             .iter()
             .map(|key| ethers::utils::keccak256(key)[12..].try_into().unwrap())
             .collect();
 
         let bytes =
-            single_set_state_bytes(validator_set_cell(&padded(&[pubkey, full], SLOTS), 2, 2));
+            single_set_state_bytes(validator_set_cell(&padded(&[short, full], SLOTS), 2, 2));
 
         let ism = decode_ism_state(&bytes).expect("decode ISM state");
         assert_eq!(
             ism.validator_sets[&31337].validators, expected,
-            "trimmed atom must right-pad back to the full 64-byte pubkey before hashing"
+            "short atoms must pad back to the full coordinates before hashing"
+        );
+    }
+
+    // A set the compiled contract stored through the runtime: three keys and
+    // an empty slot, count 3, threshold 2. The atoms come from the runtime,
+    // not from `coordinate_atoms`, so the encoding is pinned on both sides.
+    #[test]
+    fn decodes_a_set_stored_by_the_runtime() {
+        let hex_atoms = [
+            "a971580704b7f0b09a855fcab2b54b68905d61b9ce3cef28",
+            "f70accb7dc5b354f",
+            "c0f1b2dbfbf0072bbe4a2cfed65634a02bcf3f68d95474a6",
+            "9c80ad8e1b6b5b38",
+            "263fae1b5f2822cf4949a179786104483480b50b87d1a009",
+            "cbe563e5ca7f6d46",
+            "8927e19777403ef344d0779e3a4f78e265c837dc3845daee",
+            "f831643c6c172867",
+            "b0b1c73525bb866391851d8acf707e6a382ae97f4dc9f094",
+            "af09df4fdbad723c",
+            "df0357e54ddad038fe25a2edea086eadd36c67e18ab2c18f",
+            "5d6685e00f6b303b",
+            "2efcfffffeffffffffffffffffffffffffffffffffffffff",
+            "ffffffffffffffff",
+            "2efcfffffeffffffffffffffffffffffffffffffffffffff",
+            "ffffffffffffffff",
+        ];
+        let mut fields: Vec<AlignedValue> = hex_atoms
+            .iter()
+            .map(|h| {
+                let bytes = hex::decode(h).unwrap();
+                match bytes.len() {
+                    24 => AlignedValue::from(<[u8; 24]>::try_from(bytes.as_slice()).unwrap()),
+                    8 => AlignedValue::from(<[u8; 8]>::try_from(bytes.as_slice()).unwrap()),
+                    n => panic!("unexpected atom length {n}"),
+                }
+            })
+            .collect();
+        fields.push(AlignedValue::from(3u8));
+        fields.push(AlignedValue::from(2u8));
+        let set = cell(AlignedValue::concat(fields.iter()));
+
+        let ism = decode_ism_state(&single_set_state_bytes(set)).expect("decode ISM state");
+        assert_eq!(
+            ism.validator_sets[&31337],
+            ValidatorSet {
+                validators: vec![
+                    addr("19e7e376e7c213b7e7e7e46cc70a5dd086daff2a"),
+                    addr("1563915e194d8cfba1943570603f7606a3115508"),
+                    addr("5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb"),
+                ],
+                threshold: 2,
+                slots: 4,
+            }
         );
     }
 
@@ -778,17 +899,52 @@ mod tests {
             "non-zero key past the count"
         );
 
-        let wide_key = cell(AlignedValue::concat(
+        let wide_atom = cell(AlignedValue::concat(
             [
-                AlignedValue::from([0x5Au8; 65]),
+                AlignedValue::from([0x5Au8; 25]),
+                AlignedValue::from([0x5Au8; 8]),
+                AlignedValue::from([0x5Au8; 24]),
+                AlignedValue::from([0x5Au8; 8]),
                 AlignedValue::from(1u8),
                 AlignedValue::from(1u8),
             ]
             .iter(),
         ));
         assert!(
-            decode_error(&single_set_state_bytes(wide_key)).contains("got 65 bytes"),
-            "a key wider than 64 bytes"
+            decode_error(&single_set_state_bytes(wide_atom)).contains("got 25 and 8 bytes"),
+            "a coordinate atom wider than 24 bytes"
+        );
+
+        let above_field = cell(AlignedValue::concat(
+            [
+                AlignedValue::from([0xFFu8; 24]),
+                AlignedValue::from([0xFFu8; 8]),
+                AlignedValue::from([0x5Au8; 24]),
+                AlignedValue::from([0x5Au8; 8]),
+                AlignedValue::from(1u8),
+                AlignedValue::from(1u8),
+            ]
+            .iter(),
+        ));
+        assert!(
+            decode_error(&single_set_state_bytes(above_field))
+                .contains("not a secp256k1 field element"),
+            "a coordinate at or above the field modulus"
+        );
+
+        let partial_key = cell(AlignedValue::concat(
+            [
+                AlignedValue::from([0x5Au8; 24]),
+                AlignedValue::from([0x5Au8; 8]),
+                AlignedValue::from([0x5Au8; 24]),
+                AlignedValue::from(1u8),
+                AlignedValue::from(1u8),
+            ]
+            .iter(),
+        ));
+        assert!(
+            decode_error(&single_set_state_bytes(partial_key)).contains("has 5 atoms"),
+            "key atoms that do not come in fours"
         );
 
         let too_short = cell(7u8);
@@ -862,9 +1018,9 @@ mod tests {
     }
 
     // Real `night` state, made by running the contracts repo's compiled
-    // contract: deployed with one origin's validators, given a second
-    // origin's set that holds a key whose 64 bytes end in a zero byte, then
-    // two transfers out whose stored messages end in one too. It is
+    // contract: given a set for each of two origins, one holding a key whose
+    // x coordinate starts with a zero byte, then two transfers out whose
+    // stored messages end in one. It is
     // serialized the way the indexer serves it. The ledger trims trailing
     // zero bytes on store, so every value here has to come back whole.
     #[test]
@@ -885,7 +1041,7 @@ mod tests {
             expected.ism.validator_sets.len() >= 2,
             "the fixture holds more than one origin"
         );
-        let mut zero_tailed_keys = 0;
+        let mut short_coordinate_keys = 0;
         for want in &expected.ism.validator_sets {
             let set = ism
                 .validator_set(want.origin)
@@ -906,15 +1062,18 @@ mod tests {
                 "origin {}: key slots",
                 want.origin
             );
-            zero_tailed_keys += want
+            short_coordinate_keys += want
                 .pubkeys
                 .iter()
-                .filter(|key| unhex(key).last() == Some(&0))
+                .filter(|key| {
+                    let key = unhex(key);
+                    key[0] == 0 || key[32] == 0
+                })
                 .count();
         }
         assert!(
-            zero_tailed_keys > 0,
-            "the fixture holds a key that ends in a zero byte"
+            short_coordinate_keys > 0,
+            "the fixture holds a key with a coordinate whose top byte is zero"
         );
 
         assert_eq!(

@@ -33,8 +33,31 @@ export async function maxValidators(): Promise<number> {
   return Number(night.pureCircuits.maxValidators());
 }
 
-// Validators are enrolled as 64-byte secp256k1 pubkeys (X || Y); the
-// Hyperlane validator identity is the derived Ethereum address.
+// night stores each validator's secp256k1 public key as its coordinates.
+export interface ValidatorKey {
+  x: bigint;
+  y: bigint;
+}
+
+// Configs carry the 64-byte form, X || Y big-endian.
+export function validatorKeyFromPubkey(pubkey: Uint8Array): ValidatorKey {
+  if (pubkey.length !== PUBKEY_BYTES) {
+    throw new Error(
+      `expected a 64-byte validator pubkey, got ${pubkey.length} bytes`,
+    );
+  }
+  return {
+    x: BigInt(bytesToHex(pubkey.slice(0, 32))),
+    y: BigInt(bytesToHex(pubkey.slice(32))),
+  };
+}
+
+export function pubkeyFromValidatorKey(key: ValidatorKey): Uint8Array {
+  const coordinate = (value: bigint) => value.toString(16).padStart(64, '0');
+  return hexToBytes(`0x${coordinate(key.x)}${coordinate(key.y)}`);
+}
+
+// The Hyperlane validator identity is the address derived from the pubkey.
 export function pubkeyToEthAddress(pubkey: Uint8Array): string {
   if (pubkey.length !== PUBKEY_BYTES) {
     throw new Error(
@@ -46,7 +69,7 @@ export function pubkeyToEthAddress(pubkey: Uint8Array): string {
 
 export interface ResolvedValidatorSet {
   // Zero-padded to the contract's slot count for its fixed-size vector.
-  paddedPubkeys: Uint8Array[];
+  paddedKeys: ValidatorKey[];
   count: bigint;
   threshold: bigint;
 }
@@ -95,7 +118,7 @@ export function resolveValidatorSet(
     );
   }
 
-  const paddedPubkeys = validatorPubkeys.map((hex, i) => {
+  const paddedKeys = validatorPubkeys.map((hex, i) => {
     const bytes = hexToBytes(hex);
     const derived = pubkeyToEthAddress(bytes);
     if (derived.toLowerCase() !== validators[i].toLowerCase()) {
@@ -104,15 +127,15 @@ export function resolveValidatorSet(
           `is ${validators[i]}`,
       );
     }
-    return bytes;
+    return validatorKeyFromPubkey(bytes);
   });
   // The contract refuses a set whose unused slots are not zero.
-  while (paddedPubkeys.length < slots) {
-    paddedPubkeys.push(new Uint8Array(PUBKEY_BYTES));
+  while (paddedKeys.length < slots) {
+    paddedKeys.push({ x: 0n, y: 0n });
   }
 
   return {
-    paddedPubkeys,
+    paddedKeys,
     count: BigInt(validators.length),
     threshold: BigInt(threshold),
   };
@@ -143,7 +166,7 @@ export function setValidatorsTx(
     contract: 'night',
     contractAddress: nightAddress,
     circuit: 'setValidatorsAndThreshold',
-    args: [BigInt(origin), set.paddedPubkeys, set.count, set.threshold],
+    args: [BigInt(origin), set.paddedKeys, set.count, set.threshold],
   };
 }
 
