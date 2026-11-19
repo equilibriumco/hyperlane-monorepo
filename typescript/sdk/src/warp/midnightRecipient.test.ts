@@ -24,8 +24,8 @@ const FORM_HEX =
   '0x7a1e5f0c3b9d2e4f6a8b0c1d2e3f4a5b' + '6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f';
 const FORM_UNDEPLOYED =
   'mn_addr_undeployed10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0snvvkpf';
-const FORM_STAGENET =
-  'mn_addr_stagenet10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0s7c8nxa';
+const FORM_PREVIEW =
+  'mn_addr_preview10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0sfkgcr9';
 const FORM_ZERO =
   'mn_addr_undeployed1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqze2h07';
 
@@ -56,9 +56,9 @@ describe('validateMidnightRecipient', () => {
   });
 
   it('Refuses another network, a damaged form and the zero address', () => {
-    expect(validateMidnightRecipient(FORM_STAGENET, midnight)).to.deep.equal({
+    expect(validateMidnightRecipient(FORM_PREVIEW, midnight)).to.deep.equal({
       recipient:
-        'Recipient address is for the stagenet network, midnighttest is undeployed',
+        'Recipient address is for the preview network, midnighttest is undeployed',
     });
     const damaged = validateMidnightRecipient(
       FORM_UNDEPLOYED.slice(0, -1) + 'g',
@@ -72,7 +72,7 @@ describe('validateMidnightRecipient', () => {
 
   it('Skips the network check when the chain names no network', () => {
     const { midnightNetworkId: _unused, ...noNetwork } = midnight;
-    expect(validateMidnightRecipient(FORM_STAGENET, noNetwork)).to.be.null;
+    expect(validateMidnightRecipient(FORM_PREVIEW, noNetwork)).to.be.null;
   });
 
   it('Is what WarpCore applies to a Midnight destination', () => {

@@ -1,9 +1,9 @@
 /**
  * Chunked contract deploy: deploy `night` with a minimal set of verifier keys,
  * then add the rest in follow-up maintenance transactions so every tx stays
- * under the chain's per-block `bytes_written` budget. Stagenet's stock limits
- * reject the monolithic deploy outright, and raising them needs a governance
- * motion.
+ * under the chain's per-block `bytes_written` budget. A public network's stock
+ * limits reject the monolithic deploy outright, and raising them needs a
+ * governance motion.
  *
  * Built at the ledger level rather than through the SDK's insert helpers,
  * which take one verifier key per transaction: a batch here carries several.
@@ -105,9 +105,9 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'isPaused',
 ] as const;
 
-// Per-tx budget for raw verifier-key bytes. Stagenet accepted ~25 KB
-// bytesWritten and rejected ~33 KB, and the deploy tx carries another ~7 KB of
-// constructor state on top of the keys.
+// Per-tx budget for raw verifier-key bytes. A public network with stock limits
+// accepted ~25 KB bytesWritten and rejected ~33 KB, and the deploy tx carries
+// another ~7 KB of constructor state on top of the keys.
 export const DEFAULT_CHUNK_BUDGET_BYTES = 18_000;
 
 export interface ChunkPlan {

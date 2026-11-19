@@ -160,9 +160,9 @@ The CLI's default registry is upstream's, which has no Midnight chain, so pass
 at the commit the deployment guide pins. Move the pin when the registry's
 `midnight` branch changes.
 
-The addresses a registry serves can also be checked against a known-good list,
-the contracts repo's `deployments/stagenet-sepolia.json`. Only registries and
-configs with a Midnight chain are checked, so nothing changes for other chains:
+The addresses a registry serves can also be checked against a known-good list
+from the contracts repo's `deployments/` folder. Only registries and configs
+with a Midnight chain are checked, so nothing changes for other chains:
 
 - **HYPERLANE_KNOWN_ADDRESSES=\<path>**: read by the CLI on every command
   except the deploys, once a registry that serves a Midnight chain is loaded.
@@ -197,8 +197,6 @@ on disk.
   rather than at build time.
 - **MIDNIGHT_PROOF_SERVER_URL=\<url>**: proof server to prove against, default
   local. There is no public proof server.
-- **MIDNIGHT_NETWORK=devnet/stagenet**: selects default endpoints. Unset on a
-  stagenet host means every endpoint quietly points at localhost.
 - **MIDNIGHT_STATE_DIR=\<path>**: holds the ownership secret, the private state
   and the maintenance committee keys this host holds. Losing it forfeits
   contract ownership and the ability to update circuits, so back it up after a

@@ -12,14 +12,14 @@ describe('privateStatePassword', () => {
 
   it('is required off a local devnet', () => {
     delete process.env.MIDNIGHT_STATE_PASSWORD;
-    expect(() => privateStatePassword('stagenet')).to.throw(
-      /MIDNIGHT_STATE_PASSWORD is required on stagenet/,
+    expect(() => privateStatePassword('preview')).to.throw(
+      /MIDNIGHT_STATE_PASSWORD is required on preview/,
     );
   });
 
   it('is the one set, on any network', () => {
     process.env.MIDNIGHT_STATE_PASSWORD = 'from-the-operator';
-    expect(privateStatePassword('stagenet')).to.equal('from-the-operator');
+    expect(privateStatePassword('preview')).to.equal('from-the-operator');
     expect(privateStatePassword('undeployed')).to.equal('from-the-operator');
   });
 

@@ -275,15 +275,15 @@ describe('Address utilities', () => {
       '0x7a1e5f0c3b9d2e4f6a8b0c1d2e3f4a5b' + '6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f';
     const FORM_UNDEPLOYED =
       'mn_addr_undeployed10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0snvvkpf';
-    const FORM_STAGENET =
-      'mn_addr_stagenet10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0s7c8nxa';
+    const FORM_PREVIEW =
+      'mn_addr_preview10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0sfkgcr9';
     const FORM_MAINNET =
       'mn_addr10g097rpmn5hy765tpswju062tdk8mr5lpgdjc02wta48hryapc0sjrz6n0';
 
     it('Decodes and encodes the unshielded address form', () => {
       for (const [form, networkId] of [
         [FORM_UNDEPLOYED, 'undeployed'],
-        [FORM_STAGENET, 'stagenet'],
+        [FORM_PREVIEW, 'preview'],
         [FORM_MAINNET, 'mainnet'],
       ] as const) {
         const decoded = decodeMidnightUnshieldedAddress(form);
@@ -327,7 +327,7 @@ describe('Address utilities', () => {
       );
       expect(
         bytesToProtocolAddress(
-          addressToBytes(FORM_STAGENET, ProtocolType.Midnight),
+          addressToBytes(FORM_PREVIEW, ProtocolType.Midnight),
           ProtocolType.Midnight,
         ),
       ).to.equal(FORM_HEX);
