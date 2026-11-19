@@ -18,9 +18,16 @@ describe('privateStatePassword', () => {
   });
 
   it('is the one set, on any network', () => {
+    process.env.MIDNIGHT_STATE_PASSWORD = 'From-The-Operator-7';
+    expect(privateStatePassword('preview')).to.equal('From-The-Operator-7');
+    expect(privateStatePassword('undeployed')).to.equal('From-The-Operator-7');
+  });
+
+  it("is held to Midnight.js's rules", () => {
     process.env.MIDNIGHT_STATE_PASSWORD = 'from-the-operator';
-    expect(privateStatePassword('preview')).to.equal('from-the-operator');
-    expect(privateStatePassword('undeployed')).to.equal('from-the-operator');
+    expect(() => privateStatePassword('preview')).to.throw(
+      /MIDNIGHT_STATE_PASSWORD: Password must contain at least 3/,
+    );
   });
 
   it('falls back to the devnet one on a local devnet', () => {

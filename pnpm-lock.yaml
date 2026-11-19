@@ -1881,6 +1881,9 @@ importers:
       '@midnight-ntwrk/midnight-js-types':
         specifier: 5.0.0
         version: 5.0.0
+      '@midnight-ntwrk/midnight-js-utils':
+        specifier: 5.0.0
+        version: 5.0.0
       '@midnightntwrk/ledger-v9':
         specifier: 1.0.2
         version: 1.0.2

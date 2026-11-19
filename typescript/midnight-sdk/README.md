@@ -203,7 +203,10 @@ on disk.
   deploy. Its `owner-state.json` is written readable by your user only, and a
   deploy will not start while it is readable by others.
 - **MIDNIGHT_STATE_PASSWORD=\<password>**: encrypts that state, and is required
-  off a local devnet. There is no rotation path, so set it before first use.
+  off a local devnet. It must pass Midnight.js's rules (at least 16 characters
+  with three of upper case, lower case, digits and symbols, and no run like
+  `1234`), which are checked before anything is sent. There is no rotation
+  path, so set it before first use.
 - **MIDNIGHT_MAINTENANCE_COMMITTEE=\<kind>:\<hex>,...**: the verifying keys of
   the maintenance committee every deploy ends with, at least three, each as
   its holder's key tool prints it (`schnorr:...`). The deploy's last
