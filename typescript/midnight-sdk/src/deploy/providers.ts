@@ -41,6 +41,9 @@ export async function createProviders(
   zkConfigPath: string,
   options: ProviderOptions,
 ): Promise<ContractProviders> {
+  // Read now, before anything is sent: a deploy first writes the store after
+  // its transaction lands.
+  const privateStatePassword = options.privateStatePassword();
   const { wallet, unshieldedKeystore } = walletCtx;
   const { shielded } = await waitForSync(walletCtx);
 
@@ -71,8 +74,7 @@ export async function createProviders(
 
   return {
     privateStateProvider: levelPrivateStateProvider({
-      privateStoragePasswordProvider: async () =>
-        options.privateStatePassword(),
+      privateStoragePasswordProvider: async () => privateStatePassword,
       accountId: String(unshieldedKeystore.getBech32Address()),
       midnightDbName: options.privateStateDbPath,
     }),

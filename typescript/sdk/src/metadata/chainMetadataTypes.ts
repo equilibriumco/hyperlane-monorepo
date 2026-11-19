@@ -306,7 +306,7 @@ export const ChainMetadataSchemaObject = z.object({
     .string()
     .optional()
     .describe(
-      "The Midnight network id, e.g. 'stagenet', or 'undeployed' for a local devnet.",
+      "The Midnight network id, e.g. 'preview', or 'undeployed' for a local devnet.",
     ),
 
   name: ZChainName.describe(

@@ -1,3 +1,5 @@
+import { validatePassword } from '@midnight-ntwrk/midnight-js-utils';
+
 // The local devnet's network id; its stores hold only throwaway secrets.
 const DEVNET_NETWORK_ID = 'undeployed';
 const DEVNET_PASSWORD = 'Hyperlane-Midnight-2026!';
@@ -11,7 +13,16 @@ let devnetPasswordNoted = false;
  */
 export function privateStatePassword(networkId: string): string {
   const password = process.env.MIDNIGHT_STATE_PASSWORD;
-  if (password) return password;
+  if (password) {
+    try {
+      validatePassword(password);
+    } catch (error) {
+      throw new Error(`MIDNIGHT_STATE_PASSWORD: ${(error as Error).message}`, {
+        cause: error,
+      });
+    }
+    return password;
+  }
   if (networkId !== DEVNET_NETWORK_ID) {
     throw new Error(
       `MIDNIGHT_STATE_PASSWORD is required on ${networkId}: it encrypts the ` +
