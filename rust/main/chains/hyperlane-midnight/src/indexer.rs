@@ -5,6 +5,7 @@
 //! their sequence; deliveries have none and run off the watermark cursor.
 
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -13,6 +14,7 @@ use hyperlane_core::{
     SequenceAwareIndexer, H256, H512,
 };
 
+use crate::dispatch_log::DispatchLog;
 use crate::events::{
     address_hex, decode_dispatch_event, decode_process_event, event_log_meta, h512_to_h256,
     has_name, MidnightEventReader, HYP_DISPATCH, HYP_PROCESS,
@@ -25,6 +27,7 @@ use crate::MidnightIndexerClient;
 pub struct MidnightDispatchIndexer {
     client: MidnightIndexerClient,
     address: H256,
+    log: Arc<DispatchLog>,
 }
 
 impl MidnightDispatchIndexer {
@@ -33,6 +36,7 @@ impl MidnightDispatchIndexer {
         Self {
             client,
             address: locator.address,
+            log: Arc::new(DispatchLog::new(locator.address)),
         }
     }
 }
@@ -105,12 +109,9 @@ impl Indexer<HyperlaneMessage> for MidnightDispatchIndexer {
 #[async_trait]
 impl SequenceAwareIndexer<HyperlaneMessage> for MidnightDispatchIndexer {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // The Mailbox `nonce` counter is the dispatch count.
-        let tip = self.client.read_tip().await?;
-        let count = self
-            .client
-            .read_nonce_count(&address_hex(&self.address))
-            .await?;
+        // The contract stores no message, so the dispatches the events carry
+        // are the count.
+        let (count, tip) = self.log.count_and_tip(&self.client).await?;
         Ok((Some(count), tip))
     }
 }

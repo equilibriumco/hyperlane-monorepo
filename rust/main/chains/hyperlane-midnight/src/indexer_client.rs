@@ -9,7 +9,7 @@ use hyperlane_core::{ChainResult, U256};
 
 use hyperlane_core::H256;
 
-use crate::state_decode::{decode_ism_state, decode_nonce_count, IsmState};
+use crate::state_decode::{decode_ism_state, IsmState};
 use crate::HyperlaneMidnightError;
 
 /// How long a decoded ISM state is reused before re-reading. Short on purpose:
@@ -17,9 +17,10 @@ use crate::HyperlaneMidnightError;
 /// on-chain validator rotation is still picked up quickly.
 const ISM_STATE_TTL: Duration = Duration::from_secs(5);
 
-/// The indexer orders by the monotonic event `id`, so offset paging over the
-/// append-only log is stable and a short page marks the end.
-const CONTRACT_EVENTS_PAGE_SIZE: usize = 200;
+/// The most events the indexer serves in one answer. It orders by the
+/// monotonic event `id`, so paging over the append-only log is stable and a
+/// short page marks the end.
+const CONTRACT_EVENTS_PAGE_SIZE: usize = 500;
 
 /// Compact `Bytes<32>`, zero-padded by the indexer before serving.
 pub const MISC_NAME_LEN: usize = 32;
@@ -183,13 +184,6 @@ impl MidnightIndexerClient {
         Ok(state)
     }
 
-    /// The dispatch and merkle indexers use this as their sequence tip: one
-    /// state fetch and one counter decode, with no per-message work.
-    pub async fn read_nonce_count(&self, address: &str) -> ChainResult<u32> {
-        let bytes = self.contract_state(address).await?;
-        decode_nonce_count(&bytes)
-    }
-
     /// In event-id order, paginated transparently, with failed transactions
     /// excluded (see [`TxStatus::is_indexable`]).
     pub async fn misc_events_in_range(
@@ -198,13 +192,24 @@ impl MidnightIndexerClient {
         from_block: u32,
         to_block: u32,
     ) -> Result<Vec<MiscEvent>, HyperlaneMidnightError> {
-        let filter = serde_json::json!({
-            "contractAddress": address,
-            "types": ["MISC"],
-            "fromBlock": from_block,
-            "toBlock": to_block,
-        });
-        self.misc_events_filtered(filter).await
+        let mut out = Vec::new();
+        let mut page = RangePage::from(from_block);
+        loop {
+            let filter = serde_json::json!({
+                "contractAddress": address,
+                "types": ["MISC"],
+                "fromBlock": page.from_block,
+                "toBlock": to_block,
+            });
+            let raw = self.contract_events_page(&filter, page.offset).await?;
+            let next = page.after(&raw);
+            out.extend(misc_events_from_raw(raw)?);
+            match next {
+                Some(next) => page = next,
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     /// Failed transactions are excluded (see [`TxStatus::is_indexable`]).
@@ -218,26 +223,10 @@ impl MidnightIndexerClient {
             "types": ["MISC"],
             "transactionHash": format!("{tx_hash:x}"),
         });
-        self.misc_events_filtered(filter).await
-    }
-
-    async fn misc_events_filtered(
-        &self,
-        filter: serde_json::Value,
-    ) -> Result<Vec<MiscEvent>, HyperlaneMidnightError> {
         let mut out = Vec::new();
         let mut offset = 0usize;
         loop {
-            let body = GraphqlRequest {
-                query: CONTRACT_EVENTS_QUERY,
-                variables: serde_json::json!({
-                    "filter": filter,
-                    "limit": CONTRACT_EVENTS_PAGE_SIZE,
-                    "offset": offset,
-                }),
-            };
-            let data = self.post::<ContractEventsData>(&body).await?.into_data()?;
-            let raw = data.map(|d| d.contract_events).unwrap_or_default();
+            let raw = self.contract_events_page(&filter, offset).await?;
             let page_len = raw.len();
             out.extend(misc_events_from_raw(raw)?);
             if page_len < CONTRACT_EVENTS_PAGE_SIZE {
@@ -246,6 +235,23 @@ impl MidnightIndexerClient {
             offset += page_len;
         }
         Ok(out)
+    }
+
+    async fn contract_events_page(
+        &self,
+        filter: &serde_json::Value,
+        offset: usize,
+    ) -> Result<Vec<RawContractEvent>, HyperlaneMidnightError> {
+        let body = GraphqlRequest {
+            query: CONTRACT_EVENTS_QUERY,
+            variables: serde_json::json!({
+                "filter": filter,
+                "limit": CONTRACT_EVENTS_PAGE_SIZE,
+                "offset": offset,
+            }),
+        };
+        let data = self.post::<ContractEventsData>(&body).await?.into_data()?;
+        Ok(data.map(|d| d.contract_events).unwrap_or_default())
     }
 
     /// Fetch block metadata by height. `None` if the indexer has not observed
@@ -475,6 +481,50 @@ struct TransactionsData {
     transactions: Vec<RawTransaction>,
 }
 
+/// Where one page of a block range starts. Event ids rise with the block
+/// height, so the page after a full one starts at that page's last block,
+/// past the events already taken from it. The offset then never grows with
+/// the range, where an offset counted from the range's start makes the
+/// indexer walk the whole history again for every page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RangePage {
+    from_block: u64,
+    offset: usize,
+}
+
+impl RangePage {
+    fn from(from_block: u32) -> Self {
+        Self {
+            from_block: u64::from(from_block),
+            offset: 0,
+        }
+    }
+
+    /// The page after `raw`, or `None` when `raw` was the last one.
+    fn after(self, raw: &[RawContractEvent]) -> Option<Self> {
+        if raw.len() < CONTRACT_EVENTS_PAGE_SIZE {
+            return None;
+        }
+        let last_block = raw.last()?.transaction.block.height;
+        let from_last_block = raw
+            .iter()
+            .rev()
+            .take_while(|event| event.transaction.block.height == last_block)
+            .count();
+        Some(if last_block == self.from_block {
+            Self {
+                from_block: last_block,
+                offset: self.offset + from_last_block,
+            }
+        } else {
+            Self {
+                from_block: last_block,
+                offset: from_last_block,
+            }
+        })
+    }
+}
+
 fn hex_bytes(value: &str, what: &str) -> Result<Vec<u8>, HyperlaneMidnightError> {
     hex::decode(value.trim_start_matches("0x")).map_err(|e| {
         HyperlaneMidnightError::IndexerGraphql(format!("{what} is not valid hex: {e}"))
@@ -625,6 +675,92 @@ mod tests {
         let process = &events[3];
         assert_eq!(process.tx_hash, H256::repeat_byte(0x03));
         assert_eq!(process.block_hash, H256::repeat_byte(0xa3));
+    }
+
+    fn raw_event(id: u64, height: u64) -> RawContractEvent {
+        RawContractEvent {
+            typename: "MiscContractEvent".to_string(),
+            id,
+            name: None,
+            payload: None,
+            transaction: RawTransaction {
+                id,
+                hash: String::new(),
+                block: RawBlock {
+                    hash: String::new(),
+                    height,
+                    timestamp: 0,
+                },
+                transaction_result: None,
+                fee: None,
+            },
+        }
+    }
+
+    /// Every event of `heights` from `page` on, as the indexer cuts it.
+    fn served(heights: &[u64], page: RangePage) -> Vec<RawContractEvent> {
+        heights
+            .iter()
+            .enumerate()
+            .filter(|(_, height)| **height >= page.from_block)
+            .skip(page.offset)
+            .take(CONTRACT_EVENTS_PAGE_SIZE)
+            .map(|(id, height)| raw_event(id as u64, *height))
+            .collect()
+    }
+
+    /// The ids a client collects by following `RangePage` over `heights`.
+    fn paged_ids(heights: &[u64]) -> Vec<u64> {
+        let mut ids = Vec::new();
+        let mut page = RangePage::from(0);
+        loop {
+            let raw = served(heights, page);
+            ids.extend(raw.iter().map(|event| event.id));
+            match page.after(&raw) {
+                Some(next) => page = next,
+                None => break,
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn a_short_page_is_the_last_one() {
+        let page = RangePage::from(7);
+        assert_eq!(page.after(&[]), None);
+        assert_eq!(page.after(&[raw_event(1, 7), raw_event(2, 9)]), None);
+    }
+
+    #[test]
+    fn the_next_page_starts_at_the_last_block_past_what_was_taken_from_it() {
+        // 498 events in blocks 10 to 507, then two in block 600.
+        let mut raw: Vec<_> = (0..498).map(|i| raw_event(i, 10 + i)).collect();
+        raw.push(raw_event(498, 600));
+        raw.push(raw_event(499, 600));
+        assert_eq!(
+            RangePage::from(10).after(&raw),
+            Some(RangePage {
+                from_block: 600,
+                offset: 2
+            })
+        );
+    }
+
+    #[test]
+    fn paging_serves_every_event_once_whatever_the_blocks_hold() {
+        let page = CONTRACT_EVENTS_PAGE_SIZE as u64;
+        let spread: Vec<u64> = (0..page * 3 + 17).map(|i| i / 3).collect();
+        let one_block: Vec<u64> = vec![42; CONTRACT_EVENTS_PAGE_SIZE * 2 + 5];
+        // A block that fills more than two pages between quieter ones.
+        let mut burst: Vec<u64> = (0..page - 3).collect();
+        burst.extend(vec![page; CONTRACT_EVENTS_PAGE_SIZE * 2 + 9]);
+        burst.extend(page + 1..page + 40);
+        let exact: Vec<u64> = (0..page * 2).collect();
+
+        for heights in [spread, one_block, burst, exact, vec![]] {
+            let want: Vec<u64> = (0..heights.len() as u64).collect();
+            assert_eq!(paged_ids(&heights), want);
+        }
     }
 
     #[test]

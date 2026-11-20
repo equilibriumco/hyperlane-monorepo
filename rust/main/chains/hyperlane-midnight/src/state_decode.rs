@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use hyperlane_core::{ChainResult, HyperlaneMessage, U256};
+use hyperlane_core::{ChainResult, H256, U256};
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_serialize::tagged_deserialize;
 use midnight_storage::merkle_patricia_trie::ALLOW_SHORT_EXTENSION_CHAINS;
@@ -36,7 +36,7 @@ const ISM_MODULE_TYPE_PATH: [usize; 2] = [1, 5];
 // not decoded here: deliveries come from `HYP_PROCESS` events and the
 // `delivered` read goes through the toolkit.
 const MAILBOX_NONCE_PATH: [usize; 2] = [1, 7];
-const DISPATCHED_MESSAGES_PATH: [usize; 2] = [1, 8];
+const DISPATCH_HASH_PATH: [usize; 2] = [1, 8];
 
 /// Length of an encoded `HyperlaneMessage`: version(1) + nonce(4) + origin(4)
 /// + sender(32) + destination(4) + recipient(32) + body(64).
@@ -327,80 +327,50 @@ fn read_counter_u64(node: &StateValue<DefaultDB>) -> ChainResult<u64> {
     Ok(u64::from_le_bytes(le))
 }
 
-/// The number of messages dispatched so far. The on-chain circuit caps the
-/// counter below `2^32`, so the cast cannot truncate a legitimate value.
-pub fn decode_nonce_count(bytes: &[u8]) -> ChainResult<u32> {
+/// What the contract holds of the messages it has dispatched. It stores none
+/// of them: the `HYP_DISPATCH` events carry them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchState {
+    /// How many messages were dispatched. The on-chain circuit caps the
+    /// counter below `2^32`.
+    pub count: u32,
+    /// The contract's running hash over their ids, in nonce order: SHA-256
+    /// over the hash so far and the next id, starting from zero.
+    pub hash: H256,
+}
+
+/// Decode the dispatch count and running hash from the serialized ledger
+/// state.
+pub fn decode_dispatch_state(bytes: &[u8]) -> ChainResult<DispatchState> {
     let cs = decode_contract_state(bytes)?;
     let root = cs.data.get_ref();
     let n = read_counter_u64(nav(root, &MAILBOX_NONCE_PATH)?)?;
-    u32::try_from(n).map_err(|_| {
-        HyperlaneMidnightError::StateDecode(format!("nonce counter {n} exceeds u32")).into()
-    })
-}
+    let count = u32::try_from(n).map_err(|_| {
+        HyperlaneMidnightError::StateDecode(format!("nonce counter {n} exceeds u32"))
+    })?;
 
-/// Sorted by nonce. Each message's encoded nonce must match its map key, the
-/// same binding `Mailbox.recordDispatch` enforces on-chain.
-pub fn decode_dispatched_messages(bytes: &[u8]) -> ChainResult<Vec<(u32, HyperlaneMessage)>> {
-    let cs = decode_contract_state(bytes)?;
-    let root = cs.data.get_ref();
-    let map = match nav(root, &DISPATCHED_MESSAGES_PATH)? {
-        StateValue::Map(m) => m,
-        other => {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "expected map for dispatched_messages, got {other:?}"
-            ))
-            .into())
-        }
-    };
-
-    let mut out: Vec<(u32, HyperlaneMessage)> = Vec::with_capacity(map.size());
-    for entry in map.iter() {
-        let pair = &*entry;
-        // The key is a little-endian `Uint<32>` nonce.
-        let key_av = &*pair.0;
-        let key_bytes = key_av
-            .value
-            .0
-            .first()
-            .map(|atom| &atom.0[..])
-            .unwrap_or(&[]);
-        let mut kb = [0u8; 4];
-        let n = key_bytes.len().min(4);
-        kb[..n].copy_from_slice(&key_bytes[..n]);
-        let nonce = u32::from_le_bytes(kb);
-
-        // Trailing zero bytes are trimmed on store, so a message whose tail is
-        // zero (a scaled amount ending in 0x00, say) comes back short and has
-        // to be right-padded before decoding.
-        let value = cell_atom(&pair.1)?;
-        if value.len() > ENCODED_MESSAGE_LEN {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "dispatched message at nonce {nonce} is {} bytes, expected at most {ENCODED_MESSAGE_LEN}",
-                value.len()
-            ))
-            .into());
-        }
-        let mut full = [0u8; ENCODED_MESSAGE_LEN];
-        full[..value.len()].copy_from_slice(value);
-        let message = HyperlaneMessage::from(full.to_vec());
-        if message.nonce != nonce {
-            return Err(HyperlaneMidnightError::StateDecode(format!(
-                "dispatched message nonce field {} does not match map key {nonce}",
-                message.nonce
-            ))
-            .into());
-        }
-        out.push((nonce, message));
+    // Trailing zero bytes are trimmed on store, so a hash that ends in zeros
+    // comes back short and has to be right-padded.
+    let stored = cell_atom(nav(root, &DISPATCH_HASH_PATH)?)?;
+    if stored.len() > 32 {
+        return Err(HyperlaneMidnightError::StateDecode(format!(
+            "dispatch hash is {} bytes, expected at most 32",
+            stored.len()
+        ))
+        .into());
     }
-    out.sort_by_key(|(nonce, _)| *nonce);
-    Ok(out)
+    let mut hash = [0u8; 32];
+    hash[..stored.len()].copy_from_slice(stored);
+    Ok(DispatchState {
+        count,
+        hash: H256::from(hash),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use hyperlane_core::{Encode as _, H256};
     use midnight_base_crypto::cost_model::RunningCost;
     use midnight_base_crypto::fab::{AlignedValue, ValueAtom};
     use midnight_onchain_state::state::ChargedState;
@@ -424,7 +394,7 @@ mod tests {
     fn mailbox_root(
         deliveries: StateValue<DefaultDB>,
         nonce: StateValue<DefaultDB>,
-        dispatched: StateValue<DefaultDB>,
+        dispatch_hash: StateValue<DefaultDB>,
     ) -> StateValue<DefaultDB> {
         let mailbox = array(vec![
             StateValue::Null, // [1,0]
@@ -435,7 +405,7 @@ mod tests {
             StateValue::Null, // [1,5]
             deliveries,       // [1,6]
             nonce,            // [1,7]
-            dispatched,       // [1,8]
+            dispatch_hash,    // [1,8]
         ]);
         array(vec![
             StateValue::Null, // [0] ownership + Routes fields (unused here)
@@ -454,52 +424,74 @@ mod tests {
         bytes
     }
 
-    fn mailbox_state_bytes(
-        deliveries: StateValue<DefaultDB>,
-        nonce: StateValue<DefaultDB>,
-        dispatched: StateValue<DefaultDB>,
-    ) -> Vec<u8> {
+    fn mailbox_state_bytes(nonce: u64, dispatch_hash: [u8; 32]) -> Vec<u8> {
         state_bytes(ChargedState::new(mailbox_root(
-            deliveries, nonce, dispatched,
+            StateValue::Map(HashMap::new()),
+            cell(nonce),
+            cell(dispatch_hash),
         )))
     }
 
-    fn sample_message(nonce: u32) -> HyperlaneMessage {
-        HyperlaneMessage {
-            version: 3,
-            nonce,
-            origin: 1234,
-            sender: H256::repeat_byte(0xAB),
-            destination: 5678,
-            recipient: H256::repeat_byte(0xCD),
-            // Trailing zeros exercise the right-pad path.
-            body: {
-                let mut b = vec![0u8; 64];
-                b[0] = 0x11;
-                b[1] = 0x22;
-                b
-            },
-        }
+    #[test]
+    fn decodes_synthetic_dispatch_state() {
+        let hash = [0x5Au8; 32];
+        let bytes = mailbox_state_bytes(7, hash);
+        assert_eq!(
+            decode_dispatch_state(&bytes).expect("decode dispatch state"),
+            DispatchState {
+                count: 7,
+                hash: H256::from(hash)
+            }
+        );
     }
 
     #[test]
-    fn decodes_synthetic_nonce_count() {
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(7u64),
-            StateValue::Map(HashMap::new()),
+    fn decodes_the_dispatch_state_of_a_contract_that_sent_nothing() {
+        let bytes = mailbox_state_bytes(0, [0u8; 32]);
+        assert_eq!(
+            decode_dispatch_state(&bytes).expect("decode dispatch state"),
+            DispatchState {
+                count: 0,
+                hash: H256::zero()
+            }
         );
-        assert_eq!(decode_nonce_count(&bytes).expect("decode nonce"), 7);
     }
 
     #[test]
-    fn decodes_synthetic_nonce_count_zero() {
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(0u64),
-            StateValue::Map(HashMap::new()),
+    fn right_pads_a_dispatch_hash_stored_without_its_trailing_zeros() {
+        let mut hash = [0u8; 32];
+        hash[0] = 0xC4;
+        hash[17] = 0x09;
+        assert!(
+            ValueAtom::from(hash).0.len() < 32,
+            "expected the trailing-zero tail to be trimmed on store"
         );
-        assert_eq!(decode_nonce_count(&bytes).expect("decode nonce"), 0);
+        let bytes = mailbox_state_bytes(3, hash);
+        assert_eq!(
+            decode_dispatch_state(&bytes)
+                .expect("decode dispatch state")
+                .hash,
+            H256::from(hash),
+            "the trimmed hash is padded back to 32 bytes"
+        );
+    }
+
+    #[test]
+    fn rejects_a_nonce_counter_past_u32() {
+        let bytes = mailbox_state_bytes(1u64 << 32, [0u8; 32]);
+        let err = decode_dispatch_state(&bytes).expect_err("a count no message can carry");
+        assert!(err.to_string().contains("exceeds u32"), "{err}");
+    }
+
+    #[test]
+    fn rejects_state_without_a_dispatch_hash_cell() {
+        let bytes = state_bytes(ChargedState::new(mailbox_root(
+            StateValue::Map(HashMap::new()),
+            cell(1u64),
+            StateValue::Map(HashMap::new()),
+        )));
+        let err = decode_dispatch_state(&bytes).expect_err("a map at the dispatch hash path");
+        assert!(err.to_string().contains("expected cell leaf"), "{err}");
     }
 
     // A small state is stored in-line, so its charge record is keyed by the
@@ -511,7 +503,7 @@ mod tests {
             mailbox_root(
                 StateValue::Map(HashMap::new()),
                 cell(nonce),
-                StateValue::Map(HashMap::new()),
+                cell([0x11u8; 32]),
             )
         };
         let (data, _) =
@@ -527,67 +519,11 @@ mod tests {
             "refused for the chain: {refusal}"
         );
 
-        assert_eq!(decode_nonce_count(&bytes).expect("decode nonce"), 8);
-    }
-
-    #[test]
-    fn decodes_dispatched_messages_sorted_by_nonce() {
-        // The merkle reconstruction ingests leaves in nonce order, so a wrong
-        // key parse or ordering bug would produce a different root.
-        let mut map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new();
-        let mut expected = Vec::new();
-        for nonce in [7u32, 0, 42, 1] {
-            let msg = sample_message(nonce);
-            let full: [u8; ENCODED_MESSAGE_LEN] = msg.to_vec().try_into().unwrap();
-            map = map.insert(AlignedValue::from(nonce), cell(full));
-            expected.push((nonce, msg));
-        }
-        expected.sort_by_key(|(nonce, _)| *nonce);
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(43u64),
-            StateValue::Map(map),
-        );
-
-        let decoded = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
-        assert_eq!(decoded, expected, "every message, sorted by nonce");
-    }
-
-    #[test]
-    fn decode_dispatched_messages_right_pads_trimmed_value() {
-        // A real dispatch whose scaled amount ends in zero bytes is stored
-        // shorter than 141 (a 6->18-decimal route scales 10^5 to 10^17, which
-        // ends in 0x0000). An all-zero body trims the most and pins the pad
-        // branch.
-        let msg = HyperlaneMessage {
-            version: 3,
-            nonce: 0,
-            origin: 1234,
-            sender: H256::repeat_byte(0x01),
-            destination: 2,
-            recipient: H256::repeat_byte(0x02),
-            body: vec![0u8; 64],
-        };
-        let full: [u8; ENCODED_MESSAGE_LEN] = msg.to_vec().try_into().unwrap();
-        assert!(
-            ValueAtom::from(full).0.len() < ENCODED_MESSAGE_LEN,
-            "expected the trailing-zero tail to be trimmed on store"
-        );
-
-        let map = HashMap::<AlignedValue, StateValue<DefaultDB>, DefaultDB>::new()
-            .insert(AlignedValue::from(0u32), cell(full));
-        let bytes = mailbox_state_bytes(
-            StateValue::Map(HashMap::new()),
-            cell(1u64),
-            StateValue::Map(map),
-        );
-
-        let decoded = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
-        assert_eq!(decoded.len(), 1, "one dispatched message");
-        assert_eq!(decoded[0].0, 0, "nonce key");
         assert_eq!(
-            decoded[0].1, msg,
-            "trimmed leaf must right-pad back to the original 141-byte message"
+            decode_dispatch_state(&bytes)
+                .expect("decode dispatch state")
+                .count,
+            8
         );
     }
 
@@ -984,6 +920,8 @@ mod tests {
     struct ExpectedState {
         ism: ExpectedIsm,
         nonce: u32,
+        #[serde(rename = "dispatchHash")]
+        dispatch_hash: String,
         messages: Vec<ExpectedMessage>,
     }
 
@@ -1007,8 +945,6 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct ExpectedMessage {
-        nonce: u32,
-        encoded: String,
         #[serde(rename = "messageId")]
         message_id: String,
     }
@@ -1019,10 +955,10 @@ mod tests {
 
     // Real `night` state, made by running the contracts repo's compiled
     // contract: given a set for each of two origins, one holding a key whose
-    // x coordinate starts with a zero byte, then two transfers out whose
-    // stored messages end in one. It is
-    // serialized the way the indexer serves it. The ledger trims trailing
-    // zero bytes on store, so every value here has to come back whole.
+    // x coordinate starts with a zero byte, then transfers out that leave a
+    // running hash ending in one. It is serialized the way the indexer serves
+    // it. The ledger trims trailing zero bytes on store, so every value here
+    // has to come back whole.
     #[test]
     fn decodes_real_night_state() {
         let bytes = unhex(include_str!("../tests/fixtures/night-state.hex").trim());
@@ -1076,36 +1012,34 @@ mod tests {
             "the fixture holds a key with a coordinate whose top byte is zero"
         );
 
+        let dispatched = decode_dispatch_state(&bytes).expect("decode dispatch state");
+        assert_eq!(dispatched.count, expected.nonce, "nonce");
         assert_eq!(
-            decode_nonce_count(&bytes).expect("decode nonce"),
-            expected.nonce,
-            "nonce"
-        );
-
-        let messages = decode_dispatched_messages(&bytes).expect("decode dispatched messages");
-        assert_eq!(
-            messages.len(),
+            dispatched.count as usize,
             expected.messages.len(),
             "every dispatched message"
         );
-        for ((nonce, message), want) in messages.iter().zip(&expected.messages) {
-            assert_eq!(*nonce, want.nonce, "map key");
-            let encoded = unhex(&want.encoded);
-            assert_eq!(
-                encoded.last().copied(),
-                Some(0u8),
-                "the fixture's message ends in a zero byte"
-            );
-            assert_eq!(
-                message.to_vec(),
-                encoded,
-                "message {nonce} byte for byte, trailing zero restored"
-            );
-            assert_eq!(
-                message.id().as_bytes(),
-                unhex(&want.message_id).as_slice(),
-                "message {nonce} id"
-            );
-        }
+        let stored = unhex(&expected.dispatch_hash);
+        assert_eq!(
+            stored.last().copied(),
+            Some(0u8),
+            "the fixture's running hash ends in a zero byte"
+        );
+        assert_eq!(
+            dispatched.hash.as_bytes(),
+            stored.as_slice(),
+            "running hash byte for byte, trailing zero restored"
+        );
+        // The hash a validator rebuilds from the ids the events carry.
+        let rebuilt = expected.messages.iter().fold(H256::zero(), |hash, want| {
+            crate::dispatch_log::next_dispatch_hash(
+                hash,
+                H256::from_slice(&unhex(&want.message_id)),
+            )
+        });
+        assert_eq!(
+            rebuilt, dispatched.hash,
+            "the ids hash to what the contract holds"
+        );
     }
 }

@@ -17,7 +17,7 @@ use hyperlane_core::{
 };
 use serde::Deserialize;
 
-use crate::state_decode::decode_dispatched_messages;
+use crate::events::test_util::dispatched_fixture;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,14 +60,10 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
 
     // Drift guard: the committed fixture and this vector must describe one
     // dispatch state.
-    let fixture = hex::decode(include_str!("../tests/fixtures/night-state-dispatched.hex").trim())
-        .expect("fixture is valid hex");
-
-    let mut messages = decode_dispatched_messages(&fixture).expect("decode dispatched messages");
-    messages.sort_by_key(|(nonce, _)| *nonce);
+    let messages = dispatched_fixture();
 
     let mut tree = IncrementalMerkle::default();
-    for (_nonce, message) in &messages {
+    for message in &messages {
         tree.ingest(message.id());
     }
     assert_eq!(
@@ -79,10 +75,10 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
 
     let tip = messages
         .iter()
-        .find(|(nonce, _)| *nonce == vector.index)
+        .find(|message| message.nonce == vector.index)
         .expect("tip leaf present in fixture");
     assert_eq!(
-        tip.1.id(),
+        tip.id(),
         h256(&vector.message_id),
         "fixture tip messageId must match the vector (fixture/vector drift)"
     );
@@ -127,7 +123,7 @@ fn metadata_matches_fixture_and_verifies_as_standard_multisig() {
         },
         // The blob carries no messageId field, so the destination computes it
         // from the delivered message.
-        message_id: tip.1.id(),
+        message_id: tip.id(),
     };
     // Checked before recovery: a digest bug surfaces here rather than as a
     // confusing "signer not in set" further down.

@@ -181,6 +181,23 @@ pub(crate) mod test_util {
         }
     }
 
+    /// The messages the contracts repo's compiled contract emitted on its way
+    /// to the state in `night-state-dispatched.hex`, in nonce order.
+    pub(crate) fn dispatched_fixture() -> Vec<HyperlaneMessage> {
+        let encoded: Vec<String> = serde_json::from_str(include_str!(
+            "../tests/fixtures/night-dispatched-messages.json"
+        ))
+        .expect("fixture is a JSON list");
+        encoded
+            .iter()
+            .map(|message| {
+                let bytes = hex::decode(message).expect("fixture message is valid hex");
+                assert_eq!(bytes.len(), ENCODED_MESSAGE_LEN);
+                HyperlaneMessage::from(bytes)
+            })
+            .collect()
+    }
+
     pub(crate) struct FakeEventReader {
         pub tip: u32,
         pub events: Vec<MiscEvent>,
