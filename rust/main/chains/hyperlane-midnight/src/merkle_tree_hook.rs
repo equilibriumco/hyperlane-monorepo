@@ -13,7 +13,8 @@
 //! The events are read from the indexer, and held to the count and the hash
 //! in the node's copy of the state at a finalized block when the chain config
 //! names a node: events that do not hash to what the node holds are an error,
-//! and a message the node has not finalized yet is left out of the tree.
+//! and a message the node does not back is left out of the tree and of the
+//! leaves the indexer half serves, so a validator never stores it.
 
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Once};
@@ -100,11 +101,12 @@ pub struct MidnightMerkleTreeHook {
 impl MidnightMerkleTreeHook {
     /// `address` is the monolithic contract, shared with the mailbox and ISM.
     pub fn new(address: H256, domain: HyperlaneDomain, provider: MidnightProvider) -> Self {
+        let log = Arc::new(DispatchLog::new(address, provider.node().cloned()));
         Self {
             address,
             domain,
             provider,
-            log: Arc::new(DispatchLog::new(address)),
+            log,
         }
     }
 
@@ -115,8 +117,7 @@ impl MidnightMerkleTreeHook {
     /// The tree of the dispatched messages the indexer's events carry, held
     /// to the node's copy of the state when the chain config names a node.
     async fn checked_tree(&self) -> ChainResult<IncrementalMerkle> {
-        let node = self.provider.node();
-        if node.is_none() {
+        if self.provider.node().is_none() {
             CROSS_CHECK_OFF.call_once(|| {
                 tracing::warn!(
                     chain = self.domain.name(),
@@ -124,7 +125,30 @@ impl MidnightMerkleTreeHook {
                 );
             });
         }
-        self.log.checked_tree(self.provider.indexer(), node).await
+        self.log.tree(self.provider.indexer()).await
+    }
+
+    /// The leaves of `events`, without those the node does not back.
+    async fn held_insertions(
+        &self,
+        events: &[MiscEvent],
+    ) -> ChainResult<Vec<(Indexed<MerkleTreeInsertion>, LogMeta)>> {
+        let served = insertions_from_events(events, self.address)?;
+        let count = served.len();
+        let held = self
+            .log
+            .held(self.provider.indexer(), served, |(insertion, _)| {
+                (insertion.inner().index(), insertion.inner().message_id())
+            })
+            .await?;
+        if held.len() < count {
+            tracing::warn!(
+                chain = self.domain.name(),
+                left_out = count - held.len(),
+                "the indexer served dispatched messages the node does not back"
+            );
+        }
+        Ok(held)
     }
 
     async fn latest_height_u32(&self) -> ChainResult<u32> {
@@ -198,7 +222,7 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
             .indexer()
             .misc_events(&self.address_hex(), *range.start(), *range.end())
             .await?;
-        insertions_from_events(&events, self.address)
+        self.held_insertions(&events).await
     }
 
     /// Midnight has BFT finality, so the latest observed height is final.
@@ -220,15 +244,15 @@ impl Indexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
             .indexer()
             .misc_events_by_tx(&self.address_hex(), &tx_hash)
             .await?;
-        insertions_from_events(&events, self.address)
+        self.held_insertions(&events).await
     }
 }
 
 #[async_trait]
 impl SequenceAwareIndexer<MerkleTreeInsertion> for MidnightMerkleTreeHook {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
-        // Every dispatch inserts one leaf, so the dispatches the events carry
-        // are the leaf count.
+        // Every dispatch inserts one leaf, so the held messages are the leaf
+        // count.
         let (count, tip) = self.log.count_and_tip(self.provider.indexer()).await?;
         Ok((Some(count), tip))
     }
@@ -306,17 +330,17 @@ mod tests {
         let addr = H256::from_slice(&hex::decode(&address).expect("hex address"));
         let hook = MidnightMerkleTreeHook::new(addr, domain, provider);
 
-        let (served, tip) = hook
+        let (count, tip) = hook
             .latest_sequence_count_and_tip()
             .await
-            .expect("the indexer's dispatch count");
-        let served = served.expect("a leaf count");
+            .expect("the hook's leaf count");
+        let count = count.expect("a leaf count");
         let tree = hook
             .tree(&ReorgPeriod::None)
             .await
             .expect("cross-checked tree");
         println!(
-            "the indexer serves {served} dispatches up to block {tip}, the checked tree holds {}",
+            "the hook counts {count} leaves up to block {tip}, its tree holds {}",
             tree.tree.count()
         );
 
@@ -332,14 +356,13 @@ mod tests {
             held.count, held.hash
         );
         assert!(
-            tree.tree.count() as u32 <= served,
-            "the tree holds no more than the indexer served"
+            tree.tree.count() as u32 >= count,
+            "the tree holds the leaves counted a moment before"
         );
         if height == u64::from(tip) {
             assert_eq!(
-                tree.tree.count() as u32,
-                held.count,
-                "the checked tree holds every message the node holds at the block both have"
+                count, held.count,
+                "the hook counts every message the node holds at the block both have"
             );
         }
     }

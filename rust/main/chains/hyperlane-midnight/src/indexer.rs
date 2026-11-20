@@ -36,7 +36,7 @@ impl MidnightDispatchIndexer {
         Self {
             client,
             address: locator.address,
-            log: Arc::new(DispatchLog::new(locator.address)),
+            log: Arc::new(DispatchLog::new(locator.address, None)),
         }
     }
 }

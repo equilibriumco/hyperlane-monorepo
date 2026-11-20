@@ -68,6 +68,7 @@ midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledge
 # building tests; no non-test code depends on it.
 hyperlane-core = { path = "../../hyperlane-core", features = ["async", "ethers"] }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 # Build synthetic `ContractState` blobs in unit tests: construct the same
 # `StateValue` tree the deployed `night` Mailbox produces, then serialize it
 # with `tagged_serialize` and feed it through the decoders. `onchain-state` and
