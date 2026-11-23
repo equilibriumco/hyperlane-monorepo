@@ -64,14 +64,20 @@ impl FinalizedDispatchState for MidnightNodeClient {
 
 /// The indexer can answer an events query from a copy of the chain a few
 /// blocks behind the one that named the tip, and a message in those blocks
-/// would be missed for good. So each read starts this many blocks before the
-/// last one ended, and skips the messages it has already.
+/// would be missed. So each read starts this many blocks before the last one
+/// ended, though never before the newest held message, and skips the
+/// messages it has already.
 const REREAD_BLOCKS: u32 = 10;
 
 /// While the events do not add up, the least time between two reads that
 /// start over at the newest held message. With nothing held yet that is the
 /// whole history, which is not to be asked for on every poll.
 const START_OVER_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often a read covers every block after the newest held message, for a
+/// message the indexer serves later than `REREAD_BLOCKS` covers. Without it
+/// such a message would wait for the next one to give the gap away.
+const LOOK_BACK_INTERVAL: Duration = Duration::from_secs(300);
 
 /// A message the indexer served that is not held yet.
 #[derive(Debug)]
@@ -90,12 +96,15 @@ struct Read {
     hash: H256,
     /// The held messages' ids by nonce, kept when there is a node.
     ids: Vec<H256>,
-    /// The block of the newest held message.
-    held_block: u32,
+    /// The block after the newest held message's. No earlier block can
+    /// have a message that is not held.
+    after_held: u32,
     /// The messages read and not held yet, oldest first.
     unchecked: VecDeque<Unchecked>,
     /// When a read last started over.
     started_over: Option<Instant>,
+    /// When a read last covered every block from `after_held`.
+    looked_back: Option<Instant>,
 }
 
 impl Read {
@@ -119,12 +128,12 @@ impl Read {
             if keep_ids {
                 self.ids.push(message.id);
             }
-            self.held_block = message.block;
+            self.after_held = message.block.saturating_add(1);
         }
     }
 
-    /// Forgets the messages not held and has the next read start at the block
-    /// after the newest held one, unless a read started over less than
+    /// Forgets the messages not held and has the next read start after the
+    /// newest held one, unless a read started over less than
     /// `START_OVER_INTERVAL` ago.
     fn start_over(&mut self) {
         if self
@@ -135,7 +144,7 @@ impl Read {
         }
         self.started_over = Some(Instant::now());
         self.unchecked.clear();
-        self.next_block = self.held_block.saturating_add(1);
+        self.next_block = self.after_held;
     }
 }
 
@@ -236,8 +245,20 @@ impl<N: FinalizedDispatchState> DispatchLog<N> {
             }
             return Ok(());
         }
-        let from_block = read.next_block.saturating_sub(REREAD_BLOCKS);
+        let look_back = read
+            .looked_back
+            .is_none_or(|at| at.elapsed() >= LOOK_BACK_INTERVAL);
+        let from_block = if look_back {
+            read.after_held
+        } else {
+            read.next_block
+                .saturating_sub(REREAD_BLOCKS)
+                .max(read.after_held)
+        };
         let events = reader.misc_events(&self.address, from_block, tip).await?;
+        if look_back {
+            read.looked_back = Some(Instant::now());
+        }
 
         let mut next_nonce = read.next_nonce();
         let mut new = Vec::new();
@@ -555,12 +576,8 @@ mod tests {
         assert_eq!(log.count_and_tip(&indexer).await.unwrap(), (3, 1500));
         assert_eq!(
             indexer.asked(),
-            vec![
-                (0, 1002),
-                (1003 - REREAD_BLOCKS, 1030),
-                (1031 - REREAD_BLOCKS, 1500)
-            ],
-            "the history once, then the blocks since and a few before them"
+            vec![(0, 1002), (1003, 1030), (1026, 1500)],
+            "the history once, then the blocks since, and none up to the newest message's"
         );
     }
 
@@ -578,6 +595,37 @@ mod tests {
             log.count_and_tip(&indexer).await.unwrap(),
             (2, 1006),
             "a block read before is read again, and the message it holds is counted once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn looks_back_for_a_message_served_after_its_block_was_read() {
+        let real = [message(0), message(1)];
+        let indexer = Indexer::at(1010, vec![dispatch(1, &real[0])]);
+        let node = Node::new(2000, vec![(1001, held(&real[..1])), (1050, held(&real))]);
+        let log = log_on(&node);
+        assert_eq!(log.tree(&indexer).await.unwrap(), tree_of(&real[..1]));
+
+        // The indexer names block 1100 and serves the second message's
+        // block, 1050, with no event in it. Nothing is unchecked, so the node
+        // is not asked and nothing gives the message away.
+        indexer.set(1100, vec![dispatch(1, &real[0])]);
+        assert_eq!(log.tree(&indexer).await.unwrap(), tree_of(&real[..1]));
+
+        // It serves the event now, in a block too far back for the next read.
+        let both = vec![dispatch(1, &real[0]), dispatch(50, &real[1])];
+        indexer.set(1101, both.clone());
+        assert_eq!(log.tree(&indexer).await.unwrap(), tree_of(&real[..1]));
+        assert_eq!(indexer.asked().last(), Some(&(1101 - REREAD_BLOCKS, 1101)));
+        assert_eq!(node.asked().len(), 1);
+
+        tokio::time::advance(LOOK_BACK_INTERVAL).await;
+        indexer.set(1102, both);
+        assert_eq!(log.tree(&indexer).await.unwrap(), tree_of(&real));
+        assert_eq!(
+            indexer.asked().last(),
+            Some(&(1002, 1102)),
+            "every block after the newest held message"
         );
     }
 
@@ -610,7 +658,7 @@ mod tests {
         indexer.set(1020, vec![dispatch(1, &m0), dispatch(15, &m1)]);
         assert_eq!(log.count_and_tip(&indexer).await.unwrap(), (1, 1001));
         assert_eq!(log.count_and_tip(&indexer).await.unwrap(), (2, 1020));
-        assert_eq!(indexer.asked().last(), Some(&(1002 - REREAD_BLOCKS, 1020)));
+        assert_eq!(indexer.asked().last(), Some(&(1002, 1020)));
     }
 
     #[tokio::test]
@@ -660,7 +708,7 @@ mod tests {
         assert_eq!(log.count_and_tip(&indexer).await.unwrap(), (3, 1200));
         assert_eq!(
             indexer.asked().last(),
-            Some(&(1002 - REREAD_BLOCKS, 1200)),
+            Some(&(1002, 1200)),
             "read again from the block after the newest message held"
         );
     }
@@ -962,8 +1010,8 @@ mod tests {
         log.tree(&indexer).await.expect_err("fabricated again");
         assert_eq!(
             indexer.asked()[1..],
-            [(1011 - REREAD_BLOCKS, 1015), (1003 - REREAD_BLOCKS, 1015)],
-            "the second read starts after the newest held message"
+            [(1003, 1015), (1003, 1015)],
+            "both reads start after the newest held message"
         );
 
         // It no longer serves it, but the log read it within the last
@@ -979,7 +1027,7 @@ mod tests {
             .await
             .expect_err("this disagreement starts the read over");
         assert_eq!(log.tree(&indexer).await.unwrap(), tree_of(&real[..2]));
-        assert_eq!(indexer.asked().last(), Some(&(1003 - REREAD_BLOCKS, 1016)));
+        assert_eq!(indexer.asked().last(), Some(&(1003, 1016)));
 
         // A real message at the fabricated one's nonce is held like any other.
         indexer.set(1035, [honest, vec![dispatch(30, &real[2])]].concat());
