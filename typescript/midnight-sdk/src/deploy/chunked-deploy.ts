@@ -90,7 +90,7 @@ export const NIGHT_MAINTENANCE_PRIORITY = [
   'isDelivered',
   'deliveryCount',
   'nonceValue',
-  'messageAt',
+  'dispatchHash',
   'vaultBalance',
   'validatorSet',
   // sealed-config read views

@@ -9,6 +9,7 @@
 
 pub mod application;
 mod config;
+mod dispatch_log;
 mod error;
 mod events;
 mod indexer;

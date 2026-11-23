@@ -79,9 +79,13 @@ pub enum HyperlaneMidnightError {
     #[error("node RPC error: {0}")]
     NodeRpc(String),
 
-    /// The indexer and the node serve different dispatched messages.
+    /// The indexer's dispatch events do not hash to what the node holds.
     #[error("indexer and node disagree: {0}")]
     IndexerNodeMismatch(String),
+
+    /// The indexer's dispatch events are not one unbroken run of nonces.
+    #[error("indexer dispatch events out of sequence: {0}")]
+    DispatchSequence(String),
 
     /// Catch-all.
     #[error("{0}")]
