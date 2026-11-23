@@ -20,6 +20,7 @@ import {
 import {
   type FinalizedTxRead,
   LedgerTransaction,
+  SucceedEntirely,
 } from '@midnight-ntwrk/midnight-js-types';
 import * as ledger from '@midnightntwrk/ledger-v9';
 
@@ -326,9 +327,26 @@ async function submitDeployKeyUpdate(
     undefined,
     intent,
   );
-  return await submitTx(providers, {
+  const finalized = await submitTx(providers, {
     unprovenTx: LedgerTransaction.seal('v9', 'Unproven', unprovenTx),
   }).catch(rethrowWithCauses);
+  return requireSucceeded(finalized, contractAddress);
+}
+
+// A maintenance update the chain took but did not apply comes back from the
+// wait like one that did. Any later step would then act on a contract short of
+// keys, or with the deploy key still in charge.
+export function requireSucceeded(
+  finalized: FinalizedTxRead,
+  contractAddress: string,
+): FinalizedTxRead {
+  if (finalized.status !== SucceedEntirely) {
+    throw new Error(
+      `maintenance update of ${contractAddress} in tx ${finalized.txId} ` +
+        `ended ${finalized.status}, so the deploy stops here`,
+    );
+  }
+  return finalized;
 }
 
 /**

@@ -1,12 +1,14 @@
 import { expect } from 'chai';
+import fs from 'fs';
 
 import { type ChainAddresses } from '@hyperlane-xyz/registry';
 import { type CoreConfig } from '@hyperlane-xyz/sdk';
 import { ProtocolType } from '@hyperlane-xyz/utils';
 
-import { readYamlOrJson } from '../../../utils/files.js';
+import { readYamlOrJson, writeYamlOrJson } from '../../../utils/files.js';
 import { HyperlaneE2ECoreTestCommands } from '../../commands/core.js';
 import {
+  CHAIN_1_ADDRESSES_PATH,
   CHAIN_1_METADATA_PATH,
   CHAIN_NAME_1,
   CORE_CONFIG_PATH,
@@ -16,6 +18,7 @@ import {
   REGISTRY_PATH,
   REMOTE_CHAIN_NAME,
   REMOTE_CHAIN_NAME_2,
+  TEMP_PATH,
 } from '../consts.js';
 import { comparableSet, validatorSetsByOrigin } from '../ism.js';
 
@@ -108,6 +111,35 @@ describe('hyperlane midnight core deploy e2e tests', async function () {
         addresses.mailbox,
       );
     }
+  });
+
+  // The owner would be sent as a new owner id right after night is
+  // deployed, so the deploy has to stop before anything is sent.
+  it('should refuse an owner before deploying anything', async () => {
+    const configPath = `${TEMP_PATH}/${CHAIN_NAME_1}/core-config-with-owner.yaml`;
+    writeYamlOrJson(configPath, {
+      ...inputConfig,
+      owner: `0x${'77'.repeat(32)}`,
+    });
+    const addressesBefore = fs.readFileSync(CHAIN_1_ADDRESSES_PATH, 'utf8');
+
+    const output = await new HyperlaneE2ECoreTestCommands(
+      ProtocolType.Midnight,
+      CHAIN_NAME_1,
+      REGISTRY_PATH,
+      configPath,
+      CORE_READ_CONFIG_PATH_1,
+    )
+      .deploy(HYP_KEY)
+      .nothrow();
+
+    expect(output.exitCode).to.not.equal(0);
+    expect(output.text()).to.include(
+      "night's owner cannot be changed from a config on Midnight",
+    );
+    expect(fs.readFileSync(CHAIN_1_ADDRESSES_PATH, 'utf8')).to.equal(
+      addressesBefore,
+    );
   });
 
   it('should keep ownership with the deployer for a zero owner config', async () => {

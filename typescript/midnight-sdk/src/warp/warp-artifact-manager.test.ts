@@ -81,4 +81,19 @@ describe('Midnight native warp writer', () => {
       await rejectionOf(writer.update(await routeWithIsm(ZERO_ADDRESS_HEX_32))),
     ).to.include("write night's ISM as a domainRoutingIsm");
   });
+
+  it('keeps the owner, and refuses any other value', async () => {
+    const route = await routeWithIsm();
+    const withOwner = (owner: string) => ({
+      ...route,
+      config: { ...route.config, owner },
+    });
+
+    expect(await writer.update(withOwner(route.config.owner))).to.eql([]);
+    expect(await writer.update(withOwner(ZERO_ADDRESS_HEX_32))).to.eql([]);
+    const other = `0x${'77'.repeat(32)}`;
+    expect(await rejectionOf(writer.update(withOwner(other)))).to.include(
+      `night's owner cannot be changed from a config on Midnight, and the config says ${other}`,
+    );
+  });
 });

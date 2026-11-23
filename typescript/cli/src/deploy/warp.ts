@@ -128,6 +128,7 @@ import {
 import { canSelfRelay, runSelfRelay } from '../utils/relay.js';
 
 import { validateWarpConfigForAltVM } from './configValidation.js';
+import { assertRouteMatchesNight } from './midnightRoute.js';
 import {
   completeDeploy,
   getBalances,
@@ -183,6 +184,7 @@ export async function runWarpRouteDeploy({
 
   // Validate ISM compatibility for all chains
   validateWarpIsmCompatibility(warpDeployConfig, context);
+  await assertRouteMatchesNight(context, warpDeployConfig);
 
   const chains = Object.keys(warpDeployConfig);
 
@@ -579,6 +581,7 @@ export async function runWarpRouteApply(
     multiProvider,
     warpDeployConfig,
   });
+  await assertRouteMatchesNight(context, warpDeployConfig, warpCoreConfig);
 
   const chains = Object.keys(warpDeployConfig);
 

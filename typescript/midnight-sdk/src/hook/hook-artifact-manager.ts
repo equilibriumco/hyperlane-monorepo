@@ -18,14 +18,15 @@ import type {
   AnnotatedTx,
   TxReceipt,
 } from '@hyperlane-xyz/provider-sdk/module';
-import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
+import { ZERO_ADDRESS_HEX_32, fromWei } from '@hyperlane-xyz/utils';
 
 import {
   bytesToHex,
   hexToBytes,
   normalizeHexForCompare,
 } from '../utils/conversion.js';
-import { unsupportedOnMidnight } from '../utils/errors.js';
+import { assertOwnerKept, unsupportedOnMidnight } from '../utils/errors.js';
+import { defaultLog } from '../utils/log.js';
 import type { MidnightTransaction, MidnightTxReceipt } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
@@ -149,13 +150,16 @@ class MidnightIgpHookReader implements ArtifactReader<
   }
 }
 
-class MidnightIgpHookWriter
+export class MidnightIgpHookWriter
   extends MidnightIgpHookReader
   implements ArtifactWriter<IgpHookConfig, DeployedHookAddress>
 {
   constructor(
     client: MidnightReadClient,
-    private readonly signer: MidnightSigner,
+    private readonly signer: Pick<
+      MidnightSigner,
+      'deployMidnightContract' | 'sendAndConfirmTransaction'
+    >,
   ) {
     super(client);
   }
@@ -166,7 +170,9 @@ class MidnightIgpHookWriter
     [ArtifactDeployed<IgpHookConfig, DeployedHookAddress>, TxReceipt[]]
   > {
     const config = artifact.config;
+    assertOwnerKept('the IGP', config.owner);
     assertOverheadDomainsHaveOracles(config);
+    assertIgpOracles(config);
     const receipts: MidnightTxReceipt[] = [];
 
     const deployResult = await this.signer.deployMidnightContract({
@@ -194,6 +200,8 @@ class MidnightIgpHookWriter
     const { address, ownerId } = deployResult;
 
     for (const [domain, oracle] of sortedOracleEntries(config)) {
+      const overhead = BigInt(config.overhead?.[domain] ?? 0);
+      defaultLog(igpQuoteLine(domain, oracle, overhead));
       const tx: MidnightTransaction = {
         annotation: `Set IGP gas oracle for domain ${domain}`,
         contract: 'igp',
@@ -203,33 +211,16 @@ class MidnightIgpHookWriter
           BigInt(domain),
           BigInt(oracle.tokenExchangeRate),
           BigInt(oracle.gasPrice),
-          BigInt(config.overhead?.[domain] ?? 0),
+          overhead,
         ],
       };
       receipts.push(await this.signer.sendAndConfirmTransaction(tx));
     }
 
-    const ownerHex = bytesToHex(ownerId);
-    if (
-      config.owner &&
-      config.owner !== ZERO_ADDRESS_HEX_32 &&
-      normalizeHexForCompare(config.owner) !== normalizeHexForCompare(ownerHex)
-    ) {
-      receipts.push(
-        await this.signer.sendAndConfirmTransaction({
-          annotation: `Transfer IGP ownership to ${config.owner}`,
-          contract: 'igp',
-          contractAddress: address,
-          circuit: 'transferOwnership',
-          args: [requireCommitment(config.owner, 'IGP owner')],
-        }),
-      );
-    }
-
     return [
       {
         artifactState: ArtifactState.DEPLOYED,
-        config: { ...config, owner: config.owner || ownerHex },
+        config: { ...config, owner: config.owner || bytesToHex(ownerId) },
         deployed: { address },
       },
       receipts,
@@ -241,8 +232,10 @@ class MidnightIgpHookWriter
   ): Promise<MidnightTransaction[]> {
     const expected = artifact.config;
     assertOverheadDomainsHaveOracles(expected);
+    assertIgpOracles(expected);
     const address = artifact.deployed.address;
     const current = (await this.read(address)).config;
+    assertOwnerKept('the IGP', expected.owner, current.owner);
     const txs: MidnightTransaction[] = [];
 
     for (const [domain, oracle] of sortedOracleEntries(expected)) {
@@ -257,6 +250,7 @@ class MidnightIgpHookWriter
       ) {
         continue;
       }
+      defaultLog(igpQuoteLine(domain, oracle, expectedOverhead));
       txs.push({
         annotation: `Set IGP gas oracle for domain ${domain}`,
         contract: 'igp',
@@ -293,30 +287,48 @@ class MidnightIgpHookWriter
       });
     }
 
-    if (
-      expected.owner &&
-      expected.owner !== ZERO_ADDRESS_HEX_32 &&
-      normalizeHexForCompare(expected.owner) !==
-        normalizeHexForCompare(current.owner)
-    ) {
-      txs.push({
-        annotation: `Transfer IGP ownership to ${expected.owner}`,
-        contract: 'igp',
-        contractAddress: address,
-        circuit: 'transferOwnership',
-        args: [requireCommitment(expected.owner, 'IGP owner')],
-      });
-    }
-
     return txs;
+  }
+}
+
+// What the IGP itself takes for a gas price and an exchange rate. It refuses
+// anything else only when the transaction lands, which in a deploy is after
+// the contracts are on chain. The domains are chain names in a core config and
+// domain ids in a hook artifact, so both checks take either.
+const MAX_GAS_ORACLE_VALUE = 2n ** 64n - 1n;
+const TOKEN_EXCHANGE_RATE_SCALE = 10n ** 10n;
+const QUOTE_REFERENCE_GAS = 100_000n;
+
+type OracleRates = { gasPrice: string; tokenExchangeRate: string };
+
+export function assertIgpOracles(config: {
+  oracleConfig?: Record<string | number, OracleRates>;
+}): void {
+  for (const [domain, oracle] of Object.entries(config.oracleConfig ?? {})) {
+    for (const [field, value] of [
+      ['gasPrice', oracle.gasPrice],
+      ['tokenExchangeRate', oracle.tokenExchangeRate],
+    ] as const) {
+      const n = BigInt(value);
+      if (n <= 0n || n > MAX_GAS_ORACLE_VALUE) {
+        throw new Error(
+          `IGP ${field} for ${domain} is ${value}: it has to be between 1 ` +
+            `and ${MAX_GAS_ORACLE_VALUE}, and tokenExchangeRate is scaled by ` +
+            '1e10 (10000000000 is a rate of one)',
+        );
+      }
+    }
   }
 }
 
 // Overhead is stored with the oracle pair, and the contract rejects a zero
 // exchangeRate/gasPrice, so an overhead-only domain can never be written.
-function assertOverheadDomainsHaveOracles(config: IgpHookConfig): void {
+export function assertOverheadDomainsHaveOracles(config: {
+  overhead?: Record<string | number, number>;
+  oracleConfig?: Record<string | number, OracleRates>;
+}): void {
   const orphaned = Object.entries(config.overhead ?? {}).filter(
-    ([domain, v]) => Number(v) !== 0 && !config.oracleConfig?.[Number(domain)],
+    ([domain, v]) => Number(v) !== 0 && !config.oracleConfig?.[domain],
   );
   if (orphaned.length > 0) {
     throw new Error(
@@ -327,16 +339,32 @@ function assertOverheadDomainsHaveOracles(config: IgpHookConfig): void {
   }
 }
 
+// The price a rate gives, so a rate off by orders of magnitude shows before
+// anything is paid with it: (gas + overhead) x gasPrice x rate / 1e10.
+export function igpQuoteLine(
+  domain: number,
+  oracle: OracleRates,
+  overhead: bigint,
+): string {
+  const quote =
+    ((QUOTE_REFERENCE_GAS + overhead) *
+      BigInt(oracle.gasPrice) *
+      BigInt(oracle.tokenExchangeRate)) /
+    TOKEN_EXCHANGE_RATE_SCALE;
+  return (
+    `IGP rates for domain ${domain}: a delivery of ${QUOTE_REFERENCE_GAS} gas ` +
+    `costs ${fromWei(quote.toString(), 6)} NIGHT once the IGP adds its ` +
+    `${overhead} gas of overhead (gasPrice ${oracle.gasPrice}, ` +
+    `tokenExchangeRate ${oracle.tokenExchangeRate})`
+  );
+}
+
 function sortedOracleEntries(
   config: IgpHookConfig,
-): Array<[number, { gasPrice: string; tokenExchangeRate: string }]> {
+): Array<[number, OracleRates]> {
   return Object.entries(config.oracleConfig ?? {})
     .map(
-      ([domain, oracle]) =>
-        [Number(domain), oracle] as [
-          number,
-          { gasPrice: string; tokenExchangeRate: string },
-        ],
+      ([domain, oracle]) => [Number(domain), oracle] as [number, OracleRates],
     )
     .sort(([a], [b]) => a - b);
 }

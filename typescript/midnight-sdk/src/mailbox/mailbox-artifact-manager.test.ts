@@ -243,5 +243,27 @@ describe('Midnight mailbox writer', () => {
       const ism = await new MidnightRoutingIsmWriter(night).read(night.address);
       expect(ism.config.owner).to.equal(mailbox.config.owner);
     });
+
+    // A commitment written back, such as one from before a transfer, would
+    // be taken as a new owner id that nobody can act as.
+    it('keeps the owner, and refuses any other value', async () => {
+      const { owner } = (await writer.read(night.address)).config;
+      const withOwner = (value: string) => {
+        const mailbox = mailboxWith(night.address);
+        return {
+          ...mailbox,
+          config: { ...mailbox.config, owner: value, maxTransferAmount: '5' },
+        };
+      };
+
+      expect(await writer.update(withOwner(owner))).to.have.length(1);
+      expect(
+        await writer.update(withOwner(ZERO_ADDRESS_HEX_32)),
+      ).to.have.length(1);
+      const other = `0x${'77'.repeat(32)}`;
+      expect(await rejectionOf(writer.update(withOwner(other)))).to.include(
+        `night's owner cannot be changed from a config on Midnight, and the config says ${other}`,
+      );
+    });
   });
 });

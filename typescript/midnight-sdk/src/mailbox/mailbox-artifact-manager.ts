@@ -21,12 +21,12 @@ import type {
 } from '@hyperlane-xyz/provider-sdk/module';
 import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
+import { bytesToHex } from '../utils/conversion.js';
 import {
-  bytesToHex,
-  hexToBytes,
-  normalizeHexForCompare,
-} from '../utils/conversion.js';
-import { NIGHT_ISM_SHAPE, assertNightIsItsOwnIsm } from '../utils/errors.js';
+  NIGHT_ISM_SHAPE,
+  assertNightIsItsOwnIsm,
+  assertOwnerKept,
+} from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
 import { MidnightReadClient } from '../clients/read-client.js';
 import { MidnightSigner, requireMidnightSigner } from '../clients/signer.js';
@@ -180,8 +180,8 @@ export class MidnightMailboxWriter
   }
 
   // The monolith's ISM/hook pointers are sealed at construction; the
-  // mailbox-level mutable state is the transfer limit and ownership. Validator
-  // rotation goes through the ISM writer.
+  // mailbox-level mutable state is the transfer limit. Validator rotation goes
+  // through the ISM writer.
   async update(
     artifact: DeployedRawMailboxArtifact,
   ): Promise<MidnightTransaction[]> {
@@ -191,10 +191,10 @@ export class MidnightMailboxWriter
       artifact.config.defaultIsm.deployed.address,
     );
     const current = await this.read(address);
+    assertOwnerKept('night', artifact.config.owner, current.config.owner);
     const txs: MidnightTransaction[] = [];
 
-    // The limit is changed only when the config sets it, and before any
-    // ownership transfer, which would take the signer's right to change it.
+    // The limit is changed only when the config sets it.
     if (artifact.config.maxTransferAmount !== undefined) {
       const expectedLimit = parseMaxTransferAmount(
         artifact.config.maxTransferAmount,
@@ -211,29 +211,6 @@ export class MidnightMailboxWriter
           args: [expectedLimit],
         });
       }
-    }
-
-    const expectedOwner = artifact.config.owner;
-    if (!expectedOwner || expectedOwner === ZERO_ADDRESS_HEX_32) {
-      return txs;
-    }
-    const ownerBytes = hexToBytes(expectedOwner);
-    if (ownerBytes.length !== 32) {
-      throw new Error(
-        `night owner must be a 32-byte ZOwnablePK commitment, got ${expectedOwner}`,
-      );
-    }
-    if (
-      normalizeHexForCompare(current.config.owner) !==
-      normalizeHexForCompare(expectedOwner)
-    ) {
-      txs.push({
-        annotation: `Transfer night ownership to ${expectedOwner}`,
-        contract: 'night',
-        contractAddress: address,
-        circuit: 'transferOwnership',
-        args: [ownerBytes],
-      });
     }
     return txs;
   }

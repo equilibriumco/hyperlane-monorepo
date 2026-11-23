@@ -25,7 +25,7 @@ export type ContractModule = {
     ): Promise<ConstructorResult>;
   };
   pureCircuits: {
-    // ZOwnablePK commitment: computeOwnerId(pkEither, secretNonce).
+    // ZOwnablePK owner id: hash of the owner's public key and secret nonce.
     computeOwnerId(pk: unknown, nonce: Uint8Array): Uint8Array;
     // night only: the slots a validator set is padded to.
     maxValidators?(): bigint;

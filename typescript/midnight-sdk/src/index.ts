@@ -3,6 +3,7 @@ export { MidnightProtocolProvider } from './clients/protocol.js';
 export { MidnightProvider } from './clients/provider.js';
 export { MidnightReadClient } from './clients/read-client.js';
 export { MidnightSigner, requireMidnightSigner } from './clients/signer.js';
+export { assertCoreDeployConfig } from './deploy/core-deploy-config.js';
 export { MidnightHookArtifactManager } from './hook/hook-artifact-manager.js';
 export { MidnightIsmArtifactManager } from './ism/ism-artifact-manager.js';
 export { MidnightMailboxArtifactManager } from './mailbox/mailbox-artifact-manager.js';

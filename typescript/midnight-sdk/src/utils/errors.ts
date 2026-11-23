@@ -1,4 +1,34 @@
+import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
+
 import { normalizeHexForCompare } from './conversion.js';
+
+// The chain holds an owner as a commitment that changes with every transfer,
+// and a transfer takes an owner id, which nothing here makes. So a config can
+// only keep the owner: the zero value, or the commitment the chain holds now.
+export function assertOwnerKept(
+  contract: string,
+  configured: string | undefined,
+  current?: string,
+): void {
+  if (
+    !configured ||
+    normalizeHexForCompare(configured) ===
+      normalizeHexForCompare(ZERO_ADDRESS_HEX_32) ||
+    (current !== undefined &&
+      normalizeHexForCompare(configured) === normalizeHexForCompare(current))
+  ) {
+    return;
+  }
+  throw new Error(
+    `${contract}'s owner cannot be changed from a config on Midnight, and the ` +
+      `config says ${configured}. The chain holds the owner as a commitment` +
+      `${current === undefined ? '' : ` (${current})`}, and any other value ` +
+      'would be taken as a new owner id, which most likely nobody can act ' +
+      'as. Write the owner as the 32-byte zero value to keep it. To give ' +
+      `${contract} to someone else, hand over the deployer's key and its ` +
+      'MIDNIGHT_STATE_DIR.',
+  );
+}
 
 export function unsupportedOnMidnight(kind: string, type: string): () => never {
   return () => {

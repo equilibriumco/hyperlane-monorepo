@@ -17,15 +17,12 @@ import type {
   RawWarpArtifactConfigs,
   WarpType,
 } from '@hyperlane-xyz/provider-sdk/warp';
-import { ZERO_ADDRESS_HEX_32, addressToBytes32 } from '@hyperlane-xyz/utils';
+import { addressToBytes32 } from '@hyperlane-xyz/utils';
 
-import {
-  bytesToHex,
-  hexToBytes,
-  normalizeHexForCompare,
-} from '../utils/conversion.js';
+import { bytesToHex, hexToBytes } from '../utils/conversion.js';
 import {
   assertNightIsItsOwnIsm,
+  assertOwnerKept,
   unsupportedOnMidnight,
 } from '../utils/errors.js';
 import type { MidnightTransaction } from '../utils/types.js';
@@ -88,7 +85,7 @@ class MidnightNativeWarpReader implements ArtifactReader<
 
 // The night warp route is the mailbox monolith itself, born in core deploy
 // with its ISM/hook/decimals sealed. Mutable surface: remote router
-// enrollment, per-destination gas, and ownership.
+// enrollment and per-destination gas.
 export class MidnightNativeWarpWriter
   extends MidnightNativeWarpReader
   implements
@@ -121,6 +118,7 @@ export class MidnightNativeWarpWriter
       );
     }
     const current = (await this.read(address)).config;
+    assertOwnerKept('night', expected.owner, current.owner);
     const txs: MidnightTransaction[] = [];
 
     // Sealed constructor values: a mismatch is a config error, not a diff.
@@ -173,27 +171,6 @@ export class MidnightNativeWarpWriter
         contractAddress: address,
         circuit: 'setDestinationGas',
         args: [BigInt(domain), expectedGas],
-      });
-    }
-
-    if (
-      expected.owner &&
-      expected.owner !== ZERO_ADDRESS_HEX_32 &&
-      normalizeHexForCompare(expected.owner) !==
-        normalizeHexForCompare(current.owner)
-    ) {
-      const ownerBytes = hexToBytes(expected.owner);
-      if (ownerBytes.length !== 32) {
-        throw new Error(
-          `night owner must be a 32-byte ZOwnablePK commitment, got ${expected.owner}`,
-        );
-      }
-      txs.push({
-        annotation: `Transfer night ownership to ${expected.owner}`,
-        contract: 'night',
-        contractAddress: address,
-        circuit: 'transferOwnership',
-        args: [ownerBytes],
       });
     }
 

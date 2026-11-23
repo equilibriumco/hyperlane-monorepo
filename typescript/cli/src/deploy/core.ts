@@ -2,6 +2,7 @@ import { stringify as yamlStringify } from 'yaml';
 
 import { buildArtifact as coreBuildArtifact } from '@hyperlane-xyz/core/buildArtifact.js';
 import { createCoreWriter } from '@hyperlane-xyz/deploy-sdk';
+import { assertCoreDeployConfig } from '@hyperlane-xyz/midnight-sdk';
 import {
   GasAction,
   ProtocolType,
@@ -59,6 +60,11 @@ export async function runCoreDeploy(params: DeployParams) {
 
   // Validate ISM compatibility
   validateCoreIsmCompatibility(chain, config, context);
+  // Midnight only: the owner and IGP values the deploy would refuse after
+  // night is on chain.
+  if (multiProvider.getProtocol(chain) === ProtocolType.Midnight) {
+    assertCoreDeployConfig(config);
+  }
 
   const deploymentParams: DeployParams = {
     context: { ...context },

@@ -41,6 +41,7 @@ import {
 } from '../deploy/wallet.js';
 import { bytesToHex, hexToBytes } from '../utils/conversion.js';
 import { rethrowWithCauses } from '../utils/errors.js';
+import { defaultLog } from '../utils/log.js';
 import type { MidnightTransaction, MidnightTxReceipt } from '../utils/types.js';
 
 import {
@@ -420,8 +421,8 @@ export class MidnightSigner
   }
 
   /**
-   * The ZOwnablePK owner commitment comes from the wallet's shielded
-   * coinPublicKey plus the per-contract secretNonce, persisted or generated.
+   * The ZOwnablePK owner id comes from the wallet's shielded coinPublicKey
+   * plus the per-contract secretNonce, persisted or generated.
    */
   async deployMidnightContract(options: {
     name: MidnightContractName;
@@ -582,11 +583,6 @@ export function requireMidnightSigner(signer: unknown): MidnightSigner {
     );
   }
   return signer;
-}
-
-function defaultLog(message: string): void {
-  // eslint-disable-next-line no-console
-  console.log(`midnight: ${message}`);
 }
 
 function toPrintable(value: unknown): unknown {
