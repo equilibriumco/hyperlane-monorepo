@@ -1,3 +1,5 @@
+import { strip0x } from '@hyperlane-xyz/utils';
+
 // The indexer is the read path for chain state; the node RPC exposes no
 // query surface comparable to EVM JSON-RPC.
 export class MidnightIndexerClient {
@@ -40,5 +42,19 @@ export class MidnightIndexerClient {
       throw new Error('Midnight indexer has no blocks yet');
     }
     return data.block.height;
+  }
+
+  // The transaction behind the contract's newest state the indexer serves. It
+  // moves with every transaction that lands on the contract.
+  async latestContractTransaction(
+    contractAddress: string,
+  ): Promise<string | undefined> {
+    const data = await this.query<{
+      contractAction: { transaction: { hash: string } } | null;
+    }>(
+      `query ($address: HexEncoded!) { contractAction(address: $address) { transaction { hash } } }`,
+      { address: strip0x(contractAddress) },
+    );
+    return data.contractAction?.transaction.hash;
   }
 }

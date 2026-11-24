@@ -57,6 +57,7 @@ import {
 import { MidnightIndexerClient } from './indexer.js';
 import { MidnightProvider } from './provider.js';
 import { MidnightReadClient } from './read-client.js';
+import { sendWithStaleStateResend } from './stale-state.js';
 import { readGasPayments } from './state.js';
 
 // Proving is client-side and public networks expose no proof server, so the
@@ -69,6 +70,19 @@ const PAY_FOR_GAS_RETRY_DELAY_MS = 1000;
 // never land: a broadcast transaction stays valid for the one-hour tx TTL.
 const PAY_FOR_GAS_SETTLE_MS_DEFAULT = 180_000;
 const PAY_FOR_GAS_POLL_MS = 3000;
+
+// A transfer out or a gas payment refused because another one changed the
+// contract first is built again on the new state, up to this many sends.
+const STALE_STATE_SENDS = 4;
+// How long the indexer gets to serve the state the refusal came from.
+const STALE_STATE_SETTLE_MS = 180_000;
+const STALE_STATE_POLL_MS = 3000;
+
+// The part of a landed circuit call this signer reads.
+type LandedCall = {
+  public: { txId: unknown; blockHeight?: unknown };
+  private?: { result?: unknown };
+};
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -202,7 +216,16 @@ export class MidnightSigner
           `at ${transaction.contractAddress}`,
       );
     }
-    const txData = await call(...transaction.args).catch(rethrowWithCauses);
+    const send = (): Promise<LandedCall> =>
+      call(...transaction.args).catch(rethrowWithCauses);
+    const txData =
+      transaction.circuit === 'transferRemote'
+        ? await this.resendOnStaleState(
+            transaction.circuit,
+            transaction.contractAddress,
+            send,
+          )
+        : await send();
     const receipt: MidnightTxReceipt = {
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
@@ -320,18 +343,45 @@ export class MidnightSigner
       throw new Error(`messageId must be 32 bytes, got ${req.messageId}`);
     }
     const igp = await this.joinContract('igp', req.igpAddress);
-    const txData = await igp.callTx
-      .payForGas(
-        messageId,
-        BigInt(req.destinationDomainId),
-        BigInt(req.gasLimit),
-        BigInt(req.amount),
-      )
-      .catch(rethrowWithCauses);
+    const txData = await this.resendOnStaleState<LandedCall>(
+      'payForGas',
+      req.igpAddress,
+      () =>
+        igp.callTx
+          .payForGas(
+            messageId,
+            BigInt(req.destinationDomainId),
+            BigInt(req.gasLimit),
+            BigInt(req.amount),
+          )
+          .catch(rethrowWithCauses),
+    );
     return {
       txId: String(txData.public.txId),
       blockHeight: Number(txData.public.blockHeight ?? 0),
     };
+  }
+
+  private resendOnStaleState<T>(
+    circuit: string,
+    contractAddress: string,
+    send: () => Promise<T>,
+  ): Promise<T> {
+    return sendWithStaleStateResend({
+      send,
+      stateMark: () => this.indexer.latestContractTransaction(contractAddress),
+      sends: STALE_STATE_SENDS,
+      settleMs: STALE_STATE_SETTLE_MS,
+      pollMs: STALE_STATE_POLL_MS,
+      sleep,
+      now: Date.now,
+      onRefused: (sent, refusal) =>
+        defaultLog(
+          `${circuit} was refused (${refusal}): another transaction changed ${contractAddress} ` +
+            `first, so nothing was spent. Building it again on the new state ` +
+            `(send ${sent + 1} of ${STALE_STATE_SENDS}).`,
+        ),
+    });
   }
 
   private async readIgpState(

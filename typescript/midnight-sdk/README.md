@@ -145,6 +145,32 @@ rules as well, and also takes the 32-byte zero-padded form of an EVM address,
 which `WarpCore.validateRecipient` refuses. The transaction builder refuses an
 all-zero recipient on every route.
 
+## Transfers out at the same time
+
+A transfer out of Midnight reads night's message counter, and its gas payment
+the IGP's payment counter. When two senders build on the same state, the node
+takes one and refuses the other. When the first is already in a block, the
+node refuses the second on submit with `Custom error: 104`. It never left the
+node, so it spent no NIGHT and no fee.
+
+The SDK, and so `warp send`, builds a transfer or gas payment refused this way
+again once the indexer serves the new state, and sends it again, up to four
+sends in all. Each resend is a new proof and prints a line:
+
+```text
+midnight: transferRemote was refused (Invalid Transaction: Custom error: 104): another transaction changed <night> first, so nothing was spent. Building it again on the new state (send 2 of 4).
+```
+
+If the fourth send is refused too, or the indexer still serves the old state
+three minutes after a refusal, the send stops with the node's error.
+
+When both were waiting in the node's pool, the node drops one with
+`TransactionInvalidError` and no reason. Other nodes may already have it, and
+a fork can still put it in a block, so the SDK does not send it again: check
+that it did not land before sending it again. A gas payment that follows a
+transfer still gets the SDK's usual retry, which first checks whether a
+payment landed.
+
 ## Pause and fund
 
 Three owner calls on night have no field in a Hyperlane config, so they are
