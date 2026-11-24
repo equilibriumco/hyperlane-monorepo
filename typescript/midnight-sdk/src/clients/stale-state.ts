@@ -1,13 +1,10 @@
 // A transfer out reads night's message nonce and a gas payment reads the IGP's
-// payment count, and the node checks those reads against its own state. Of two
-// built on the same state, the one the node takes first wins and the other is
-// refused: with error 104 when the first is already in a block, or as invalid
-// when both were waiting in its pool. Either way the refused one is in no
-// block, so nothing was spent.
-const STALE_STATE_REFUSALS = [
-  /Invalid Transaction: Custom error: 104\b/,
-  /TransactionInvalidError/,
-];
+// payment count, so of two built on the same state the node takes one and
+// refuses the other: on submit with error 104 when the first is already in a
+// block, or by dropping it from its pool when both were waiting there. Only a
+// refusal on submit is sent again. That call never left the node, while a
+// dropped one may be with other nodes, and a fork can still put it in a block.
+const STALE_STATE_REFUSAL = /Invalid Transaction: Custom error: 104\b/;
 
 const MAX_CAUSE_DEPTH = 8;
 
@@ -15,10 +12,8 @@ const MAX_CAUSE_DEPTH = 8;
 export function staleStateRefusal(err: unknown): string | undefined {
   let current: unknown = err;
   for (let i = 0; current instanceof Error && i < MAX_CAUSE_DEPTH; i++) {
-    for (const refusal of STALE_STATE_REFUSALS) {
-      const found = refusal.exec(current.message);
-      if (found) return found[0];
-    }
+    const found = STALE_STATE_REFUSAL.exec(current.message);
+    if (found) return found[0];
     current = current.cause;
   }
   return undefined;
@@ -37,9 +32,6 @@ export type StaleStateResendDeps<T> = {
   onRefused: (send: number, refusal: string) => void;
 };
 
-// A resend reads either the value the refused send read, so only one of the two
-// could ever land, or a newer one, which the indexer serves only once the
-// block that took the old value is final.
 export async function sendWithStaleStateResend<T>(
   deps: StaleStateResendDeps<T>,
 ): Promise<T> {

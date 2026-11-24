@@ -27,10 +27,10 @@ describe('staleStateRefusal', () => {
     );
   });
 
-  it('takes the drop from the pool as invalid', () => {
-    expect(staleStateRefusal(new Error(DROPPED_FROM_POOL))).to.equal(
-      'TransactionInvalidError',
-    );
+  // Other nodes may hold a transaction this node dropped, and a fork can still
+  // put it in a block.
+  it('leaves a transaction dropped from the pool as invalid alone', () => {
+    expect(staleStateRefusal(new Error(DROPPED_FROM_POOL))).to.be.undefined;
   });
 
   it('finds the refusal in a cause', () => {
@@ -123,11 +123,24 @@ describe('sendWithStaleStateResend', () => {
 
   it('builds again at once when the state already moved', async () => {
     const { calls, deps } = harness(
-      [fail(DROPPED_FROM_POOL), ok('tx')],
+      [fail(REFUSED_ON_SUBMIT), ok('tx')],
       ['a', 'b'],
     );
     expect(await sendWithStaleStateResend(deps)).to.equal('tx');
     expect(calls.sleep).to.equal(0);
+  });
+
+  it('does not send again after a drop from the pool', async () => {
+    const { calls, deps } = harness(
+      [fail(DROPPED_FROM_POOL), ok('tx')],
+      ['a', 'b'],
+    );
+    await expectRejection(
+      sendWithStaleStateResend(deps),
+      /TransactionInvalidError/,
+    );
+    expect(calls.send).to.equal(1);
+    expect(calls.refused).to.deep.equal([]);
   });
 
   it('does not send again after any other failure', async () => {

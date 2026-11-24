@@ -134,14 +134,13 @@ all-zero recipient on every route.
 
 A transfer out of Midnight reads night's message counter, and its gas payment
 the IGP's payment counter. When two senders build on the same state, the node
-takes one and refuses the other: with `Custom error: 104` when the first is
-already in a block, or with `TransactionInvalidError` when both were waiting in
-its pool. The refused transaction is in no block, so it spent no NIGHT and no
-fee.
+takes one and refuses the other. When the first is already in a block, the
+node refuses the second on submit with `Custom error: 104`. It never left the
+node, so it spent no NIGHT and no fee.
 
-The SDK, and so `warp send`, builds a refused transfer or gas payment again
-once the indexer serves the new state, and sends it again, up to four sends in
-all. Each resend is a new proof and prints a line:
+The SDK, and so `warp send`, builds a transfer or gas payment refused this way
+again once the indexer serves the new state, and sends it again, up to four
+sends in all. Each resend is a new proof and prints a line:
 
 ```text
 midnight: transferRemote was refused (Invalid Transaction: Custom error: 104): another transaction changed <night> first, so nothing was spent. Building it again on the new state (send 2 of 4).
@@ -149,6 +148,13 @@ midnight: transferRemote was refused (Invalid Transaction: Custom error: 104): a
 
 If the fourth send is refused too, or the indexer still serves the old state
 three minutes after a refusal, the send stops with the node's error.
+
+When both were waiting in the node's pool, the node drops one with
+`TransactionInvalidError` and no reason. Other nodes may already have it, and
+a fork can still put it in a block, so the SDK does not send it again: check
+that it did not land before sending it again. A gas payment that follows a
+transfer still gets the SDK's usual retry, which first checks whether a
+payment landed.
 
 ## Pause and fund
 
