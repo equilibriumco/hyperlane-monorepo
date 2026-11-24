@@ -54,6 +54,10 @@ Two things differ from the other AltVM SDKs and are worth knowing first:
   no cross-contract calls, so the token logic lives inside the core contract
   and the route is created by `core deploy`. A warp deploy targets the
   counterpart chain and references the Midnight end as a `foreignDeployment`.
+  Before they send anything, `warp deploy` and `warp apply` read night's
+  decimals and scale on chain, and stop when a token of the route would turn
+  amounts into other message amounts than night: a token that exists is read
+  on chain too, one still to be deployed is taken from the config.
 
 ## Core config
 
@@ -92,17 +96,28 @@ changes the validator sets and the field below. See
   holds at most as many validators as the contract has slots (its
   `maxValidators()`). `core read` reports one entry per origin, each with
   night's address.
+- **owner**: write the zero value, which keeps ownership with the deployer;
+  `core read` reports night's owner commitment, which is accepted too. Any
+  other value is refused, by `core deploy` before it sends anything and by
+  `core apply`, `warp apply` and `hook apply`, for night and the IGP alike:
+  the chain holds a commitment that changes with every ownership transfer, and
+  a value here would be taken as a new owner id, which most likely nobody can
+  act as.
+  To hand the contracts over, hand over the deployer's key and its
+  `MIDNIGHT_STATE_DIR`.
 - **defaultIsm.owner**: the ISM has no owner of its own, night's owner sets
   the validators. Write the zero address; `core read` reports night's owner,
-  which is accepted too. Any other value is refused: ownership moves through
-  the top-level `owner`.
+  which is accepted too. Any other value is refused.
 - **maxTransferAmount**: per-transfer limit in local NIGHT units, as a decimal
   string or number. `0` or unset at deploy means no limit. With a different
   value, `core apply` changes it through night's owner-only setter; left out
   of the config, the deployed limit stays as it is. `core read` reports it as
   a decimal string.
 - **requiredHook**: an `interchainGasPaymaster` block here is the IGP that
-  `core deploy` deploys beside night. night keeps no hook pointer, so `core
+  `core deploy` deploys beside night. A gas price or exchange rate of zero, or
+  above 2^64 - 1, is refused before anything is deployed, and the deploy
+  prints the price a delivery costs at the values it sets. `hook apply` does
+  the same. night keeps no hook pointer, so `core
 read` reports the zero address, and `core apply` refuses the block, which
   would deploy a new IGP that nothing uses. The IGP changes through `hook
 apply`.
@@ -173,8 +188,12 @@ with a Midnight chain are checked, so nothing changes for other chains:
   addresses were not checked.
 - **knownAddresses** (`HYP_KNOWNADDRESSES=\<path>`): the same check in the
   relayer and the validator at startup, on the core addresses of those chains
-  in the config the agent will actually use. Unset, an agent with a Midnight
-  chain warns that the addresses were not checked. The scraper does not check.
+  in the config the agent will actually use. When the matching entry records
+  `remoteDeployBlock`, the block the route's token on the other chain was
+  deployed in, an agent that loads that chain also stops when its
+  `index.from` is later: it would never see a transfer made before it. Unset,
+  an agent with a Midnight chain warns that the addresses were not checked.
+  The scraper does not check.
 
 `core deploy` and `warp deploy` create new addresses, so they do not check;
 after a Midnight deploy, add the addresses to the known list from the deploy

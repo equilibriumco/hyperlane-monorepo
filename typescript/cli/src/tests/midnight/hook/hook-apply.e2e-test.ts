@@ -95,6 +95,38 @@ describe('hyperlane midnight hook apply e2e tests', async function () {
     expect(reverted.gasPrice).to.equal('1');
   });
 
+  it("should refuse a zero gas price and an owner other than the IGP's", async () => {
+    const { config } = await readGasPrice();
+    const refusals = [
+      {
+        config: {
+          ...config,
+          oracleConfig: {
+            ...config.oracleConfig,
+            [REMOTE_CHAIN_NAME]: {
+              ...config.oracleConfig[REMOTE_CHAIN_NAME],
+              gasPrice: '0',
+            },
+          },
+        },
+        message: 'IGP gasPrice for',
+      },
+      {
+        config: { ...config, owner: `0x${'77'.repeat(32)}` },
+        message: "the IGP's owner cannot be changed from a config on Midnight",
+      },
+    ];
+    for (const { config: applyConfig, message } of refusals) {
+      writeYamlOrJson(HOOK_APPLY_CONFIG_PATH_1, applyConfig);
+      const output = await hyperlaneHook
+        .apply(HYP_KEY, igpAddress, HOOK_APPLY_CONFIG_PATH_1)
+        .nothrow();
+      expect(output.exitCode).to.not.equal(0);
+      expect(output.text()).to.include(message);
+    }
+    expect((await readGasPrice()).config).to.deep.equal(config);
+  });
+
   async function applyOverhead(
     baseConfig: IgpHookConfig,
     overhead: number,

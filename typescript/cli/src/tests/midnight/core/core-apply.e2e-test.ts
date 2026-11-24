@@ -127,6 +127,26 @@ describe('hyperlane midnight core apply e2e tests', async function () {
     );
   });
 
+  it("should refuse an owner other than night's", async () => {
+    const other = `0x${'77'.repeat(32)}`;
+    writeYamlOrJson(CORE_READ_CONFIG_PATH_1, {
+      ...applyConfig({
+        type: IsmType.ROUTING,
+        owner: ZERO_32_BYTES,
+        domains: deployedSets,
+      }),
+      owner: other,
+    });
+
+    const output = await hyperlaneCore.apply(HYP_KEY).nothrow();
+
+    expect(output.exitCode).to.not.equal(0);
+    expect(output.text()).to.include(
+      `night's owner cannot be changed from a config on Midnight, and the config says ${other}`,
+    );
+    expect((await hyperlaneCore.readConfig()).owner).to.equal(ownerCommitment);
+  });
+
   // The deploy config as it is, IGP block included, before anything is sent.
   it('should refuse an IGP block in requiredHook', async () => {
     const deployConfig: CoreConfig = readYamlOrJson(CORE_CONFIG_PATH);

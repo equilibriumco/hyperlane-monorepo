@@ -70,6 +70,7 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
   function writeRouteConfigs(
     remoteRouters: Record<string, { address: string }>,
     scale = NIGHT_SCALE,
+    owner = ownerCommitment,
   ): void {
     // Only the Midnight side: the remote router is enrolled by domain, and a
     // remote chain in the route would need a real token there, which warp
@@ -81,7 +82,7 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
         name: 'NIGHT',
         symbol: 'NIGHT',
         decimals: 6,
-        owner: ownerCommitment,
+        owner,
         mailbox,
         scale,
         remoteRouters,
@@ -152,6 +153,16 @@ describe('hyperlane midnight warp apply e2e tests', async function () {
 
     const unenrolled = await readRemoteRouters();
     expect(unenrolled[REMOTE_CHAIN_NAME]).to.be.undefined;
+  });
+
+  it("should refuse an owner other than night's", async () => {
+    const other = `0x${'77'.repeat(32)}`;
+    writeRouteConfigs({}, NIGHT_SCALE, other);
+    const refused = await applyRoute().nothrow();
+    expect(refused.exitCode).to.not.equal(0);
+    expect(refused.stdout + refused.stderr).to.include(
+      `night's owner cannot be changed from a config on Midnight, and the config says ${other}`,
+    );
   });
 
   it('should refuse a scale other than the one set at deploy', async () => {

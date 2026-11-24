@@ -9,6 +9,7 @@ import {
   moduleFingerprintProblems,
   operationVersionForKey,
   planChunks,
+  requireSucceeded,
   totalKeyBytes,
 } from './chunked-deploy.js';
 
@@ -210,5 +211,25 @@ describe('moduleFingerprintProblems', () => {
 
   it('refuses a module built without keys', () => {
     expect(moduleFingerprintProblems(undefined, keys)).to.have.length(1);
+  });
+});
+
+describe('requireSucceeded', () => {
+  const finalized = (status: string) =>
+    ({ txId: 'abc', blockHeight: 7, status }) as Parameters<
+      typeof requireSucceeded
+    >[0];
+
+  it('passes an update the chain applied', () => {
+    const applied = finalized('SucceedEntirely');
+    expect(requireSucceeded(applied, 'night')).to.equal(applied);
+  });
+
+  it('stops the deploy on an update the chain took but did not apply', () => {
+    for (const status of ['FailEntirely', 'FailFallible']) {
+      expect(() => requireSucceeded(finalized(status), 'night')).to.throw(
+        `maintenance update of night in tx abc ended ${status}`,
+      );
+    }
   });
 });

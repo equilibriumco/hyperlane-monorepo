@@ -128,12 +128,11 @@ fn sample_announcement() -> SignedType<Announcement> {
     }
 }
 
-const ERROR_KINDS: [&str; 9] = [
+const ERROR_KINDS: [&str; 8] = [
     "proofTimeout",
     "insufficientDust",
     "staleState",
     "replay",
-    "signerUnavailable",
     "rpcUnreachable",
     "nodeRejected",
     "contractRevert",

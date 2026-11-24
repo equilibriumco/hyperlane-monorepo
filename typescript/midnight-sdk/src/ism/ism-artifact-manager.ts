@@ -211,9 +211,8 @@ export class MidnightRoutingIsmWriter
     ) {
       throw new Error(
         `night's ISM has no owner of its own: it is night's owner ` +
-          `(${current.owner}), and the config says ${expectedOwner}. Move ` +
-          `ownership through the core config's owner and write the ISM owner ` +
-          `as the zero address`,
+          `(${current.owner}), and the config says ${expectedOwner}. Write ` +
+          `the ISM owner as the zero address`,
       );
     }
 

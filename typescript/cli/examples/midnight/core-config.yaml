@@ -7,7 +7,8 @@
 # removes origins. The merkleTreeHook resolves to the mailbox address itself,
 # and the IGP deploys as a standalone contract from requiredHook.
 #
-# A zero owner keeps ownership with the deployer.
+# A zero owner keeps ownership with the deployer. Any other value is refused:
+# the chain holds the owner as a commitment no one knows before the deploy.
 owner: '0x0000000000000000000000000000000000000000000000000000000000000000'
 # The night contract's per-transfer limit, in local NIGHT units (6 decimals).
 # 0 means no limit; `core apply` changes it through the owner.

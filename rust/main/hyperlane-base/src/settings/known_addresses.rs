@@ -44,6 +44,9 @@ pub struct KnownDeployment {
     pub name: String,
     pub midnight: KnownMidnightAddresses,
     pub remote: HashMap<String, Option<String>>,
+    /// The block the route's token on the remote chain was deployed in.
+    #[serde(default)]
+    pub remote_deploy_block: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +84,33 @@ impl Settings {
         };
         let known = read_known_addresses(path)?;
         let loaded = self.loaded_addresses(&known)?;
-        compare_known_addresses(&loaded, &known)
+        let deployment = compare_known_addresses(&loaded, &known)?;
+        self.check_remote_index_from(&known, deployment)
+    }
+
+    /// An agent that starts reading the remote chain after the block the
+    /// route's token was deployed in never sees the transfers made before.
+    fn check_remote_index_from(
+        &self,
+        known: &KnownAddresses,
+        deployment: &KnownDeployment,
+    ) -> Result<()> {
+        let (Some(deploy_block), Some(domain)) = (
+            deployment.remote_deploy_block,
+            self.domains.get(&known.remote.chain_name),
+        ) else {
+            return Ok(());
+        };
+        let from = self.chain_setup(domain)?.index.from;
+        if from > i64::try_from(deploy_block).unwrap_or(i64::MAX) {
+            bail!(
+                "{FAILED}: remote index.from is {from}, after block {deploy_block}, which the \
+                 route's token was deployed in (deployment \"{}\"); transfers made before it \
+                 would never be seen",
+                deployment.name
+            );
+        }
+        Ok(())
     }
 
     /// The addresses of the two chains the known list names, for the chains
@@ -190,9 +219,13 @@ fn display_loaded(value: H256, known: &str) -> String {
 }
 
 /// A deployment entry matches when every address it knows that was also
-/// loaded is equal. On failure the error names the first changed address of
-/// the entry with the most equal addresses.
-pub fn compare_known_addresses(loaded: &[LoadedAddress], known: &KnownAddresses) -> Result<()> {
+/// loaded is equal, and the first one that does is returned. On failure the
+/// error names the first changed address of the entry with the most equal
+/// addresses.
+pub fn compare_known_addresses<'a>(
+    loaded: &[LoadedAddress],
+    known: &'a KnownAddresses,
+) -> Result<&'a KnownDeployment> {
     struct Candidate<'a> {
         deployment: &'a KnownDeployment,
         matched: usize,
@@ -220,7 +253,7 @@ pub fn compare_known_addresses(loaded: &[LoadedAddress], known: &KnownAddresses)
             }
         }
         let Some(mismatch) = mismatch else {
-            return Ok(());
+            return Ok(deployment);
         };
         if closest.as_ref().is_none_or(|c| matched > c.matched) {
             closest = Some(Candidate {
@@ -510,6 +543,51 @@ mod test {
             error.contains("expected 40 or 64"),
             "unexpected error: {error}"
         );
+    }
+
+    fn chains_reading_remote_from(from: u64) -> Value {
+        let mut chains = august_chains();
+        chains["test4"]["index"] = json!({ "from": from });
+        chains
+    }
+
+    fn list_with_remote_deploy_block(block: u64) -> Value {
+        let mut list = known_list();
+        list["deployments"][1]["remoteDeployBlock"] = json!(block);
+        list
+    }
+
+    #[test]
+    fn passes_a_remote_start_at_or_before_the_token_deploy() {
+        for from in [99, 100] {
+            check(
+                chains_reading_remote_from(from),
+                &list_with_remote_deploy_block(100),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn fails_a_remote_start_after_the_token_deploy() {
+        let error = check(
+            chains_reading_remote_from(101),
+            &list_with_remote_deploy_block(100),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "registry address check failed: remote index.from is 101, after block 100, which the route's token was deployed in (deployment \"August 2026\"); transfers made before it would never be seen"
+        );
+    }
+
+    #[test]
+    fn skips_the_start_block_with_no_deploy_block_or_no_remote_chain() {
+        check(chains_reading_remote_from(101), &known_list()).unwrap();
+        let mut chains = chains_reading_remote_from(101);
+        chains.as_object_mut().unwrap().remove("test4");
+        check(chains, &list_with_remote_deploy_block(100)).unwrap();
     }
 
     #[test]
