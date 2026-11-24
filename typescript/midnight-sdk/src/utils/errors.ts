@@ -2,9 +2,10 @@ import { ZERO_ADDRESS_HEX_32 } from '@hyperlane-xyz/utils';
 
 import { normalizeHexForCompare } from './conversion.js';
 
-// The chain holds an owner as a commitment that changes with every transfer,
-// and a transfer takes an owner id, which nothing here makes. So a config can
-// only keep the owner: the zero value, or the commitment the chain holds now.
+// The chain holds an owner as a commitment that changes with every ownership
+// transfer, and a transfer takes an owner id, which nothing here makes. So a
+// config can only keep the owner: the zero value, or the commitment the chain
+// holds now.
 export function assertOwnerKept(
   contract: string,
   configured: string | undefined,

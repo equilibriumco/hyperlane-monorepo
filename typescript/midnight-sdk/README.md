@@ -100,8 +100,9 @@ changes the validator sets and the field below. See
   `core read` reports night's owner commitment, which is accepted too. Any
   other value is refused, by `core deploy` before it sends anything and by
   `core apply`, `warp apply` and `hook apply`, for night and the IGP alike:
-  the chain holds a commitment that changes with every transfer, and a value
-  here would be taken as a new owner id, which most likely nobody can act as.
+  the chain holds a commitment that changes with every ownership transfer, and
+  a value here would be taken as a new owner id, which most likely nobody can
+  act as.
   To hand the contracts over, hand over the deployer's key and its
   `MIDNIGHT_STATE_DIR`.
 - **defaultIsm.owner**: the ISM has no owner of its own, night's owner sets
