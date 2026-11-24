@@ -233,7 +233,7 @@ on disk.
 
 - **HYPERLANE_MIDNIGHT_CONTRACTS=\<path>**: the compiled contract tree from
   [hyperlane-midnight](https://github.com/equilibriumco/hyperlane-midnight)
-  (`contracts/src/managed`), compiled with Compact 0.36.0. Each contract's
+  (`contracts/src/managed`), compiled with Compact 0.36.1. Each contract's
   `compiler/` directory has to be there next to `keys/` and `zkir/`: the keys
   and circuits are checked against its manifest. Export it before **building**
   this package, not only before using it: the build copies the artifacts in,
