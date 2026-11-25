@@ -719,6 +719,7 @@ pub async fn dry_run_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_boundary_tests::StubSubmitter;
 
     #[test]
     fn sidecar_env_keeps_its_own_settings_and_drops_the_rest() {
@@ -832,8 +833,9 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stdout_maps_to_malformed_error() {
+        let stub = StubSubmitter::silent();
         let mut ctx = ctx();
-        ctx.binary_path = "/usr/bin/true".to_string();
+        ctx.binary_path = stub.binary_path().to_owned();
         let message = HyperlaneMessage::default();
         let request = build_request(H256::zero(), &ctx, &message, metadata(), false);
         let err = submit_handle(&ctx, &request).await.unwrap_err();
@@ -843,32 +845,17 @@ mod tests {
 
     #[tokio::test]
     async fn storage_locations_length_mismatch_is_malformed() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         // The results are mapped to validators positionally, so a short
         // `locations` array must error rather than silently misalign.
-        let tmp = std::env::temp_dir().join(format!(
-            "midnight-toolkit-locmismatch-{}.sh",
-            std::process::id()
-        ));
-        {
-            let mut f = std::fs::File::create(&tmp).unwrap();
-            // Two validators requested below, but only one location list back.
-            f.write_all(b"#!/bin/sh\necho '{\"locations\":[[\"s3://only-one\"]]}'\n")
-                .unwrap();
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
+        // Two validators requested below, but only one location list back.
+        let stub = StubSubmitter::always_returns(r#"{"locations":[["s3://only-one"]]}"#);
         let mut ctx = ctx();
-        ctx.binary_path = tmp.to_string_lossy().into_owned();
+        ctx.binary_path = stub.binary_path().to_owned();
 
         let validators = vec![H160::repeat_byte(0x11), H160::repeat_byte(0x22)];
         let err = query_storage_locations(&ctx, H256::from_low_u64_be(0xabcd), &validators)
             .await
             .unwrap_err();
-
-        let _ = std::fs::remove_file(&tmp);
 
         let msg = format!("{err}");
         assert!(
@@ -879,21 +866,12 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_elapses_and_kills_child() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = std::env::temp_dir().join(format!(
-            "midnight-toolkit-timeout-{}.sh",
-            std::process::id()
-        ));
-        {
-            let mut f = std::fs::File::create(&tmp).unwrap();
-            f.write_all(b"#!/bin/sh\nsleep 5\n").unwrap();
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
         let mut ctx = ctx();
-        ctx.binary_path = tmp.to_string_lossy().into_owned();
+        ctx.binary_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/slow-submitter.sh"
+        )
+        .to_owned();
         let payload = serde_json::json!({"op": "submit"});
 
         let started = std::time::Instant::now();
@@ -902,25 +880,9 @@ mod tests {
             .unwrap_err();
         let elapsed = started.elapsed();
 
-        let _ = std::fs::remove_file(&tmp);
-
         assert!(elapsed < Duration::from_secs(2));
         let display = format!("{err}");
         assert!(display.contains("timeout") || display.contains("SIGKILL"));
-    }
-
-    // An executable mock submitter that prints `json_response` on stdout. The
-    // caller removes the file.
-    fn write_mock_submitter(tag: &str, json_response: &str) -> std::path::PathBuf {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        let path =
-            std::env::temp_dir().join(format!("midnight-toolkit-{tag}-{}.sh", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(format!("#!/bin/sh\necho '{json_response}'\n").as_bytes())
-            .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
     }
 
     fn sample_message() -> HyperlaneMessage {
@@ -950,13 +912,12 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_ok_response_is_ok() {
-        let script = write_mock_submitter("dryrun-ok", "{\"ok\":true}");
+        let stub = StubSubmitter::always_returns("{\"ok\":true}");
         let mut ctx = ctx();
-        ctx.binary_path = script.to_string_lossy().into_owned();
+        ctx.binary_path = stub.binary_path().to_owned();
         let msg = sample_message();
         let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
         let result = dry_run_handle(&ctx, &request).await;
-        let _ = std::fs::remove_file(&script);
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -964,16 +925,14 @@ mod tests {
     // that into `ErrorEstimatingGas` and backs off.
     #[tokio::test]
     async fn dry_run_error_response_maps_to_submitter_reported() {
-        let script = write_mock_submitter(
-            "dryrun-revert",
+        let stub = StubSubmitter::always_returns(
             "{\"error\":{\"kind\":\"contractRevert\",\"message\":\"Mailbox: bad version\"}}",
         );
         let mut ctx = ctx();
-        ctx.binary_path = script.to_string_lossy().into_owned();
+        ctx.binary_path = stub.binary_path().to_owned();
         let msg = sample_message();
         let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
         let err = dry_run_handle(&ctx, &request).await.unwrap_err();
-        let _ = std::fs::remove_file(&script);
         let display = format!("{err}");
         assert!(
             display.contains("contractRevert"),
@@ -988,13 +947,12 @@ mod tests {
     // The op always sends one or the other, so this only fires on drift.
     #[tokio::test]
     async fn dry_run_missing_ok_and_error_is_malformed() {
-        let script = write_mock_submitter("dryrun-empty", "{}");
+        let stub = StubSubmitter::always_returns("{}");
         let mut ctx = ctx();
-        ctx.binary_path = script.to_string_lossy().into_owned();
+        ctx.binary_path = stub.binary_path().to_owned();
         let msg = sample_message();
         let request = build_dry_run_request(H256::zero(), &ctx, &msg, metadata(), false);
         let err = dry_run_handle(&ctx, &request).await.unwrap_err();
-        let _ = std::fs::remove_file(&script);
         let display = format!("{err:?}").to_lowercase();
         assert!(
             display.contains("missing") || display.contains("malformed"),

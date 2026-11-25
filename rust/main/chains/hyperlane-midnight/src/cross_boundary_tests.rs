@@ -1,4 +1,4 @@
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,37 +12,40 @@ use url::Url;
 
 use crate::{ConnectionConf, MidnightMailbox, MidnightValidatorAnnounce};
 
-struct StubSubmitter {
+pub(crate) struct StubSubmitter {
     _dir: TempDir,
     binary: PathBuf,
     request_log: PathBuf,
 }
 
 impl StubSubmitter {
-    fn always_returns(response_json: &str) -> Self {
-        Self::with_reply(&format!(
-            "cat <<'__SUBMITTER_RESPONSE__'\n{response_json}\n__SUBMITTER_RESPONSE__\n"
-        ))
+    pub(crate) fn always_returns(response_json: &str) -> Self {
+        Self::with_reply(&format!("{response_json}\n"))
     }
 
     /// Reads the request and exits without printing anything.
-    fn silent() -> Self {
+    pub(crate) fn silent() -> Self {
         Self::with_reply("")
     }
 
-    fn with_reply(reply_script: &str) -> Self {
+    // Runs the committed stub through a link in a folder of its own, where the
+    // stub saves the request and finds the reply. A script written here and run
+    // at once fails now and then with "Text file busy" on Linux: a process
+    // another test forks meanwhile holds it open for writing.
+    fn with_reply(reply: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("submit");
         let request_log = dir.path().join("request.json");
 
-        let script = format!(
-            "#!/bin/sh\ncat > '{log}'\n{reply_script}",
-            log = request_log.display(),
-        );
-        std::fs::write(&binary, script).unwrap();
-        let mut perms = std::fs::metadata(&binary).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&binary, perms).unwrap();
+        std::fs::write(dir.path().join("reply"), reply).unwrap();
+        symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/stub-submitter.sh"
+            ),
+            &binary,
+        )
+        .unwrap();
 
         Self {
             _dir: dir,
@@ -51,7 +54,7 @@ impl StubSubmitter {
         }
     }
 
-    fn binary_path(&self) -> &str {
+    pub(crate) fn binary_path(&self) -> &str {
         self.binary.to_str().unwrap()
     }
 
